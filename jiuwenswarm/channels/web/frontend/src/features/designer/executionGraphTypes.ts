@@ -24,6 +24,8 @@ export const DESIGNER_NODE_ROLE_STORYBOARD = 'storyboard' as const;
 export const DESIGNER_NODE_ROLE_FRAME = 'frame' as const;
 export const DESIGNER_NODE_ROLE_CLIP = 'clip' as const;
 export const DESIGNER_NODE_ROLE_COMPOSE = 'compose' as const;
+export const DESIGNER_NODE_ROLE_MUSIC = 'music' as const;
+export const DESIGNER_NODE_ROLE_SPEECH = 'speech' as const;
 
 export const DESIGNER_NODE_ROLES = [
   DESIGNER_NODE_ROLE_BRIEF,
@@ -33,6 +35,8 @@ export const DESIGNER_NODE_ROLES = [
   DESIGNER_NODE_ROLE_FRAME,
   DESIGNER_NODE_ROLE_CLIP,
   DESIGNER_NODE_ROLE_COMPOSE,
+  DESIGNER_NODE_ROLE_MUSIC,
+  DESIGNER_NODE_ROLE_SPEECH,
 ] as const;
 
 export type DesignerNodeRole = (typeof DESIGNER_NODE_ROLES)[number];
@@ -126,6 +130,8 @@ export type DesignerNodeConfig =
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_FRAME>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_CLIP>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_COMPOSE>
+  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_MUSIC>
+  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_SPEECH>
   | {
       role?: string;
       prompt?: string;

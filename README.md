@@ -77,6 +77,8 @@ Play stamps `metadata.ai_agent_pipeline` and `metadata.agent_runtime.mode` (`ai`
 - **Dotenv**: load `~/.jiuwenswarm/config/.env` before LLM calls so API keys are real.
 - **Skills / catalog / trajectory / feedback** under `designer_catalog_skills_reports_trajectory/` and runtime helpers (`capabilities`, `continuity`, `paths`, `skills_loader`, …).
 - **Eval harness**: `scripts/eval_6s_ai_clip.py` (refuses heuristic creative path when LLM is required).
+- **Designer chat restore**: left Assistant panel keeps the bootstrap prompt per `graph_id` (localStorage + Brief `config.prompt` / `graph.description` when history is empty).
+- **Recent graphs**: custom toolbar dropdown so switching graphs works inside `overflow: hidden`.
 
 Upstream `design` UI/handler improvements that landed on remote (storyboard table UX, graph restore after refresh, later-keyframe anti-clone policy in upstream handlers) are merged for the **frontend / compose** side where they did not conflict; **runtime executor + creative handlers + AI orchestration stay on this framework**.
 

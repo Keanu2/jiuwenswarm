@@ -157,18 +157,17 @@ def test_bootstrap_graph_uses_modality_node_types() -> None:
     assert NODE_TYPE_TEXT in node_types
     assert NODE_TYPE_IMAGE in node_types
     roles = {node_role(node) for node in graph["nodes"]}
-    assert {NODE_ROLE_CHARACTER_DESIGN, NODE_ROLE_STORYBOARD} <= roles
-    assert NODE_ROLE_SCENE not in roles
-    assert not any(edge["source"] == "n_brief" and edge["target"] == "n_scene" for edge in graph["edges"])
+    assert {NODE_ROLE_CHARACTER_DESIGN, NODE_ROLE_STORYBOARD, NODE_ROLE_SCENE} <= roles
+    assert any(edge["source"] == "n_brief" and edge["target"] == "n_scene" for edge in graph["edges"])
     sync_edges = [edge for edge in graph["edges"] if edge.get("kind") == EDGE_KIND_SYNC]
-    assert len(sync_edges) == 1
+    assert len(sync_edges) == 2
     sync_pairs = {frozenset((edge["source"], edge["target"])) for edge in sync_edges}
     assert sync_pairs == {
         frozenset({"n_character", "n_storyboard"}),
+        frozenset({"n_scene", "n_storyboard"}),
     }
     assert any(edge["source"] == "n_frame_1" and edge["target"] == "n_clip_1" for edge in graph["edges"])
     assert any(edge["source"] == "n_clip_1" and edge["target"] == "n_compose" for edge in graph["edges"])
-    assert not any(edge["source"] == "n_scene" for edge in graph["edges"])
     clip = next(node for node in graph["nodes"] if node["id"] == "n_clip_1")
     assert "n_frame_1" in ((clip.get("config") or {}).get("inputs") or [])
     compose = next(node for node in graph["nodes"] if node["id"] == "n_compose")
@@ -236,9 +235,13 @@ def test_expand_clip_nodes_for_shots_creates_one_clip_per_shot() -> None:
     assert (compose.get("config") or {}).get("inputs") == ["n_clip_1", "n_clip_2", "n_clip_3"]
     assert any(edge["source"] == "n_clip_2" and edge["target"] == "n_compose" for edge in expanded["edges"])
     assert any(edge["source"] == "n_frame_3" and edge["target"] == "n_clip_3" for edge in expanded["edges"])
-    assert any(edge["source"] == "n_frame_1" and edge["target"] == "n_frame_2" for edge in expanded["edges"])
+    assert not any(
+        str(edge.get("source") or "").startswith("n_frame_")
+        and str(edge.get("target") or "").startswith("n_frame_")
+        for edge in expanded["edges"]
+    )
     frame2 = next(node for node in expanded["nodes"] if node["id"] == "n_frame_2")
-    assert "n_frame_1" in ((frame2.get("config") or {}).get("inputs") or [])
+    assert "n_frame_1" not in ((frame2.get("config") or {}).get("inputs") or [])
     clips = [node for node in expanded["nodes"] if node_role(node) == NODE_ROLE_CLIP]
     compose_layout = compose.get("layout") or {}
     clip_right = max(
@@ -419,15 +422,16 @@ def test_expand_splits_bundled_keyframe_images(designer_store: DesignerGraphStor
 
 def test_normalize_wires_existing_scene_on_old_bootstrap() -> None:
     graph = build_bootstrap_graph(project_id="proj_old02", prompt="legacy-align")
-    graph["nodes"].append(
-        {
-            "id": "n_scene",
-            "type": NODE_TYPE_IMAGE,
-            "label": "Scene",
-            "config": {"role": NODE_ROLE_SCENE, "inputs": ["n_brief"]},
-            "layout": {"x": 400, "y": 240, "width": 280, "height": 160},
-        }
-    )
+    if not any(node.get("id") == "n_scene" for node in graph["nodes"]):
+        graph["nodes"].append(
+            {
+                "id": "n_scene",
+                "type": NODE_TYPE_IMAGE,
+                "label": "Scene",
+                "config": {"role": NODE_ROLE_SCENE, "inputs": ["n_brief"]},
+                "layout": {"x": 400, "y": 240, "width": 280, "height": 160},
+            }
+        )
     restored = normalize_execution_graph(graph)
     assert any(
         edge.get("source") == "n_scene"
@@ -509,6 +513,32 @@ async def test_mock_executor_completes_run(
         "n_frame_2",
         "n_frame_3",
     ]
+
+
+def test_normalize_drops_legacy_keyframe_chain() -> None:
+    graph = expand_clip_nodes_for_shots(
+        build_bootstrap_graph(project_id="proj_chain01", prompt="drop chain"),
+        3,
+    )
+    graph["edges"].append(
+        {
+            "id": "e_n_frame_1_n_frame_2",
+            "source": "n_frame_1",
+            "target": "n_frame_2",
+            "kind": "data",
+        }
+    )
+    frame2 = next(node for node in graph["nodes"] if node["id"] == "n_frame_2")
+    inputs = list((frame2.get("config") or {}).get("inputs") or [])
+    inputs.append("n_frame_1")
+    frame2.setdefault("config", {})["inputs"] = inputs
+    restored = normalize_execution_graph(graph)
+    assert not any(
+        edge.get("source") == "n_frame_1" and edge.get("target") == "n_frame_2"
+        for edge in restored["edges"]
+    )
+    restored_frame2 = next(node for node in restored["nodes"] if node["id"] == "n_frame_2")
+    assert "n_frame_1" not in ((restored_frame2.get("config") or {}).get("inputs") or [])
 
 
 @pytest.mark.asyncio
@@ -859,6 +889,53 @@ async def test_sync_peers_start_together_and_block_downstream(
     assert finished["status"] == RUN_STATUS_COMPLETED
     assert abs(starts["n_character"] - starts["n_storyboard"]) < 0.04
     assert starts["n_frame_1"] > max(starts["n_character"], starts["n_storyboard"])
+
+
+@pytest.mark.asyncio
+async def test_independent_keyframes_and_clips_run_as_soon_as_ready(
+    designer_store: DesignerGraphStore,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_clip_video: None,
+) -> None:
+    from jiuwenswarm.common.schema.designer_graph import node_shot_index
+    from jiuwenswarm.server.runtime.designer import executor as executor_mod
+    from jiuwenswarm.server.runtime.designer.handlers import NODE_HANDLERS, RoleNodeHandler
+
+    monkeypatch.setattr(executor_mod, "_MOCK_NODE_DELAY_SECONDS", 0)
+    originals = {
+        NODE_ROLE_FRAME: NODE_HANDLERS[NODE_ROLE_FRAME],
+        NODE_ROLE_CLIP: NODE_HANDLERS[NODE_ROLE_CLIP],
+    }
+
+    class StaggeredFrameHandler(RoleNodeHandler):
+        async def execute(self, node, ctx):
+            if node_shot_index(node) == 1:
+                await asyncio.sleep(0.2)
+            return await originals[NODE_ROLE_FRAME].execute(node, ctx)
+
+    monkeypatch.setitem(NODE_HANDLERS, NODE_ROLE_FRAME, StaggeredFrameHandler(NODE_ROLE_FRAME))
+    monkeypatch.setitem(NODE_HANDLERS, NODE_ROLE_CLIP, originals[NODE_ROLE_CLIP])
+
+    graph = designer_store.save_graph(
+        _handler_graph(build_bootstrap_graph(project_id="proj_parallel01", prompt="parallel shots")),
+    )
+    execu = GraphExecutor(designer_store)
+    run = execu.create_run(graph)
+    events = [event async for event in execu.run(graph, run["run_id"])]
+    assert events
+    finished = designer_store.get_run(run["run_id"])
+    assert finished is not None
+    assert finished["status"] == RUN_STATUS_COMPLETED
+    states = finished["node_states"]
+    frame1_done = int(states["n_frame_1"].get("completed_at") or 0)
+    clip2_start = int(states["n_clip_2"].get("started_at") or 0)
+    clip3_start = int(states["n_clip_3"].get("started_at") or 0)
+    assert clip2_start and clip3_start and frame1_done
+    assert clip2_start < frame1_done
+    assert clip3_start < frame1_done
+    assert abs(clip2_start - clip3_start) < 120
+    frame_starts = [int(states[key].get("started_at") or 0) for key in ("n_frame_1", "n_frame_2", "n_frame_3")]
+    assert max(frame_starts) - min(frame_starts) < 120
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,13 @@
 import { create } from 'zustand';
 import { generateUuidV4 } from '../../utils/uuid';
+import type { DesignerExecutionGraph } from './executionGraphTypes';
+import {
+  extractDesignerGraphPrompt,
+  hasDesignerUserPrompt,
+  persistDesignerChat,
+  readPersistedDesignerChat,
+  resolveBoundDesignerMessages,
+} from './designerChatHistory';
 
 export type DesignerChatRole = 'user' | 'assistant' | 'system';
 
@@ -33,6 +41,9 @@ type DesignerChatStore = {
   }) => string;
   removeMessage: (id: string) => void;
   setBootstrapPhase: (phase: DesignerBootstrapPhase) => void;
+  ensureGraphPrompt: (graph: DesignerExecutionGraph | null | undefined, options?: {
+    doneText?: string;
+  }) => void;
 };
 
 function archiveCurrent(
@@ -44,19 +55,25 @@ function archiveCurrent(
   return { ...messagesByGraphId, [activeGraphId]: messages };
 }
 
+function commitArchive(messagesByGraphId: Record<string, DesignerChatMessage[]>) {
+  persistDesignerChat(messagesByGraphId);
+  return messagesByGraphId;
+}
+
 export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
   activeGraphId: null,
   messages: [],
-  messagesByGraphId: {},
+  messagesByGraphId: readPersistedDesignerChat(),
   bootstrapPhase: 'idle',
 
   reset: () => {
     const { activeGraphId, messages, messagesByGraphId } = get();
+    const archived = commitArchive(archiveCurrent(activeGraphId, messages, messagesByGraphId));
     set({
       messages: [],
       bootstrapPhase: 'idle',
       activeGraphId: null,
-      messagesByGraphId: archiveCurrent(activeGraphId, messages, messagesByGraphId),
+      messagesByGraphId: archived,
     });
   },
 
@@ -66,14 +83,17 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
     if (id === activeGraphId) return;
     const archived = archiveCurrent(activeGraphId, messages, messagesByGraphId);
     const pending = !activeGraphId && messages.length > 0 ? messages : [];
-    const nextMessages = id ? (archived[id] ?? pending) : pending;
-    const nextArchive = id && pending.length > 0
-      ? { ...archived, [id]: pending }
+    const nextMessages = resolveBoundDesignerMessages({
+      stored: id ? archived[id] : null,
+      pending,
+    });
+    const nextArchive = id
+      ? { ...archived, [id]: nextMessages }
       : archived;
     set({
       activeGraphId: id,
       messages: nextMessages,
-      messagesByGraphId: nextArchive,
+      messagesByGraphId: commitArchive(nextArchive),
     });
   },
 
@@ -92,7 +112,7 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
         },
       ];
       const messagesByGraphId = state.activeGraphId
-        ? { ...state.messagesByGraphId, [state.activeGraphId]: next }
+        ? commitArchive({ ...state.messagesByGraphId, [state.activeGraphId]: next })
         : state.messagesByGraphId;
       return { messages: next, messagesByGraphId };
     });
@@ -103,10 +123,36 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
     set((state) => {
       const next = state.messages.filter((item) => item.id !== id);
       const messagesByGraphId = state.activeGraphId
-        ? { ...state.messagesByGraphId, [state.activeGraphId]: next }
+        ? commitArchive({ ...state.messagesByGraphId, [state.activeGraphId]: next })
         : state.messagesByGraphId;
       return { messages: next, messagesByGraphId };
     }),
 
   setBootstrapPhase: (phase) => set({ bootstrapPhase: phase }),
+
+  ensureGraphPrompt: (graph, options) => {
+    const graphId = String(graph?.graph_id ?? '').trim();
+    if (!graphId || !graph) return;
+    if (get().activeGraphId !== graphId) {
+      get().bindGraph(graphId);
+    }
+    if (hasDesignerUserPrompt(get().messages)) return;
+    const prompt = extractDesignerGraphPrompt(graph);
+    if (!prompt) return;
+    get().appendMessage({
+      role: 'user',
+      content: prompt,
+      kind: 'user',
+    });
+    const doneText = String(options?.doneText ?? '').trim();
+    if (!doneText) return;
+    get().appendMessage({
+      role: 'assistant',
+      content: doneText,
+      kind: 'bootstrap_done',
+    });
+    if (get().bootstrapPhase === 'idle') {
+      get().setBootstrapPhase('done');
+    }
+  },
 }));

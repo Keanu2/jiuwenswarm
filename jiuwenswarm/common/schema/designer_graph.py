@@ -599,7 +599,7 @@ def normalize_execution_graph(raw: Any) -> DesignerExecutionGraph:
         "created_at": int(created_at) if isinstance(created_at, int) else now,
         "updated_at": int(updated_at) if isinstance(updated_at, int) else now,
     }
-    return ensure_bootstrap_pipeline(graph)
+    return drop_keyframe_to_keyframe_deps(ensure_bootstrap_pipeline(graph))
 
 
 def _append_unique_edge(
@@ -735,6 +735,7 @@ def ensure_bootstrap_pipeline(graph: DesignerExecutionGraph) -> DesignerExecutio
                     target="n_compose",
                 )
                 _append_node_input(graph, "n_compose", clip_id)
+    drop_keyframe_to_keyframe_deps(graph)
     return repair_overlapping_pipeline_layout(graph)
 
 
@@ -908,6 +909,45 @@ def _is_shot_pipeline_id(node_id: str) -> bool:
         or node_id.startswith("n_frame_")
         or node_id.startswith("n_clip_")
     )
+
+
+def _is_frame_pipeline_id(node_id: str) -> bool:
+    return node_id == "n_frame" or node_id.startswith("n_frame_")
+
+
+def drop_keyframe_to_keyframe_deps(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
+    """Keyframe nodes do not consume each other; strip leftover serial edges."""
+    frame_ids = {
+        str(node.get("id") or "")
+        for node in graph.get("nodes") or []
+        if (
+            node_role(node) == NODE_ROLE_FRAME
+            or _is_frame_pipeline_id(str(node.get("id") or ""))
+        )
+        and str(node.get("id") or "")
+    }
+    if len(frame_ids) < 2:
+        return graph
+    graph["edges"] = [
+        edge
+        for edge in (graph.get("edges") or [])
+        if not (
+            str(edge.get("source") or "") in frame_ids
+            and str(edge.get("target") or "") in frame_ids
+        )
+    ]
+    for node in graph.get("nodes") or []:
+        node_id = str(node.get("id") or "")
+        if node_id not in frame_ids:
+            continue
+        config = node.get("config")
+        if not isinstance(config, dict):
+            continue
+        inputs = [str(item) for item in (config.get("inputs") or [])]
+        next_inputs = [item for item in inputs if item not in frame_ids]
+        if next_inputs != inputs:
+            config["inputs"] = next_inputs
+    return graph
 
 
 def shot_pipeline_count(graph: DesignerExecutionGraph) -> int:

@@ -128,9 +128,10 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     const gen = ++loadSeq;
     const keepGraph = get().domainGraph;
     const sameGraph = keepGraph?.graph_id === id;
+    rememberDesignerGraphId(id);
     set({
       graphId: id,
-      domainGraph: sameGraph ? keepGraph : null,
+      domainGraph: keepGraph,
       loadStatus: sameGraph ? 'ready' : 'loading',
       loadError: null,
     });
@@ -147,9 +148,20 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
       });
     } catch (error) {
       if (gen !== loadSeq) return;
+      const message = error instanceof Error ? error.message : String(error);
+      if (keepGraph && !isDesignerPreviewGraph(keepGraph)) {
+        rememberDesignerGraphId(keepGraph.graph_id);
+        set({
+          graphId: keepGraph.graph_id,
+          domainGraph: keepGraph,
+          loadStatus: 'ready',
+          loadError: message,
+        });
+        return;
+      }
       set({
         loadStatus: 'error',
-        loadError: error instanceof Error ? error.message : String(error),
+        loadError: message,
       });
     }
   },

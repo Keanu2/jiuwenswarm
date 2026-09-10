@@ -15,6 +15,7 @@ import { DesignerMaterialViewer } from '../DesignerMaterialViewer';
 import { DesignerRevisionChooser } from '../DesignerRevisionChooser';
 import { DesignerCanvas } from './DesignerCanvas';
 import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
+import { DesignerRecentGraphs } from './DesignerRecentGraphs';
 import { DesignerRunControl } from './DesignerRunControl';
 import './DesignerPage.css';
 
@@ -100,11 +101,17 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
 
   useEffect(() => {
     const nextId = domainGraph?.graph_id ?? null;
-    if (nextId === boundGraphId) return;
-    resetUi();
-    resetForGraph(domainGraph);
-    useDesignerChatStore.getState().bindGraph(nextId);
-  }, [boundGraphId, domainGraph, resetForGraph, resetUi]);
+    if (nextId !== boundGraphId) {
+      resetUi();
+      resetForGraph(domainGraph);
+      useDesignerChatStore.getState().bindGraph(nextId);
+    }
+    if (domainGraph && !isDesignerPreviewGraph(domainGraph)) {
+      useDesignerChatStore.getState().ensureGraphPrompt(domainGraph, {
+        doneText: t('designer.chat.bootstrapDone'),
+      });
+    }
+  }, [boundGraphId, domainGraph, resetForGraph, resetUi, t]);
 
   const materials = useMemo(
     () => collectDesignerMaterials(domainGraph, run),
@@ -158,27 +165,10 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
           </p>
         </div>
         {designerGraphs.length > 0 ? (
-          <label className="designer-page__recent">
-            <span>{t('designer.recentGraphs')}</span>
-            <select
-              value={isDesignerPreviewGraph(domainGraph) ? '' : graphId || ''}
-              onChange={(event) => {
-                const nextId = event.target.value;
-                if (nextId && nextId !== graphId) {
-                  void loadGraph(nextId);
-                }
-              }}
-              data-testid="designer-recent-graphs"
-            >
-              {designerGraphs.map((item) => (
-                <option key={item.graph_id} value={item.graph_id}>
-                  {item.has_video
-                    ? `${item.title} · ${t('designer.hasVideo')}`
-                    : item.title}
-                </option>
-              ))}
-            </select>
-          </label>
+          <DesignerRecentGraphs
+            graphId={isDesignerPreviewGraph(domainGraph) ? null : graphId}
+            currentTitle={projectTitle}
+          />
         ) : null}
         <div className="designer-page__toolbar-actions">
           <DesignerRunControl

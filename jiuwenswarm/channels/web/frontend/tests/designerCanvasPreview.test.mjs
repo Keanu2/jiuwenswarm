@@ -10,7 +10,10 @@ import {
   parseMarkdownTable,
   storyboardShotPreviews,
 } from '../node_modules/.cache/designer-canvas-preview/designerNodePreview.js';
-import { resolveDesignerGraphToLoad } from '../node_modules/.cache/designer-canvas-preview/designerGraphLoad.js';
+import {
+  resolveDesignerGraphToLoad,
+  summariesFromGraphList,
+} from '../node_modules/.cache/designer-canvas-preview/designerGraphLoad.js';
 
 test('preview graph keeps the default canvas skeleton', () => {
   const graph = buildDesignerBootstrapPreviewGraph('火车进站');
@@ -149,4 +152,31 @@ test('resolveDesignerGraphToLoad restores the last opened graph after refresh', 
     }),
     'graph_kept',
   );
+});
+
+test('summariesFromGraphList prefers summaries then falls back to graphs', () => {
+  const summaries = summariesFromGraphList({
+    summaries: [
+      { graph_id: 'graph_a', project_id: 'p1', title: 'First', has_video: false },
+      { graph_id: '', project_id: 'p1', title: 'Skipped', has_video: false },
+    ],
+    graphs: [{ graph_id: 'graph_b', project_id: 'p1', title: 'Ignored' }],
+  });
+  assert.deepEqual(
+    summaries.map((item) => item.graph_id),
+    ['graph_a'],
+  );
+  const fromGraphs = summariesFromGraphList({
+    summaries: [],
+    graphs: [
+      {
+        graph_id: 'graph_b',
+        project_id: 'p1',
+        title: 'Station',
+        nodes: [{ output_ref: { kind: 'video', uri: 'file:///clip.mp4' } }],
+      },
+    ],
+  });
+  assert.equal(fromGraphs[0]?.graph_id, 'graph_b');
+  assert.equal(fromGraphs[0]?.has_video, true);
 });

@@ -1,3 +1,4 @@
+import { useWorkspaceStore } from '../../stores';
 import { useDesignerStore } from './designerStore';
 import { useDesignerChatStore } from './designerChatStore';
 import { designerGraphClient } from './designerGraphClient';
@@ -105,6 +106,7 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
     }
     useDesignerStore.getState().applyGraph(graph);
     useDesignerChatStore.getState().bindGraph(graph.graph_id);
+    void useWorkspaceStore.getState().loadDesignerGraphs();
     const scenario = String(graph.metadata?.scenario || 'auto');
     const nodeCount = graph.nodes.length;
     useDesignerChatStore.getState().appendMessage({

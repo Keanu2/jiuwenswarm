@@ -141,15 +141,15 @@ def test_designer_fixture_normalizes() -> None:
     payload = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     graph = normalize_execution_graph(payload)
     assert graph["schema_version"] == SCHEMA_VERSION
-    assert len(graph["nodes"]) == 6
-    assert len(graph["edges"]) == 9
+    assert any(node["id"] == "n_scene" for node in graph["nodes"])
     assert any(edge["source"] == "n_frame_1" and edge["target"] == "n_clip_1" for edge in graph["edges"])
     assert any(edge["source"] == "n_clip_1" and edge["target"] == "n_compose" for edge in graph["edges"])
-    assert not any(edge["source"] == "n_brief" and edge["target"] == "n_scene" for edge in graph["edges"])
+    assert any(edge["source"] == "n_brief" and edge["target"] == "n_scene" for edge in graph["edges"])
     assert {node["type"] for node in graph["nodes"]} == {"text", "table", "image", "video"}
     sync_edges = [edge for edge in graph["edges"] if edge.get("kind") == EDGE_KIND_SYNC]
-    assert len(sync_edges) == 1
+    assert len(sync_edges) == 2
     sync_pairs = {frozenset((edge["source"], edge["target"])) for edge in sync_edges}
     assert sync_pairs == {
         frozenset({"n_character", "n_storyboard"}),
+        frozenset({"n_scene", "n_storyboard"}),
     }

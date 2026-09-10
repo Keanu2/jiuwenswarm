@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import i18n from '../i18n';
 import { designerGraphClient } from '../features/designer/designerGraphClient';
+import { summariesFromGraphList } from '../features/designer/designerGraphLoad';
 import type { DesignerGraphSummary } from '../features/designer/executionGraphTypes';
 import { projectRegistryClient, ProjectRemoveResult } from '../features/workspace/projectRegistryClient';
 import { archivedTaskClient, findBatchSessionResult } from '../features/workspace/archivedTaskClient';
@@ -430,7 +431,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   loadDesignerGraphs: async () => {
     try {
       const payload = await designerGraphClient.list();
-      const designerGraphs = payload.summaries || [];
+      const designerGraphs = summariesFromGraphList(payload);
       set((state) => {
         const expandedProjectIds = { ...state.expandedProjectIds };
         for (const graph of designerGraphs) {
