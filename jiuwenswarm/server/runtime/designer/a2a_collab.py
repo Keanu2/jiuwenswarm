@@ -57,7 +57,8 @@ _SPECIALISTS: dict[str, tuple[str, str]] = {
     ),
     NODE_ROLE_STORYBOARD: (
         "storyboard director",
-        "You are a storyboard director. Keep character continuity and scene geography. Shots serve a 5-second film.",
+        "You are a storyboard director. Keep character continuity and scene geography. "
+        "Shots must cover the duration stated in the Brief or user request.",
     ),
 }
 

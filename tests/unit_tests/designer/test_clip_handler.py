@@ -199,7 +199,7 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
         fake_generate,
     )
     await ClipNodeHandler().execute(graph["nodes"][-1], ctx)
-    assert seen["first_frame"] == str(shot1.resolve())
+    assert seen["first_frame"] is None
     assert seen["reference_images"] == [str(shot1.resolve())]
     assert seen["reference_file"] == str(story.resolve())
     assert seen["duration"] == 2
@@ -300,16 +300,18 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
         },
     )
     assert collect_clip_reference_images(ctx) == [
+        frame.resolve(),
         character.resolve(),
         scene.resolve(),
-        frame.resolve(),
     ]
     prompt = build_clip_prompt(graph, graph["nodes"][-1], ctx)
-    assert "Image 1 is the character sheet" in prompt
-    assert "Image 2 is the scene" in prompt
-    assert "Image 3 is this shot's keyframe" in prompt
+    assert "Image 1 is this shot's keyframe" in prompt
+    assert "Image 2 is the character sheet" in prompt
+    assert "Image 3 is the scene" in prompt
     assert "attached file is the storyboard" in prompt
     assert "缓推" in prompt
+    assert "No music" in prompt
+    assert "no BGM" in prompt
 
     seen: dict[str, object] = {}
 
@@ -333,12 +335,12 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
     await ClipNodeHandler().execute(graph["nodes"][-1], ctx)
     assert seen["first_frame"] is None
     assert seen["reference_images"] == [
+        str(frame.resolve()),
         str(character.resolve()),
         str(scene.resolve()),
-        str(frame.resolve()),
     ]
     assert seen["reference_file"] == str(story.resolve())
-    assert "Image 1 is the character sheet" in str(seen["prompt"])
+    assert "Image 1 is this shot's keyframe" in str(seen["prompt"])
 
 
 @pytest.mark.asyncio
@@ -534,6 +536,7 @@ async def test_clip_handler_submits_matching_keyframe_for_shot_index(
         **kwargs,
     ) -> dict[str, str]:
         seen["first_frame"] = first_frame
+        seen["reference_images"] = reference_images
         seen["prompt"] = prompt
         seen["duration"] = duration
         return {"video_path": str(video), "revised_prompt": prompt}
@@ -543,7 +546,8 @@ async def test_clip_handler_submits_matching_keyframe_for_shot_index(
         fake_generate,
     )
     await ClipNodeHandler().execute(clip, ctx)
-    assert seen["first_frame"] == str(shot2.resolve())
+    assert seen["first_frame"] is None
+    assert seen["reference_images"] == [str(shot2.resolve())]
     assert seen["duration"] == 3
     assert "Shot 2" in str(seen["prompt"])
     assert "跟移" in str(seen["prompt"])
@@ -672,6 +676,8 @@ def test_concatenate_clip_videos_concats_shot1_then_shot2(
     copy_cmd = calls[0]
     assert copy_cmd[0] == "ffmpeg"
     assert "-f" in copy_cmd and "concat" in copy_cmd
+    assert "-c:v" in copy_cmd
+    assert "-an" in copy_cmd
     listing = listings[0]
     assert clip1.resolve().as_posix() in listing
     assert clip2.resolve().as_posix() in listing
@@ -695,7 +701,7 @@ def test_concatenate_clip_videos_falls_back_to_filter_concat(
     def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(list(cmd))
         joined = " ".join(cmd)
-        if "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy":
+        if "-f" in cmd and "concat" in cmd and "-filter_complex" not in cmd:
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="copy failed")
         if "-i" in cmd and "-filter_complex" not in cmd:
             return subprocess.CompletedProcess(

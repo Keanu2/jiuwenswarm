@@ -17,7 +17,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_TEXT,
     AssetRef,
     DesignerGraphNode,
-    frame_node_id,
     node_role,
     node_shot_index,
 )
@@ -39,9 +38,11 @@ from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionCont
 
 def _character_prompt(source: str) -> str:
     return (
-        "Character design sheet, single subject, full or three-quarter body, "
-        "plain seamless studio background, no environment, no train, no station, no street. "
-        "Cinematic lighting. Follow the brief. No subtitles, no storyboard grid.\n"
+        "Character design sheet only. Single subject, relaxed standing three-quarter pose, "
+        "plain seamless studio backdrop, no location, no train, no station, no street, "
+        "not walking, not a cinematic scene. Lighting is studio, not the story setting. "
+        "Use the brief only for face, body, hair, and costume. Ignore action and place. "
+        "No subtitles, no storyboard grid.\n"
         f"{source}"
     )
 
@@ -78,48 +79,49 @@ def _shot_frame_prompt(
 ) -> str:
     timeline = f" ({shot['timeline']})" if shot["timeline"] else ""
     comment = str(shot.get("comment") or "").strip()
+    camera = str(shot.get("camera") or "").strip() or "unspecified"
+    move = str(shot.get("move") or "").strip() or "static"
+    action = str(shot.get("character_action") or "").strip() or "unspecified"
+    place = str(shot.get("scene_change") or "").strip() or "unspecified"
+    _ = brief
     lead = ""
     if comment:
         lead = f"Generate the keyframe from this shot description: {comment}. "
     lead += (
-        f"Cinematic keyframe, one photoreal still for shot {shot['shot_no']}{timeline}. "
-        "Clear composition, this instant only, no comic grid. "
-        "This shot must use a different camera size, angle, and moment than other keyframes."
+        f"ONE photoreal still for shot {shot['shot_no']}{timeline} only. "
+        f"Camera must be {camera}. Camera move: {move}. "
+        f"This instant: {action}. Place: {place}. "
+        "This shot must use a different camera size, angle, distance, and moment "
+        "than the character sheet and than every other keyframe."
     )
     lead += (
         " Shot notes: "
         f"shot {shot['shot_no']}; "
         f"timeline {shot['timeline'] or 'unspecified'}; "
-        f"camera {shot['camera'] or 'unspecified'}; "
-        f"camera move {shot['move'] or 'unspecified'}; "
-        f"character action {shot['character_action'] or 'unspecified'}; "
-        f"scene change {shot['scene_change'] or 'unspecified'}."
+        f"camera {camera}; "
+        f"camera move {move}; "
+        f"character action {action}; "
+        f"scene change {place}."
     )
     if has_previous_frame:
         lead += (
-            " Reference images are sent together with this prompt. "
-            "The first image is the previous keyframe: keep the same person, "
-            "but change camera size, angle, distance, and action to THIS shot. "
-            "Do not duplicate that composition."
+            " This is a later shot generated from text only. "
+            "Change camera size, angle, distance, blocking, and the action instant. "
+            "Do not restyle or copy another keyframe's composition."
         )
-        if has_character:
-            lead += (
-                " Later images are identity, costume, and materials only; "
-                "do not copy their pose or framing."
-            )
         if has_scene:
-            lead += " Location, lighting, and weather must match the scene reference."
+            lead += " If a later image is the scene, match location and lighting only."
     elif has_character and has_scene:
         lead += (
-            " This is image-to-image. The first reference is the character sheet; "
-            "the second is the scene. Place that character in that scene and keep "
-            "identity, costume, materials, location, lighting, and weather. "
-            "Do not copy the character sheet's camera or pose."
+            " This is image-to-image. The first reference is the character sheet "
+            "(identity and costume only); the second is the scene. "
+            "Place that person in that place with THIS shot's camera. "
+            "Do not copy the character sheet's pose or framing."
         )
     elif has_character:
         lead += (
-            " The character reference is identity, costume, and materials only. "
-            "Do not copy its camera, pose, or full-body walking-toward-camera framing."
+            " The character reference is identity and costume only. "
+            "Invent THIS shot's camera. Do not copy a studio full-body standing or walking pose."
         )
     elif has_scene:
         lead += " Location, lighting, and weather must match the scene reference."
@@ -128,12 +130,6 @@ def _shot_frame_prompt(
         "No subtitles, no storyboard grid, no table, no spreadsheet, no cell borders. "
         "Do not paint words like Shot, Timeline, Camera, Move, Character action, Scene change, or Comment."
     )
-    visual = _strip_markdown_tables(brief)
-    if visual:
-        style = " ".join(visual.split())
-        if len(style) > 180:
-            style = style[:179].rstrip() + "…"
-        return f"{lead}\nSetting from Brief: {style}"
     return lead
 
 
@@ -187,8 +183,16 @@ def collect_frame_reference_images(
     character: Path | None,
     scene: Path | None,
     previous: Path | None,
+    later_shot: bool = False,
 ) -> list[str]:
-    """Keyframe i2i refs: previous shot first (if any), then identity, then location."""
+    """Shot 1 may use character/scene. Later shots are text-to-image.
+
+    qwen-image treats a previous still as a style/edit source, so chaining
+    keyframes only changes look, not camera or action.
+    """
+    del ctx, node, previous
+    if later_shot:
+        return []
     paths: list[Path] = []
     seen: set[str] = set()
 
@@ -202,22 +206,8 @@ def collect_frame_reference_images(
         seen.add(key)
         paths.append(resolved)
 
-    if previous is not None:
-        add(previous)
-        add(character)
-        add(scene)
-    else:
-        add(character)
-        add(scene)
-    node_id = str(node.get("id") or "")
-    for edge in ctx.graph.get("edges") or []:
-        if str(edge.get("target") or "") != node_id:
-            continue
-        source = str(edge.get("source") or "")
-        if not source:
-            continue
-        for path in handler_io.node_output_image_paths(ctx, source):
-            add(path)
+    add(character)
+    add(scene)
     return [str(path) for path in paths[:_MAX_FRAME_REFERENCE_IMAGES]]
 
 
@@ -333,16 +323,14 @@ class FrameNodeHandler:
                 + " and ".join(missing)
                 + " with this shot. Finish those nodes first."
             )
-        previous = None
-        if shot_index > 1:
-            prev_paths = handler_io.node_output_image_paths(ctx, frame_node_id(shot_index - 1))
-            previous = prev_paths[0] if prev_paths else None
+        later_shot = shot_index > 1
         refs = collect_frame_reference_images(
             ctx,
             node,
             character=character,
             scene=scene,
-            previous=previous,
+            previous=None,
+            later_shot=later_shot,
         )
         shots = storyboard_shots_or_default(storyboard, visual)
         if shot_index > len(shots):
@@ -354,13 +342,15 @@ class FrameNodeHandler:
         origin = handler_io.node_generate_prompt_origin(node)
         if override and origin != GENERATE_PROMPT_ORIGIN_STORYBOARD:
             shot["comment"] = override
+        character_key = str(character.resolve()) if character is not None else ""
+        scene_key = str(scene.resolve()) if scene is not None else ""
         generated = await handler_io.generate_designer_image(
             _shot_frame_prompt(
                 shot,
                 visual,
-                has_character=character is not None,
-                has_scene=scene is not None,
-                has_previous_frame=previous is not None,
+                has_character=bool(character_key and character_key in refs),
+                has_scene=bool(scene_key and scene_key in refs),
+                has_previous_frame=later_shot,
             ),
             reference_images=refs,
         )

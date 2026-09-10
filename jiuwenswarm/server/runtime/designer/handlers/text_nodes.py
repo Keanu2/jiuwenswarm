@@ -34,8 +34,17 @@ from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionCont
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_DURATION_SECONDS = 5
+_MIN_DURATION_SECONDS = 2
+_MAX_DURATION_SECONDS = 30
+_DURATION_SECONDS = re.compile(
+    r"(?i)(?:duration\s*[：:]\s*)?(\d{1,3}(?:\.\d+)?)\s*-?\s*"
+    r"(?:seconds?|secs?|秒|(?<![a-z])s(?![a-z]))"
+)
+
 _BRIEF_INSTRUCTION = """Turn the request below into an executable short-film Brief.
-Write English Markdown with: one-line logline, visual style, main character/subject, setting, and 5-second duration.
+Write English Markdown with: one-line logline, visual style, main character/subject, setting, and duration in seconds.
+Read the duration from the user request (for example 10-second, 10 seconds, 10秒). If the request does not say how long, use 5 seconds.
 Only list constraints that are in the request. Do not add extra bans or a different setting.
 Output Markdown only, no explanation.
 
@@ -45,10 +54,11 @@ Request:
 _STORYBOARD_COLUMNS = "Shot | Timeline | Camera | Move | Character action | Scene change | Comment"
 
 _STORYBOARD_REQUIREMENTS = f"""Storyboard requirements:
-- Write a 5-second camera-script table from the Brief below. This is not a drawing
+- Write a camera-script table from the Brief below. This is not a drawing
 - English Markdown only, with heading ## Storyboard and exactly one table
 - Columns MUST be: {_STORYBOARD_COLUMNS}
-- Whole film about 5 seconds, 2-4 shots
+- Read the film duration from the Brief Duration field or the original user request. Do not assume 5 seconds unless neither mentions duration
+- Cover that full duration with 2-6 shots and no timeline gaps
 - Timeline as start-end seconds, e.g. 0.0-2.0s
 - Camera is shot size + angle, e.g. close-up / over-shoulder, medium / eye-level
 - Move is push/pull/pan/dolly/static and speed
@@ -62,7 +72,9 @@ _STORYBOARD_REQUIREMENTS = f"""Storyboard requirements:
 """
 
 
-def build_storyboard_llm_prompt(brief: str, alignment: str = "") -> str:
+def build_storyboard_llm_prompt(
+    brief: str, alignment: str = "", user_request: str = ""
+) -> str:
     """Chat-API prompt: storyboard rules plus the full Brief (and optional sheets)."""
     parts = [
         _STORYBOARD_REQUIREMENTS.strip(),
@@ -70,6 +82,9 @@ def build_storyboard_llm_prompt(brief: str, alignment: str = "") -> str:
         "## Brief",
         (brief or "").strip() or "(missing Brief — use only the user request if it appears above)",
     ]
+    request = (user_request or "").strip()
+    if request and request not in (brief or ""):
+        parts.extend(["", "## User request", request])
     extra = (alignment or "").strip()
     if extra:
         parts.extend(["", "## Character and scene alignment", extra])
@@ -254,6 +269,33 @@ def _markdown_table_cell(text: str, limit: int = 180) -> str:
     return compact[: max(0, limit - 1)].rstrip() + "…"
 
 
+def brief_duration_seconds(
+    source: str, default: int = _DEFAULT_DURATION_SECONDS
+) -> int:
+    """Seconds from a Brief Duration field, else the first duration in the request."""
+    text = source or ""
+    duration_line = re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?duration(?:\*\*)?\s*[：:].+$",
+        text,
+    )
+    blob = duration_line.group(0) if duration_line else text
+    match = _DURATION_SECONDS.search(blob)
+    if match is None and duration_line is not None:
+        match = _DURATION_SECONDS.search(text)
+    if match is None:
+        return default
+    try:
+        value = float(match.group(1))
+    except (TypeError, ValueError):
+        return default
+    seconds = int(round(value))
+    return max(_MIN_DURATION_SECONDS, min(_MAX_DURATION_SECONDS, seconds))
+
+
+def _format_timeline_seconds(value: float) -> str:
+    return f"{value:.1f}"
+
+
 def brief_logline(source: str) -> str:
     """Pull the usable one-line subject from a Brief markdown or raw prompt."""
     lines = [line.strip() for line in (source or "").splitlines()]
@@ -303,10 +345,11 @@ def _story_beats(focus: str) -> tuple[str, str]:
 
 def fallback_brief(prompt: str) -> str:
     logline = _markdown_table_cell(brief_logline(prompt) or prompt, limit=400)
+    duration = brief_duration_seconds(prompt)
     return (
         "# Brief\n\n"
         f"- Logline: {logline}\n"
-        "- Duration: 5 seconds\n"
+        f"- Duration: {duration} seconds\n"
         "- Resolution: 480P (dev)\n"
         "- Visual: follow the user description, avoid unrelated elements\n"
     )
@@ -328,14 +371,20 @@ def fallback_storyboard(prompt: str) -> str:
     """Keep fallback shots on the Brief subject; never a stock demo world."""
     focus = brief_story_focus(prompt) or (prompt or "").strip() or "the briefed action"
     beat1, beat2 = _story_beats(focus)
+    duration = float(brief_duration_seconds(prompt))
+    split = round(duration * 0.4, 1)
+    split = min(max(1.0, split), max(1.0, duration - 1.0))
+    start = _format_timeline_seconds(0.0)
+    mid = _format_timeline_seconds(split)
+    end = _format_timeline_seconds(duration)
     shot1 = (
-        "| 1 | 0.0-2.0s | wide / eye-level | slow pan to the main action | "
+        f"| 1 | {start}-{mid}s | wide / eye-level | slow pan to the main action | "
         f"{_markdown_table_cell(beat1)} | "
         f"{_markdown_table_cell('location from the Brief: ' + beat1)} | "
         f"{_markdown_table_cell('Wide establishing shot: ' + beat1)} |"
     )
     shot2 = (
-        "| 2 | 2.0-5.0s | medium close-up / eye-level | follow then hold | "
+        f"| 2 | {mid}-{end}s | medium close-up / eye-level | follow then hold | "
         f"{_markdown_table_cell(beat2)} | "
         f"{_markdown_table_cell('same location as shot 1; continue: ' + beat2)} | "
         f"{_markdown_table_cell('Closer coverage: ' + beat2)} |"
@@ -421,7 +470,9 @@ class StoryboardNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         source = role_output_text(ctx, NODE_ROLE_BRIEF) or graph_prompt(ctx.graph, node)
         alignment = _storyboard_alignment_context(ctx)
-        prompt = build_storyboard_llm_prompt(source, alignment)
+        prompt = build_storyboard_llm_prompt(
+            source, alignment, user_request=graph_prompt(ctx.graph, node)
+        )
         logger.info(
             "Designer storyboard calling chat API brief_chars=%s prompt_chars=%s",
             len(source or ""),

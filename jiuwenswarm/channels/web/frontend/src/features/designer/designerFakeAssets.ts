@@ -5,16 +5,6 @@
 
 export const DESIGNER_FAKE_TEXT = '实例文本';
 
-/** 4 rows × 3 columns (含表头共 4 行数据区也可视为 3 列表格). */
-export const DESIGNER_FAKE_TABLE: { headers: string[]; rows: string[][] } = {
-  headers: ['镜头', '画面', '时长'],
-  rows: [
-    ['01', 'Opening wide', '2.0s'],
-    ['02', 'Subject enters', '1.5s'],
-    ['03', 'Hold and exit', '3.0s'],
-  ],
-};
-
 export const DESIGNER_FAKE_IMAGE_WIDTH = 720;
 export const DESIGNER_FAKE_IMAGE_HEIGHT = 1280;
 export const DESIGNER_FAKE_VIDEO_FPS = 12;

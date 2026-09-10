@@ -27,9 +27,11 @@ from jiuwenswarm.server.runtime.designer.handlers.image_nodes import (
 from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
     BriefNodeHandler,
     StoryboardNodeHandler,
+    brief_duration_seconds,
     brief_logline,
     brief_story_focus,
     build_storyboard_llm_prompt,
+    fallback_brief,
     fallback_storyboard,
     parse_storyboard_shots,
     shot_generate_prompt,
@@ -403,9 +405,41 @@ def test_build_storyboard_llm_prompt_includes_brief_and_requirements() -> None:
     assert brief in prompt
     assert "grandmother folds dumplings" in prompt
     assert "Shot | Timeline | Camera | Move | Character action | Scene change | Comment" in prompt
-    assert "2-4 shots" in prompt
+    assert "2-6 shots" in prompt
+    assert "do not assume 5 seconds" in prompt.lower()
+    assert "5-second camera-script" not in prompt
+    assert "Whole film about 5 seconds" not in prompt
     assert "keyframe prompt" in prompt
     assert "Write the storyboard table now from the Brief" in prompt
+    with_request = build_storyboard_llm_prompt(
+        brief,
+        user_request="Generate a 10-second video in a medieval classical style",
+    )
+    assert "## User request" in with_request
+    assert "10-second video" in with_request
+
+
+def test_brief_duration_seconds_reads_user_request() -> None:
+    assert brief_duration_seconds("Generate a 10-second video in a medieval style") == 10
+    assert brief_duration_seconds("生成一段10秒的短视频，地铁进站") == 10
+    assert brief_duration_seconds("**Duration:** 10 seconds.") == 10
+    assert (
+        brief_duration_seconds(
+            "# Brief\n\n- Logline: a 10-second charge\n- Duration: 8 seconds\n"
+        )
+        == 8
+    )
+    assert brief_duration_seconds("generate a 480p video in 5 seconds, two cams") == 5
+    assert brief_duration_seconds("no length stated") == 5
+
+
+def test_fallback_brief_and_storyboard_follow_requested_duration() -> None:
+    prompt = "Generate a 10-second video: a troop charges a red castle"
+    brief = fallback_brief(prompt)
+    assert "- Duration: 10 seconds" in brief
+    shots = parse_storyboard_shots(fallback_storyboard(brief))
+    assert shots[0]["timeline"] == "0.0-4.0s"
+    assert shots[1]["timeline"] == "4.0-10.0s"
 
 
 @pytest.mark.asyncio
@@ -876,14 +910,11 @@ async def test_frame_sends_previous_keyframe_image_with_shot_prompt(
             run=refs["run"],
         ),
     )
-    assert seen["reference_images"] == [
-        str(previous.resolve()),
-        str(refs["character"].resolve()),
-    ]
+    assert seen["reference_images"] in ([], None)
     prompt = str(seen["prompt"])
     assert "Medium shot walking to the exit" in prompt
-    assert "previous keyframe" in prompt
-    assert "first image is the previous keyframe" in prompt
+    assert "later shot generated from text only" in prompt
+    assert "first image is the previous keyframe" not in prompt
     assert "Wide shot of the train" not in prompt
 
 
@@ -988,12 +1019,9 @@ async def test_frame_generates_one_image_per_storyboard_shot(
     assert len(prompts) == 2
     assert "shot 2" in prompts[1]
     assert "character action 主体入画" in prompts[1]
-    assert seen_refs[1] == [
-        str(frame1.resolve()),
-        str(refs["character"].resolve()),
-        str(refs["scene"].resolve()),
-    ]
-    assert "first image is the previous keyframe" in prompts[1]
+    assert seen_refs[1] in ([], None)
+    assert "later shot generated from text only" in prompts[1]
+    assert "first image is the previous keyframe" not in prompts[1]
     assert second.output_refs is not None
     assert second.output_refs[0]["label"] == "designer_frame_run_mid01_n_frame_shot2.png"
 

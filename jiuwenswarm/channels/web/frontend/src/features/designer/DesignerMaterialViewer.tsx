@@ -138,7 +138,7 @@ export function DesignerMaterialViewer({
           ) : null}
           <div
             className={
-              kind === 'text'
+              kind === 'text' || current.kind === 'table'
                 ? 'designer-material-viewer__body designer-material-viewer__body--text'
                 : 'designer-material-viewer__body'
             }
@@ -149,7 +149,7 @@ export function DesignerMaterialViewer({
               <video key={current.uri} src={current.previewUrl} controls playsInline autoPlay />
             ) : kind === 'audio' && current.previewUrl ? (
               <audio key={current.uri} src={current.previewUrl} controls />
-            ) : kind === 'text' && current.textUrl ? (
+            ) : (kind === 'text' || current.kind === 'table') && current.textUrl ? (
               <DesignerTextEditor
                 material={current}
                 showStartButton={false}

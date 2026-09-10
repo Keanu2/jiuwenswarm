@@ -37,7 +37,7 @@ function MaterialPreview({ material }: { material: DesignerMaterial }) {
   if (kind === 'audio' && material.previewUrl) {
     return <audio src={material.previewUrl} controls />;
   }
-  if (kind === 'text' && material.textUrl) {
+  if ((kind === 'text' || material.kind === 'table') && material.textUrl) {
     return <TextPreview url={material.textUrl} />;
   }
   return <p>{material.label}</p>;

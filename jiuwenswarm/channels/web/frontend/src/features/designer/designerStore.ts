@@ -4,7 +4,11 @@ import {
   isDesignerPreviewGraph,
 } from './designerBootstrapGraph';
 import { designerGraphClient } from './designerGraphClient';
-import { resolveDesignerGraphToLoad } from './designerGraphLoad';
+import {
+  rememberDesignerGraphId,
+  resolveDesignerGraphToLoad,
+  uniqueDesignerGraphIds,
+} from './designerGraphLoad';
 import type { DesignerReactFlowGraph } from './designerGraphAdapter';
 import type { AssetRef, DesignerExecutionGraph, DesignerGraphNode } from './executionGraphTypes';
 
@@ -108,6 +112,7 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
 
   applyGraph: (graph) => {
     saveSeq += 1;
+    rememberDesignerGraphId(graph.graph_id);
     set({
       graphId: graph.graph_id,
       domainGraph: graph,
@@ -132,6 +137,7 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     try {
       const { graph } = await designerGraphClient.get(id);
       if (gen !== loadSeq) return;
+      rememberDesignerGraphId(graph.graph_id);
       set({
         graphId: graph.graph_id,
         domainGraph: graph,
@@ -346,6 +352,7 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
         set({ saveStatus: 'saved' });
         return;
       }
+      rememberDesignerGraphId(saved.graph_id);
       set({
         domainGraph: saved,
         graphId: saved.graph_id,
@@ -370,44 +377,43 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     const normalizedProjectId = String(projectId ?? '').trim();
     const graphProjectId = String(get().domainGraph?.project_id ?? '').trim();
     const effectiveProjectId = normalizedProjectId || graphProjectId;
-
-    if (!effectiveProjectId) {
-      // 没有 project 上下文时，保留已有 ready 图（例如 bootstrap 刚写入），避免刷成 empty。
-      if (get().loadStatus === 'ready' && get().domainGraph) {
-        return;
-      }
-      set({
-        graphId: null,
-        domainGraph: null,
-        loadStatus: 'empty',
-        loadError: null,
-        bootstrapInProgress: false,
-        selectedNodeId: null,
-      });
-      return;
-    }
-
     const previousGraph = get().domainGraph;
     const previousStatus = get().loadStatus;
     const previousGraphId = get().graphId;
-    const gen = loadSeq;
+    const gen = ++loadSeq;
+
+    // 刷新后内存是空的：没有 project 也不能直接 empty，先按全量列表 / 上次打开的图恢复。
+    if (previousStatus === 'ready' && previousGraph && !effectiveProjectId) {
+      return;
+    }
 
     set({
       loadStatus: previousGraph ? 'ready' : 'loading',
       loadError: null,
     });
 
+    const collectListedIds = (listed: {
+      graphs?: Array<{ graph_id?: string }>;
+      summaries?: Array<{ graph_id?: string }>;
+    }) =>
+      uniqueDesignerGraphIds([
+        ...(listed.summaries || []).map((item) => item.graph_id),
+        ...(listed.graphs || []).map((item) => item.graph_id),
+      ]);
+
     try {
-      const listed = await designerGraphClient.list(effectiveProjectId);
+      let listed = await designerGraphClient.list(effectiveProjectId || undefined);
       if (gen !== loadSeq || get().bootstrapInProgress) {
         return;
       }
-      const graphs = listed.graphs || [];
-      const summaries = listed.summaries || [];
-      const listedIds = [
-        ...summaries.map((item) => item.graph_id),
-        ...graphs.map((item) => item.graph_id),
-      ].filter((id): id is string => Boolean(id));
+      let listedIds = collectListedIds(listed);
+      if (effectiveProjectId && listedIds.length === 0) {
+        listed = await designerGraphClient.list();
+        if (gen !== loadSeq || get().bootstrapInProgress) {
+          return;
+        }
+        listedIds = collectListedIds(listed);
+      }
       const targetId = resolveDesignerGraphToLoad({
         currentId: get().graphId,
         isPreview: isDesignerPreviewGraph(get().domainGraph),
@@ -416,7 +422,8 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
       if (previousGraphId && get().graphId && get().graphId !== previousGraphId && get().graphId !== targetId) {
         return;
       }
-      if (!targetId) {
+      const candidateIds = uniqueDesignerGraphIds([targetId, ...listedIds]);
+      if (candidateIds.length === 0) {
         if (previousStatus === 'ready' && previousGraph) {
           set({
             graphId: previousGraphId,
@@ -436,14 +443,29 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
         return;
       }
 
-      if (get().domainGraph?.graph_id === targetId && get().loadStatus === 'ready') {
+      if (get().domainGraph?.graph_id === candidateIds[0] && get().loadStatus === 'ready') {
+        rememberDesignerGraphId(candidateIds[0]);
         return;
       }
 
-      const { graph } = await designerGraphClient.get(targetId);
+      let graph: DesignerExecutionGraph | null = null;
+      let lastError: unknown;
+      for (const id of candidateIds) {
+        try {
+          const loaded = await designerGraphClient.get(id);
+          graph = loaded.graph;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
       if (gen !== loadSeq || get().bootstrapInProgress) {
         return;
       }
+      if (!graph) {
+        throw lastError instanceof Error ? lastError : new Error('graph not found');
+      }
+      rememberDesignerGraphId(graph.graph_id);
       set({
         graphId: graph.graph_id,
         domainGraph: graph,

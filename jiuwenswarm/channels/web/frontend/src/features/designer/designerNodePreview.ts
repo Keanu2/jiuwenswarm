@@ -30,6 +30,22 @@ export function storyboardShotPreviews(
     .filter((shot) => shot.shotNo || shot.timeline || shot.action || shot.picture);
 }
 
+export const EMPTY_STORYBOARD_TABLE: MarkdownTablePreview = {
+  headers: [
+    'Shot',
+    'Timeline',
+    'Camera',
+    'Move',
+    'Character action',
+    'Scene change',
+    'Comment',
+  ],
+  rows: [
+    ['', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', ''],
+  ],
+};
+
 function splitMarkdownRow(line: string): string[] {
   let text = line.trim();
   if (text.startsWith('|')) text = text.slice(1);
@@ -43,7 +59,7 @@ function isSeparator(cells: string[]): boolean {
 
 export function parseMarkdownTable(
   text: string,
-  maxRows = 6,
+  maxRows = 8,
 ): MarkdownTablePreview | null {
   const rows: string[][] = [];
   for (const line of (text || '').split(/\r?\n/)) {

@@ -83,6 +83,23 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
   ]);
 
   useEffect(() => {
+    if (bootstrapInProgress || pendingDesignerGraphId) return;
+    if (domainGraph || loadStatus === 'loading' || loadStatus === 'bootstrapping') return;
+    const fallbackId = designerGraphs[0]?.graph_id;
+    if (!fallbackId) return;
+    if (loadStatus === 'empty' || loadStatus === 'error' || loadStatus === 'idle') {
+      void loadGraph(fallbackId);
+    }
+  }, [
+    bootstrapInProgress,
+    designerGraphs,
+    domainGraph,
+    loadGraph,
+    loadStatus,
+    pendingDesignerGraphId,
+  ]);
+
+  useEffect(() => {
     const nextId = domainGraph?.graph_id ?? null;
     if (nextId === boundGraphId) return;
     resetUi();
@@ -115,7 +132,7 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
   const activeRevision =
     pendingRevisions.find((item) => item.nodeId === chooserNodeId) ?? pendingRevisions[0];
 
-  const graphReady = Boolean(domainGraph) && (!graphId || domainGraph.graph_id === graphId);
+  const graphReady = Boolean(domainGraph) && (!graphId || domainGraph?.graph_id === graphId);
   const showCanvas = graphReady;
   const showEmpty = !showCanvas && loadStatus === 'empty';
   const showError = !showCanvas && loadStatus === 'error';
@@ -184,7 +201,7 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
       <div className="designer-page__workspace">
         <DesignerChatPanel />
 
-        {showCanvas ? <DesignerCanvas graph={domainGraph} /> : null}
+        {showCanvas && domainGraph ? <DesignerCanvas graph={domainGraph} /> : null}
 
         {showLoading ? (
           <div className="designer-page__state" data-testid="designer-loading-state">

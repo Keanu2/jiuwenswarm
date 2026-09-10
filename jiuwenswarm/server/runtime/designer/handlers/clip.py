@@ -83,7 +83,7 @@ def collect_clip_reference_images(
     ctx: NodeExecutionContext | None,
     shot_index: int = 1,
 ) -> list[Path]:
-    """Visual references in wan3 Image N order: character, scene, then this shot's keyframe."""
+    """wan3 reference_image order: this shot's keyframe, then identity, then scene."""
     paths: list[Path] = []
     seen: set[str] = set()
 
@@ -97,10 +97,10 @@ def collect_clip_reference_images(
         seen.add(key)
         paths.append(resolved)
 
+    add(collect_clip_first_frame(ctx, shot_index))
     if ctx is not None:
         add(role_output_image_path(ctx, NODE_ROLE_CHARACTER_DESIGN))
         add(role_output_image_path(ctx, NODE_ROLE_SCENE))
-    add(collect_clip_first_frame(ctx, shot_index))
     return paths
 
 
@@ -161,22 +161,24 @@ def _clip_prompt_lead(
         f"Create shot {shot_index} as a {duration}-second video.",
         "Use the attached references. Image N matches the media array order.",
     ]
+    if has_frame:
+        lines.append(
+            f"Image {image_n} is this shot's keyframe. Animate that composition; keep this camera and pose."
+        )
+        image_n += 1
     if has_character:
         lines.append(
-            f"Image {image_n} is the character sheet. Keep identity, costume, and materials."
+            f"Image {image_n} is the character sheet for identity and costume only. "
+            "Do not replace the keyframe framing with the character sheet."
         )
         image_n += 1
     if has_scene:
         lines.append(
             f"Image {image_n} is the scene. Keep location, lighting, and weather."
         )
-        image_n += 1
-    if has_frame:
-        lines.append(
-            f"Image {image_n} is this shot's keyframe composition. Match framing and pose."
-        )
     if has_storyboard:
         lines.append("The attached file is the storyboard table. Film only this shot's row.")
+    lines.append("Picture and action only. No music, no soundtrack, no BGM, no score.")
     lines.append("No subtitles, no cutaways.")
     return "\n".join(lines) + "\n\n"
 
@@ -253,6 +255,7 @@ async def generate_clip_video(
         reference_images=reference_images,
         reference_file=reference_file,
         duration=max(2, min(10, int(duration or 5))),
+        audio=False,
     )
     if "error" in result:
         raise RuntimeError(str(result["error"]))
@@ -307,9 +310,17 @@ class ClipNodeHandler:
         refs = collect_clip_reference_images(ctx, shot_index)
         storyboard_file = collect_clip_storyboard_file(ctx)
         identity = character is not None or scene is not None
+        # wan3: img_url (I2V) cannot mix with reference_image or file.
+        use_reference_mode = (
+            identity or storyboard_file is not None or len(refs) > 1
+        )
         result = await generate_clip_video(
             prompt,
-            first_frame=None if identity else (str(first_frame) if first_frame is not None else None),
+            first_frame=(
+                None
+                if use_reference_mode
+                else (str(first_frame) if first_frame is not None else None)
+            ),
             reference_images=[str(path) for path in refs] or None,
             reference_file=str(storyboard_file) if storyboard_file is not None else None,
             duration=duration,

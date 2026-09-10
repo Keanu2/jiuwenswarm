@@ -604,6 +604,7 @@ async def _invoke_dashscope_video_generation(
     first_frame: str | None = None,
     reference_images: list[str] | None = None,
     reference_file: str | None = None,
+    audio: bool | None = None,
 ) -> dict[str, Any]:
     """Generate a video via DashScope (openjiuwen Model client)."""
     from openjiuwen.core.foundation.llm import (
@@ -655,6 +656,7 @@ async def _invoke_dashscope_video_generation(
         first_frame=first_frame,
         reference_images=reference_images,
         reference_file=reference_file,
+        audio=audio,
     )
     media = video_call.get("media") or []
     logger.info(
@@ -839,6 +841,7 @@ def _build_dashscope_video_call(
     first_frame: str | None = None,
     reference_images: list[str] | None = None,
     reference_file: str | None = None,
+    audio: bool | None = None,
 ) -> dict[str, Any]:
     """Map Designer clip inputs onto DashScope T2V / I2V / R2V / wan3 media."""
     refs = _unique_dashscope_image_urls(reference_images)
@@ -850,6 +853,7 @@ def _build_dashscope_video_call(
     use_reference_mode = bool(extra_refs or (refs and not img_url) or file_url)
 
     if _is_wan3_video(chosen):
+        want_audio = False if audio is None else bool(audio)
         if use_reference_mode:
             media: list[dict[str, str]] = [
                 {"type": "reference_image", "url": item} for item in refs
@@ -863,14 +867,17 @@ def _build_dashscope_video_call(
             # openjiuwen rejects resolution unless img_url is set; wan3 media is not I2V.
             params["size"] = _normalize_video_size(size) or "1280*720"
             params["ratio"] = "16:9"
+            params["audio"] = want_audio
             return params
         if img_url:
             params["model"] = chosen
             params["img_url"] = img_url
             params["resolution"] = (resolution or "720P").strip() or "720P"
+            params["audio"] = want_audio
             return params
         params["model"] = chosen
         params["size"] = _normalize_video_size(size) or "1280*720"
+        params["audio"] = want_audio
         return params
 
     if use_reference_mode:
@@ -906,6 +913,7 @@ async def _invoke_model_video_generation(
     first_frame: str | None = None,
     reference_images: list[str] | None = None,
     reference_file: str | None = None,
+    audio: bool | None = None,
 ) -> dict[str, Any]:
     """Generate a video via DashScope / MiniMax / 火山方舟 backends."""
     cfg = get_config() or {}
@@ -996,6 +1004,7 @@ async def _invoke_model_video_generation(
             first_frame=first_frame,
             reference_images=reference_images,
             reference_file=reference_file,
+            audio=audio,
         )
     except Exception as ex:
         return {"error": f"[ERROR]: Video generation failed: {ex}"}

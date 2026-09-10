@@ -6,6 +6,7 @@ import {
   isDesignerPreviewGraph,
 } from '../node_modules/.cache/designer-canvas-preview/designerBootstrapGraph.js';
 import {
+  EMPTY_STORYBOARD_TABLE,
   parseMarkdownTable,
   storyboardShotPreviews,
 } from '../node_modules/.cache/designer-canvas-preview/designerNodePreview.js';
@@ -51,19 +52,42 @@ test('storyboardShotPreviews still lists shots when Comment is empty', () => {
   assert.equal(shots[0].picture, 'platform morning light');
 });
 
+test('empty storyboard table is a blank seven-column frame', () => {
+  assert.deepEqual(EMPTY_STORYBOARD_TABLE.headers, [
+    'Shot',
+    'Timeline',
+    'Camera',
+    'Move',
+    'Character action',
+    'Scene change',
+    'Comment',
+  ]);
+  assert.equal(EMPTY_STORYBOARD_TABLE.rows.length, 2);
+  assert.ok(EMPTY_STORYBOARD_TABLE.rows.every((row) => row.length === 7 && row.every((cell) => cell === '')));
+});
+
 test('parseMarkdownTable keeps a table frame from generated markdown', () => {
   const table = parseMarkdownTable(
     [
-      '| 镜号 | 画面 | 时长 |',
-      '| --- | --- | --- |',
-      '| 1 | 火车进站 | 2.0s |',
-      '| 2 | 年轻人下车 | 3.0s |',
+      '| Shot | Timeline | Camera | Move | Character action | Scene change | Comment |',
+      '| --- | --- | --- | --- | --- | --- | --- |',
+      '| 1 | 0.0-2.0s | wide | static | steps off the train | platform morning light | Wide shot of a young man leaving the train |',
+      '| 2 | 2.0-5.0s | medium | pan | walks toward the exit | same station | Medium shot walking through the concourse |',
     ].join('\n'),
   );
   assert.ok(table);
-  assert.deepEqual(table.headers, ['镜号', '画面', '时长']);
+  assert.deepEqual(table.headers, [
+    'Shot',
+    'Timeline',
+    'Camera',
+    'Move',
+    'Character action',
+    'Scene change',
+    'Comment',
+  ]);
   assert.equal(table.rows.length, 2);
-  assert.equal(table.rows[1][1], '年轻人下车');
+  assert.equal(table.rows[0][6], 'Wide shot of a young man leaving the train');
+  assert.equal(table.rows[1][4], 'walks toward the exit');
 });
 
 test('resolveDesignerGraphToLoad keeps the selected graph instead of the first listed one', () => {
@@ -95,5 +119,34 @@ test('resolveDesignerGraphToLoad keeps the selected graph instead of the first l
       listedIds: ['graph_first', 'graph_second'],
     }),
     'graph_first',
+  );
+});
+
+test('resolveDesignerGraphToLoad restores the last opened graph after refresh', () => {
+  assert.equal(
+    resolveDesignerGraphToLoad({
+      currentId: '',
+      listedIds: ['graph_first', 'graph_second'],
+      lastId: 'graph_second',
+    }),
+    'graph_second',
+  );
+  assert.equal(
+    resolveDesignerGraphToLoad({
+      currentId: '',
+      isPreview: true,
+      listedIds: ['graph_first'],
+      lastId: 'graph_kept',
+    }),
+    'graph_kept',
+  );
+  assert.equal(
+    resolveDesignerGraphToLoad({
+      currentId: 'preview_bootstrap',
+      isPreview: true,
+      listedIds: [],
+      lastId: 'graph_kept',
+    }),
+    'graph_kept',
   );
 });

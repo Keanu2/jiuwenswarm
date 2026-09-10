@@ -14,7 +14,7 @@ import {
   DESIGNER_MATERIAL_SAVED_EVENT,
   preferredDesignerPreviewRef,
 } from '../../designerMaterials';
-import { parseMarkdownTable, storyboardShotPreviews } from '../../designerNodePreview';
+import { parseMarkdownTable, EMPTY_STORYBOARD_TABLE } from '../../designerNodePreview';
 import {
   DESIGNER_NODE_STATUS_COMPLETED,
   DESIGNER_NODE_STATUS_FAILED,
@@ -194,38 +194,24 @@ function TextPreviewBody({ nodeId, nodeType }: { nodeId: string; nodeType: strin
   );
 }
 
-function TablePreviewBody({ nodeId }: { nodeId: string }) {
-  const uri = useNodePreviewUri(nodeId);
-  const text = useDesignerAssetText(uri);
-  const shots = text ? storyboardShotPreviews(text) : [];
-  if (shots.length > 0) {
-    return (
-      <ol className="designer-node__shots" data-testid="designer-node-shot-preview">
-        {shots.map((shot) => (
-          <li key={`${shot.shotNo}-${shot.timeline}-${shot.action}`} className="designer-node__shot">
-            <span className="designer-node__shot-head">
-              {shot.shotNo || '·'}
-              {shot.timeline ? ` · ${shot.timeline}` : ''}
-            </span>
-            {shot.action ? (
-              <p className="designer-node__shot-action">{shot.action}</p>
-            ) : null}
-            {shot.picture ? (
-              <p className="designer-node__shot-picture">{shot.picture}</p>
-            ) : null}
-          </li>
-        ))}
-      </ol>
-    );
-  }
-  const table = text ? parseMarkdownTable(text) : null;
-  if (table) {
-    return (
-      <table className="designer-node__table" data-testid="designer-node-table-preview">
+function TableFrame({
+  table,
+  empty = false,
+}: {
+  table: { headers: string[]; rows: string[][] };
+  empty?: boolean;
+}) {
+  return (
+    <div className="designer-node__table-wrap">
+      <table
+        className="designer-node__table"
+        data-testid="designer-node-table-preview"
+        data-empty={empty ? 'true' : 'false'}
+      >
         <thead>
           <tr>
             {table.headers.map((header, index) => (
-              <th key={`${header}-${index}`}>{header}</th>
+              <th key={`${header}-${index}`}>{header || '\u00a0'}</th>
             ))}
           </tr>
         </thead>
@@ -233,13 +219,22 @@ function TablePreviewBody({ nodeId }: { nodeId: string }) {
           {table.rows.map((row, rowIndex) => (
             <tr key={row.join('|') || String(rowIndex)}>
               {row.map((cell, cellIndex) => (
-                <td key={`${rowIndex}-${cellIndex}`}>{cell}</td>
+                <td key={`${rowIndex}-${cellIndex}`}>{cell || '\u00a0'}</td>
               ))}
             </tr>
           ))}
         </tbody>
       </table>
-    );
+    </div>
+  );
+}
+
+function TablePreviewBody({ nodeId }: { nodeId: string }) {
+  const uri = useNodePreviewUri(nodeId);
+  const text = useDesignerAssetText(uri);
+  const table = text ? parseMarkdownTable(text) : null;
+  if (table) {
+    return <TableFrame table={table} />;
   }
   if (text) {
     return (
@@ -248,7 +243,7 @@ function TablePreviewBody({ nodeId }: { nodeId: string }) {
       </p>
     );
   }
-  return <PlaceholderBody nodeType={DESIGNER_NODE_TYPE_TABLE} />;
+  return <TableFrame table={EMPTY_STORYBOARD_TABLE} empty />;
 }
 
 export function DesignerTextNode({ id, data, selected }: NodeProps<DesignerFlowNode>) {

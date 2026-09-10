@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from jiuwenswarm.common.schema.designer_graph import (
+    NODE_ROLE_BRIEF,
     NODE_ROLE_CLIP,
     NODE_TYPE_VIDEO,
     AssetRef,
@@ -21,12 +22,14 @@ from jiuwenswarm.common.schema.designer_graph import (
     node_shot_index,
 )
 from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
+from jiuwenswarm.server.runtime.designer.handlers.common import role_output_text
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
 logger = logging.getLogger(__name__)
 
 _VIDEO_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v"}
 _STREAM_SIZE = re.compile(r"Stream #0:\d+.*.*?Video:.*?(\d{2,5})x(\d{2,5})")
+_MEDIA_DURATION = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 
@@ -99,8 +102,9 @@ def _try_concat_copy(ffmpeg: str, paths: list[Path], dest: Path) -> bool:
                 "0",
                 "-i",
                 str(list_path),
-                "-c",
+                "-c:v",
                 "copy",
+                "-an",
                 str(dest),
             ],
         )
@@ -195,6 +199,121 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
     return paths
 
 
+def _media_duration_seconds(ffmpeg: str, path: Path) -> float | None:
+    probed = _run_ffmpeg(ffmpeg, ["-i", str(path.resolve())])
+    text = f"{probed.stderr or ''}\n{probed.stdout or ''}"
+    match = _MEDIA_DURATION.search(text)
+    if match is None:
+        return None
+    hours, minutes, seconds = (
+        int(match.group(1)),
+        int(match.group(2)),
+        float(match.group(3)),
+    )
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _render_cinematic_bgm(ffmpeg: str, dest: Path, duration: float) -> Path | None:
+    seconds = max(1.0, float(duration))
+    fade_out = max(0.0, seconds - 1.8)
+    dest = Path(dest).with_suffix(".m4a")
+    rendered = _run_ffmpeg(
+        ffmpeg,
+        [
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=110:sample_rate=44100:duration={seconds}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=164.81:sample_rate=44100:duration={seconds}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"anoisesrc=color=brown:sample_rate=44100:duration={seconds}",
+            "-filter_complex",
+            (
+                "[0]volume=0.07[a];[1]volume=0.045[b];[2]lowpass=f=280,volume=0.03[c];"
+                "[a][b][c]amix=inputs=3:duration=longest:dropout_transition=0,"
+                f"afade=t=in:st=0:d=1.2,afade=t=out:st={fade_out}:d=1.6"
+            ),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            str(dest),
+        ],
+    )
+    if rendered.returncode != 0 or not _output_ok(dest):
+        logger.warning(
+            "compose BGM render failed: %s",
+            (rendered.stderr or rendered.stdout or "")[:800],
+        )
+        dest.unlink(missing_ok=True)
+        return None
+    return dest.resolve()
+
+
+def _mux_bgm(ffmpeg: str, video: Path, audio: Path, dest: Path) -> bool:
+    muxed = _run_ffmpeg(
+        ffmpeg,
+        [
+            "-y",
+            "-i",
+            str(video.resolve()),
+            "-i",
+            str(audio.resolve()),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(dest),
+        ],
+    )
+    if muxed.returncode != 0 or not _output_ok(dest):
+        logger.warning(
+            "compose BGM mux failed: %s",
+            (muxed.stderr or muxed.stdout or "")[:800],
+        )
+        dest.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def mix_compose_bgm(video: Path, dest: Path, brief: str = "") -> Path:
+    """Add a film-length score after silent clip concat. Skip if probe/mix fails."""
+    _ = brief
+    video = Path(video)
+    dest = Path(dest)
+    try:
+        ffmpeg = _find_ffmpeg()
+    except RuntimeError:
+        return video
+    duration = _media_duration_seconds(ffmpeg, video)
+    if duration is None or duration < 0.4:
+        return video
+    score = _render_cinematic_bgm(
+        ffmpeg, dest.parent / f"{dest.stem}_score", duration
+    )
+    if score is None:
+        return video
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.resolve() == video.resolve():
+        dest = video.with_name(f"{video.stem}_bgm{video.suffix}")
+    if _mux_bgm(ffmpeg, video, score, dest):
+        return dest.resolve()
+    return video
+
+
 class ComposeNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         paths = collect_clip_video_paths(ctx)
@@ -205,10 +324,15 @@ class ComposeNodeHandler:
         )
         dest = handler_io.get_agent_workspace_dir() / f"designer_compose_{ctx.run_id}.mp4"
         merged = concatenate_clip_videos(paths, dest)
+        scored = mix_compose_bgm(
+            merged,
+            dest.parent / f"designer_compose_{ctx.run_id}_bgm.mp4",
+            brief=role_output_text(ctx, NODE_ROLE_BRIEF) or "",
+        )
         output_ref: AssetRef = {
             "kind": NODE_TYPE_VIDEO,
-            "uri": merged.resolve().as_uri(),
+            "uri": scored.resolve().as_uri(),
             "mime_type": "video/mp4",
-            "label": merged.name,
+            "label": scored.name,
         }
         return NodeResult(output_ref=output_ref, message="composed video")
