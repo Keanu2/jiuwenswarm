@@ -1,10 +1,41 @@
 **JiuwenSwarm extension to support multi-modal creation/design scenarios and designer-users.**
 
-Branch: `design` (based on `img-vid-gen-inline` / image–video provider configuration).
-
-Upstream reference: https://github.com/fhfuih/jiuwenswarm/tree/design
+Branch: `design` (~~based on `img-vid-gen-inline`~~ not any more. This branch also adds some AI provider support).
 
 Operational pipeline notes (AI-first Play path): see also [`a.md`](./a.md) and [`designer_catalog_skills_reports_trajectory/`](./designer_catalog_skills_reports_trajectory/).
+
+---
+
+We curerntly focus on video design scenario. An example workflow:
+
+```mermaid
+flowchart LR
+    Brief --> CD[Character Design]
+    Brief --> SB[Storyboard]
+
+    CD --> K1[Keyframes 1]
+    CD --> K2[Keyframes 2]
+    CD --> K3[Keyframes 3]
+
+    SB --> K1
+    SB --> K2
+    SB --> K3
+
+    K1 --> C1[Clip 1]
+    K2 --> C2[Clip 2]
+    K3 --> C3[Clip 3]
+
+    C1 --> Film
+    C2 --> Film
+    C3 --> Film
+
+    Brief --> M[Optional Music] --> Film
+```
+
+- Each "connection" marks real data flow (left node used as an input to the right node). **Not simply execution order constraints**. (Real data flow indicates execution order but not the other way around)
+- No need to pass Keyframe 1 as an input to Keyframe 2. Since there can be cutscenes, KF1 content is less informative/useful to KF2.
+- If multiple nodes' dependency are all finished (e.g., all Keyframe X nodes), they can run together in parallel
+- If node A & B run in parallel, A finishes first, and another node C only depends on A (but not B), C should be able to run after A finished and before B finishes.
 
 ---
 
@@ -48,8 +79,6 @@ Play stamps `metadata.ai_agent_pipeline` and `metadata.agent_runtime.mode` (`ai`
 - **Eval harness**: `scripts/eval_6s_ai_clip.py` (refuses heuristic creative path when LLM is required).
 
 Upstream `design` UI/handler improvements that landed on remote (storyboard table UX, graph restore after refresh, later-keyframe anti-clone policy in upstream handlers) are merged for the **frontend / compose** side where they did not conflict; **runtime executor + creative handlers + AI orchestration stay on this framework**.
-
----
 
 ## 本版已澄清的三个问题 / Three questions clarified (updated)
 
