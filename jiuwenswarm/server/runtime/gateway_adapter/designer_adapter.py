@@ -17,6 +17,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphValidationError,
     apply_graph_patch,
     build_bootstrap_graph,
+    node_pipeline,
     node_role,
     NODE_ROLE_COMPOSE,
     normalize_execution_graph,
@@ -288,18 +289,26 @@ def _bootstrap_graph(
     analysis: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     prompt = str(params.get("prompt") or "").strip()
-    if not prompt:
+    raw_references = params.get("references")
+    if raw_references is None:
+        raw_references = params.get("user_references")
+    has_references = isinstance(raw_references, list) and len(raw_references) > 0
+    if not prompt and not has_references:
         return None, "prompt is required", "BAD_REQUEST"
+    if not prompt:
+        prompt = "根据参考素材创作"
 
     project_id = str(params.get("project_id") or "").strip()
     if is_default_project_id(project_id):
         project_id = ""
     project_payload: dict[str, Any] | None = None
+    resolved_project_dir = ""
 
     if project_id:
         project = project_store.get_project_by_id(project_id, cache_bust=True)
         if project is None or project.hidden:
             return None, "project not found", "NOT_FOUND"
+        resolved_project_dir = str(getattr(project, "project_dir", "") or "")
     else:
         name = str(params.get("name") or prompt[:40] or "Designer Project").strip()
         work_mode, mode_error = resolve_request_work_mode(params, channel_id)
@@ -337,6 +346,7 @@ def _bootstrap_graph(
         except ValueError as exc:
             return None, str(exc), "BAD_REQUEST"
         project_id = project.project_id
+        resolved_project_dir = str(project.project_dir or "")
         project_payload = {
             "project_id": project.project_id,
             "project_dir": project.project_dir,
@@ -353,6 +363,8 @@ def _bootstrap_graph(
         if isinstance(scenario_raw, str) and scenario_raw.strip()
         else None
     )
+    from pathlib import Path as _Path
+
     from jiuwenswarm.server.runtime.designer.composer import (
         compose_execution_graph,
         detect_scenario,
@@ -364,23 +376,48 @@ def _bootstrap_graph(
     )
     from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
     from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        UserReferenceError,
+        analysis_prompt_with_references,
+        attach_user_references_to_graph,
+        normalize_user_references,
+    )
 
-    detected = scenario or detect_scenario(prompt)
+    try:
+        refs_dir = (
+            _Path(resolved_project_dir) / ".designer" / "refs"
+            if resolved_project_dir
+            else _Path(".") / ".designer" / "refs"
+        )
+        user_refs = normalize_user_references(raw_references, dest_dir=refs_dir)
+    except UserReferenceError as exc:
+        return None, str(exc), exc.code
+    analysis_prompt = analysis_prompt_with_references(prompt, user_refs)
+
+    detected = scenario or detect_scenario(analysis_prompt)
     # Prefer supervisor-style LLM cast/shot analysis when models exist; heuristics only as fallback.
     if detected == "video":
         if analysis is None:
             if _llm_configured():
                 try:
                     analysis = analyze_creative_brief_sync(
-                        prompt, use_llm=True, timeout_sec=20.0
+                        analysis_prompt,
+                        use_llm=True,
+                        timeout_sec=20.0,
+                        reference_images=[
+                            str(item.get("path") or "")
+                            for item in user_refs
+                            if str(item.get("kind") or "") == "image"
+                            and str(item.get("path") or "").strip()
+                        ],
                     )
                 except Exception:  # noqa: BLE001
                     logger.info("Bootstrap LLM analysis failed; using heuristics", exc_info=True)
-                    analysis = heuristic_analysis(prompt)
+                    analysis = heuristic_analysis(analysis_prompt)
             else:
-                analysis = heuristic_analysis(prompt)
+                analysis = heuristic_analysis(analysis_prompt)
         if not isinstance(analysis, dict):
-            analysis = heuristic_analysis(prompt)
+            analysis = heuristic_analysis(analysis_prompt)
         graph = _prefer_runtime_pipeline(
             build_smart_video_graph(
                 project_id=project_id,
@@ -414,6 +451,8 @@ def _bootstrap_graph(
                 scenario=detected,
             )
         )
+    if user_refs:
+        graph = attach_user_references_to_graph(graph, user_refs)
     saved = _store.save_graph(graph)
     payload: dict[str, Any] = {"graph": dict(saved), "project_id": project_id}
     if project_payload is not None:
@@ -445,7 +484,7 @@ def _rerun_error_message(graph: dict[str, Any] | None, node_id: str, exc: Except
     if graph is not None:
         for node in graph.get("nodes") or []:
             if str(node.get("id") or "") == node_id:
-                role = node_role(node)
+                role = node_pipeline(node) or node_role(node)
                 break
     if role == NODE_ROLE_COMPOSE or node_id == "n_compose":
         return "请先让所有视频片段生成完成，再重新生成成片。"

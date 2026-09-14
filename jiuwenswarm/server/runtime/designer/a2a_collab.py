@@ -31,7 +31,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerExecutionGraph,
     DesignerExecutionRun,
     node_config,
-    node_role,
+    node_pipeline,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
@@ -171,7 +171,7 @@ def _brief_text(graph: DesignerExecutionGraph, run: DesignerExecutionRun) -> str
 
     states = run.get("node_states") or {}
     for node in graph.get("nodes") or []:
-        if node_role(node) != NODE_ROLE_BRIEF:
+        if node_pipeline(node) != NODE_ROLE_BRIEF:
             continue
         ref = (states.get(node["id"]) or {}).get("output_ref") or {}
         path = path_from_uri(str(ref.get("uri") or ""))
@@ -197,7 +197,7 @@ def _collab_roles_for_wave(
     for node in graph.get("nodes") or []:
         if node["id"] not in ready:
             continue
-        role = node_role(node)
+        role = node_pipeline(node)
         if role not in COLLAB_ROLES:
             continue
         if node_config(node).get("collaborate") is False:

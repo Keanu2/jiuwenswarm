@@ -26,17 +26,18 @@ export const DESIGNER_NODE_ROLE_CLIP = 'clip' as const;
 export const DESIGNER_NODE_ROLE_COMPOSE = 'compose' as const;
 export const DESIGNER_NODE_ROLE_MUSIC = 'music' as const;
 export const DESIGNER_NODE_ROLE_SPEECH = 'speech' as const;
+export const DESIGNER_NODE_ROLE_TEXT = 'text' as const;
+export const DESIGNER_NODE_ROLE_TABLE = 'table' as const;
+export const DESIGNER_NODE_ROLE_IMAGE = 'image' as const;
+export const DESIGNER_NODE_ROLE_VIDEO = 'video' as const;
+export const DESIGNER_NODE_ROLE_AUDIO = 'audio' as const;
 
 export const DESIGNER_NODE_ROLES = [
-  DESIGNER_NODE_ROLE_BRIEF,
-  DESIGNER_NODE_ROLE_CHARACTER_DESIGN,
-  DESIGNER_NODE_ROLE_SCENE,
-  DESIGNER_NODE_ROLE_STORYBOARD,
-  DESIGNER_NODE_ROLE_FRAME,
-  DESIGNER_NODE_ROLE_CLIP,
-  DESIGNER_NODE_ROLE_COMPOSE,
-  DESIGNER_NODE_ROLE_MUSIC,
-  DESIGNER_NODE_ROLE_SPEECH,
+  DESIGNER_NODE_TYPE_TEXT,
+  DESIGNER_NODE_TYPE_TABLE,
+  DESIGNER_NODE_TYPE_IMAGE,
+  DESIGNER_NODE_TYPE_VIDEO,
+  DESIGNER_NODE_TYPE_AUDIO,
 ] as const;
 
 export type DesignerNodeRole = (typeof DESIGNER_NODE_ROLES)[number];
@@ -63,10 +64,15 @@ export const DESIGNER_ROLE_DEFAULT_TEMPLATES = {
   [DESIGNER_NODE_ROLE_FRAME]: 'designer/frame',
   [DESIGNER_NODE_ROLE_CLIP]: 'designer/clip',
   [DESIGNER_NODE_ROLE_COMPOSE]: 'designer/clip',
+  [DESIGNER_NODE_TYPE_TEXT]: 'designer/leader',
+  [DESIGNER_NODE_TYPE_TABLE]: 'designer/storyboard',
+  [DESIGNER_NODE_TYPE_IMAGE]: 'designer/character',
+  [DESIGNER_NODE_TYPE_VIDEO]: 'designer/clip',
 } as const;
 
 export const DESIGNER_NODE_CONFIG_KEYS = [
   'role',
+  'pipeline',
   'prompt',
   'inputs',
   'delegate',
@@ -107,8 +113,9 @@ export type DesignerMediaMaterialSlot = {
   asset_id?: string;
 };
 
-type DesignerRoleConfig<R extends DesignerNodeRole> = {
+type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
   role: R;
+  pipeline?: string;
   prompt?: string;
   inputs?: string[];
   delegate?: DesignerConfigDelegate;
@@ -132,8 +139,12 @@ export type DesignerNodeConfig =
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_COMPOSE>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_MUSIC>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_SPEECH>
+  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_IMAGE>
+  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_VIDEO>
+  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_AUDIO>
   | {
       role?: string;
+      pipeline?: string;
       prompt?: string;
       inputs?: string[];
       delegate?: string;

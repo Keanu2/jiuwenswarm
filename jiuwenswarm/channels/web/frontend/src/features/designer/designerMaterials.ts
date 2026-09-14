@@ -28,6 +28,7 @@ export type DesignerMaterial = {
   previewUrl: string | null;
   textUrl: string | null;
   editable?: boolean;
+  source?: 'uploaded' | 'generated';
 };
 
 export function isEditableDesignerMaterial(material: DesignerMaterial): boolean {
@@ -103,6 +104,7 @@ export function materialsFromRefs(
         previewUrl: designerAssetPreviewUrl(ref.uri),
         textUrl,
         editable,
+        source: placeholder ? undefined : 'generated',
       },
     ];
   });
@@ -193,7 +195,7 @@ export function collectDesignerMaterials(
   run: DesignerExecutionRun | null | undefined,
 ): DesignerMaterial[] {
   if (!graph) return [];
-  return graph.nodes.flatMap((node) => {
+  const fromNodes = graph.nodes.flatMap((node) => {
     const state = run?.node_states?.[node.id];
     const accepted = refsFromState(state, 'accepted');
     const candidate = refsFromState(state, 'candidate');
@@ -207,6 +209,37 @@ export function collectDesignerMaterials(
           ? [node.output_ref]
           : [];
     return materialsFromRefs(node, refs, node.id);
+  });
+  return [...materialsFromUserReferences(graph), ...fromNodes];
+}
+
+function materialsFromUserReferences(graph: DesignerExecutionGraph): DesignerMaterial[] {
+  const raw = graph.metadata?.user_references;
+  if (!Array.isArray(raw)) return [];
+  const brief = graph.nodes.find((node) => node.config?.role === 'brief');
+  const nodeId = brief?.id || 'n_brief';
+  return raw.flatMap((item, index) => {
+    if (!item || typeof item !== 'object') return [];
+    const record = item as Record<string, unknown>;
+    const uri = String(record.uri || record.path || '').trim();
+    if (!uri) return [];
+    const kind = String(record.kind || 'file');
+    const filename = String(record.filename || `${kind} ${index + 1}`);
+    return [
+      {
+        id: `user_ref:${String(record.id || index)}`,
+        nodeId,
+        label: filename,
+        kind,
+        role: 'user_reference',
+        uri,
+        mimeType: String(record.mime_type || ''),
+        placeholder: false,
+        previewUrl: designerAssetPreviewUrl(uri),
+        textUrl: null,
+        source: 'uploaded' as const,
+      },
+    ];
   });
 }
 

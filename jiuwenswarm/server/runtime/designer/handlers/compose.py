@@ -19,7 +19,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_VIDEO,
     AssetRef,
     DesignerGraphNode,
-    node_role,
+    node_pipeline,
     node_shot_index,
 )
 from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
@@ -260,7 +260,7 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
     """Collect every shot clip mp4 in storyboard order — all must feed the final film."""
     states = (ctx.run or {}).get("node_states") or {}
     clips = sorted(
-        [node for node in (ctx.graph.get("nodes") or []) if node_role(node) == NODE_ROLE_CLIP],
+        [node for node in (ctx.graph.get("nodes") or []) if node_pipeline(node) == NODE_ROLE_CLIP],
         key=node_shot_index,
     )
     # Prefer edged clips when present, but never drop other completed clips.
@@ -335,7 +335,7 @@ def _collect_role_audio_paths(ctx: NodeExecutionContext, roles: set[str]) -> lis
     for node in ctx.graph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
-        role = str((node.get("config") or {}).get("role") or "")
+        role = node_pipeline(node)
         if role not in roles:
             continue
         nid = str(node.get("id") or "")
@@ -433,6 +433,14 @@ def mix_compose_soundtrack(
         music = _collect_role_audio_paths(ctx, {"music"})
         # Put speech first for slightly higher volume in mixer.
         upstream = [*speech, *music]
+        if not upstream:
+            from jiuwenswarm.server.runtime.designer.user_references import (
+                user_reference_audio_path,
+            )
+
+            user_audio = user_reference_audio_path(ctx.graph)
+            if user_audio is not None and user_audio.is_file():
+                upstream = [user_audio]
 
     score: Path | None = None
     if upstream:

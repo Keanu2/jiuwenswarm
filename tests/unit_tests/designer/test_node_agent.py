@@ -47,7 +47,62 @@ def designer_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> DesignerG
         "jiuwenswarm.server.runtime.designer.handlers.common.get_agent_workspace_dir",
         lambda: tmp_path,
     )
+
+    async def fake_image(prompt: str, **kwargs) -> dict[str, str]:
+        path = tmp_path / "agent_stub.png"
+        path.write_bytes(b"png")
+        return {"image_path": str(path)}
+
+    async def fake_video(prompt: str, **kwargs) -> dict[str, str]:
+        path = tmp_path / "agent_stub.mp4"
+        path.write_bytes(b"mp4" * 200)
+        return {"video_path": str(path), "revised_prompt": prompt}
+
+    def fake_concat(paths: list[Path], dest: Path) -> Path:
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mp4-merged" * 80)
+        return dest.resolve()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.handlers.common.generate_designer_image",
+        fake_image,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.handlers.clip.generate_clip_video",
+        fake_video,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.handlers.compose.concatenate_clip_videos",
+        fake_concat,
+    )
     return DesignerGraphStore()
+
+
+async def _complete_with_dummy_media(
+    tmp_path: Path,
+    node: DesignerGraphNode,
+    toolkit: DesignerGraphToolkit,
+) -> NodeResult:
+    node_type = str(node.get("type") or "text")
+    if node_type in {"image", "video", "audio"}:
+        suffix = { "image": ".png", "video": ".mp4", "audio": ".m4a" }[node_type]
+        mime = {
+            "image": "image/png",
+            "video": "video/mp4",
+            "audio": "audio/mp4",
+        }[node_type]
+        path = tmp_path / f"{node['id']}{suffix}"
+        path.write_bytes(b"x" * 16)
+        await toolkit.node_complete(
+            uri=path.resolve().as_uri(),
+            kind=node_type,
+            mime_type=mime,
+        )
+    else:
+        await toolkit.node_complete(text=f"done {node['id']}")
+    assert toolkit.completed is not None
+    return toolkit.completed
 
 
 async def _await_executor_task(executor: GraphExecutor, run_id: str) -> None:
@@ -125,14 +180,15 @@ def test_load_node_agent_template_resolves_designer_leader() -> None:
 @pytest.mark.asyncio
 async def test_agent_scheduler_starts_only_ready_root(
     designer_store: DesignerGraphStore,
+    tmp_path: Path,
 ) -> None:
     started: list[str] = []
 
     async def runner(node, ctx, toolkit: DesignerGraphToolkit) -> NodeResult:
+        if not started:
+            assert node["id"] == "n_brief"
         started.append(node["id"])
-        toolkit.node_complete(text=f"done {node['id']}")
-        assert toolkit.completed is not None
-        return toolkit.completed
+        return await _complete_with_dummy_media(tmp_path, node, toolkit)
 
     graph = designer_store.save_graph(
         build_bootstrap_graph(project_id="proj_agent_root", prompt="only root"),
@@ -144,15 +200,15 @@ async def test_agent_scheduler_starts_only_ready_root(
     finished = designer_store.get_run(run["run_id"])
     assert finished is not None
     assert finished["status"] == RUN_STATUS_COMPLETED
-    assert started == ["n_brief"]
+    assert started[0] == "n_brief"
     assert finished["node_states"]["n_brief"]["status"] == NODE_STATUS_COMPLETED
-    assert finished["node_states"]["n_character"]["status"] == NODE_STATUS_PENDING
-    assert finished["node_states"]["n_clip_1"]["status"] == NODE_STATUS_PENDING
+    assert "n_character" in started
 
 
 @pytest.mark.asyncio
 async def test_agent_node_run_starts_companion(
     designer_store: DesignerGraphStore,
+    tmp_path: Path,
 ) -> None:
     started: list[str] = []
 
@@ -160,9 +216,7 @@ async def test_agent_node_run_starts_companion(
         started.append(node["id"])
         if node["id"] == "n_brief":
             await toolkit.node_run("n_character")
-        toolkit.node_complete(text=f"done {node['id']}")
-        assert toolkit.completed is not None
-        return toolkit.completed
+        return await _complete_with_dummy_media(tmp_path, node, toolkit)
 
     graph = designer_store.save_graph(
         build_bootstrap_graph(project_id="proj_agent_run", prompt="pull companion"),
@@ -174,14 +228,15 @@ async def test_agent_node_run_starts_companion(
     finished = designer_store.get_run(run["run_id"])
     assert finished is not None
     assert finished["status"] == RUN_STATUS_COMPLETED
-    assert started == ["n_brief", "n_character"]
+    assert started[:2] == ["n_brief", "n_character"]
     assert finished["node_states"]["n_character"]["status"] == NODE_STATUS_COMPLETED
-    assert finished["node_states"]["n_storyboard"]["status"] == NODE_STATUS_PENDING
+    assert finished["node_states"]["n_storyboard"]["status"] == NODE_STATUS_COMPLETED
 
 
 @pytest.mark.asyncio
 async def test_agent_patch_then_run_new_node(
     designer_store: DesignerGraphStore,
+    tmp_path: Path,
 ) -> None:
     started: list[str] = []
 
@@ -201,9 +256,7 @@ async def test_agent_patch_then_run_new_node(
                 }
             )
             await toolkit.node_run("n_extra")
-        toolkit.node_complete(text=f"done {node['id']}")
-        assert toolkit.completed is not None
-        return toolkit.completed
+        return await _complete_with_dummy_media(tmp_path, node, toolkit)
 
     graph = designer_store.save_graph(
         build_bootstrap_graph(project_id="proj_agent_patch", prompt="patch then run"),

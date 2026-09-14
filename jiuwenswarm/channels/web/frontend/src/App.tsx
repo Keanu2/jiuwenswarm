@@ -41,6 +41,7 @@ import { LoginDialog } from './components/LoginDialog';
 import { DesignerPage } from './features/designer/components/DesignerPage';
 import { useDesignArmedStore } from './features/designer/designArmedStore';
 import { launchDesignerFromTask } from './features/designer/designerEntry';
+import { mediaItemsToBootstrapReferences } from './features/designer/designerReferences';
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI, FEATURE_PERSONAL_CONTEXT_UI } from './featureFlags';
@@ -2874,11 +2875,24 @@ function AppContent({
   }, [enterNewConversation]);
 
   const handleLaunchDesign = useCallback(
-    (prompt: string) => {
+    (prompt: string, mediaItems?: MediaItem[]) => {
       const workspace = useWorkspaceStore.getState();
       const workContext = getWorkContextForSession(sessionIdRef.current || NEW_CONVERSATION_ID);
+      const converted = mediaItemsToBootstrapReferences(mediaItems);
+      if (converted.error) {
+        const map: Record<string, string> = {
+          image_limit: t('designer.chat.limitImages'),
+          video_limit: t('designer.chat.limitVideo'),
+          audio_limit: t('designer.chat.limitAudio'),
+          too_large: t('designer.chat.tooLarge'),
+          unsupported: t('designer.chat.unsupported'),
+        };
+        window.alert(map[converted.error] || t('designer.chat.unsupported'));
+        return;
+      }
       void launchDesignerFromTask({
         prompt,
+        references: converted.refs,
         projectId: workContext.project_id || sessionProject?.project_id,
         projectDir: workContext.project_dir || sessionProject?.project_dir,
         workMode: workspace.workMode === 'code' ? 'code' : 'work',
@@ -2899,13 +2913,9 @@ function AppContent({
     const currentSessionId = sessionIdRef.current;
     const designSid = currentSessionId || NEW_CONVERSATION_ID;
     const trimmedPrompt = content.trim();
-    if (trimmedPrompt && useDesignArmedStore.getState().isArmed(designSid)) {
-      if (mediaItems && mediaItems.length > 0) {
-        window.alert(t('designer.attachmentsBlocked'));
-        return;
-      }
+    if ((trimmedPrompt || (mediaItems && mediaItems.length > 0)) && useDesignArmedStore.getState().isArmed(designSid)) {
       useDesignArmedStore.getState().consumeArmed(designSid);
-      handleLaunchDesign(trimmedPrompt);
+      handleLaunchDesign(trimmedPrompt, mediaItems);
       return;
     }
     if (!currentSessionId) return;

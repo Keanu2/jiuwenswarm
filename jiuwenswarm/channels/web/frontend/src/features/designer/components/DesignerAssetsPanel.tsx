@@ -7,6 +7,7 @@ import {
   type DesignerAssetSource,
 } from '../designerAssetLibraryStore';
 import { collectDesignerMaterials, type DesignerMaterial } from '../designerMaterials';
+import { DESIGNER_ASSET_DRAG_MIME } from '../designerCanvasNodes';
 import { useDesignerRunStore } from '../designerRunStore';
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
@@ -110,7 +111,7 @@ export function DesignerAssetsPanel() {
         id: `gen:${material.id}`,
         filename: material.label,
         kind: kindFromMaterial(material),
-        source: isUploadedMaterial(material) ? 'uploaded' : 'generated',
+        source: material.source || (isUploadedMaterial(material) ? 'uploaded' : 'generated'),
         previewUrl: material.previewUrl,
         sizeLabel: material.kind,
         onCanvas: true,
@@ -183,6 +184,12 @@ export function DesignerAssetsPanel() {
             <button
               type="button"
               className="designer-assets-panel__open"
+              draggable={Boolean(asset.deletable)}
+              onDragStart={(event) => {
+                if (!asset.deletable) return;
+                event.dataTransfer.setData(DESIGNER_ASSET_DRAG_MIME, asset.id);
+                event.dataTransfer.effectAllowed = 'copy';
+              }}
               onClick={() => onOpen(asset)}
               data-testid="designer-assets-panel-open"
             >

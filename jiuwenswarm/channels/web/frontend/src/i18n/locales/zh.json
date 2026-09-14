@@ -76,15 +76,23 @@
     "attachmentsBlocked": "设计模式暂不支持附件，请先移除附件后再发送。",
     "chat": {
       "title": "设计助手",
-      "emptyHint": "在这里描述你的创作意图，或通过任务页带「设计」选项跳转后在此继续对话。",
-      "inputPlaceholder": "描述你想创作的内容…",
+      "emptyHint": "描述创作意图，并可附上图片、视频或音频作为参考。",
+      "inputPlaceholder": "描述你想创作的内容，可附上参考素材…",
       "collapse": "收起聊天",
       "expand": "展开聊天",
       "thinking": "正在思考如何搭建设计工作流…",
       "bootstrapDone": "已为你搭建初始设计工作流。",
       "bootstrapError": "搭建工作流失败，请稍后重试。",
       "notImplemented": "未实现",
-      "send": "发送"
+      "send": "发送",
+      "attach": "添加参考素材",
+      "removeAttachment": "移除参考素材",
+      "attachHint": "支持图片、视频、音频。最多 3 张图、1 个视频、1 段音频。",
+      "limitImages": "最多只能附 3 张参考图。",
+      "limitVideo": "最多只能附 1 个参考视频。",
+      "limitAudio": "最多只能附 1 段参考音频。",
+      "tooLarge": "文件超过 6MB，请改用更小的文件，或从本机路径添加。",
+      "unsupported": "仅支持图片、视频或音频作为参考素材。"
     },
     "run": {
       "controlLabel": "执行控制",
@@ -131,12 +139,41 @@
       "assets": "Assets"
     },
     "assets": {
-      "empty": "还没有素材。上传或生成产物后会显示在这里。",
+      "empty": "还没有素材。创建任务时附上图片/视频/音频，或在节点上上传、生成后会显示在这里。",
       "onCanvas": "画布中",
       "libraryOnly": "仅素材库",
       "delete": "删除素材",
       "sourceUploaded": "上传",
       "sourceGenerated": "生成"
+    },
+    "dock": {
+      "label": "画布工具",
+      "add": "添加节点",
+      "addTitle": "添加到画布",
+      "select": "选择 / 移动",
+      "selectHint": "选择并移动节点。快捷键 V；按住空格可临时平移。",
+      "hand": "平移画布",
+      "handHint": "拖动画布。快捷键 H。",
+      "assets": "素材包",
+      "assetsTitle": "素材包",
+      "assetsHint": "打开素材包，可拖到画布上生成节点。",
+      "group": {
+        "image": "图片",
+        "video": "视频",
+        "audio": "音频",
+        "text": "文本"
+      },
+      "node": {
+        "image": "图片",
+        "video": "视频",
+        "audio": "音频"
+      }
+    },
+    "nodeActions": {
+      "add": "添加后续节点",
+      "addTitle": "连接到此节点",
+      "delete": "删除节点",
+      "deleteHint": "删除此节点及其连线。也可选中后按 Delete / Backspace。"
     },
     "edge": {
       "delete": "删除连线",

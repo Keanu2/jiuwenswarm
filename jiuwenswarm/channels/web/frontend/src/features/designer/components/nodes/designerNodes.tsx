@@ -4,10 +4,12 @@ import {
   Image as ImageIcon,
   Loader2,
   Sheet,
+  Trash2,
   Video,
   type LucideIcon,
 } from 'lucide-react';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type MouseEvent, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Handle, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react';
 import { designerAssetPreviewUrl, designerAssetTextUrl } from '../../designerAssetUrl';
 import {
@@ -28,8 +30,10 @@ import {
 import type { DesignerReactFlowNode } from '../../designerGraphAdapter';
 import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
+import { useDesignerUiStore } from '../../designerUiStore';
 import { isMediaNodeType, supportsNodeToolbar } from '../../mediaNodeConfig';
 import { DesignerNodeToolbar } from '../controls/DesignerNodeToolbar';
+import { DesignerNodeSuccessorControl } from './DesignerNodeSuccessorControl';
 
 type DesignerNodeData = DesignerReactFlowNode['data'];
 type DesignerFlowNode = Node<DesignerNodeData>;
@@ -91,6 +95,7 @@ function DesignerNodeShell({
   selected?: boolean;
   toolbar?: ReactNode;
 }) {
+  const { t } = useTranslation();
   const status = useDesignerRunStore(
     (state) => state.nodeStates[nodeId]?.status ?? 'pending',
   );
@@ -104,6 +109,18 @@ function DesignerNodeShell({
           : '';
   const TypeIcon = modalityIcon(nodeType);
   const showMediaFill = media && (mediaFilled || status === DESIGNER_NODE_STATUS_COMPLETED);
+  const removeNodes = useDesignerStore((state) => state.removeNodes);
+  const closeDock = useDesignerUiStore((state) => state.closeDock);
+
+  const onDelete = useCallback(
+    (event: MouseEvent) => {
+      event.stopPropagation();
+      event.preventDefault();
+      removeNodes([nodeId]);
+      closeDock();
+    },
+    [closeDock, nodeId, removeNodes],
+  );
 
   return (
     <div
@@ -118,9 +135,21 @@ function DesignerNodeShell({
           <TypeIcon size={14} strokeWidth={1.75} />
         </span>
         <span className="designer-node__label">{label}</span>
+        <button
+          type="button"
+          className="designer-node__delete nodrag nopan"
+          aria-label={t('designer.nodeActions.delete')}
+          title={t('designer.nodeActions.deleteHint')}
+          data-testid="designer-node-delete"
+          onClick={onDelete}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <Trash2 size={13} strokeWidth={2.25} aria-hidden />
+        </button>
       </div>
       <div className="designer-node__body">{body}</div>
       <Handle type="source" position={Position.Right} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
+      <DesignerNodeSuccessorControl nodeId={nodeId} />
       {toolbar}
     </div>
   );

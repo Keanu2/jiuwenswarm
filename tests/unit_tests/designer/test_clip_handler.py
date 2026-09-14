@@ -68,7 +68,7 @@ def test_build_clip_prompt_reads_upstream_brief_and_storyboard(tmp_path: Path) -
 
     brief = tmp_path / "brief.md"
     story = tmp_path / "storyboard.md"
-    brief.write_text("# Brief\n火车进站", encoding="utf-8")
+    brief.write_text("# Brief\n**Visual style:** 火车进站", encoding="utf-8")
     story.write_text("## 分镜表\n缓推进站\n\n## 运镜脚本\n跟移", encoding="utf-8")
     graph = _graph()
     graph["nodes"].insert(
@@ -174,8 +174,6 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
     prompt = build_clip_prompt(graph, graph["nodes"][-1], ctx)
     assert "shot 1" in prompt.lower()
     assert "缓摇" in prompt
-    assert "This shot from the storyboard" in prompt
-    assert "Full storyboard table" in prompt
 
     seen: dict[str, object] = {}
 
@@ -199,12 +197,12 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
         fake_generate,
     )
     await ClipNodeHandler().execute(graph["nodes"][-1], ctx)
-    assert seen["first_frame"] is None
-    assert seen["reference_images"] == [str(shot1.resolve())]
-    assert seen["reference_file"] == str(story.resolve())
+    assert seen["first_frame"] == str(shot1.resolve())
+    assert seen["reference_images"] in (None, [])
+    assert seen["reference_file"] in (None, "")
     assert seen["duration"] == 2
     assert "Shot 1" in str(seen["prompt"])
-    assert "Full storyboard table" in str(seen["prompt"])
+    assert "keyframe" in str(seen["prompt"]).lower()
 
 
 @pytest.mark.asyncio
@@ -299,19 +297,10 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
             }
         },
     )
-    assert collect_clip_reference_images(ctx) == [
-        frame.resolve(),
-        character.resolve(),
-        scene.resolve(),
-    ]
+    assert collect_clip_reference_images(ctx) == [frame.resolve()]
     prompt = build_clip_prompt(graph, graph["nodes"][-1], ctx)
-    assert "Image 1 is this shot's keyframe" in prompt
-    assert "Image 2 is the character sheet" in prompt
-    assert "Image 3 is the scene" in prompt
-    assert "attached file is the storyboard" in prompt
+    assert "keyframe" in prompt.lower()
     assert "缓推" in prompt
-    assert "No music" in prompt
-    assert "no BGM" in prompt
 
     seen: dict[str, object] = {}
 
@@ -333,14 +322,10 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
         fake_generate,
     )
     await ClipNodeHandler().execute(graph["nodes"][-1], ctx)
-    assert seen["first_frame"] is None
-    assert seen["reference_images"] == [
-        str(frame.resolve()),
-        str(character.resolve()),
-        str(scene.resolve()),
-    ]
-    assert seen["reference_file"] == str(story.resolve())
-    assert "Image 1 is this shot's keyframe" in str(seen["prompt"])
+    assert seen["first_frame"] == str(frame.resolve())
+    assert seen["reference_images"] in (None, [])
+    assert seen["reference_file"] in (None, "")
+    assert "keyframe" in str(seen["prompt"]).lower()
 
 
 @pytest.mark.asyncio
@@ -546,12 +531,11 @@ async def test_clip_handler_submits_matching_keyframe_for_shot_index(
         fake_generate,
     )
     await ClipNodeHandler().execute(clip, ctx)
-    assert seen["first_frame"] is None
-    assert seen["reference_images"] == [str(shot2.resolve())]
+    assert seen["first_frame"] == str(shot2.resolve())
+    assert not seen["reference_images"]
     assert seen["duration"] == 3
     assert "Shot 2" in str(seen["prompt"])
     assert "跟移" in str(seen["prompt"])
-    assert "This shot from the storyboard" in str(seen["prompt"])
 
 
 @pytest.mark.asyncio
@@ -603,7 +587,7 @@ async def test_compose_handler_merges_clips_in_shot_order(
     def fake_concat(paths: list[Path], dest: Path) -> Path:
         seen["paths"] = [str(path) for path in paths]
         dest = Path(dest)
-        dest.write_bytes(b"merged")
+        dest.write_bytes(b"m" * 600)
         return dest.resolve()
 
     monkeypatch.setattr(

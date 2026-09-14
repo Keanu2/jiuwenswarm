@@ -21,7 +21,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     AssetRef,
     DesignerExecutionGraph,
     DesignerGraphNode,
-    node_role,
+    node_pipeline,
     node_shot_index,
 )
 from jiuwenswarm.server.runtime.designer.handlers.common import (
@@ -120,7 +120,7 @@ def collect_clip_first_frame(
     frames = [
         node
         for node in (ctx.graph.get("nodes") or [])
-        if node_role(node) == NODE_ROLE_FRAME
+        if node_pipeline(node) == NODE_ROLE_FRAME
     ]
     matched = next(
         (node for node in frames if node_shot_index(node) == shot_index),
@@ -347,6 +347,30 @@ def build_clip_prompt(
     override = str((cfg.get("generate") or {}).get("prompt") or "").strip() if isinstance(cfg.get("generate"), dict) else ""
     if override:
         parts.append(f"Supervisor shot brief: {override}")
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        graph_user_references,
+        prompt_slot_roster,
+        user_reference_video_path,
+        user_reference_audio_path,
+    )
+
+    roster = prompt_slot_roster(graph_user_references(graph))
+    if roster:
+        parts.append(
+            "User reference slots (original files are visual/audio authority). "
+            "Video and audio are generic references — not the first frame or keyframe:\n"
+            f"{roster}"
+        )
+    if user_reference_video_path(graph) is not None:
+        parts.append(
+            "Attached video 1 is a motion/style reference only. "
+            "Do not treat it as this shot's first frame."
+        )
+    if user_reference_audio_path(graph) is not None:
+        parts.append(
+            "Attached audio 1 is a soundtrack/voice reference only; "
+            "do not invent a conflicting score."
+        )
     return "\n\n".join(part.strip() for part in parts if part.strip())[:6000]
 
 
@@ -355,7 +379,9 @@ async def generate_clip_video(
     save_dir: str | None = None,
     first_frame: str | None = None,
     reference_images: list[str] | None = None,
+    reference_file: str | None = None,
     duration: int = 5,
+    audio: bool | None = None,
 ) -> dict[str, Any]:
     """Call the shared video-generation stack. Tests monkeypatch this function."""
     from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
@@ -385,7 +411,9 @@ async def generate_clip_video(
         resolution="480P",
         first_frame=first_frame,
         reference_images=reference_images,
+        reference_file=reference_file,
         duration=max(2, min(10, int(duration or 5))),
+        audio=audio,
     )
     if "error" in result:
         raise RuntimeError(str(result["error"]))
@@ -410,7 +438,7 @@ class ClipNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         shot_index = node_shot_index(node)
         has_frame_node = any(
-            node_role(item) == NODE_ROLE_FRAME for item in (ctx.graph.get("nodes") or [])
+            node_pipeline(item) == NODE_ROLE_FRAME for item in (ctx.graph.get("nodes") or [])
         )
         first_frame = collect_clip_first_frame(ctx, shot_index)
         refs = collect_clip_reference_images(ctx, shot_index, node=node)
@@ -437,11 +465,23 @@ class ClipNodeHandler:
             for path in refs
             if path.is_file() and (not ff_key or str(path.resolve()) != ff_key)
         ]
+        from jiuwenswarm.server.runtime.designer.user_references import (
+            user_reference_video_path,
+        )
+
+        user_video = user_reference_video_path(ctx.graph)
+        # User video is a generic reference, never the I2V first frame.
+        reference_file = (
+            str(user_video.resolve())
+            if user_video is not None and user_video.is_file()
+            else None
+        )
         try:
             result = await generate_clip_video(
                 prompt,
                 first_frame=str(first_frame) if first_frame is not None else None,
                 reference_images=extra_refs or None,
+                reference_file=reference_file,
                 duration=duration,
             )
             path = Path(str(result["video_path"]))

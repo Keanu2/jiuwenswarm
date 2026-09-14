@@ -130,9 +130,10 @@ def _append_audio_nodes(
             {
                 "id": node_id,
                 "type": node_type,
-                "label": label,
+                "label": "Audio",
                 "config": {
-                    "role": role,
+                    "role": node_type,
+                    "pipeline": role,
                     "prompt": prompt,
                     "optimize_for": meta.get("optimize_for") or "quality",
                     "agent_id": f"agent_{node_id}",

@@ -5,6 +5,7 @@ import {
   DESIGNER_CHAT_MAX_GRAPHS,
   DESIGNER_CHAT_STORAGE_KEY,
   extractDesignerGraphPrompt,
+  extractDesignerGraphReferences,
   hasDesignerUserPrompt,
   persistDesignerChat,
   readPersistedDesignerChat,
@@ -81,6 +82,41 @@ test('sanitizeDesignerChatMessages drops thinking bubbles', () => {
     cleaned.map((item) => item.kind),
     ['user', 'bootstrap_done'],
   );
+});
+
+test('extractDesignerGraphReferences reads metadata.user_references', () => {
+  const refs = extractDesignerGraphReferences({
+    metadata: {
+      user_references: [
+        {
+          id: 'ref_01',
+          kind: 'image',
+          filename: 'hero.png',
+          mime_type: 'image/png',
+          path: 'D:/proj/.designer/refs/hero.png',
+          uri: 'file:///D:/proj/.designer/refs/hero.png',
+          role: 'reference',
+          order: 1,
+        },
+      ],
+    },
+  });
+  assert.equal(refs[0].filename, 'hero.png');
+  assert.equal(refs[0].kind, 'image');
+});
+
+test('sanitizeDesignerChatMessages keeps user references without dropping the bubble', () => {
+  const cleaned = sanitizeDesignerChatMessages([
+    {
+      id: 'u1',
+      role: 'user',
+      content: '按参考图做短片',
+      kind: 'user',
+      createdAt: 1,
+      references: [{ kind: 'image', filename: 'hero.png', mime_type: 'image/png', path: 'D:/hero.png' }],
+    },
+  ]);
+  assert.equal(cleaned[0].references?.[0].filename, 'hero.png');
 });
 
 test('persistDesignerChat restores the original prompt after a reload', () => {

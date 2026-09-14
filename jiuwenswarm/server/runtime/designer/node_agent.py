@@ -17,6 +17,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphNode,
     data_predecessors,
     node_agent_template,
+    node_pipeline,
     node_role,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
@@ -170,7 +171,7 @@ def _result_satisfies_required_media(
     required = _required_media_family(node)
     if not _result_has_media(result, required=required):
         return False
-    role = str(node_role(node) or "").strip().lower()
+    role = str(node_pipeline(node) or node_role(node) or "").strip().lower()
     # Scene / character sheets: primary output_ref must itself be the image.
     # Agents often attach upstream master PNGs as extra_uris while primary is .md —
     # that must NOT count as this node producing an image.
@@ -212,7 +213,7 @@ def _result_satisfies_required_media(
 
 
 def _node_expects_media(node: DesignerGraphNode) -> bool:
-    role = str(node_role(node) or "").strip().lower()
+    role = str(node_pipeline(node) or node_role(node) or "").strip().lower()
     if role in _MEDIA_MATERIALIZE_ROLES:
         return True
     ntype = str(node.get("type") or "").strip().lower()
@@ -220,7 +221,7 @@ def _node_expects_media(node: DesignerGraphNode) -> bool:
 
 
 def _required_media_family(node: DesignerGraphNode) -> str | None:
-    role = str(node_role(node) or "").strip().lower()
+    role = str(node_pipeline(node) or node_role(node) or "").strip().lower()
     if role in _ROLE_REQUIRED_MEDIA:
         return _ROLE_REQUIRED_MEDIA[role]
     ntype = str(node.get("type") or "").strip().lower()
@@ -424,7 +425,7 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
     ]
     snapshot = {
         "node_id": node["id"],
-        "role": node_role(node),
+        "role": node_pipeline(node) or node_role(node),
         "label": node.get("label"),
         "type": node.get("type"),
         "prompt": graph_prompt(graph, node),
@@ -561,7 +562,7 @@ class DesignerGraphToolkit:
             logger.info(
                 "Eager media materialization on node_complete. node=%s role=%s required=%s",
                 self.ctx.node_id,
-                node_role(node),
+                node_pipeline(node) or node_role(node),
                 required_family,
             )
             try:
@@ -766,7 +767,7 @@ class NodeAgentHost:
                 "Materializing media via handler after agent text output. "
                 "node=%s role=%s required=%s",
                 ctx.node_id,
-                node_role(node),
+                node_pipeline(node) or node_role(node),
                 required_family,
             )
             try:

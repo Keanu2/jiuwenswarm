@@ -28,6 +28,9 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_FRAME,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
+    NODE_ROLE_IMAGE,
+    NODE_ROLE_VIDEO,
+    NODE_ROLE_AUDIO,
     NODE_ROLES,
     NODE_TYPES,
     NODE_TYPE_AUDIO,
@@ -37,7 +40,9 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_VIDEO,
     RUN_SCHEMA_VERSION,
     SCHEMA_VERSION,
+    node_pipeline,
     normalize_execution_graph,
+    normalize_node,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -104,6 +109,9 @@ def _extract_ts_const_array(path: Path, name: str) -> list[str]:
         (NODE_ROLE_FRAME, "DESIGNER_NODE_ROLE_FRAME"),
         (NODE_ROLE_CLIP, "DESIGNER_NODE_ROLE_CLIP"),
         (NODE_ROLE_COMPOSE, "DESIGNER_NODE_ROLE_COMPOSE"),
+        (NODE_ROLE_IMAGE, "DESIGNER_NODE_ROLE_IMAGE"),
+        (NODE_ROLE_VIDEO, "DESIGNER_NODE_ROLE_VIDEO"),
+        (NODE_ROLE_AUDIO, "DESIGNER_NODE_ROLE_AUDIO"),
         (EDGE_KIND_DATA, "DESIGNER_EDGE_KIND_DATA"),
         (EDGE_KIND_SYNC, "DESIGNER_EDGE_KIND_SYNC"),
         (CONFIG_DELEGATE_HANDLER, "DESIGNER_CONFIG_DELEGATE_HANDLER"),
@@ -153,3 +161,35 @@ def test_designer_fixture_normalizes() -> None:
         frozenset({"n_character", "n_storyboard"}),
         frozenset({"n_scene", "n_storyboard"}),
     }
+
+
+def test_manual_modality_roles_normalize() -> None:
+    image = normalize_node(
+        {
+            "id": "n_image_1",
+            "type": NODE_TYPE_IMAGE,
+            "label": "Image 1",
+            "config": {"role": NODE_ROLE_IMAGE, "delegate": "handler"},
+            "layout": {"x": 0, "y": 0, "width": 280, "height": 160},
+        }
+    )
+    assert image["type"] == "image"
+    assert image["config"]["role"] == "image"
+    assert not image["config"].get("pipeline")
+
+
+def test_legacy_pipeline_role_maps_to_modality() -> None:
+    node = normalize_node(
+        {
+            "id": "n_character",
+            "type": NODE_TYPE_IMAGE,
+            "label": "Character",
+            "config": {"role": NODE_ROLE_CHARACTER_DESIGN},
+            "layout": {"x": 0, "y": 0, "width": 280, "height": 160},
+        }
+    )
+    assert node["type"] == "image"
+    assert node["config"]["role"] == "image"
+    assert node["config"]["pipeline"] == NODE_ROLE_CHARACTER_DESIGN
+    assert node["label"] == "Image"
+    assert node_pipeline(node) == NODE_ROLE_CHARACTER_DESIGN

@@ -37,7 +37,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     preserve_expanded_shot_nodes,
     normalize_execution_graph,
     normalize_node,
-    node_role,
+    node_pipeline,
 )
 
 
@@ -88,6 +88,7 @@ def stub_clip_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         size: str = "512x512",
         reference_image: str | None = None,
         reference_images: list[str] | None = None,
+        **kwargs,
     ) -> dict[str, str]:
         image_seq["n"] += 1
         path = tmp_path / f"generated_{image_seq['n']}.png"
@@ -105,13 +106,13 @@ def stub_clip_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ) -> dict[str, str]:
         video_seq["n"] += 1
         path = tmp_path / f"generated_clip_{video_seq['n']}.mp4"
-        path.write_bytes(b"mp4")
+        path.write_bytes(b"mp4" * 200)
         return {"video_path": str(path), "revised_prompt": prompt}
 
     def fake_concat(paths: list[Path], dest: Path) -> Path:
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"mp4-merged")
+        dest.write_bytes(b"mp4-merged" * 80)
         return dest.resolve()
 
     monkeypatch.setattr(
@@ -133,6 +134,10 @@ def stub_clip_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.designer.handlers.compose.concatenate_clip_videos",
         fake_concat,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.model_tools.llm_available",
+        lambda: False,
     )
 
 
@@ -156,7 +161,7 @@ def test_bootstrap_graph_uses_modality_node_types() -> None:
     assert node_types <= {NODE_TYPE_TEXT, NODE_TYPE_TABLE, NODE_TYPE_IMAGE, NODE_TYPE_VIDEO}
     assert NODE_TYPE_TEXT in node_types
     assert NODE_TYPE_IMAGE in node_types
-    roles = {node_role(node) for node in graph["nodes"]}
+    roles = {node_pipeline(node) for node in graph["nodes"]}
     assert {NODE_ROLE_CHARACTER_DESIGN, NODE_ROLE_STORYBOARD, NODE_ROLE_SCENE} <= roles
     assert any(edge["source"] == "n_brief" and edge["target"] == "n_scene" for edge in graph["edges"])
     sync_edges = [edge for edge in graph["edges"] if edge.get("kind") == EDGE_KIND_SYNC]
@@ -171,7 +176,7 @@ def test_bootstrap_graph_uses_modality_node_types() -> None:
     clip = next(node for node in graph["nodes"] if node["id"] == "n_clip_1")
     assert "n_frame_1" in ((clip.get("config") or {}).get("inputs") or [])
     compose = next(node for node in graph["nodes"] if node["id"] == "n_compose")
-    assert node_role(compose) == NODE_ROLE_COMPOSE
+    assert node_pipeline(compose) == NODE_ROLE_COMPOSE
     assert "n_clip_1" in ((compose.get("config") or {}).get("inputs") or [])
     clip_layout = clip.get("layout") or {}
     compose_layout = compose.get("layout") or {}
@@ -226,12 +231,12 @@ def test_normalize_adds_frame_to_clip_on_old_bootstrap() -> None:
 def test_expand_clip_nodes_for_shots_creates_one_clip_per_shot() -> None:
     graph = build_bootstrap_graph(project_id="proj_expand01", prompt="three shots")
     expanded = expand_clip_nodes_for_shots(graph, 3)
-    clip_ids = [node["id"] for node in expanded["nodes"] if node_role(node) == NODE_ROLE_CLIP]
-    frame_ids = [node["id"] for node in expanded["nodes"] if node_role(node) == NODE_ROLE_FRAME]
+    clip_ids = [node["id"] for node in expanded["nodes"] if node_pipeline(node) == NODE_ROLE_CLIP]
+    frame_ids = [node["id"] for node in expanded["nodes"] if node_pipeline(node) == NODE_ROLE_FRAME]
     assert clip_ids == ["n_clip_1", "n_clip_2", "n_clip_3"]
     assert frame_ids == ["n_frame_1", "n_frame_2", "n_frame_3"]
     compose = next(node for node in expanded["nodes"] if node["id"] == "n_compose")
-    assert node_role(compose) == NODE_ROLE_COMPOSE
+    assert node_pipeline(compose) == NODE_ROLE_COMPOSE
     assert (compose.get("config") or {}).get("inputs") == ["n_clip_1", "n_clip_2", "n_clip_3"]
     assert any(edge["source"] == "n_clip_2" and edge["target"] == "n_compose" for edge in expanded["edges"])
     assert any(edge["source"] == "n_frame_3" and edge["target"] == "n_clip_3" for edge in expanded["edges"])
@@ -242,7 +247,7 @@ def test_expand_clip_nodes_for_shots_creates_one_clip_per_shot() -> None:
     )
     frame2 = next(node for node in expanded["nodes"] if node["id"] == "n_frame_2")
     assert "n_frame_1" not in ((frame2.get("config") or {}).get("inputs") or [])
-    clips = [node for node in expanded["nodes"] if node_role(node) == NODE_ROLE_CLIP]
+    clips = [node for node in expanded["nodes"] if node_pipeline(node) == NODE_ROLE_CLIP]
     compose_layout = compose.get("layout") or {}
     clip_right = max(
         float((node.get("layout") or {}).get("x") or 0)
@@ -302,7 +307,7 @@ def test_should_auto_promote_replaces_storyboard_markdown() -> None:
 
     kept = {"kind": "table", "uri": "file:///old.md"}
     primary = {"kind": "table", "uri": "file:///new.md"}
-    assert _should_auto_promote(kept, primary)
+    assert not _should_auto_promote(kept, primary)
     clip_kept = {"kind": "video", "uri": "file:///old.mp4"}
     clip_new = {"kind": "video", "uri": "file:///new.mp4"}
     assert not _should_auto_promote(clip_kept, clip_new)
@@ -349,12 +354,12 @@ def test_preserve_expanded_shot_nodes_rejects_stale_bootstrap_save() -> None:
     stale = build_bootstrap_graph(project_id="proj_keep01", prompt="keep shots")
     stale["graph_id"] = expanded["graph_id"]
     kept = preserve_expanded_shot_nodes(stale, expanded)
-    assert [node["id"] for node in kept["nodes"] if node_role(node) == NODE_ROLE_FRAME] == [
+    assert [node["id"] for node in kept["nodes"] if node_pipeline(node) == NODE_ROLE_FRAME] == [
         "n_frame_1",
         "n_frame_2",
         "n_frame_3",
     ]
-    assert [node["id"] for node in kept["nodes"] if node_role(node) == NODE_ROLE_CLIP] == [
+    assert [node["id"] for node in kept["nodes"] if node_pipeline(node) == NODE_ROLE_CLIP] == [
         "n_clip_1",
         "n_clip_2",
         "n_clip_3",
@@ -371,14 +376,16 @@ def test_graph_store_does_not_shrink_expanded_shot_nodes(designer_store: Designe
     stale = build_bootstrap_graph(project_id="proj_keep02", prompt="keep shots")
     stale["graph_id"] = graph["graph_id"]
     saved = designer_store.save_graph(stale)
-    assert [node["id"] for node in saved["nodes"] if node_role(node) == NODE_ROLE_FRAME] == [
+    assert [node["id"] for node in saved["nodes"] if node_pipeline(node) == NODE_ROLE_FRAME] == [
         "n_frame_1",
         "n_frame_2",
         "n_frame_3",
     ]
 
 
-def test_expand_splits_bundled_keyframe_images(designer_store: DesignerGraphStore) -> None:
+def test_expand_splits_bundled_keyframe_images(
+    designer_store: DesignerGraphStore, tmp_path: Path
+) -> None:
     from jiuwenswarm.server.runtime.designer.executor import GraphExecutor
 
     graph = designer_store.save_graph(
@@ -396,12 +403,29 @@ def test_expand_splits_bundled_keyframe_images(designer_store: DesignerGraphStor
         "mime_type": "image/png",
         "label": "shot2.png",
     }
+    story = tmp_path / "two-shots.md"
+    story.write_text(
+        "# Storyboard\n\n"
+        "## Storyboard\n\n"
+        "| Shot | Timeline | Camera | Move | Character action | Continuity | Comment |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| 1 | 0.0-4.0s | wide | hold | enter | hold | shot one |\n"
+        "| 2 | 4.0-8.0s | medium | push | walk | hold | shot two |\n",
+        encoding="utf-8",
+    )
     executor = GraphExecutor(designer_store)
     run = executor.create_run(graph)
     run["node_states"]["n_brief"] = {"status": NODE_STATUS_COMPLETED}
     run["node_states"]["n_character"] = {"status": NODE_STATUS_COMPLETED}
     run["node_states"]["n_scene"] = {"status": NODE_STATUS_COMPLETED}
-    run["node_states"]["n_storyboard"] = {"status": NODE_STATUS_COMPLETED}
+    run["node_states"]["n_storyboard"] = {
+        "status": NODE_STATUS_COMPLETED,
+        "output_ref": {
+            "kind": "table",
+            "uri": story.resolve().as_uri(),
+            "mime_type": "text/markdown",
+        },
+    }
     run["node_states"]["n_frame_1"] = {
         "status": NODE_STATUS_COMPLETED,
         "output_ref": shot1,
@@ -409,7 +433,7 @@ def test_expand_splits_bundled_keyframe_images(designer_store: DesignerGraphStor
     }
     designer_store.save_run(run)
     expanded, remaining, _, _ = executor._expand_clips_if_needed(graph, run, set(), on_update=None)
-    frame_ids = [node["id"] for node in expanded["nodes"] if node_role(node) == NODE_ROLE_FRAME]
+    frame_ids = [node["id"] for node in expanded["nodes"] if node_pipeline(node) == NODE_ROLE_FRAME]
     assert frame_ids == ["n_frame_1", "n_frame_2"]
     states = run["node_states"]
     assert (states["n_frame_1"].get("output_refs") or []) == [shot1]
@@ -503,12 +527,12 @@ async def test_mock_executor_completes_run(
     assert (node_states["n_clip_3"].get("completed_at") or 0) <= (compose.get("started_at") or 0)
     saved_graph = designer_store.get_graph(graph["graph_id"])
     assert saved_graph is not None
-    assert [node["id"] for node in saved_graph["nodes"] if node_role(node) == NODE_ROLE_CLIP] == [
+    assert [node["id"] for node in saved_graph["nodes"] if node_pipeline(node) == NODE_ROLE_CLIP] == [
         "n_clip_1",
         "n_clip_2",
         "n_clip_3",
     ]
-    assert [node["id"] for node in saved_graph["nodes"] if node_role(node) == NODE_ROLE_FRAME] == [
+    assert [node["id"] for node in saved_graph["nodes"] if node_pipeline(node) == NODE_ROLE_FRAME] == [
         "n_frame_1",
         "n_frame_2",
         "n_frame_3",
@@ -611,14 +635,10 @@ async def test_rerun_single_node_keeps_upstream_outputs(
     assert (again["node_states"]["n_brief"].get("output_ref") or {}).get("uri") == brief_uri
     assert again["node_states"]["n_clip_1"]["status"] == NODE_STATUS_COMPLETED
     original_clip = (finished["node_states"]["n_clip_1"].get("output_ref") or {}).get("uri")
-    new_clip = (again["node_states"]["n_clip_1"].get("candidate_output_ref") or {}).get("uri")
-    assert (again["node_states"]["n_clip_1"].get("output_ref") or {}).get("uri") == original_clip
+    new_clip = (again["node_states"]["n_clip_1"].get("output_ref") or {}).get("uri")
     assert new_clip
     assert new_clip != original_clip
-
-    kept = executor.choose_output(again["run_id"], "n_clip_1", "new")
-    assert (kept["node_states"]["n_clip_1"].get("output_ref") or {}).get("uri") == new_clip
-    assert not (kept["node_states"]["n_clip_1"].get("candidate_output_ref") or {}).get("uri")
+    assert not (again["node_states"]["n_clip_1"].get("candidate_output_ref") or {}).get("uri")
 
     with pytest.raises(ValueError, match="upstream not ready"):
         unfinished = {
@@ -1041,7 +1061,8 @@ def test_normalize_node_accepts_typed_config() -> None:
             },
         }
     )
-    assert node["config"]["role"] == "brief"
+    assert node["config"]["role"] == "text"
+    assert node["config"]["pipeline"] == "brief"
     assert node["config"]["prompt"] == "晨间"
     assert node["config"]["inputs"] == ["n_src"]
     assert node["config"]["delegate"] == "handler"

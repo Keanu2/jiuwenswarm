@@ -35,6 +35,7 @@ export const designerGraphClient = {
     workMode?: 'work' | 'code';
     optimizeFor?: 'cost' | 'quality';
     scenario?: string;
+    references?: Array<Record<string, unknown>>;
   }) =>
     webRequest<DesignerGraphBootstrapResult>(
       'designer.graph.bootstrap',
@@ -47,6 +48,9 @@ export const designerGraphClient = {
         ...(params.workMode ? { work_mode: params.workMode } : {}),
         ...(params.optimizeFor ? { optimize_for: params.optimizeFor } : {}),
         ...(params.scenario ? { scenario: params.scenario } : {}),
+        ...(params.references && params.references.length > 0
+          ? { references: params.references }
+          : {}),
       },
       { timeoutMs: 120000 },
     ),

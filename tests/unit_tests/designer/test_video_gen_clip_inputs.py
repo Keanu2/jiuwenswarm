@@ -125,6 +125,22 @@ def test_wan3_compose_score_can_enable_audio() -> None:
     assert "img_url" not in params
 
 
+def test_wan26_keeps_i2v_when_user_video_file_is_attached(tmp_path: Path) -> None:
+    frame = tmp_path / "shot1.png"
+    video = tmp_path / "motion.mp4"
+    frame.write_bytes(b"png")
+    video.write_bytes(b"mp4")
+    params = _build_dashscope_video_call(
+        "wan2.6-t2v",
+        first_frame=str(frame),
+        reference_file=str(video),
+    )
+    assert params["model"] == "wan2.6-i2v"
+    assert "img_url" in params
+    assert "reference_urls" not in params
+    assert "media" not in params
+
+
 def test_build_call_stays_text_to_video_without_images() -> None:
     params = _build_dashscope_video_call("wan2.6-t2v")
     assert params["model"] == "wan2.6-t2v"

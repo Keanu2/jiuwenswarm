@@ -95,14 +95,15 @@ async def test_collaborate_ready_wave_runs_for_character_and_scene(
         fake_text,
     )
     graph = build_bootstrap_graph(project_id="proj_a2a01", prompt="火车站")
-    graph["nodes"].append(
-        {
-            "id": "n_scene",
-            "type": NODE_TYPE_IMAGE,
-            "label": "Scene",
-            "config": {"role": NODE_ROLE_SCENE, "inputs": ["n_brief"]},
-        }
-    )
+    if not any(node.get("id") == "n_scene" for node in graph["nodes"]):
+        graph["nodes"].append(
+            {
+                "id": "n_scene",
+                "type": NODE_TYPE_IMAGE,
+                "label": "Scene",
+                "config": {"role": NODE_ROLE_SCENE, "inputs": ["n_brief"]},
+            }
+        )
     graph = normalize_execution_graph(graph)
     run = normalize_execution_run(
         {

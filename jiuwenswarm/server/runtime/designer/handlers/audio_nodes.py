@@ -94,6 +94,27 @@ class MusicNodeHandler:
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         duration = _bed_duration_sec(cfg)
         stem = f"designer_music_{ctx.run_id}_{ctx.node_id}"
+        from jiuwenswarm.server.runtime.designer.user_references import (
+            user_reference_audio_path,
+        )
+
+        user_audio = user_reference_audio_path(ctx.graph)
+        if user_audio is not None and user_audio.is_file():
+            dest = Path(get_agent_workspace_dir()) / f"{stem}{user_audio.suffix.lower() or '.mp3'}"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(user_audio, dest)
+            suffix = dest.suffix.lower()
+            mime = {
+                ".wav": "audio/wav",
+                ".m4a": "audio/mp4",
+                ".aac": "audio/aac",
+                ".ogg": "audio/ogg",
+                ".flac": "audio/flac",
+            }.get(suffix, "audio/mpeg")
+            return NodeResult(
+                output_ref=file_output_ref(dest, kind=NODE_TYPE_AUDIO, mime_type=mime),
+                message="music from user audio reference",
+            )
         dest = Path(get_agent_workspace_dir()) / f"{stem}.mp3"
         if _synthesize_bed(dest, duration=duration, kind="music"):
             return NodeResult(

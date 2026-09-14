@@ -11,6 +11,7 @@ from jiuwenswarm.common.config import get_config, resolve_env_vars
 from jiuwenswarm.common.schema.designer_graph import (
     DesignerExecutionGraph,
     DesignerGraphNode,
+    node_pipeline,
     node_role,
 )
 from jiuwenswarm.server.runtime.designer.model_tools import list_configured_models
@@ -207,9 +208,9 @@ def _tools_for_role(
     can_music: bool = False,
 ) -> list[str]:
     base = ["call_model", "read_upstream", "write_artifact"]
-    if role in {"character", "character_design", "scene", "frame", "keyframe"}:
+    if role in {"character", "character_design", "scene", "frame", "keyframe", "image"}:
         tools = ["call_model", "read_upstream", "call_image_model"]
-    elif role in {"clip"}:
+    elif role in {"clip", "video"}:
         tools = ["call_model", "read_upstream", "call_video_model"]
     elif role in {"compose", "film"}:
         tools = ["call_model", "read_upstream", "compose_timeline", "mix_audio"]
@@ -235,6 +236,8 @@ def _tools_for_role(
         "keyframe",
         "clip",
         "compose",
+        "image",
+        "video",
     }:
         tools.append("inspect_image")
         tools.append("visual_question_answering")
@@ -310,7 +313,7 @@ def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
         nid = str(node.get("id") or "")
         if not nid:
             continue
-        role = str(node_role(node) or (node.get("config") or {}).get("role") or "")
+        role = str(node_pipeline(node) or node_role(node) or (node.get("config") or {}).get("role") or "")
         tools = _tools_for_role(
             role,
             can_vision=can_vision,
@@ -428,13 +431,14 @@ def collect_rateable_image_paths(
     pairs: list[tuple[str, str]] = []
     for node in graph.get("nodes") or []:
         nid = str(node.get("id") or "")
-        role = str(node_role(node) or "")
+        role = str(node_pipeline(node) or node_role(node) or "")
         if role not in {
             "character_design",
             "character",
             "scene",
             "frame",
             "keyframe",
+            "image",
         }:
             continue
         state = states.get(nid) or {}

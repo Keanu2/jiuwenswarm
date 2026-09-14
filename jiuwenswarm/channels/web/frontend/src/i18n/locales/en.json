@@ -76,15 +76,23 @@
     "attachmentsBlocked": "Design mode does not support attachments yet. Remove attachments and try again.",
     "chat": {
       "title": "Design assistant",
-      "emptyHint": "Describe your creative intent here, or continue after jumping from Tasks with Design enabled.",
-      "inputPlaceholder": "Describe what you want to create…",
+      "emptyHint": "Describe what you want to create. You can attach image, video, or audio references.",
+      "inputPlaceholder": "Describe what you want to create, and optionally attach references…",
       "collapse": "Collapse chat",
       "expand": "Expand chat",
       "thinking": "Thinking about how to build your design workflow…",
       "bootstrapDone": "Your initial design workflow is ready.",
       "bootstrapError": "Failed to build the workflow. Please try again later.",
       "notImplemented": "Not implemented",
-      "send": "Send"
+      "send": "Send",
+      "attach": "Add reference media",
+      "removeAttachment": "Remove reference",
+      "attachHint": "Images, video, or audio. Up to 3 images, 1 video, and 1 audio clip.",
+      "limitImages": "You can attach at most 3 reference images.",
+      "limitVideo": "You can attach at most 1 reference video.",
+      "limitAudio": "You can attach at most 1 reference audio clip.",
+      "tooLarge": "File is larger than 6MB. Use a smaller file or a local path.",
+      "unsupported": "Only image, video, or audio files can be used as references."
     },
     "run": {
       "controlLabel": "Run controls",
@@ -131,12 +139,41 @@
       "assets": "Assets"
     },
     "assets": {
-      "empty": "No assets yet. Uploads and generated outputs will show up here.",
+      "empty": "No assets yet. Attach image, video, or audio when creating a task, or upload/generate on the canvas.",
       "onCanvas": "On canvas",
       "libraryOnly": "Library only",
       "delete": "Delete asset",
       "sourceUploaded": "Uploaded",
       "sourceGenerated": "Generated"
+    },
+    "dock": {
+      "label": "Canvas tools",
+      "add": "Add node",
+      "addTitle": "Add to canvas",
+      "select": "Select / move",
+      "selectHint": "Select and move nodes. Shortcut V; hold Space to pan.",
+      "hand": "Pan canvas",
+      "handHint": "Drag to pan. Shortcut H.",
+      "assets": "Asset pack",
+      "assetsTitle": "Asset pack",
+      "assetsHint": "Open the asset pack. Drag an item onto the canvas to create a node.",
+      "group": {
+        "image": "Image",
+        "video": "Video",
+        "audio": "Audio",
+        "text": "Text"
+      },
+      "node": {
+        "image": "Image",
+        "video": "Video",
+        "audio": "Audio"
+      }
+    },
+    "nodeActions": {
+      "add": "Add connected node",
+      "addTitle": "Connect to this node",
+      "delete": "Delete node",
+      "deleteHint": "Delete this node and its connections. You can also press Delete / Backspace."
     },
     "edge": {
       "delete": "Delete connection",

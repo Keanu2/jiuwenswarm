@@ -1,5 +1,11 @@
 import { DESIGNER_PREVIEW_GRAPH_ID } from './designerBootstrapGraph';
 import { DESIGNER_NODE_ROLE_BRIEF, type DesignerExecutionGraph } from './executionGraphTypes';
+import {
+  extractDesignerGraphReferences,
+  type DesignerStoredReference,
+} from './designerReferences';
+
+export { extractDesignerGraphReferences };
 
 export type DesignerStoredChatMessage = {
   id: string;
@@ -7,6 +13,7 @@ export type DesignerStoredChatMessage = {
   content: string;
   kind: 'user' | 'thinking' | 'bootstrap_done' | 'bootstrap_error' | 'not_implemented';
   createdAt: number;
+  references?: DesignerStoredReference[];
 };
 
 export const DESIGNER_CHAT_STORAGE_KEY = 'jiuwenswarm_designer_chat_by_graph';
@@ -51,9 +58,13 @@ export function extractDesignerGraphPrompt(
 }
 
 export function hasDesignerUserPrompt(
-  messages: Array<Pick<DesignerStoredChatMessage, 'kind' | 'content'>> | null | undefined,
+  messages: Array<Pick<DesignerStoredChatMessage, 'kind' | 'content' | 'references'>> | null | undefined,
 ): boolean {
-  return (messages || []).some((item) => item?.kind === 'user' && String(item.content || '').trim());
+  return (messages || []).some(
+    (item) =>
+      item?.kind === 'user' &&
+      (String(item.content || '').trim() || (item.references || []).length > 0),
+  );
 }
 
 export function resolveBoundDesignerMessages(input: {
@@ -78,13 +89,15 @@ export function sanitizeDesignerChatMessages(
     const content = String(raw.content ?? '');
     if (!MESSAGE_KINDS.has(kind) || !MESSAGE_ROLES.has(role)) continue;
     if (!keepThinking && kind === 'thinking') continue;
-    if (!content.trim()) continue;
+    const references = sanitizeStoredReferences(raw.references);
+    if (!content.trim() && references.length === 0) continue;
     out.push({
       id: String(raw.id || '').trim() || `seed-${out.length}`,
       role: role as DesignerStoredChatMessage['role'],
       content,
       kind: kind as DesignerStoredChatMessage['kind'],
       createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : 0,
+      ...(references.length > 0 ? { references } : {}),
     });
     if (out.length >= DESIGNER_CHAT_MAX_MESSAGES) break;
   }
@@ -178,4 +191,9 @@ export function persistDesignerChat(
     // Quota or private-mode failures should not break chat.
   }
   return pruned;
+}
+
+function sanitizeStoredReferences(raw: DesignerStoredReference[] | unknown): DesignerStoredReference[] {
+  if (!Array.isArray(raw)) return [];
+  return extractDesignerGraphReferences({ metadata: { user_references: raw } });
 }

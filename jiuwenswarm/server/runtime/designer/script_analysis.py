@@ -759,6 +759,7 @@ async def analyze_creative_brief(
     *,
     use_llm: bool = True,
     timeout_sec: float = _DEFAULT_LLM_TIMEOUT_SEC,
+    reference_images: list[str] | None = None,
 ) -> dict[str, Any]:
     """LLM cast/shot analysis when models are available; else general heuristics."""
     base = heuristic_analysis(prompt)
@@ -795,6 +796,9 @@ async def analyze_creative_brief(
             "Decide cast_layout: 'single' | 'combined' | 'hybrid' | 'split'. "
             "Set prefer_combined_cast true when any shot has 2+ focus characters. "
             "Write precise keyframe_prompt that names every focus person and their action. "
+            "If the user attached original images, they are visual authority: assign "
+            "slots/roles (character vs scene vs style) from what you see. "
+            "Do not replace an image with a prose description of the picture. "
             + duration_rule
             + "CRITICAL: Reply with a single raw JSON object only. "
             "No markdown fences, no prose before or after, no second JSON object. Schema: "
@@ -850,6 +854,7 @@ async def analyze_creative_brief(
                 optimize_for="quality",
                 # Script JSON can be large; avoid mid-object truncation.
                 max_tokens=3200,
+                images=reference_images,
             )
             if result.get("fallback") or not result.get("ok"):
                 logger.info(
@@ -928,13 +933,19 @@ def analyze_creative_brief_sync(
     *,
     use_llm: bool = True,
     timeout_sec: float = _DEFAULT_LLM_TIMEOUT_SEC,
+    reference_images: list[str] | None = None,
 ) -> dict[str, Any]:
     """Sync wrapper for bootstrap threads (safe if no running loop)."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(
-            analyze_creative_brief(prompt, use_llm=use_llm, timeout_sec=timeout_sec)
+            analyze_creative_brief(
+                prompt,
+                use_llm=use_llm,
+                timeout_sec=timeout_sec,
+                reference_images=reference_images,
+            )
         )
     # Already on a loop — fall back to heuristics to avoid nested asyncio.run.
     if use_llm and _llm_configured():

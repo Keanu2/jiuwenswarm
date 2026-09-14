@@ -1,0 +1,132 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Generic image / video / audio handlers for canvas media nodes.
+
+Pipeline recipes (character_design, clip, …) keep specialized handlers via
+``config.pipeline``. These run when the node is a plain image / video / audio.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from jiuwenswarm.common.schema.designer_graph import (
+    NODE_TYPE_IMAGE,
+    NODE_TYPE_VIDEO,
+    DesignerGraphNode,
+    data_predecessors,
+)
+from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import MusicNodeHandler
+from jiuwenswarm.server.runtime.designer.handlers.clip import generate_clip_video
+from jiuwenswarm.server.runtime.designer.handlers.common import (
+    file_output_ref,
+    graph_prompt,
+    node_generate_prompt,
+    node_output_image_paths,
+    path_from_uri,
+)
+from jiuwenswarm.server.runtime.designer.handlers.image_nodes import _image_or_notes
+from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
+from jiuwenswarm.server.runtime.designer.user_references import user_reference_image_paths
+
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+def _predecessor_ids(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list[str]:
+    node_id = str(node.get("id") or ctx.node_id)
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    declared = [str(item).strip() for item in (config.get("inputs") or []) if str(item).strip()]
+    incoming = data_predecessors(ctx.graph).get(node_id, [])
+    ordered: list[str] = []
+    for item in [*declared, *incoming]:
+        if item and item not in ordered:
+            ordered.append(item)
+    return ordered
+
+
+def _graph_output_image_paths(ctx: NodeExecutionContext, node_id: str) -> list[Path]:
+    paths: list[Path] = []
+    for other in ctx.graph.get("nodes") or []:
+        if not isinstance(other, dict) or str(other.get("id") or "") != node_id:
+            continue
+        ref = other.get("output_ref")
+        if not isinstance(ref, dict):
+            continue
+        path = path_from_uri(str(ref.get("uri") or ""))
+        if path is None or not path.is_file():
+            continue
+        kind = str(ref.get("kind") or "").lower()
+        mime = str(ref.get("mime_type") or "").lower()
+        if kind != "image" and not mime.startswith("image/") and path.suffix.lower() not in _IMAGE_SUFFIXES:
+            continue
+        paths.append(path.resolve())
+    return paths
+
+
+def _upstream_images(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list[Path]:
+    seen: set[str] = set()
+    paths: list[Path] = []
+    for node_id in _predecessor_ids(ctx, node):
+        for path in [*node_output_image_paths(ctx, node_id), *_graph_output_image_paths(ctx, node_id)]:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path)
+    for path in user_reference_image_paths(ctx.graph) or []:
+        resolved = Path(path).resolve() if path else None
+        if resolved is None or not resolved.is_file():
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(resolved)
+    return paths[:3]
+
+
+class ImageNodeHandler:
+    async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
+        prompt = node_generate_prompt(node) or graph_prompt(ctx.graph, node)
+        refs = _upstream_images(ctx, node)
+        return await _image_or_notes(
+            prompt=prompt,
+            notes=prompt,
+            stem=f"designer_image_{ctx.run_id}_{ctx.node_id}",
+            kind_if_text=NODE_TYPE_IMAGE,
+            size="1280*720",
+            max_tries=4,
+            require_image=True,
+            reference_images=[str(path) for path in refs] or None,
+        )
+
+
+class VideoNodeHandler:
+    async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
+        prompt = node_generate_prompt(node) or graph_prompt(ctx.graph, node)
+        refs = _upstream_images(ctx, node)
+        first_frame = str(refs[0]) if refs else None
+        extra = [str(path) for path in refs[1:]]
+        generated = await generate_clip_video(
+            prompt,
+            save_dir=str(get_agent_workspace_dir()),
+            first_frame=first_frame,
+            reference_images=extra or None,
+        )
+        path = Path(str(generated.get("video_path") or ""))
+        if not path.is_file():
+            raise RuntimeError("video generation returned no file")
+        return NodeResult(
+            output_ref=file_output_ref(path, kind=NODE_TYPE_VIDEO, mime_type="video/mp4"),
+            message="video generated",
+        )
+
+
+class AudioNodeHandler(MusicNodeHandler):
+    """Generic audio uses the same bed/music path as a music node."""
+
+
+GENERIC_IMAGE_HANDLER = ImageNodeHandler()
+GENERIC_VIDEO_HANDLER = VideoNodeHandler()
+GENERIC_AUDIO_HANDLER = AudioNodeHandler()

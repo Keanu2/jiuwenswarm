@@ -16,10 +16,11 @@ from jiuwenswarm.common.schema.designer_graph import (
     AssetRef,
     DesignerExecutionGraph,
     DesignerGraphNode,
-    node_role,
+    node_pipeline,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
+from jiuwenswarm.server.runtime.designer.user_references import user_reference_image_paths
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,10 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
             generate_prompt = str(generate.get("prompt") or "").strip()
             if generate_prompt:
                 return generate_prompt
-        if node_role(node) == NODE_ROLE_BRIEF:
+        if node_pipeline(node) == NODE_ROLE_BRIEF:
             pass
     for candidate in graph.get("nodes") or []:
-        if node_role(candidate) != NODE_ROLE_BRIEF:
+        if node_pipeline(candidate) != NODE_ROLE_BRIEF:
             continue
         brief_config = candidate.get("config") if isinstance(candidate.get("config"), dict) else {}
         brief_prompt = str(brief_config.get("prompt") or "").strip()
@@ -142,7 +143,7 @@ def role_output_refs(ctx: NodeExecutionContext, role: str) -> list[dict]:
     collected: list[dict] = []
     seen_uri: set[str] = set()
     for node in ctx.graph.get("nodes") or []:
-        if node_role(node) != role:
+        if node_pipeline(node) != role:
             continue
         for ref in node_output_refs(ctx, str(node.get("id") or "")):
             uri = str(ref.get("uri") or "").strip()
@@ -190,7 +191,7 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
             if not isinstance(other, dict):
                 continue
             oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-            if str(oc.get("role") or "") != NODE_ROLE_CHARACTER_DESIGN:
+            if node_pipeline(other) != NODE_ROLE_CHARACTER_DESIGN:
                 continue
             if oc.get("combined_cast"):
                 continue
@@ -234,10 +235,11 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
     strategy = str(
         identity.get("keyframe_strategy") or cfg.get("keyframe_strategy") or ""
     )
+    user_paths = user_reference_image_paths(ctx.graph if isinstance(ctx.graph, dict) else None)
     ordered = (
-        [*prior_paths, *paths, *scene_paths]
+        [*user_paths, *prior_paths, *paths, *scene_paths]
         if strategy == "edit_prior_keyframe" and prior_paths
-        else [*paths, *scene_paths, *prior_paths]
+        else [*user_paths, *paths, *scene_paths, *prior_paths]
     )
     for path in ordered:
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
@@ -281,7 +283,7 @@ def role_output_text(ctx: NodeExecutionContext, role: str) -> str:
         return ""
     states = ctx.run.get("node_states") or {}
     for node in ctx.graph.get("nodes") or []:
-        if node_role(node) != role:
+        if node_pipeline(node) != role:
             continue
         ref = (states.get(node["id"]) or {}).get("output_ref") or {}
         path = path_from_uri(str(ref.get("uri") or ""))

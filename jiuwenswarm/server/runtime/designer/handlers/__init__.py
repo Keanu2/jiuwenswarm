@@ -2,9 +2,8 @@
 
 """Node handler registry for Designer graph execution.
 
-Dispatch order: ``node.config.role`` (character_design / storyboard / ...)
-then ``node.type`` (image / table / ...). Agent code replaces a role handler
-without changing the UI modality types.
+Dispatch order: ``node.config.pipeline`` (character_design / storyboard / ...)
+then ``node.type`` (image / video / ...). Canvas role is the MiniMax modality.
 """
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_VIDEO,
     AssetRef,
     DesignerGraphNode,
+    node_pipeline,
     node_role,
 )
 from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import (
@@ -40,6 +40,11 @@ from jiuwenswarm.server.runtime.designer.handlers.image_nodes import (
     CharacterDesignNodeHandler,
     FrameNodeHandler,
     SceneNodeHandler,
+)
+from jiuwenswarm.server.runtime.designer.handlers.media_nodes import (
+    GENERIC_AUDIO_HANDLER,
+    GENERIC_IMAGE_HANDLER,
+    GENERIC_VIDEO_HANDLER,
 )
 from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
     BriefNodeHandler,
@@ -95,13 +100,16 @@ NODE_HANDLERS: dict[str, NodeHandler] = {
     NODE_ROLE_SPEECH: SpeechNodeHandler(),
     NODE_TYPE_TEXT: MockNodeHandler(),
     NODE_TYPE_TABLE: MockNodeHandler(),
-    NODE_TYPE_IMAGE: MockNodeHandler(),
-    NODE_TYPE_VIDEO: MockNodeHandler(),
-    NODE_TYPE_AUDIO: MusicNodeHandler(),
+    NODE_TYPE_IMAGE: GENERIC_IMAGE_HANDLER,
+    NODE_TYPE_VIDEO: GENERIC_VIDEO_HANDLER,
+    NODE_TYPE_AUDIO: GENERIC_AUDIO_HANDLER,
 }
 
 
 def resolve_handler_key(node: DesignerGraphNode) -> str:
+    pipeline = node_pipeline(node)
+    if pipeline and pipeline in NODE_HANDLERS:
+        return pipeline
     role = node_role(node)
     if role and role in NODE_HANDLERS:
         return role

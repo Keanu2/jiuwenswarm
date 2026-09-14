@@ -13,6 +13,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     AssetRef,
     DesignerExecutionGraph,
     DesignerGraphNode,
+    node_pipeline,
 )
 from jiuwenswarm.server.runtime.designer.continuity import (
     continuity_prompt_clause as _continuity_prompt_clause,
@@ -48,6 +49,9 @@ _ROLE_TOOLS: dict[str, list[str]] = {
 
 
 def _role_key(node: DesignerGraphNode) -> str:
+    pipeline = str(node_pipeline(node) or "").strip().lower()
+    if pipeline:
+        return pipeline
     cfg = node.get("config") or {}
     role = str(cfg.get("role") or node.get("type") or "").strip().lower()
     return role
@@ -109,7 +113,7 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
 
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
-        role = str(cfg.get("role") or "")
+        role = _role_key(node)
         if role not in {"frame", "clip", "keyframe", "storyboard"}:
             continue
         idx = int(cfg.get("shot_index") or 0) or 0
@@ -149,7 +153,7 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
                 sb_md = _write_storyboard_markdown(shots, characters)
                 for node in graph.get("nodes") or []:
                     cfg = dict(node.get("config") or {})
-                    if str(cfg.get("role") or "") != "storyboard":
+                    if _role_key(node) != "storyboard":
                         continue
                     if cfg.get("skip_llm"):
                         cfg["prewritten"] = sb_md
@@ -210,16 +214,26 @@ def _spatial_geography_lock_patch(graph: DesignerExecutionGraph) -> list[str]:
         + "; ".join(f"{k}={v}" for k, v in lock.items() if str(v).strip())
     )[:500]
 
+    ids = {
+        str(item.get("id") or "")
+        for item in (graph.get("nodes") or [])
+        if isinstance(item, dict)
+    }
     for node in graph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
         cfg = dict(node.get("config") or {})
-        role = str(cfg.get("role") or "")
+        role = _role_key(node)
         nid = str(node.get("id") or "")
         if role not in {"scene", "frame", "clip", "keyframe", "brief", "storyboard"}:
             continue
         cfg["spatial_lock"] = lock
-        if role == "scene" and nid != "n_scene" and not cfg.get("master_scene_node_id"):
+        if (
+            role == "scene"
+            and nid != "n_scene"
+            and "n_scene" in ids
+            and not cfg.get("master_scene_node_id")
+        ):
             cfg["master_scene_node_id"] = "n_scene"
             cfg.setdefault("scene_strategy", "edit_master_view")
             notes.append(f"{nid}: master_scene_node_id=n_scene")
@@ -292,7 +306,7 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
             continue
         cfg = dict(n.get("config") or {})
         nid = str(n.get("id") or "")
-        role = str(cfg.get("role") or "")
+        role = _role_key(n)
         if role == "scene" and nid != master_id and master_id:
             cfg.setdefault("master_scene_node_id", master_id)
             cfg.setdefault("scene_strategy", "edit_master_view")
@@ -472,7 +486,7 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
 
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
-        role = str(cfg.get("role") or "").lower()
+        role = _role_key(node).lower()
         nid = str(node.get("id") or "")
         if role in {"speech", "tts"} or nid == "n_speech":
             cfg["role"] = "speech"
@@ -686,7 +700,7 @@ class SupervisorAgent:
         states = node_states or {}
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
-            if str(cfg.get("role") or "") != "clip":
+            if _role_key(node) != "clip":
                 continue
             if str((states.get(str(node.get("id") or "")) or {}).get("status") or "") in {
                 "completed",
@@ -936,7 +950,7 @@ class SupervisorAgent:
         stamped = False
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
-            if str(cfg.get("role") or "") != "brief" and str(node.get("id") or "") != "n_brief":
+            if _role_key(node) != "brief" and str(node.get("id") or "") != "n_brief":
                 continue
             if cfg.get("skip_llm"):
                 cfg["prewritten"] = brief_md
@@ -1048,7 +1062,7 @@ class SupervisorAgent:
         stamped = False
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
-            if str(cfg.get("role") or "") != "storyboard" and str(node.get("id") or "") != "n_storyboard":
+            if _role_key(node) != "storyboard" and str(node.get("id") or "") != "n_storyboard":
                 continue
             if cfg.get("skip_llm"):
                 cfg["prewritten"] = sb_md
@@ -1063,7 +1077,7 @@ class SupervisorAgent:
         # Propagate timelines/continuity into frame/clip configs once.
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
-            if str(cfg.get("role") or "") not in {"frame", "clip", "keyframe"}:
+            if _role_key(node) not in {"frame", "clip", "keyframe"}:
                 continue
             idx = int(cfg.get("shot_index") or 0)
             for shot in shots:
@@ -1208,7 +1222,7 @@ def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
     )
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
-        role = str(cfg.get("role") or "")
+        role = _role_key(node)
         if role not in {"frame", "clip", "keyframe"}:
             continue
         idx = int(cfg.get("shot_index") or 0) or 1
@@ -1304,7 +1318,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
             sb_md = _write_storyboard_markdown(planned, characters)
             for node in graph.get("nodes") or []:
                 cfg = dict(node.get("config") or {})
-                if str(cfg.get("role") or "") != "storyboard":
+                if _role_key(node) != "storyboard":
                     continue
                 cfg["prewritten"] = sb_md
                 cfg["planned_shots"] = planned
@@ -1315,7 +1329,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
 
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
-        role = str(cfg.get("role") or "")
+        role = _role_key(node)
         if role not in {"frame", "clip", "keyframe"}:
             continue
         blob = f"{cfg.get('shot_action') or ''} {(cfg.get('generate') or {}).get('prompt') or ''}"
@@ -1338,7 +1352,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
                     if not isinstance(other, dict):
                         continue
                     oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-                    if str(oc.get("role") or "") != "character_design":
+                    if _role_key(other) != "character_design":
                         continue
                     if oc.get("combined_cast"):
                         continue
@@ -1356,7 +1370,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
                     if not isinstance(other, dict):
                         continue
                     oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-                    if str(oc.get("role") or "") != "character_design":
+                    if _role_key(other) != "character_design":
                         continue
                     if oc.get("combined_cast"):
                         continue
@@ -1420,7 +1434,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         if not isinstance(node, dict):
             continue
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        if str(cfg.get("role") or "") != "character_design":
+        if _role_key(node) != "character_design":
             continue
         if cfg.get("combined_cast"):
             continue
@@ -1448,14 +1462,14 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         [
             n
             for n in (graph.get("nodes") or [])
-            if str((n.get("config") or {}).get("role") or "") in {"frame", "keyframe"}
+            if _role_key(n) in {"frame", "keyframe"}
         ],
         key=lambda n: int((n.get("config") or {}).get("shot_index") or 0),
     )
 
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
-        role = str(cfg.get("role") or "")
+        role = _role_key(node)
         if role not in {"frame", "clip", "keyframe"}:
             continue
         cids = [str(x) for x in (cfg.get("character_ids") or []) if str(x)]
@@ -1671,7 +1685,7 @@ class ManagerAgent:
                 if not isinstance(node, dict):
                     continue
                 nid = str(node.get("id") or "")
-                role = str((node.get("config") or {}).get("role") or "")
+                role = _role_key(node)
                 if role in {"clip", "speech", "music"} or nid.startswith("n_clip"):
                     key = (nid, "n_compose")
                     if key not in existing and nid != "n_compose":
@@ -1814,7 +1828,7 @@ class ManagerAgent:
 
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
-            if str(cfg.get("role") or "") != "brief" and str(node.get("id") or "") != "n_brief":
+            if _role_key(node) != "brief" and str(node.get("id") or "") != "n_brief":
                 continue
             if cfg.get("skip_llm"):
                 cfg["prewritten"] = brief
@@ -1968,7 +1982,7 @@ class ManagerAgent:
                 sb_md = _write_storyboard_markdown(shots, characters)
                 for node in graph.get("nodes") or []:
                     cfg = dict(node.get("config") or {})
-                    role = str(cfg.get("role") or "")
+                    role = _role_key(node)
                     if role == "storyboard":
                         if cfg.get("skip_llm"):
                             cfg["prewritten"] = sb_md
@@ -2057,7 +2071,7 @@ class ManagerAgent:
                     {
                         "id": n.get("id"),
                         "label": n.get("label"),
-                        "role": (n.get("config") or {}).get("role"),
+                        "role": _role_key(n),
                         "character_ids": (n.get("config") or {}).get("character_ids"),
                         "cast_names": (n.get("config") or {}).get("cast_names"),
                         "shot_action": (n.get("config") or {}).get("shot_action"),
@@ -2133,7 +2147,7 @@ class ManagerAgent:
                 applied.append(f"shot {idx} llm-fix")
             for node in graph.get("nodes") or []:
                 cfg = dict(node.get("config") or {})
-                if str(cfg.get("role") or "") not in {"frame", "clip", "keyframe"}:
+                if _role_key(node) not in {"frame", "clip", "keyframe"}:
                     continue
                 if int(cfg.get("shot_index") or 0) != idx:
                     continue
@@ -2169,7 +2183,7 @@ class ManagerAgent:
                 sb_md = _write_storyboard_markdown(shots, characters)
                 for node in graph.get("nodes") or []:
                     cfg = dict(node.get("config") or {})
-                    if str(cfg.get("role") or "") != "storyboard":
+                    if _role_key(node) != "storyboard":
                         continue
                     if cfg.get("skip_llm"):
                         cfg["prewritten"] = sb_md
@@ -2202,7 +2216,7 @@ class ManagerAgent:
                 str(n.get("id") or "").startswith("n_clip")
                 or str(n.get("id") or "").startswith("n_frame")
                 or str(n.get("id") or "") in {"n_scene", "n_compose", "n_speech", "n_music"}
-                or str((n.get("config") or {}).get("role") or "")
+                or _role_key(n)
                 in {"clip", "frame", "keyframe", "compose", "speech", "music"}
             )
         }

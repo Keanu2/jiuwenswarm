@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Protocol
 
 from jiuwenswarm.common.schema.designer_graph import (
+    CONFIG_DELEGATE_AGENT,
+    CONFIG_DELEGATE_HANDLER,
     DesignerExecutionGraph,
     DesignerExecutionRun,
     DesignerGraphNode,
@@ -43,7 +45,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     graph_uses_agent_scheduler,
     initial_node_states,
     new_run_id,
-    node_role,
+    node_pipeline,
     node_uses_agent_runtime,
     sync_groups,
     utc_now_ms,
@@ -155,7 +157,7 @@ class GraphExecutor:
         if (
             target_type in {NODE_TYPE_IMAGE, NODE_TYPE_VIDEO}
             and _is_fallback_text_ref(kept_ref)
-        ) or node_role(target_node) == NODE_ROLE_COMPOSE:
+        ) or node_pipeline(target_node) == NODE_ROLE_COMPOSE:
             kept_ref = None
             kept_refs = []
         states[node_id] = {
@@ -212,13 +214,15 @@ class GraphExecutor:
         use_agents = llm_available()
         for node in graph.get("nodes") or []:
             cfg = node.setdefault("config", {})
-            if isinstance(cfg, dict):
-                if cfg.get("force_handler"):
-                    cfg["delegate"] = "handler"
-                else:
-                    cfg["delegate"] = "agent" if use_agents else "handler"
-                    if use_agents and cfg.get("skip_llm"):
-                        cfg["skip_llm"] = False
+            if not isinstance(cfg, dict):
+                continue
+            current = str(cfg.get("delegate") or "").strip()
+            if cfg.get("force_handler") or current == CONFIG_DELEGATE_HANDLER:
+                cfg["delegate"] = CONFIG_DELEGATE_HANDLER
+            elif not current:
+                cfg["delegate"] = CONFIG_DELEGATE_AGENT if use_agents else CONFIG_DELEGATE_HANDLER
+            if use_agents and cfg.get("delegate") != CONFIG_DELEGATE_HANDLER and cfg.get("skip_llm"):
+                cfg["skip_llm"] = False
         meta = dict(graph.get("metadata") or {})
         meta["ai_agent_pipeline"] = use_agents
         graph["metadata"] = meta
@@ -880,12 +884,12 @@ class GraphExecutor:
                 frame_nodes = [
                     n
                     for n in (graph.get("nodes") or [])
-                    if node_role(n) == NODE_ROLE_FRAME
+                    if node_pipeline(n) == NODE_ROLE_FRAME
                 ]
                 clip_pending = [
                     n
                     for n in (graph.get("nodes") or [])
-                    if node_role(n) == NODE_ROLE_CLIP
+                    if node_pipeline(n) == NODE_ROLE_CLIP
                     and (run.get("node_states") or {}).get(str(n.get("id") or ""), {}).get(
                         "status"
                     )
@@ -1218,7 +1222,7 @@ class GraphExecutor:
 
         prompts = [shot_generate_prompt(shot) for shot in shot_rows]
         has_clip_pipeline = any(
-            node_role(node) in {NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}
+            node_pipeline(node) in {NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}
             or str(node.get("id") or "") in {"n_clip", "n_compose"}
             or str(node.get("id") or "").startswith("n_clip_")
             for node in graph.get("nodes") or []
@@ -1241,17 +1245,17 @@ class GraphExecutor:
         current_clip_ids = {
             str(node.get("id") or "")
             for node in graph.get("nodes") or []
-            if node_role(node) == NODE_ROLE_CLIP
+            if node_pipeline(node) == NODE_ROLE_CLIP
         }
         current_frame_ids = {
             str(node.get("id") or "")
             for node in graph.get("nodes") or []
-            if node_role(node) == NODE_ROLE_FRAME
+            if node_pipeline(node) == NODE_ROLE_FRAME
         }
         wanted_clip_ids = {clip_node_id(index) for index in range(1, shot_count + 1)}
         wanted_frame_ids = {frame_node_id(index) for index in range(1, shot_count + 1)}
         has_compose = any(
-            node_role(node) == NODE_ROLE_COMPOSE or str(node.get("id") or "") == "n_compose"
+            node_pipeline(node) == NODE_ROLE_COMPOSE or str(node.get("id") or "") == "n_compose"
             for node in graph.get("nodes") or []
         )
         topology_matches = (
@@ -1309,7 +1313,7 @@ class GraphExecutor:
             (
                 node
                 for node in graph.get("nodes") or []
-                if node_role(node) == NODE_ROLE_STORYBOARD
+                if node_pipeline(node) == NODE_ROLE_STORYBOARD
             ),
             None,
         )
@@ -1401,7 +1405,10 @@ class GraphExecutor:
         started_at = utc_now_ms()
         blocked_by = list(sync_groups(graph).get(node_id, frozenset()) - {node_id})
         lock = self._state_locks.setdefault(run["run_id"], asyncio.Lock())
-        from jiuwenswarm.common.schema.designer_graph import node_role as _node_role_fn
+        from jiuwenswarm.common.schema.designer_graph import (
+            node_pipeline as _node_pipeline_fn,
+            node_role as _node_role_fn,
+        )
         from jiuwenswarm.server.runtime.designer.skills_loader import (
             load_agent_skill,
             load_subject_skill,
@@ -1409,7 +1416,8 @@ class GraphExecutor:
         from jiuwenswarm.server.runtime.designer.trajectory import get_trajectory
 
         role = str(
-            (node.get("config") or {}).get("role")
+            _node_pipeline_fn(node)
+            or (node.get("config") or {}).get("pipeline")
             or _node_role_fn(node)
             or node_id
         )
@@ -1458,6 +1466,7 @@ class GraphExecutor:
                     "blocked_by": blocked_by,
                 },
             )
+            self._store.save_run(run)
             self._publish(run, on_update, node_id)
         tool_name = "node_agent" if node_uses_agent_runtime(node) else "handler"
         span_cm = (
@@ -1523,7 +1532,7 @@ class GraphExecutor:
             primary = result.output_ref or (refs[0] if refs else None)
             if primary is not None and not refs:
                 refs = [primary]
-            if node_role(node) == NODE_ROLE_FRAME:
+            if node_pipeline(node) == NODE_ROLE_FRAME:
                 image_refs = [ref for ref in refs if _ref_kind(ref) == "image"]
                 if image_refs:
                     primary = image_refs[0]
@@ -1547,7 +1556,7 @@ class GraphExecutor:
                 and incoming_uri != kept_uri
             )
             if pending and (
-                node_role(node) == NODE_ROLE_COMPOSE or _should_auto_promote(kept, primary)
+                node_pipeline(node) == NODE_ROLE_COMPOSE or _should_auto_promote(kept, primary)
             ):
                 pending = False
             async with lock:
@@ -1566,7 +1575,7 @@ class GraphExecutor:
                         "blocked_by": [],
                     },
                 )
-            if node_role(node) == NODE_ROLE_STORYBOARD:
+            if node_pipeline(node) == NODE_ROLE_STORYBOARD:
                 live_graph = self._require_graph(str(run.get("graph_id") or graph.get("graph_id") or ""))
                 self._expand_clips_if_needed(live_graph, run, set(), on_update=on_update)
         except Exception as exc:  # noqa: BLE001
@@ -1756,12 +1765,12 @@ def _node_by_id(graph: DesignerExecutionGraph, node_id: str) -> DesignerGraphNod
 
 def _node_execute_timeout_sec(node: DesignerGraphNode) -> float:
     """Hard cap so one leaf cannot hang the ready-queue forever."""
-    role = node_role(node)
-    if role in {NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}:
+    pipeline = node_pipeline(node)
+    if pipeline in {NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}:
         return 480.0
-    if role in {NODE_ROLE_FRAME, "character", "character_design", "scene"}:
+    if pipeline in {NODE_ROLE_FRAME, "character", "character_design", "scene"}:
         return 300.0
-    if role in {"speech", "music"}:
+    if pipeline in {"speech", "music"}:
         return 120.0
     return 180.0
 

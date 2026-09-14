@@ -3,6 +3,7 @@ import { useDesignerStore } from './designerStore';
 import { useDesignerChatStore } from './designerChatStore';
 import { designerGraphClient } from './designerGraphClient';
 import { useDesignerOptimizeStore } from './designerOptimizeStore';
+import type { DesignerBootstrapReference, DesignerStoredReference } from './designerReferences';
 
 export const DESIGNER_BOOTSTRAP_THINKING_MS = 1200;
 
@@ -13,6 +14,7 @@ export type LaunchDesignerFromTaskParams = {
   workMode?: 'work' | 'code';
   optimizeFor?: 'cost' | 'quality';
   scenario?: string;
+  references?: DesignerBootstrapReference[];
   /** Navigate to Design nav before/while bootstrap runs. */
   onNavigateToDesign: () => void;
   thinkingMs?: number;
@@ -38,6 +40,7 @@ export async function bootstrapDesignerFromChat(params: {
   workMode?: 'work' | 'code';
   optimizeFor?: 'cost' | 'quality';
   scenario?: string;
+  references?: DesignerBootstrapReference[];
   thinkingText?: string;
   doneText?: string;
   errorText?: string;
@@ -54,7 +57,8 @@ export async function bootstrapDesignerFromChat(params: {
  */
 export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParams): Promise<void> {
   const prompt = params.prompt.trim();
-  if (!prompt) return;
+  const references = params.references || [];
+  if (!prompt && references.length === 0) return;
 
   const optimizeFor =
     params.optimizeFor ?? useDesignerOptimizeStore.getState().optimizeFor ?? 'quality';
@@ -72,10 +76,20 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
 
   chatStore.reset();
   designerStore.beginBootstrapEntry(prompt);
+  const chatReferences: DesignerStoredReference[] = references.map((item, index) => ({
+    kind: item.kind,
+    filename: item.filename,
+    mime_type: item.mime_type,
+    path: item.path,
+    uri: item.uri || item.path,
+    role: item.role || 'reference',
+    order: index + 1,
+  }));
   chatStore.appendMessage({
     role: 'user',
     content: prompt,
     kind: 'user',
+    ...(chatReferences.length > 0 ? { references: chatReferences } : {}),
   });
   params.onNavigateToDesign();
 
@@ -99,6 +113,7 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
       workMode: params.workMode,
       optimizeFor,
       scenario: params.scenario,
+      references,
     });
     const graph = result?.graph;
     if (!graph?.graph_id || !Array.isArray(graph.nodes)) {

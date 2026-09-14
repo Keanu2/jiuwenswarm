@@ -28,6 +28,11 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
     role_output_text,
     write_workspace_text,
 )
+from jiuwenswarm.server.runtime.designer.user_references import (
+    graph_user_references,
+    prompt_slot_roster,
+    user_reference_image_paths,
+)
 from jiuwenswarm.server.runtime.designer.a2a_collab import collaboration_card
 from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
     StoryboardShot,
@@ -329,13 +334,21 @@ class CharacterDesignNodeHandler:
         size = str(cfg.get("image_size") or "1024x1024")
         combined = bool(cfg.get("combined_cast"))
         max_tries = int(cfg.get("max_image_calls") or 1)
+        user_images = [str(path) for path in user_reference_image_paths(ctx.graph)]
+        roster = prompt_slot_roster(graph_user_references(ctx.graph))
+        prompt = _character_prompt(f"{name}\n{source}", combined_cast=combined)
+        if roster:
+            prompt = (
+                f"{prompt}\nUser reference slots (original files are visual authority):\n{roster}"
+            )
         result = await _image_or_notes(
-            prompt=_character_prompt(f"{name}\n{source}", combined_cast=combined),
+            prompt=prompt,
             notes=fallback_character_sheet(source),
             stem=f"designer_character_{ctx.run_id}_{ctx.node_id}",
             kind_if_text=NODE_TYPE_TEXT,
             size=size,
             max_tries=max_tries,
+            reference_images=user_images or None,
         )
         return _with_card_ref(result, ctx, NODE_ROLE_CHARACTER_DESIGN)
 
@@ -359,18 +372,25 @@ class SceneNodeHandler:
             master_paths = node_ids_output_image_paths(ctx, [master_id])
             refs = [str(p) for p in master_paths]
             if not refs:
-                raise RuntimeError(
-                    f"Scene view {ctx.node_id} requires master plate {master_id} "
-                    "before it can edit/reframe."
-                )
-            lock = cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else {}
-            if lock:
-                source = (
-                    f"{source}\nSPATIAL LOCK: "
-                    + "; ".join(f"{k}={v}" for k, v in lock.items() if str(v).strip())
-                )
+                derive = False
+            else:
+                lock = cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else {}
+                if lock:
+                    source = (
+                        f"{source}\nSPATIAL LOCK: "
+                        + "; ".join(f"{k}={v}" for k, v in lock.items() if str(v).strip())
+                    )
+        else:
+            refs = [str(path) for path in user_reference_image_paths(ctx.graph)]
+        scene_prompt = _scene_prompt(source, derive_from_master=derive)
+        roster = prompt_slot_roster(graph_user_references(ctx.graph))
+        if roster:
+            scene_prompt = (
+                f"{scene_prompt}\nUser reference slots (original files are visual authority):\n"
+                f"{roster}"
+            )
         result = await _image_or_notes(
-            prompt=_scene_prompt(source, derive_from_master=derive),
+            prompt=scene_prompt,
             notes=fallback_scene_notes(source),
             stem=f"designer_scene_{ctx.run_id}_{ctx.node_id}",
             kind_if_text=NODE_TYPE_TEXT,
@@ -466,18 +486,25 @@ class FrameNodeHandler:
             shot["comment"] = planned_action
         size = str(cfg.get("image_size") or "1024x1024")
         max_tries = int(cfg.get("max_image_calls") or 1)
+        frame_prompt = _shot_frame_prompt(
+            shot,
+            visual,
+            has_character=True,
+            has_scene=True,
+            cast_names=cast_names,
+            character_ref_count=char_ref_count,
+            combined_cast_ref=combined_cast_ref,
+            keyframe_strategy=keyframe_strategy,
+            costume_lock=costume_lock,
+        )
+        roster = prompt_slot_roster(graph_user_references(ctx.graph))
+        if roster:
+            frame_prompt = (
+                f"{frame_prompt}\nUser reference slots (original files are visual authority):\n"
+                f"{roster}"
+            )
         generated = await handler_io.generate_designer_image(
-            _shot_frame_prompt(
-                shot,
-                visual,
-                has_character=True,
-                has_scene=True,
-                cast_names=cast_names,
-                character_ref_count=char_ref_count,
-                combined_cast_ref=combined_cast_ref,
-                keyframe_strategy=keyframe_strategy,
-                costume_lock=costume_lock,
-            ),
+            frame_prompt,
             size=size,
             reference_images=refs,
             max_tries=max_tries,

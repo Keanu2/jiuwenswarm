@@ -189,7 +189,7 @@ interface ChatPanelProps {
    */
   onComposerHeightChange?: (height: number) => void;
   /** 任务页选「设计」后发送：跳转设计栏并 bootstrap */
-  onLaunchDesign?: (prompt: string) => void;
+  onLaunchDesign?: (prompt: string, mediaItems?: MediaItem[]) => void;
 }
 
 // 邀请指令只对 human_agent 成员存在（见 upsertHumanShareCommandFromEvent 的

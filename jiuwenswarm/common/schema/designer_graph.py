@@ -42,106 +42,165 @@ NODE_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# ── Node roles (handler dispatch; modality type stays on node.type) ───────────
+# ── Node roles (canvas modality; same strings as node.type, MiniMax-style) ────
 
-NODE_ROLE_BRIEF = "brief"
-NODE_ROLE_CHARACTER_DESIGN = "character_design"
-NODE_ROLE_SCENE = "scene"
-NODE_ROLE_STORYBOARD = "storyboard"
-NODE_ROLE_FRAME = "frame"
-NODE_ROLE_CLIP = "clip"
-NODE_ROLE_COMPOSE = "compose"
-NODE_ROLE_MUSIC = "music"
-NODE_ROLE_SPEECH = "speech"
+NODE_ROLE_TEXT = NODE_TYPE_TEXT
+NODE_ROLE_TABLE = NODE_TYPE_TABLE
+NODE_ROLE_IMAGE = NODE_TYPE_IMAGE
+NODE_ROLE_VIDEO = NODE_TYPE_VIDEO
+NODE_ROLE_AUDIO = NODE_TYPE_AUDIO
 
-NODE_ROLES: frozenset[str] = frozenset(
+NODE_ROLES: frozenset[str] = frozenset(NODE_TYPES)
+
+# Internal generation recipes. Not a canvas node kind — MiniMax keeps Character /
+# Storyboard / Clip in Plan docs and filenames, not in node.type.
+PIPELINE_BRIEF = "brief"
+PIPELINE_CHARACTER_DESIGN = "character_design"
+PIPELINE_SCENE = "scene"
+PIPELINE_STORYBOARD = "storyboard"
+PIPELINE_FRAME = "frame"
+PIPELINE_CLIP = "clip"
+PIPELINE_COMPOSE = "compose"
+PIPELINE_MUSIC = "music"
+PIPELINE_SPEECH = "speech"
+
+# Back-compat aliases used by handlers / tests for pipeline identity.
+NODE_ROLE_BRIEF = PIPELINE_BRIEF
+NODE_ROLE_CHARACTER_DESIGN = PIPELINE_CHARACTER_DESIGN
+NODE_ROLE_SCENE = PIPELINE_SCENE
+NODE_ROLE_STORYBOARD = PIPELINE_STORYBOARD
+NODE_ROLE_FRAME = PIPELINE_FRAME
+NODE_ROLE_CLIP = PIPELINE_CLIP
+NODE_ROLE_COMPOSE = PIPELINE_COMPOSE
+NODE_ROLE_MUSIC = PIPELINE_MUSIC
+NODE_ROLE_SPEECH = PIPELINE_SPEECH
+
+PIPELINES: frozenset[str] = frozenset(
     {
-        NODE_ROLE_BRIEF,
-        NODE_ROLE_CHARACTER_DESIGN,
-        NODE_ROLE_SCENE,
-        NODE_ROLE_STORYBOARD,
-        NODE_ROLE_FRAME,
-        NODE_ROLE_CLIP,
-        NODE_ROLE_COMPOSE,
-        NODE_ROLE_MUSIC,
-        NODE_ROLE_SPEECH,
+        PIPELINE_BRIEF,
+        PIPELINE_CHARACTER_DESIGN,
+        PIPELINE_SCENE,
+        PIPELINE_STORYBOARD,
+        PIPELINE_FRAME,
+        PIPELINE_CLIP,
+        PIPELINE_COMPOSE,
+        PIPELINE_MUSIC,
+        PIPELINE_SPEECH,
     }
 )
 
-_LEGACY_ROLE_LABELS = {
-    NODE_ROLE_BRIEF: (
+PIPELINE_TO_TYPE: dict[str, str] = {
+    PIPELINE_BRIEF: NODE_TYPE_TEXT,
+    PIPELINE_CHARACTER_DESIGN: NODE_TYPE_IMAGE,
+    PIPELINE_SCENE: NODE_TYPE_IMAGE,
+    PIPELINE_STORYBOARD: NODE_TYPE_TABLE,
+    PIPELINE_FRAME: NODE_TYPE_IMAGE,
+    PIPELINE_CLIP: NODE_TYPE_VIDEO,
+    PIPELINE_COMPOSE: NODE_TYPE_VIDEO,
+    PIPELINE_MUSIC: NODE_TYPE_AUDIO,
+    PIPELINE_SPEECH: NODE_TYPE_AUDIO,
+}
+
+_MODALITY_TITLES = {
+    NODE_TYPE_TEXT: "Text",
+    NODE_TYPE_TABLE: "Table",
+    NODE_TYPE_IMAGE: "Image",
+    NODE_TYPE_VIDEO: "Video",
+    NODE_TYPE_AUDIO: "Audio",
+}
+
+_LEGACY_PIPELINE_TITLES = frozenset(
+    {
         "项目 brief",
         "Brief",
         "brief",
-    ),
-    NODE_ROLE_CHARACTER_DESIGN: (
         "角色图",
         "Character",
         "character",
-    ),
-    NODE_ROLE_SCENE: (
         "场景图",
         "场景",
         "Scene",
         "scene",
-    ),
-    NODE_ROLE_STORYBOARD: (
         "分镜表",
         "Storyboard",
         "storyboard",
-    ),
-    NODE_ROLE_COMPOSE: (
         "成片",
         "Film",
         "Compose",
         "compose",
-    ),
-}
+        "Speech / TTS",
+        "Music / Bed",
+        "最终视频",
+    }
+)
 _INDEXED_LABEL_RE = re.compile(
-    r"^(?:关键帧|视频片段|Keyframe|Clip)\s*(\d+)?$",
+    r"^(?:关键帧|视频片段|Keyframe|Clip)(?:\s*(\d+))?(?:首帧)?$",
     re.IGNORECASE,
 )
 
 
+def modality_node_label(node_type: str, index: int = 0) -> str:
+    """Canvas title from modality. MiniMax nodes are Image / Video / Audio / Text."""
+    base = _MODALITY_TITLES.get(node_type, "")
+    if not base:
+        return ""
+    if index and index > 0:
+        return f"{base} {index}"
+    return base
+
+
 def pipeline_node_label(role: str, shot_index: int = 1) -> str:
-    """English-first canvas title for a Designer pipeline role."""
-    index = max(1, int(shot_index or 1))
-    if role == NODE_ROLE_BRIEF:
-        return "Brief"
-    if role == NODE_ROLE_CHARACTER_DESIGN:
-        return "Character"
-    if role == NODE_ROLE_SCENE:
-        return "Scene"
-    if role == NODE_ROLE_STORYBOARD:
-        return "Storyboard"
-    if role == NODE_ROLE_FRAME:
-        return f"Keyframe {index}"
-    if role == NODE_ROLE_CLIP:
-        return f"Clip {index}"
-    if role == NODE_ROLE_COMPOSE:
-        return "Film"
-    return ""
+    """Canvas title for a role or pipeline id — always a modality name."""
+    del shot_index
+    modality = PIPELINE_TO_TYPE.get(role, role)
+    return modality_node_label(modality)
 
 
 def english_pipeline_label(label: str, role: str, shot_index: int = 1) -> str:
-    """Rewrite known Chinese/legacy titles; leave custom names alone."""
+    """Rewrite known pipeline titles to modality names; leave custom names alone."""
     desired = pipeline_node_label(role, shot_index)
     if not desired:
         return label
     text = (label or "").strip()
     if not text:
         return desired
-    aliases = _LEGACY_ROLE_LABELS.get(role, ())
-    if text in aliases or text.casefold() in {item.casefold() for item in aliases}:
+    if text in _LEGACY_PIPELINE_TITLES or text.casefold() in {
+        item.casefold() for item in _LEGACY_PIPELINE_TITLES
+    }:
         return desired
     indexed = _INDEXED_LABEL_RE.match(text)
-    if indexed and role in {NODE_ROLE_FRAME, NODE_ROLE_CLIP}:
+    if indexed:
         return desired
     return text
+
+
+def infer_pipeline_from_id(node_id: str) -> str:
+    """Bootstrap / static graph ids still encode the generation recipe."""
+    value = str(node_id or "").strip()
+    if value == "n_brief":
+        return PIPELINE_BRIEF
+    if value == "n_character":
+        return PIPELINE_CHARACTER_DESIGN
+    if value == "n_scene":
+        return PIPELINE_SCENE
+    if value == "n_storyboard":
+        return PIPELINE_STORYBOARD
+    if value in {"n_compose", "n_final"}:
+        return PIPELINE_COMPOSE
+    if value == "n_speech":
+        return PIPELINE_SPEECH
+    if value == "n_music":
+        return PIPELINE_MUSIC
+    if value == "n_frame" or value.startswith("n_frame_"):
+        return PIPELINE_FRAME
+    if value == "n_clip" or value.startswith("n_clip_"):
+        return PIPELINE_CLIP
+    return ""
 
 # ── Node config (role-discriminated; modality stays on node.type) ─────────────
 
 CONFIG_KEY_ROLE = "role"
+CONFIG_KEY_PIPELINE = "pipeline"
 CONFIG_KEY_PROMPT = "prompt"
 CONFIG_KEY_INPUTS = "inputs"
 CONFIG_KEY_DELEGATE = "delegate"
@@ -156,6 +215,7 @@ CONFIG_KEY_MATERIALS = "materials"
 CONFIG_KEYS: frozenset[str] = frozenset(
     {
         CONFIG_KEY_ROLE,
+        CONFIG_KEY_PIPELINE,
         CONFIG_KEY_PROMPT,
         CONFIG_KEY_INPUTS,
         CONFIG_KEY_DELEGATE,
@@ -189,13 +249,17 @@ CONFIG_DELEGATES: frozenset[str] = frozenset(
 DESIGNER_AGENT_GROUP_NAME = "designer"
 
 ROLE_DEFAULT_TEMPLATES: dict[str, str] = {
-    NODE_ROLE_BRIEF: f"{DESIGNER_AGENT_GROUP_NAME}/leader",
-    NODE_ROLE_CHARACTER_DESIGN: f"{DESIGNER_AGENT_GROUP_NAME}/character",
-    NODE_ROLE_SCENE: f"{DESIGNER_AGENT_GROUP_NAME}/scene",
-    NODE_ROLE_STORYBOARD: f"{DESIGNER_AGENT_GROUP_NAME}/storyboard",
-    NODE_ROLE_FRAME: f"{DESIGNER_AGENT_GROUP_NAME}/frame",
-    NODE_ROLE_CLIP: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
-    NODE_ROLE_COMPOSE: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
+    PIPELINE_BRIEF: f"{DESIGNER_AGENT_GROUP_NAME}/leader",
+    PIPELINE_CHARACTER_DESIGN: f"{DESIGNER_AGENT_GROUP_NAME}/character",
+    PIPELINE_SCENE: f"{DESIGNER_AGENT_GROUP_NAME}/scene",
+    PIPELINE_STORYBOARD: f"{DESIGNER_AGENT_GROUP_NAME}/storyboard",
+    PIPELINE_FRAME: f"{DESIGNER_AGENT_GROUP_NAME}/frame",
+    PIPELINE_CLIP: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
+    PIPELINE_COMPOSE: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
+    NODE_TYPE_TEXT: f"{DESIGNER_AGENT_GROUP_NAME}/leader",
+    NODE_TYPE_TABLE: f"{DESIGNER_AGENT_GROUP_NAME}/storyboard",
+    NODE_TYPE_IMAGE: f"{DESIGNER_AGENT_GROUP_NAME}/character",
+    NODE_TYPE_VIDEO: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
 }
 
 # ── Edge kinds ────────────────────────────────────────────────────────────────
@@ -290,9 +354,10 @@ class NodeLayout(TypedDict, total=False):
 
 
 class DesignerNodeConfig(TypedDict, total=False):
-    """Typed node config. ``role`` is the handler discriminator."""
+    """Typed node config. ``role`` is the canvas modality; ``pipeline`` is internal."""
 
     role: str
+    pipeline: str
     prompt: str
     inputs: list[str]
     delegate: str
@@ -425,11 +490,23 @@ def normalize_node_config(raw: Any) -> DesignerNodeConfig:
     config: dict[str, Any] = {
         key: value for key, value in raw.items() if key not in CONFIG_KEYS
     }
+    pipeline = raw.get(CONFIG_KEY_PIPELINE)
+    if pipeline is not None and not (isinstance(pipeline, str) and not pipeline.strip()):
+        if not isinstance(pipeline, str) or not pipeline.strip():
+            raise DesignerGraphValidationError("node.config.pipeline must be a non-empty string")
+        pipeline = pipeline.strip()
+        if pipeline not in PIPELINES:
+            raise DesignerGraphValidationError(f"unsupported node pipeline: {pipeline!r}")
+        config[CONFIG_KEY_PIPELINE] = pipeline
     role = raw.get(CONFIG_KEY_ROLE)
     if role is not None and not (isinstance(role, str) and not role.strip()):
         if not isinstance(role, str) or not role.strip():
             raise DesignerGraphValidationError("node.config.role must be a non-empty string")
         role = role.strip()
+        if role in PIPELINES:
+            if CONFIG_KEY_PIPELINE not in config:
+                config[CONFIG_KEY_PIPELINE] = role
+            role = PIPELINE_TO_TYPE[role]
         if role not in NODE_ROLES:
             raise DesignerGraphValidationError(f"unsupported node role: {role!r}")
         config[CONFIG_KEY_ROLE] = role
@@ -502,7 +579,13 @@ def normalize_node(raw: Any) -> DesignerGraphNode:
         raise DesignerGraphValidationError(f"unsupported node type: {node_type!r}")
     label = raw.get("label")
     config = normalize_node_config(raw.get("config"))
-    role = str(config.get(CONFIG_KEY_ROLE) or "").strip()
+    if not str(config.get(CONFIG_KEY_PIPELINE) or "").strip():
+        inferred = infer_pipeline_from_id(node_id)
+        if inferred:
+            config[CONFIG_KEY_PIPELINE] = inferred
+    if not str(config.get(CONFIG_KEY_ROLE) or "").strip():
+        config[CONFIG_KEY_ROLE] = node_type
+    role = str(config.get(CONFIG_KEY_ROLE) or node_type).strip()
     shot_raw = config.get("shot_index")
     try:
         shot_index = int(shot_raw) if shot_raw is not None else 1
@@ -648,8 +731,12 @@ def ensure_bootstrap_pipeline(graph: DesignerExecutionGraph) -> DesignerExecutio
             {
                 "id": "n_scene",
                 "type": NODE_TYPE_IMAGE,
-                "label": "Scene",
-                "config": {"role": NODE_ROLE_SCENE, "inputs": ["n_brief"]},
+                "label": "Image",
+                "config": {
+                    "role": NODE_TYPE_IMAGE,
+                    "pipeline": PIPELINE_SCENE,
+                    "inputs": ["n_brief"],
+                },
                 "layout": {"x": 400, "y": 240, "width": 280, "height": 160},
             }
         )
@@ -657,7 +744,7 @@ def ensure_bootstrap_pipeline(graph: DesignerExecutionGraph) -> DesignerExecutio
     frame_ids = [
         str(node.get("id") or "")
         for node in graph.get("nodes") or []
-        if node_role(node) == NODE_ROLE_FRAME
+        if node_pipeline(node) == PIPELINE_FRAME
         or str(node.get("id") or "") == "n_frame"
         or str(node.get("id") or "").startswith("n_frame_")
     ]
@@ -685,7 +772,7 @@ def ensure_bootstrap_pipeline(graph: DesignerExecutionGraph) -> DesignerExecutio
         clip_nodes = [
             node
             for node in graph.get("nodes") or []
-            if node_role(node) == NODE_ROLE_CLIP
+            if node_pipeline(node) == PIPELINE_CLIP
             or str(node.get("id") or "") == "n_clip"
             or str(node.get("id") or "").startswith("n_clip_")
         ]
@@ -718,8 +805,12 @@ def ensure_bootstrap_pipeline(graph: DesignerExecutionGraph) -> DesignerExecutio
                 {
                     "id": "n_compose",
                     "type": NODE_TYPE_VIDEO,
-                    "label": "Film",
-                    "config": {"role": NODE_ROLE_COMPOSE, "inputs": list(clip_ids)},
+                    "label": "Video",
+                    "config": {
+                        "role": NODE_TYPE_VIDEO,
+                        "pipeline": PIPELINE_COMPOSE,
+                        "inputs": list(clip_ids),
+                    },
                     "layout": compose_layout_right_of_clips(
                         [node.get("layout") for node in clip_nodes]
                     ),
@@ -835,7 +926,7 @@ def repair_overlapping_pipeline_layout(graph: DesignerExecutionGraph) -> Designe
         [
             node
             for node in nodes
-            if node_role(node) == NODE_ROLE_FRAME
+            if node_pipeline(node) == PIPELINE_FRAME
             or str(node.get("id") or "").startswith("n_frame")
         ],
         key=node_shot_index,
@@ -844,7 +935,7 @@ def repair_overlapping_pipeline_layout(graph: DesignerExecutionGraph) -> Designe
         [
             node
             for node in nodes
-            if node_role(node) == NODE_ROLE_CLIP
+            if node_pipeline(node) == PIPELINE_CLIP
             or str(node.get("id") or "").startswith("n_clip")
         ],
         key=node_shot_index,
@@ -921,7 +1012,7 @@ def drop_keyframe_to_keyframe_deps(graph: DesignerExecutionGraph) -> DesignerExe
         str(node.get("id") or "")
         for node in graph.get("nodes") or []
         if (
-            node_role(node) == NODE_ROLE_FRAME
+            node_pipeline(node) == PIPELINE_FRAME
             or _is_frame_pipeline_id(str(node.get("id") or ""))
         )
         and str(node.get("id") or "")
@@ -956,10 +1047,10 @@ def shot_pipeline_count(graph: DesignerExecutionGraph) -> int:
     clips = 0
     for node in graph.get("nodes") or []:
         node_id = str(node.get("id") or "")
-        role = node_role(node)
-        if role == NODE_ROLE_FRAME or node_id == "n_frame" or node_id.startswith("n_frame_"):
+        pipeline = node_pipeline(node)
+        if pipeline == PIPELINE_FRAME or node_id == "n_frame" or node_id.startswith("n_frame_"):
             frames += 1
-        elif role == NODE_ROLE_CLIP or node_id == "n_clip" or node_id.startswith("n_clip_"):
+        elif pipeline == PIPELINE_CLIP or node_id == "n_clip" or node_id.startswith("n_clip_"):
             clips += 1
     return max(frames, clips, 0)
 
@@ -1017,7 +1108,7 @@ def preserve_expanded_shot_nodes(
         for node in existing.get("nodes") or []
         if str(node.get("id") or "") not in incoming_ids
         and (
-            node_role(node) in {NODE_ROLE_FRAME, NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}
+            node_pipeline(node) in {PIPELINE_FRAME, PIPELINE_CLIP, PIPELINE_COMPOSE}
             or _is_shot_pipeline_id(str(node.get("id") or ""))
         )
     ]
@@ -1045,7 +1136,7 @@ def expand_shot_nodes(
     kept_nodes = [
         dict(node)
         for node in raw.get("nodes") or []
-        if node_role(node) not in {NODE_ROLE_FRAME, NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}
+        if node_pipeline(node) not in {PIPELINE_FRAME, PIPELINE_CLIP, PIPELINE_COMPOSE}
         and not _is_shot_pipeline_id(str(node.get("id") or ""))
     ]
     kept_edges = [
@@ -1059,7 +1150,7 @@ def expand_shot_nodes(
     def _role_node_ids(role: str) -> list[str]:
         ids: list[str] = []
         for node in kept_nodes:
-            if node_role(node) == role and str(node.get("id") or ""):
+            if node_pipeline(node) == role and str(node.get("id") or ""):
                 ids.append(str(node["id"]))
         return ids
 
@@ -1080,12 +1171,14 @@ def expand_shot_nodes(
             clip_inputs.append(storyboard_id)
         clip_inputs.append(frame_id)
         frame_config: dict[str, Any] = {
-            "role": NODE_ROLE_FRAME,
+            "role": NODE_TYPE_IMAGE,
+            "pipeline": PIPELINE_FRAME,
             "shot_index": index,
             "inputs": frame_inputs,
         }
         clip_config: dict[str, Any] = {
-            "role": NODE_ROLE_CLIP,
+            "role": NODE_TYPE_VIDEO,
+            "pipeline": PIPELINE_CLIP,
             "shot_index": index,
             "inputs": clip_inputs,
         }
@@ -1118,7 +1211,7 @@ def expand_shot_nodes(
             {
                 "id": frame_id,
                 "type": NODE_TYPE_IMAGE,
-                "label": f"Keyframe {index}",
+                "label": modality_node_label(NODE_TYPE_IMAGE, index + 2),
                 "config": frame_config,
                 "layout": frame_layout,
             }
@@ -1127,7 +1220,7 @@ def expand_shot_nodes(
             {
                 "id": clip_id,
                 "type": NODE_TYPE_VIDEO,
-                "label": f"Clip {index}",
+                "label": modality_node_label(NODE_TYPE_VIDEO, index),
                 "config": clip_config,
                 "layout": clip_layout,
             }
@@ -1224,7 +1317,8 @@ def expand_shot_nodes(
                 }
             )
     compose_config: dict[str, Any] = {
-        "role": NODE_ROLE_COMPOSE,
+        "role": NODE_TYPE_VIDEO,
+        "pipeline": PIPELINE_COMPOSE,
         "inputs": compose_inputs,
         "delegate": CONFIG_DELEGATE_HANDLER,
         "force_handler": True,
@@ -1232,7 +1326,7 @@ def expand_shot_nodes(
     compose_node: DesignerGraphNode = {
         "id": COMPOSE_NODE_ID,
         "type": NODE_TYPE_VIDEO,
-        "label": "Film",
+        "label": modality_node_label(NODE_TYPE_VIDEO, count + 1),
         "config": compose_config,
         "layout": compose_layout_right_of_clips(
             [node.get("layout") for node in clip_nodes]
@@ -1256,8 +1350,8 @@ def apply_shot_generate_prompts(
     changed = False
     nodes: list[DesignerGraphNode] = []
     for node in graph.get("nodes") or []:
-        role = node_role(node)
-        if role not in {NODE_ROLE_FRAME, NODE_ROLE_CLIP}:
+        pipeline = node_pipeline(node)
+        if pipeline not in {PIPELINE_FRAME, PIPELINE_CLIP}:
             nodes.append(node)
             continue
         index = node_shot_index(node)
@@ -1413,8 +1507,28 @@ def node_config(node: DesignerGraphNode) -> DesignerNodeConfig:
 
 
 def node_role(node: DesignerGraphNode) -> str:
-    role = str(node_config(node).get("role") or "").strip()
+    """Canvas modality (image / video / audio / text / table)."""
+    role = str(node_config(node).get(CONFIG_KEY_ROLE) or "").strip()
+    if role in NODE_TYPES:
+        return role
+    if role in PIPELINE_TO_TYPE:
+        return PIPELINE_TO_TYPE[role]
+    node_type = str(node.get("type") or "").strip()
+    if node_type in NODE_TYPES:
+        return node_type
     return role
+
+
+def node_pipeline(node: DesignerGraphNode) -> str:
+    """Internal generation recipe. Empty for generic user-added media nodes."""
+    config = node_config(node)
+    pipeline = str(config.get(CONFIG_KEY_PIPELINE) or "").strip()
+    if pipeline in PIPELINES:
+        return pipeline
+    role = str(config.get(CONFIG_KEY_ROLE) or "").strip()
+    if role in PIPELINES:
+        return role
+    return infer_pipeline_from_id(str(node.get("id") or ""))
 
 
 def node_delegate(node: DesignerGraphNode) -> str:
@@ -1425,10 +1539,13 @@ def node_delegate(node: DesignerGraphNode) -> str:
 
 
 def node_agent_template(node: DesignerGraphNode) -> str:
-    """Resolve the AgentTemplate ref for a node (explicit, else role default)."""
+    """Resolve the AgentTemplate ref for a node (explicit, else pipeline / type default)."""
     explicit = str(node_config(node).get(CONFIG_KEY_AGENT_TEMPLATE) or "").strip()
     if explicit:
         return explicit
+    pipeline = node_pipeline(node)
+    if pipeline in ROLE_DEFAULT_TEMPLATES:
+        return ROLE_DEFAULT_TEMPLATES[pipeline]
     return ROLE_DEFAULT_TEMPLATES.get(node_role(node), "")
 
 
@@ -1559,37 +1676,54 @@ def build_bootstrap_graph(
         {
             "id": "n_brief",
             "type": NODE_TYPE_TEXT,
-            "label": "Brief",
-            "config": {"role": NODE_ROLE_BRIEF, "prompt": prompt_text},
+            "label": "Text 1",
+            "config": {
+                "role": NODE_TYPE_TEXT,
+                "pipeline": PIPELINE_BRIEF,
+                "prompt": prompt_text,
+            },
             "layout": {"x": 40, "y": 240, "width": 280, "height": 160},
         },
         {
             "id": "n_character",
             "type": NODE_TYPE_IMAGE,
-            "label": "Character",
-            "config": {"role": NODE_ROLE_CHARACTER_DESIGN, "inputs": ["n_brief"]},
+            "label": "Image 1",
+            "config": {
+                "role": NODE_TYPE_IMAGE,
+                "pipeline": PIPELINE_CHARACTER_DESIGN,
+                "inputs": ["n_brief"],
+            },
             "layout": {"x": 400, "y": 40, "width": 280, "height": 160},
         },
         {
             "id": "n_scene",
             "type": NODE_TYPE_IMAGE,
-            "label": "Scene",
-            "config": {"role": NODE_ROLE_SCENE, "inputs": ["n_brief"]},
+            "label": "Image 2",
+            "config": {
+                "role": NODE_TYPE_IMAGE,
+                "pipeline": PIPELINE_SCENE,
+                "inputs": ["n_brief"],
+            },
             "layout": {"x": 400, "y": 240, "width": 280, "height": 160},
         },
         {
             "id": "n_storyboard",
             "type": NODE_TYPE_TABLE,
-            "label": "Storyboard",
-            "config": {"role": NODE_ROLE_STORYBOARD, "inputs": ["n_brief"]},
+            "label": "Table 1",
+            "config": {
+                "role": NODE_TYPE_TABLE,
+                "pipeline": PIPELINE_STORYBOARD,
+                "inputs": ["n_brief"],
+            },
             "layout": {"x": 400, "y": 440, "width": 280, "height": 160},
         },
         {
             "id": "n_frame_1",
             "type": NODE_TYPE_IMAGE,
-            "label": "Keyframe 1",
+            "label": "Image 3",
             "config": {
-                "role": NODE_ROLE_FRAME,
+                "role": NODE_TYPE_IMAGE,
+                "pipeline": PIPELINE_FRAME,
                 "shot_index": 1,
                 "inputs": ["n_character", "n_scene", "n_storyboard"],
             },
@@ -1598,9 +1732,10 @@ def build_bootstrap_graph(
         {
             "id": "n_clip_1",
             "type": NODE_TYPE_VIDEO,
-            "label": "Clip 1",
+            "label": "Video 1",
             "config": {
-                "role": NODE_ROLE_CLIP,
+                "role": NODE_TYPE_VIDEO,
+                "pipeline": PIPELINE_CLIP,
                 "shot_index": 1,
                 "inputs": ["n_character", "n_scene", "n_storyboard", "n_frame_1"],
             },
@@ -1609,8 +1744,12 @@ def build_bootstrap_graph(
         {
             "id": "n_compose",
             "type": NODE_TYPE_VIDEO,
-            "label": "Film",
-            "config": {"role": NODE_ROLE_COMPOSE, "inputs": ["n_clip_1"]},
+            "label": "Video 2",
+            "config": {
+                "role": NODE_TYPE_VIDEO,
+                "pipeline": PIPELINE_COMPOSE,
+                "inputs": ["n_clip_1"],
+            },
             "layout": {"x": 1480, "y": 240, "width": 280, "height": 160},
         },
     ]

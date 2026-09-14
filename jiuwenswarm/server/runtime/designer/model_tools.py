@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import mimetypes
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.config import get_config, get_model_names, resolve_env_vars
@@ -109,6 +112,59 @@ def pick_model_for_optimize(optimize_for: str) -> dict[str, Any] | None:
     return pool[0]
 
 
+_MAX_VISION_IMAGE_BYTES = 6 * 1024 * 1024
+
+
+def vision_user_content(
+    prompt: str,
+    images: list[str] | None = None,
+) -> str | list[dict[str, Any]]:
+    """OpenAI-compatible user content: text plus original reference images.
+
+    Original files stay the visual authority. Callers should describe slots in
+    ``prompt``; this helper does not caption or summarize the pictures.
+    """
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": str(prompt or "")}]
+    for raw in (images or [])[:3]:
+        url = _image_data_uri(raw)
+        if not url:
+            continue
+        blocks.append({"type": "image_url", "image_url": {"url": url}})
+    if len(blocks) == 1:
+        return str(prompt or "")
+    return blocks
+
+
+def _image_data_uri(raw: str) -> str | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    if value.startswith(("http://", "https://", "data:")):
+        return value
+    path = Path(value)
+    if value.startswith("file:"):
+        from urllib.parse import unquote, urlparse
+
+        parsed = urlparse(value)
+        pathname = unquote(parsed.path)
+        if len(pathname) >= 3 and pathname[0] == "/" and pathname[2] == ":":
+            pathname = pathname[1:]
+        path = Path(pathname)
+    try:
+        if not path.is_file():
+            return None
+        size = path.stat().st_size
+        if size <= 0 or size > _MAX_VISION_IMAGE_BYTES:
+            return None
+        mime, _ = mimetypes.guess_type(str(path))
+        if not mime or not mime.startswith("image/"):
+            mime = "image/png"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        return None
+    return f"data:{mime};base64,{encoded}"
+
+
 async def call_model_tool(
     *,
     prompt: str,
@@ -116,6 +172,7 @@ async def call_model_tool(
     optimize_for: str,
     preferred_model: str | None = None,
     max_tokens: int = 800,
+    images: list[str] | None = None,
 ) -> dict[str, Any]:
     """Call a configured chat model (OpenAI-compatible) as an agent tool."""
     # Ensure ~/.jiuwenswarm/config/.env is loaded (API_KEY / API_BASE).
@@ -189,11 +246,12 @@ async def call_model_tool(
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+        user_content = vision_user_content(prompt, images)
         resp = await client.chat.completions.create(
             model=model_name,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": user_content},
             ],
             max_tokens=max_tokens,
             temperature=0.4 if optimize_for == "quality" else 0.7,

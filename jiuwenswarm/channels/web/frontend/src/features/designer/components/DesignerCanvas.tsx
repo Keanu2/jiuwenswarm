@@ -16,9 +16,10 @@ import {
   type OnConnect,
   type OnEdgesChange,
   type OnNodeDrag,
+  type OnNodesDelete,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import type { DesignerExecutionGraph } from '../executionGraphTypes';
 import {
   toReactFlowGraph,
@@ -28,6 +29,14 @@ import {
 import { useDesignerStore } from '../designerStore';
 import { designerEdgeTypes } from './edges/DesignerEdge';
 import { designerNodeTypes } from './nodes/designerNodes';
+import { DesignerCanvasDock } from './DesignerCanvasDock';
+import {
+  DESIGNER_ASSET_DRAG_MIME,
+  buildNodeFromLibraryAsset,
+  offsetCanvasPosition,
+} from '../designerCanvasNodes';
+import { useDesignerAssetLibraryStore } from '../designerAssetLibraryStore';
+import { useDesignerUiStore } from '../designerUiStore';
 
 type DesignerCanvasProps = {
   graph: DesignerExecutionGraph;
@@ -81,19 +90,55 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
   );
   const [nodes, setNodes, onNodesChange] = useNodesState(reactFlowGraph.nodes as Node[]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState(reactFlowGraph.edges as Edge[]);
-  const { fitView } = useReactFlow();
+  const { fitView, screenToFlowPosition } = useReactFlow();
   const persistReactFlowLayout = useDesignerStore((state) => state.persistReactFlowLayout);
   const addDomainEdge = useDesignerStore((state) => state.addEdge);
+  const addDomainNode = useDesignerStore((state) => state.addNode);
   const removeEdges = useDesignerStore((state) => state.removeEdges);
+  const removeNodes = useDesignerStore((state) => state.removeNodes);
   const setSelectedNodeId = useDesignerStore((state) => state.setSelectedNodeId);
+  const selectedNodeId = useDesignerStore((state) => state.selectedNodeId);
+  const canvasTool = useDesignerUiStore((state) => state.canvasTool);
+  const setCanvasTool = useDesignerUiStore((state) => state.setCanvasTool);
+  const closeDock = useDesignerUiStore((state) => state.closeDock);
+  const getAsset = useDesignerAssetLibraryStore((state) => state.getById);
+  const [spacePan, setSpacePan] = useState(false);
   const fittedGraphIdRef = useRef<string | null>(null);
+  const handMode = canvasTool === 'hand' || spacePan;
+
+  useEffect(() => {
+    const isTypingTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code === 'Space' && !event.repeat && !isTypingTarget(event.target)) {
+        event.preventDefault();
+        setSpacePan(true);
+        return;
+      }
+      if (isTypingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === 'h' || event.key === 'H') setCanvasTool('hand');
+      if (event.key === 'v' || event.key === 'V') setCanvasTool('select');
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code === 'Space') setSpacePan(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, [setCanvasTool]);
 
   useEffect(() => {
     setNodes((previous) => {
       const selectedIds = new Set(previous.filter((node) => node.selected).map((node) => node.id));
       return reactFlowGraph.nodes.map((node) => ({
         ...(node as Node),
-        selected: selectedIds.has(node.id),
+        selected: selectedIds.has(node.id) || node.id === selectedNodeId,
       }));
     });
     setEdges((previous) => {
@@ -110,12 +155,16 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         void fitView({ padding: 0.2, duration: 200 });
       });
     }
-  }, [graph.graph_id, reactFlowGraph, setNodes, setEdges, fitView]);
+  }, [graph.graph_id, reactFlowGraph, selectedNodeId, setNodes, setEdges, fitView]);
 
   useOnSelectionChange({
     onChange: ({ nodes: selectedNodes }) => {
       const only = selectedNodes.length === 1 ? selectedNodes[0] : null;
       setSelectedNodeId(only?.id ?? null);
+      const menuId = useDesignerUiStore.getState().successorMenuNodeId;
+      if (menuId && only?.id !== menuId) {
+        closeDock();
+      }
     },
   });
 
@@ -163,34 +212,85 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
     [onEdgesChangeBase, removeEdges],
   );
 
+  const onNodesDelete: OnNodesDelete = useCallback(
+    (deleted) => {
+      removeNodes(deleted.map((node) => node.id));
+      closeDock();
+    },
+    [closeDock, removeNodes],
+  );
+
+  const onDragOver = useCallback((event: DragEvent) => {
+    if (![...event.dataTransfer.types].includes(DESIGNER_ASSET_DRAG_MIME)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }, []);
+
+  const onDrop = useCallback(
+    (event: DragEvent) => {
+      const assetId = event.dataTransfer.getData(DESIGNER_ASSET_DRAG_MIME).trim();
+      if (!assetId) return;
+      event.preventDefault();
+      const asset = getAsset(assetId);
+      if (!asset) return;
+      const position = offsetCanvasPosition(
+        screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+        graphRef.current.nodes.length,
+      );
+      addDomainNode(
+        buildNodeFromLibraryAsset({
+          asset,
+          existing: graphRef.current.nodes,
+          position,
+        }),
+      );
+    },
+    [addDomainNode, getAsset, screenToFlowPosition],
+  );
+
   return (
-    <ReactFlow
-      className="designer-page__canvas"
-      nodes={nodes}
-      edges={edges}
-      nodeTypes={designerNodeTypes}
-      edgeTypes={designerEdgeTypes}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onConnect={onConnect}
-      onNodeDragStop={onNodeDragStop}
-      fitView
-      minZoom={0.2}
-      maxZoom={1.5}
-      proOptions={{ hideAttribution: true }}
-      data-testid="designer-canvas"
-    >
-      <Background gap={20} size={1} />
-      <Controls position="bottom-right" className="designer-canvas__controls" />
-      <MiniMap position="bottom-right" pannable zoomable />
-    </ReactFlow>
+    <div className={`designer-canvas-shell${handMode ? ' is-hand' : ''}`}>
+      <ReactFlow
+        className="designer-page__canvas"
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={designerNodeTypes}
+        edgeTypes={designerEdgeTypes}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onConnect={onConnect}
+        onNodeDragStop={onNodeDragStop}
+        onNodesDelete={onNodesDelete}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        onPaneClick={closeDock}
+        panOnDrag={handMode ? true : [1]}
+        selectionOnDrag={!handMode}
+        nodesDraggable={!handMode}
+        nodesConnectable={!handMode}
+        deleteKeyCode={['Backspace', 'Delete']}
+        elementsSelectable
+        fitView
+        minZoom={0.2}
+        maxZoom={1.5}
+        proOptions={{ hideAttribution: true }}
+        data-testid="designer-canvas"
+      >
+        <Background gap={20} size={1} />
+        <Controls position="bottom-right" className="designer-canvas__controls" />
+        <MiniMap position="bottom-right" pannable zoomable />
+      </ReactFlow>
+      <DesignerCanvasDock />
+    </div>
   );
 }
 
 export function DesignerCanvas({ graph }: DesignerCanvasProps) {
   return (
-    <ReactFlowProvider>
-      <DesignerCanvasInner key={graph.graph_id} graph={graph} />
-    </ReactFlowProvider>
+    <div className="designer-canvas-host">
+      <ReactFlowProvider>
+        <DesignerCanvasInner key={graph.graph_id} graph={graph} />
+      </ReactFlowProvider>
+    </div>
   );
 }

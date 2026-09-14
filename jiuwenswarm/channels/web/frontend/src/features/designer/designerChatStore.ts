@@ -8,6 +8,7 @@ import {
   readPersistedDesignerChat,
   resolveBoundDesignerMessages,
 } from './designerChatHistory';
+import { extractDesignerGraphReferences, type DesignerStoredReference } from './designerReferences';
 
 export type DesignerChatRole = 'user' | 'assistant' | 'system';
 
@@ -24,6 +25,7 @@ export type DesignerChatMessage = {
   content: string;
   kind: DesignerChatMessageKind;
   createdAt: number;
+  references?: DesignerStoredReference[];
 };
 
 export type DesignerBootstrapPhase = 'idle' | 'thinking' | 'bootstrapping' | 'done' | 'error';
@@ -109,6 +111,9 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
           content: message.content,
           kind: message.kind,
           createdAt,
+          ...(message.references && message.references.length > 0
+            ? { references: message.references }
+            : {}),
         },
       ];
       const messagesByGraphId = state.activeGraphId
@@ -138,11 +143,13 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
     }
     if (hasDesignerUserPrompt(get().messages)) return;
     const prompt = extractDesignerGraphPrompt(graph);
-    if (!prompt) return;
+    const references = extractDesignerGraphReferences(graph);
+    if (!prompt && references.length === 0) return;
     get().appendMessage({
       role: 'user',
       content: prompt,
       kind: 'user',
+      ...(references.length > 0 ? { references } : {}),
     });
     const doneText = String(options?.doneText ?? '').trim();
     if (!doneText) return;

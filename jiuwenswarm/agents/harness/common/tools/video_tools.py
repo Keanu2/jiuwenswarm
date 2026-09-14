@@ -850,7 +850,12 @@ def _build_dashscope_video_call(
     file_url = _as_dashscope_file_url(reference_file)
     chosen = model.strip() or "wan2.6-t2v"
     params: dict[str, Any] = {"duration": duration}
-    use_reference_mode = bool(extra_refs or (refs and not img_url) or file_url)
+    wan3 = _is_wan3_video(chosen)
+    # User video/audio is a generic file reference, not a first frame.
+    # wan2.6 r2v only accepts image URLs, so a file must not kick I2V off.
+    use_reference_mode = bool(
+        extra_refs or (refs and not img_url) or (file_url and wan3)
+    )
 
     if _is_wan3_video(chosen):
         want_audio = False if audio is None else bool(audio)

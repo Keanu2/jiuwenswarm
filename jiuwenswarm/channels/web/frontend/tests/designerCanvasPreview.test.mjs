@@ -20,10 +20,11 @@ test('preview graph keeps the default canvas skeleton', () => {
   assert.equal(isDesignerPreviewGraph(graph), true);
   assert.deepEqual(
     graph.nodes.map((node) => node.id),
-    ['n_brief', 'n_character', 'n_storyboard', 'n_frame_1', 'n_clip_1', 'n_compose'],
+    ['n_brief', 'n_character', 'n_scene', 'n_storyboard', 'n_frame_1', 'n_clip_1', 'n_compose'],
   );
-  assert.equal(graph.nodes.find((node) => node.id === 'n_character')?.layout?.y, 140);
-  assert.equal(graph.nodes.find((node) => node.id === 'n_storyboard')?.layout?.y, 340);
+  assert.equal(graph.nodes.find((node) => node.id === 'n_character')?.layout?.y, 40);
+  assert.equal(graph.nodes.find((node) => node.id === 'n_scene')?.type, 'image');
+  assert.equal(graph.nodes.find((node) => node.id === 'n_storyboard')?.layout?.y, 440);
 });
 
 test('storyboardShotPreviews shows action and picture from the Brief columns', () => {

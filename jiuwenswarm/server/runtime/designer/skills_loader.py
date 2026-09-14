@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.common.schema.designer_graph import node_pipeline
 from jiuwenswarm.server.runtime.designer.paths import skills_dir
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,7 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
     roles: list[str] = []
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
-        role = str(cfg.get("role") or cfg.get("agent_role") or node.get("id") or "")
+        role = str(node_pipeline(node) or cfg.get("role") or cfg.get("agent_role") or node.get("id") or "")
         roles.append(role)
         # Leaf agents: only their own agent skill (short). No scenario / supervisor dump.
         skill_text = load_agent_skill(role) or load_agent_skill(str(node.get("id") or ""))

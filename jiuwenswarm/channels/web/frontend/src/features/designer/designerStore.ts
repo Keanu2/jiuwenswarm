@@ -10,6 +10,8 @@ import {
   uniqueDesignerGraphIds,
 } from './designerGraphLoad';
 import type { DesignerReactFlowGraph } from './designerGraphAdapter';
+import { connectNodeToGraph, removeNodesFromGraph } from './designerCanvasNodes';
+import { useDesignerUiStore } from './designerUiStore';
 import type { AssetRef, DesignerExecutionGraph, DesignerGraphNode } from './executionGraphTypes';
 
 export type DesignerLoadStatus =
@@ -47,8 +49,11 @@ type DesignerStore = {
   ) => void;
   setNodeOutputRef: (nodeId: string, outputRef: AssetRef | null) => void;
   clearAssetReferences: (assetId: string) => void;
+  addNode: (node: DesignerGraphNode) => void;
+  addConnectedNode: (sourceId: string, node: DesignerGraphNode) => void;
   addEdge: (connection: { source: string; target: string; id?: string; label?: string }) => void;
   removeEdges: (edgeIds: string[]) => void;
+  removeNodes: (nodeIds: string[]) => void;
   persistReactFlowLayout: (reactFlow: DesignerReactFlowGraph) => void;
   scheduleSave: () => void;
   flushSave: () => Promise<void>;
@@ -256,6 +261,39 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     get().scheduleSave();
   },
 
+  addNode: (node) => {
+    const graph = get().domainGraph;
+    if (!graph) return;
+    const id = String(node.id || '').trim();
+    if (!id || graph.nodes.some((item) => item.id === id)) return;
+    set({
+      domainGraph: {
+        ...graph,
+        nodes: [...graph.nodes, node],
+        updated_at: Date.now(),
+      },
+      selectedNodeId: id,
+    });
+    get().scheduleSave();
+  },
+
+  addConnectedNode: (sourceId, node) => {
+    const graph = get().domainGraph;
+    if (!graph) return;
+    const next = connectNodeToGraph(graph, sourceId, node);
+    if (!next) return;
+    set({
+      domainGraph: {
+        ...graph,
+        nodes: next.nodes,
+        edges: next.edges,
+        updated_at: Date.now(),
+      },
+      selectedNodeId: node.id,
+    });
+    get().scheduleSave();
+  },
+
   addEdge: (connection) => {
     const graph = get().domainGraph;
     if (!graph) return;
@@ -300,6 +338,40 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
         updated_at: Date.now(),
       },
     });
+    get().scheduleSave();
+  },
+
+  removeNodes: (nodeIds) => {
+    const graph = get().domainGraph;
+    if (!graph || nodeIds.length === 0) return;
+    const next = removeNodesFromGraph(graph, nodeIds);
+    if (next.nodes.length === graph.nodes.length && next.edges.length === graph.edges.length) {
+      return;
+    }
+    const removed = new Set(nodeIds.map((id) => String(id || '').trim()).filter(Boolean));
+    const selectedNodeId = get().selectedNodeId;
+    set({
+      domainGraph: {
+        ...graph,
+        nodes: next.nodes,
+        edges: next.edges,
+        updated_at: Date.now(),
+      },
+      selectedNodeId:
+        selectedNodeId && removed.has(selectedNodeId) ? null : selectedNodeId,
+    });
+    const ui = useDesignerUiStore.getState();
+    const materialId = ui.selectedMaterialId;
+    if (
+      [...removed].some(
+        (id) => materialId === id || materialId.startsWith(`${id}:`),
+      )
+    ) {
+      ui.closeViewer();
+    }
+    if (removed.has(ui.chooserNodeId)) {
+      ui.closeRevision();
+    }
     get().scheduleSave();
   },
 

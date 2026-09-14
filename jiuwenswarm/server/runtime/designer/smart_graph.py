@@ -36,6 +36,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerExecutionGraph,
     normalize_execution_graph,
     new_graph_id,
+    node_pipeline,
     utc_now_ms,
 )
 from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
@@ -112,7 +113,7 @@ def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
         sinks = {
             str(n.get("id"))
             for n in nodes
-            if str((n.get("config") or {}).get("role") or "") == NODE_ROLE_COMPOSE
+            if node_pipeline(n) == NODE_ROLE_COMPOSE
         }
     if not sinks:
         return []
@@ -467,7 +468,7 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
         if s not in ids or t not in ids:
             continue
         edge_keys.add((s, t))
-        trole = str((by_id[t].get("config") or {}).get("role") or "")
+        trole = node_pipeline(by_id[t])
         if (
             trole in sink_roles
             or t in {"n_compose", "n_storyboard"}
@@ -484,7 +485,7 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
     ]
     has_frame_1 = "n_frame_1" in ids
     has_compose = "n_compose" in ids or any(
-        str((by_id[i].get("config") or {}).get("role") or "") == NODE_ROLE_COMPOSE
+        node_pipeline(by_id[i]) == NODE_ROLE_COMPOSE
         for i in ids
     )
     fallback = "n_frame_1" if has_frame_1 else (
@@ -492,7 +493,7 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
             (
                 i
                 for i in sorted(ids)
-                if str((by_id[i].get("config") or {}).get("role") or "")
+                if node_pipeline(by_id[i])
                 == NODE_ROLE_COMPOSE
             ),
             None,
