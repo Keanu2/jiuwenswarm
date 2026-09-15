@@ -82,59 +82,6 @@ Play stamps `metadata.ai_agent_pipeline` and `metadata.agent_runtime.mode` (`ai`
 
 Upstream `design` UI/handler improvements that landed on remote (storyboard table UX, graph restore after refresh, later-keyframe anti-clone policy in upstream handlers) are merged for the **frontend / compose** side where they did not conflict; **runtime executor + creative handlers + AI orchestration stay on this framework**.
 
-## 本版已澄清的三个问题 / Three questions clarified (updated)
-
-下面按**当前实现**写实。画布连线在代码里叫 `edges`，产品里常叫 trajectory.
-
----
-
-### 1. Graph 中的 trajectory 是否具有输入 / 输出含义？
-
-### 1. Do graph trajectories carry input / output meaning?
-
-**有调度含义，没有通用的“沿边传物料”语义。** Trajectories gate scheduling; they are not a generic payload bus.
-
-- Each edge is `source → target` with kinds:
-  - `data`: target waits until every data predecessor (and that predecessor’s `sync` group) is completed.
-  - `sync`: barrier, not payload (e.g. Character ↔ Storyboard Align).
-- Actual inputs are loaded by **role / shot_index** from `run.node_states[*].output_ref`, not by walking edge payloads.
-- `config.inputs` is kept aligned with `data` edges at bootstrap/expand; handlers still resolve by role at execute time.
-- Scheduler: continuous ready-queue + concurrency cap (see above). Independent clips can still start when **their** keyframe finishes.
-
----
-
-### 2. E2A 协议的调用和监听逻辑？
-
-### 2. How does the E2A protocol call and listen?
-
-Unchanged in spirit from the original `design` docs: E2A is the **Gateway ↔ AgentServer** envelope, not node-to-node sync.
-
-**Call:** Browser `webRequest('designer.graph.*' | 'designer.run.*')` → Gateway → unary E2A → `DesignerAdapter` → GraphStore / GraphExecutor → response.
-
-**Listen:** `designer.run.start` returns a snapshot; progress is push:
-
-`designer.run.updated` / `designer.node.updated` / `designer.graph.updated`
-
-Specs: `docs/zh/E2A-protocol.md`, `docs/en/E2A-protocol.md`. Designer A2A collab bus and inbound chat A2A channels are **not** this E2A envelope.
-
----
-
-### 3. 当前节点的 Agent 是否实际参与作用？作用机制如何？
-
-### 3. Does the per-node Agent actually participate, and how?
-
-**Updated answer (this is the important delta vs the original README):**
-
-**When Settings has a chat model (`llm_available() == True`), Play is AI-first: leaf DeepAgents do run. Heuristics / handler-only mode is for when no chat model is configured.**
-
-Three layers:
-
-1. **Scheduling** — `_execute_wave_run` ready-queue (`FIRST_COMPLETED`, max 6). Bootstrap uses `_prefer_runtime_pipeline` / `apply_runtime_delegate` (agents when LLM exists; handlers otherwise). `force_handler` keeps music/speech on fast beds.
-2. **Orchestration agents** — `SupervisorAgent` / `ManagerAgent` via `call_model_tool` (+ skills). Script analysis prefers LLM JSON; rejects local-tool-fallback echoes.
-3. **Leaf NodeAgentHost** — DeepAgent with `designer_graph_get` / `patch` / `node_run` / `node_complete`; on failure or missing required media family, **handler materialization** (image / I2V / compose) runs. Music/Speech without backends stay handlers.
-
-Original README stated DeepAgents were off by default — that described the early handler prototype. **Do not treat that as current Play behavior when DeepSeek (or any Settings chat model) is configured.**
-
 ---
 
 ## Architecture notes (unchanged intent)
