@@ -168,11 +168,12 @@ def node_ids_output_image_paths(ctx: NodeExecutionContext, node_ids: list[str]) 
 
 
 def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
-    """Identity-first refs: optional prior keyframe, solo cast sheets, then scene.
+    """Continuity refs for keyframes: solo character sheets (+ optional user refs).
 
-    Order matters for I2I models: prior KF (edit strategy) → character solos → scene.
+    Scene consistency comes from scene_bible + prompt handoff text — not prior KF images.
+    Never attach empty scene plates.
     """
-    cfg = node.get("config") or {}
+    cfg = dict(node.get("config") or {})
     identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
     preferred = [
         str(x)
@@ -185,7 +186,6 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
     ]
     paths = node_ids_output_image_paths(ctx, preferred) if preferred else []
     if not paths:
-        # Prefer identity_source solos over combined compose aids.
         solo_ids: list[str] = []
         for other in ctx.graph.get("nodes") or []:
             if not isinstance(other, dict):
@@ -200,47 +200,41 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
     if not paths:
         paths = list(role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN))
 
-    scene_paths = list(role_output_image_paths(ctx, NODE_ROLE_SCENE))
-    # Prefer explicit master + this shot's scene view from node inputs / identity_refs.
-    preferred_scene_ids: list[str] = []
-    master_id = str(
-        identity.get("master_scene_node_id") or cfg.get("master_scene_node_id") or ""
-    ).strip()
-    shot_scene_id = str(
-        identity.get("scene_node_id") or cfg.get("scene_node_id") or ""
-    ).strip()
-    if master_id:
-        preferred_scene_ids.append(master_id)
-    if shot_scene_id and shot_scene_id not in preferred_scene_ids:
-        preferred_scene_ids.append(shot_scene_id)
-    input_ids = [str(x) for x in (cfg.get("inputs") or []) if str(x).startswith("n_scene")]
-    for iid in input_ids:
-        if iid not in preferred_scene_ids:
-            preferred_scene_ids.append(iid)
-    if preferred_scene_ids:
-        scene_paths = node_ids_output_image_paths(ctx, preferred_scene_ids) or scene_paths
-
-    prior_id = str(
-        identity.get("prior_keyframe_node_id")
-        or cfg.get("prior_keyframe_node_id")
+    handoff_id = str(
+        identity.get("scene_prompt_handoff_from")
+        or cfg.get("scene_prompt_handoff_from")
+        or identity.get("scene_master_frame_id")
+        or cfg.get("scene_master_frame_id")
         or ""
     ).strip()
-    prior_paths: list[Path] = []
-    if prior_id:
-        prior_paths = node_ids_output_image_paths(ctx, [prior_id])
+    # If master prompt was handed off onto this config, prefer it in the leaf prompt path.
+    if handoff_id and not str(cfg.get("scene_master_prompt") or "").strip():
+        master_node = next(
+            (
+                n
+                for n in (ctx.graph.get("nodes") or [])
+                if isinstance(n, dict) and str(n.get("id") or "") == handoff_id
+            ),
+            None,
+        )
+        if master_node:
+            mcfg = master_node.get("config") if isinstance(master_node.get("config"), dict) else {}
+            mgen = mcfg.get("generate") if isinstance(mcfg.get("generate"), dict) else {}
+            master_prompt = str(mgen.get("prompt") or mcfg.get("prompt") or "").strip()
+            if master_prompt:
+                cfg["scene_master_prompt"] = master_prompt[:2400]
+                if isinstance(mcfg.get("scene_bible"), dict):
+                    cfg["scene_bible"] = dict(mcfg["scene_bible"])
+                node["config"] = cfg
+
+    user_paths = user_reference_image_paths(ctx.graph if isinstance(ctx.graph, dict) else None)
+
+    # Do NOT pull empty NODE_ROLE_SCENE plates or prior keyframe images into refs.
+    # Continuity is scene_bible + prompt handoff; visual identity is solo sheets only.
+    ordered = [*user_paths, *paths]
 
     merged: list[Path] = []
     seen: set[str] = set()
-    # Prior keyframe first when editing sequentially; else cast then scene.
-    strategy = str(
-        identity.get("keyframe_strategy") or cfg.get("keyframe_strategy") or ""
-    )
-    user_paths = user_reference_image_paths(ctx.graph if isinstance(ctx.graph, dict) else None)
-    ordered = (
-        [*user_paths, *prior_paths, *paths, *scene_paths]
-        if strategy == "edit_prior_keyframe" and prior_paths
-        else [*user_paths, *paths, *scene_paths, *prior_paths]
-    )
     for path in ordered:
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
             continue
@@ -404,11 +398,11 @@ def _is_rate_limit_error(text: str) -> bool:
 
 async def generate_designer_image(
     prompt: str,
-    size: str = "1024x1024",
+    size: str = "1K",
     reference_image: str | None = None,
     reference_images: list[str] | None = None,
-    max_tries: int = 4,
-    timeout_sec: float = 120.0,
+    max_tries: int = 2,
+    timeout_sec: float = 600.0,
 ) -> dict[str, str] | None:
     """Call image_gen when configured. Tests monkeypatch this function.
 
@@ -459,10 +453,10 @@ async def generate_designer_image(
                         reference_images=refs or None,
                         max_tries=1,
                     ),
-                    timeout=max(30.0, float(timeout_sec or 120.0)),
+                    timeout=max(60.0, float(timeout_sec or 600.0)),
                 )
             except asyncio.TimeoutError:
-                last_error = f"image_gen timed out after {int(timeout_sec)}s"
+                last_error = f"image_gen timed out after {int(timeout_sec or 600)}s"
                 logger.info("Designer image generation timed out (attempt %s/%s)", attempt, attempts)
                 result = {"error": last_error}
             except Exception as exc:  # noqa: BLE001
@@ -484,6 +478,8 @@ async def generate_designer_image(
             await asyncio.sleep(delay)
             continue
         if attempt < attempts and "timed out" in err.lower():
+            if attempt >= 2:
+                break
             await asyncio.sleep(2.0)
             continue
         break

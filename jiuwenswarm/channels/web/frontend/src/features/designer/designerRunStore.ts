@@ -8,6 +8,7 @@ import {
 } from './designerLayerRun';
 import { isActiveDesignerRun } from './designerRunView';
 import {
+  DESIGNER_LEADER_NODE_ID,
   DESIGNER_NODE_STATUS_COMPLETED,
   DESIGNER_NODE_STATUS_FAILED,
   DESIGNER_NODE_STATUS_PENDING,
@@ -15,6 +16,7 @@ import {
   type AssetRef,
   type DesignerExecutionGraph,
   type DesignerExecutionRun,
+  type DesignerNodeActivity,
   type DesignerNodeState,
 } from './executionGraphTypes';
 
@@ -26,7 +28,11 @@ type DesignerRunStore = {
   primaryAction: DesignerRunPrimaryAction;
   boundGraphId: string | null;
   runError: string | null;
+  runWarning: string | null;
+  leaderActivity: DesignerNodeActivity | null;
+  leaderActivityTail: string[];
   applyRun: (run: DesignerExecutionRun | null) => void;
+  applyLeaderActivity: (activity: DesignerNodeActivity | null) => void;
   resetForGraph: (graph: DesignerExecutionGraph | null) => void;
   getPrimaryAction: (graph: DesignerExecutionGraph | null) => DesignerRunPrimaryAction;
   advance: (graph: DesignerExecutionGraph) => Promise<void>;
@@ -46,6 +52,7 @@ type DesignerRunStore = {
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let runtimeBound = false;
 let unbindRuntime: (() => void) | null = null;
+let autoContinueKey: string | null = null;
 
 function clearPoll() {
   if (pollTimer) {
@@ -104,15 +111,25 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
   primaryAction: 'execute',
   boundGraphId: null,
   runError: null,
+  runWarning: null,
+  leaderActivity: null,
+  leaderActivityTail: [],
 
   applyRun: (run) => {
     const graph = useDesignerStore.getState().domainGraph;
     if (run && graph && run.graph_id !== graph.graph_id) {
       return;
     }
+    const leader = run?.node_states?.[DESIGNER_LEADER_NODE_ID];
     set({
       ...applySnapshot(run, graph),
       runError: null,
+      ...(leader?.activity
+        ? {
+            leaderActivity: leader.activity,
+            leaderActivityTail: leader.activity_tail || [],
+          }
+        : {}),
     });
     clearPoll();
     if (run && isActiveDesignerRun(run.status)) {
@@ -125,6 +142,43 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       }, 400);
     }
     // Do NOT auto-press Continue / Regenerate — user chooses explicitly.
+    // Exception: if the run stopped early with pending work still remaining,
+    // auto-resume once so the continuous scheduler can finish (avoids false Continue stalls).
+    if (run && !isActiveDesignerRun(run.status)) {
+      const graph = useDesignerStore.getState().domainGraph;
+      const primary = get().primaryAction;
+      const hasPending = Object.values(run.node_states || {}).some(
+        (s) => s?.status === DESIGNER_NODE_STATUS_PENDING,
+      );
+      if (
+        graph &&
+        hasPending &&
+        (primary === 'continue' || primary === 'retry_failed') &&
+        run.status !== 'cancelled'
+      ) {
+        const key = `${run.run_id}:${Object.keys(run.node_states || {}).length}`;
+        if (autoContinueKey !== key) {
+          autoContinueKey = key;
+          void get().advance(graph);
+        }
+      }
+    }
+  },
+
+  applyLeaderActivity: (activity) => {
+    if (!activity) {
+      set({ leaderActivity: null, leaderActivityTail: [] });
+      return;
+    }
+    const line = [activity.tool, activity.text].filter(Boolean).join(' · ') || activity.text;
+    set((state) => {
+      const tail = [...state.leaderActivityTail];
+      if (line && tail[tail.length - 1] !== line) tail.push(line);
+      return {
+        leaderActivity: activity,
+        leaderActivityTail: tail.slice(-8),
+      };
+    });
   },
 
   resetForGraph: (graph) => {
@@ -133,6 +187,9 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       set({
         ...applySnapshot(null, graph),
         runError: null,
+        runWarning: null,
+        leaderActivity: null,
+        leaderActivityTail: [],
       });
       return;
     }
@@ -144,6 +201,7 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       ...applySnapshot(null, graph),
       boundGraphId: graph.graph_id,
       runError: null,
+      runWarning: null,
     });
     void designerGraphClient
       .getRun({ graphId: graph.graph_id })
@@ -169,7 +227,7 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
     const nodeStates = run ? state.nodeStates : {};
     const currentLayerNodeIds = run ? state.currentLayerNodeIds : [];
     const primary = primaryFrom(graph, nodeStates, currentLayerNodeIds, false);
-    set({ runError: null });
+    set({ runError: null, runWarning: null });
     try {
       let result;
       // Always drive the full remaining pipeline in one start — never require
@@ -194,7 +252,12 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       } else {
         result = await designerGraphClient.startRun({ graphId: graph.graph_id });
       }
+      const warning =
+        String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
       get().applyRun(result.run);
+      if (warning) {
+        set({ runWarning: warning });
+      }
     } catch (error) {
       set({ runError: error instanceof Error ? error.message : String(error) });
     }
@@ -210,7 +273,7 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
   rerunNode: async (graph, nodeId) => {
     if (get().isRunning || !nodeId) return;
     await persistBeforeRun();
-    set({ runError: null });
+    set({ runError: null, runWarning: null });
     try {
       const run = get().run?.graph_id === graph.graph_id ? get().run : null;
       const result = await designerGraphClient.startRun({
@@ -218,7 +281,12 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
         runId: run?.run_id,
         nodeId,
       });
+      const warning =
+        String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
       get().applyRun(result.run);
+      if (warning) {
+        set({ runWarning: warning });
+      }
     } catch (error) {
       set({ runError: error instanceof Error ? error.message : String(error) });
     }
@@ -227,10 +295,15 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
   restart: async (graph) => {
     if (get().isRunning || graph.nodes.length === 0) return;
     await persistBeforeRun();
-    set({ runError: null });
+    set({ runError: null, runWarning: null });
     try {
       const result = await designerGraphClient.startRun({ graphId: graph.graph_id });
+      const warning =
+        String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
       get().applyRun(result.run);
+      if (warning) {
+        set({ runWarning: warning });
+      }
     } catch (error) {
       set({ runError: error instanceof Error ? error.message : String(error) });
     }
@@ -351,6 +424,19 @@ export function bindDesignerRuntime(): () => void {
     const run = (payload as { run?: DesignerExecutionRun }).run;
     if (matches(run)) useDesignerRunStore.getState().applyRun(run as DesignerExecutionRun);
   });
+  const offLeader = webClient.on('designer.leader.activity', ({ payload }) => {
+    const activity =
+      (payload as { activity?: DesignerNodeActivity }).activity ??
+      (payload as DesignerNodeActivity);
+    if (activity && typeof activity === 'object') {
+      useDesignerRunStore.getState().applyLeaderActivity({
+        kind: String(activity.kind || 'stage'),
+        text: String(activity.text || ''),
+        tool: activity.tool ? String(activity.tool) : undefined,
+        at: typeof activity.at === 'number' ? activity.at : Date.now(),
+      });
+    }
+  });
   const offGraph = webClient.on('designer.graph.updated', ({ payload }) => {
     const graph = (payload as { graph?: DesignerExecutionGraph }).graph;
     const current = useDesignerStore.getState().domainGraph;
@@ -360,10 +446,26 @@ export function bindDesignerRuntime(): () => void {
   unbindRuntime = () => {
     offRun();
     offNode();
+    offLeader();
     offGraph();
     clearPoll();
     runtimeBound = false;
     unbindRuntime = null;
   };
   return unbindRuntime;
+}
+
+export function selectLeaderPeek(state: {
+  nodeStates: Record<string, DesignerNodeState>;
+  leaderActivity: DesignerNodeActivity | null;
+  leaderActivityTail: string[];
+}): Pick<DesignerNodeState, 'activity' | 'activity_tail'> | null {
+  const fromRun = state.nodeStates[DESIGNER_LEADER_NODE_ID];
+  if (fromRun?.activity || (fromRun?.activity_tail && fromRun.activity_tail.length > 0)) {
+    return { activity: fromRun.activity, activity_tail: fromRun.activity_tail };
+  }
+  if (state.leaderActivity || state.leaderActivityTail.length > 0) {
+    return { activity: state.leaderActivity || undefined, activity_tail: state.leaderActivityTail };
+  }
+  return null;
 }

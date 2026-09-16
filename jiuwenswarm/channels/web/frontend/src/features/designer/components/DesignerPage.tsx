@@ -42,6 +42,7 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
   const boundGraphId = useDesignerRunStore((state) => state.boundGraphId);
   const run = useDesignerRunStore((state) => state.run);
   const runError = useDesignerRunStore((state) => state.runError);
+  const runWarning = useDesignerRunStore((state) => state.runWarning);
   const chooseOutput = useDesignerRunStore((state) => state.chooseOutput);
   const selectedMaterialId = useDesignerUiStore((state) => state.selectedMaterialId);
   const viewerOpen = useDesignerUiStore((state) => state.viewerOpen);
@@ -184,6 +185,11 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
       {runError ? (
         <p className="designer-page__error" data-testid="designer-error">
           {runError}
+        </p>
+      ) : null}
+      {runWarning ? (
+        <p className="designer-page__warning" data-testid="designer-warning">
+          {runWarning}
         </p>
       ) : null}
 

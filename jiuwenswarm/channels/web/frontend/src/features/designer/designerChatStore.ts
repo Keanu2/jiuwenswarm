@@ -17,6 +17,8 @@ export type DesignerChatMessageKind =
   | 'thinking'
   | 'bootstrap_done'
   | 'bootstrap_error'
+  | 'chat_ack'
+  | 'chat_error'
   | 'not_implemented';
 
 export type DesignerChatMessage = {

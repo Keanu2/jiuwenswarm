@@ -289,6 +289,22 @@ NODE_STATUS_COMPLETED = "completed"
 NODE_STATUS_FAILED = "failed"
 NODE_STATUS_CANCELLED = "cancelled"
 
+# Virtual node: invisible leader activity lives in run.node_states, never on the canvas.
+LEADER_NODE_ID = "__leader__"
+
+ACTIVITY_KIND_THINKING = "thinking"
+ACTIVITY_KIND_TOOL_CALL = "tool_call"
+ACTIVITY_KIND_STAGE = "stage"
+ACTIVITY_KINDS: frozenset[str] = frozenset(
+    {
+        ACTIVITY_KIND_THINKING,
+        ACTIVITY_KIND_TOOL_CALL,
+        ACTIVITY_KIND_STAGE,
+    }
+)
+ACTIVITY_TEXT_MAX = 120
+ACTIVITY_TAIL_LIMIT = 8
+
 NODE_STATUSES: frozenset[str] = frozenset(
     {
         NODE_STATUS_PENDING,
@@ -411,6 +427,13 @@ class DesignerExecutionGraph(TypedDict, total=False):
     updated_at: int
 
 
+class DesignerNodeActivity(TypedDict, total=False):
+    kind: str
+    text: str
+    tool: str
+    at: int
+
+
 class DesignerNodeState(TypedDict, total=False):
     status: str
     started_at: int | None
@@ -421,6 +444,8 @@ class DesignerNodeState(TypedDict, total=False):
     candidate_output_refs: list[AssetRef]
     error: str | None
     blocked_by: list[str]
+    activity: DesignerNodeActivity
+    activity_tail: list[str]
 
 
 class DesignerExecutionRun(TypedDict, total=False):
@@ -830,7 +855,7 @@ def ensure_bootstrap_pipeline(graph: DesignerExecutionGraph) -> DesignerExecutio
     return repair_overlapping_pipeline_layout(graph)
 
 
-MAX_SHOT_CLIP_NODES = 6
+MAX_SHOT_CLIP_NODES = 16
 COMPOSE_NODE_ID = "n_compose"
 DEFAULT_NODE_WIDTH = 280.0
 DEFAULT_NODE_HEIGHT = 160.0
@@ -1006,11 +1031,34 @@ def _is_frame_pipeline_id(node_id: str) -> bool:
     return node_id == "n_frame" or node_id.startswith("n_frame_")
 
 
+def _allowed_prior_frame_deps(node: DesignerGraphNode) -> set[str]:
+    """Same-setting prompt-handoff wires that must survive normalize."""
+    config = node.get("config")
+    if not isinstance(config, dict):
+        return set()
+    irefs = config.get("identity_refs") if isinstance(config.get("identity_refs"), dict) else {}
+    allowed: set[str] = set()
+    for key in (
+        "scene_prompt_handoff_from",
+        "scene_master_frame_id",
+        "prior_keyframe_node_id",
+    ):
+        for src in (config.get(key), irefs.get(key)):
+            val = str(src or "").strip()
+            if val and _is_frame_pipeline_id(val):
+                allowed.add(val)
+    # Only keep handoff deps when this node is a non-master keyframe.
+    if bool(config.get("is_scene_master") or irefs.get("is_scene_master")):
+        return set()
+    return allowed
+
+
 def drop_keyframe_to_keyframe_deps(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
-    """Keyframe nodes do not consume each other; strip leftover serial edges."""
+    """Strip accidental keyframe→keyframe edges; keep declared edit-prior / scene-master wires."""
+    nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
     frame_ids = {
         str(node.get("id") or "")
-        for node in graph.get("nodes") or []
+        for node in nodes
         if (
             node_pipeline(node) == PIPELINE_FRAME
             or _is_frame_pipeline_id(str(node.get("id") or ""))
@@ -1019,23 +1067,56 @@ def drop_keyframe_to_keyframe_deps(graph: DesignerExecutionGraph) -> DesignerExe
     }
     if len(frame_ids) < 2:
         return graph
-    graph["edges"] = [
+    keep_pairs: set[tuple[str, str]] = set()
+    by_id = {str(n.get("id") or ""): n for n in nodes if n.get("id")}
+    for nid, node in by_id.items():
+        if nid not in frame_ids:
+            continue
+        for dep in _allowed_prior_frame_deps(node):
+            if dep in frame_ids and dep != nid:
+                keep_pairs.add((dep, nid))
+    kept_edges = [
         edge
         for edge in (graph.get("edges") or [])
         if not (
             str(edge.get("source") or "") in frame_ids
             and str(edge.get("target") or "") in frame_ids
+            and (str(edge.get("source") or ""), str(edge.get("target") or "")) not in keep_pairs
         )
     ]
-    for node in graph.get("nodes") or []:
+    existing_pairs = {
+        (str(e.get("source") or ""), str(e.get("target") or ""))
+        for e in kept_edges
+        if isinstance(e, dict)
+    }
+    for src, tgt in sorted(keep_pairs):
+        if (src, tgt) not in existing_pairs:
+            kept_edges.append(
+                {
+                    "id": f"e_{src}_{tgt}",
+                    "source": src,
+                    "target": tgt,
+                    "kind": EDGE_KIND_DATA,
+                }
+            )
+            existing_pairs.add((src, tgt))
+    graph["edges"] = kept_edges
+    for node in nodes:
         node_id = str(node.get("id") or "")
         if node_id not in frame_ids:
             continue
         config = node.get("config")
         if not isinstance(config, dict):
             continue
+        allowed = {dep for dep in _allowed_prior_frame_deps(node) if dep != node_id}
         inputs = [str(item) for item in (config.get("inputs") or [])]
-        next_inputs = [item for item in inputs if item not in frame_ids]
+        next_inputs = [
+            item for item in inputs if item not in frame_ids or item in allowed
+        ]
+        # Ensure declared prior/master stay wired even if a prior pass omitted them.
+        for dep in allowed:
+            if dep not in next_inputs:
+                next_inputs.append(dep)
         if next_inputs != inputs:
             config["inputs"] = next_inputs
     return graph
@@ -1400,6 +1481,79 @@ def ensure_bootstrap_clip_waits_for_frame(
     return ensure_bootstrap_pipeline(graph)
 
 
+def is_leader_node_id(node_id: Any) -> bool:
+    return str(node_id or "").strip() == LEADER_NODE_ID
+
+
+def clip_activity_text(value: Any, *, max_len: int = ACTIVITY_TEXT_MAX) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max(1, max_len - 1)] + "…"
+
+
+def format_activity_line(kind: str, text: str, tool: str = "") -> str:
+    label = str(tool or "").strip() or str(kind or "").strip() or "activity"
+    body = clip_activity_text(text) or label
+    if kind == ACTIVITY_KIND_TOOL_CALL and str(tool or "").strip():
+        return f"{tool} · {body}" if body != tool else tool
+    return body
+
+
+def normalize_node_activity(raw: Any) -> DesignerNodeActivity | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise DesignerGraphValidationError("node_state.activity must be an object")
+    kind = str(raw.get("kind") or ACTIVITY_KIND_STAGE).strip() or ACTIVITY_KIND_STAGE
+    if kind not in ACTIVITY_KINDS:
+        kind = ACTIVITY_KIND_STAGE
+    text = clip_activity_text(raw.get("text"))
+    tool = str(raw.get("tool") or "").strip()
+    at = raw.get("at")
+    activity: DesignerNodeActivity = {"kind": kind, "text": text}
+    if tool:
+        activity["tool"] = tool
+    if isinstance(at, int) and not isinstance(at, bool):
+        activity["at"] = at
+    else:
+        activity["at"] = utc_now_ms()
+    return activity
+
+
+def apply_node_activity(
+    state: DesignerNodeState | dict[str, Any] | None,
+    *,
+    kind: str,
+    text: str,
+    tool: str = "",
+    at: int | None = None,
+) -> DesignerNodeState:
+    current = dict(state or {})
+    activity = normalize_node_activity(
+        {
+            "kind": kind,
+            "text": text,
+            "tool": tool,
+            "at": at if isinstance(at, int) else utc_now_ms(),
+        }
+    )
+    assert activity is not None
+    line = format_activity_line(
+        str(activity.get("kind") or ""),
+        str(activity.get("text") or ""),
+        str(activity.get("tool") or ""),
+    )
+    tail = [item for item in (current.get("activity_tail") or []) if isinstance(item, str)]
+    if line and (not tail or tail[-1] != line):
+        tail.append(line)
+    current["activity"] = activity
+    current["activity_tail"] = tail[-ACTIVITY_TAIL_LIMIT:]
+    if "status" not in current:
+        current["status"] = NODE_STATUS_RUNNING
+    return current  # type: ignore[return-value]
+
+
 def normalize_node_state(raw: Any) -> DesignerNodeState:
     if not isinstance(raw, dict):
         raise DesignerGraphValidationError("node_state must be an object")
@@ -1447,7 +1601,88 @@ def normalize_node_state(raw: Any) -> DesignerNodeState:
         ):
             raise DesignerGraphValidationError("node_state.blocked_by must be a string array")
         state["blocked_by"] = list(blocked_by)
+    activity = normalize_node_activity(raw.get("activity"))
+    if activity is not None:
+        state["activity"] = activity
+    tail = raw.get("activity_tail")
+    if tail is not None:
+        if not isinstance(tail, list) or not all(isinstance(item, str) for item in tail):
+            raise DesignerGraphValidationError("node_state.activity_tail must be a string array")
+        state["activity_tail"] = [item for item in tail if item.strip()][:ACTIVITY_TAIL_LIMIT]
     return state
+
+
+def is_leader_node_id(node_id: Any) -> bool:
+    return str(node_id or "").strip() == LEADER_NODE_ID
+
+
+def clip_activity_text(value: Any, *, max_len: int = ACTIVITY_TEXT_MAX) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max(1, max_len - 1)] + "…"
+
+
+def format_activity_line(kind: str, text: str, tool: str = "") -> str:
+    label = str(tool or "").strip() or str(kind or "").strip() or "activity"
+    body = clip_activity_text(text) or label
+    if kind == ACTIVITY_KIND_TOOL_CALL and str(tool or "").strip():
+        return f"{tool} · {body}" if body != tool else tool
+    return body
+
+
+def normalize_node_activity(raw: Any) -> DesignerNodeActivity | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise DesignerGraphValidationError("node_state.activity must be an object")
+    kind = str(raw.get("kind") or ACTIVITY_KIND_STAGE).strip() or ACTIVITY_KIND_STAGE
+    if kind not in ACTIVITY_KINDS:
+        kind = ACTIVITY_KIND_STAGE
+    text = clip_activity_text(raw.get("text"))
+    tool = str(raw.get("tool") or "").strip()
+    at = raw.get("at")
+    activity: DesignerNodeActivity = {"kind": kind, "text": text}
+    if tool:
+        activity["tool"] = tool
+    if isinstance(at, int) and not isinstance(at, bool):
+        activity["at"] = at
+    else:
+        activity["at"] = utc_now_ms()
+    return activity
+
+
+def apply_node_activity(
+    state: DesignerNodeState | dict[str, Any] | None,
+    *,
+    kind: str,
+    text: str,
+    tool: str = "",
+    at: int | None = None,
+) -> DesignerNodeState:
+    current = dict(state or {})
+    activity = normalize_node_activity(
+        {
+            "kind": kind,
+            "text": text,
+            "tool": tool,
+            "at": at if isinstance(at, int) else utc_now_ms(),
+        }
+    )
+    assert activity is not None
+    line = format_activity_line(
+        str(activity.get("kind") or ""),
+        str(activity.get("text") or ""),
+        str(activity.get("tool") or ""),
+    )
+    tail = [item for item in (current.get("activity_tail") or []) if isinstance(item, str)]
+    if line and (not tail or tail[-1] != line):
+        tail.append(line)
+    current["activity"] = activity
+    current["activity_tail"] = tail[-ACTIVITY_TAIL_LIMIT:]
+    if "status" not in current:
+        current["status"] = NODE_STATUS_RUNNING
+    return current  # type: ignore[return-value]
 
 
 def normalize_execution_run(raw: Any) -> DesignerExecutionRun:

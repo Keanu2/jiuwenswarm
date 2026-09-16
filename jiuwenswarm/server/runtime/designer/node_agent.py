@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -423,6 +424,25 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         for edge in graph.get("edges") or []
         if edge.get("source") == node["id"]
     ]
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+    spatial = cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else {}
+    if not spatial:
+        meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+        spatial = meta.get("spatial_lock") if isinstance(meta.get("spatial_lock"), dict) else {}
+    locks = {
+        "setting_id": cfg.get("setting_id") or identity.get("setting_id"),
+        "keyframe_strategy": cfg.get("keyframe_strategy") or identity.get("keyframe_strategy"),
+        "costume_lock": cfg.get("costume_lock") or identity.get("costume_lock"),
+        "spatial_lock": spatial or None,
+        "occupancy": cfg.get("occupancy") or identity.get("occupancy"),
+        "character_node_ids": cfg.get("character_node_ids") or identity.get("character_node_ids"),
+        "all_solo_node_ids": identity.get("all_solo_node_ids"),
+        "prior_keyframe_node_id": cfg.get("prior_keyframe_node_id")
+        or identity.get("prior_keyframe_node_id"),
+        "manager_prompt_reviewed": bool(cfg.get("manager_prompt_reviewed")),
+        "manager_lock_gate": cfg.get("manager_lock_gate"),
+    }
     snapshot = {
         "node_id": node["id"],
         "role": node_pipeline(node) or node_role(node),
@@ -433,14 +453,32 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "upstream_node_ids": preds,
         "suggested_next_node_ids": [item for item in suggested if isinstance(item, str)],
         "upstream_outputs": _upstream_outputs(ctx, preds),
+        "setting_id": locks["setting_id"],
+        "keyframe_strategy": locks["keyframe_strategy"],
+        "occupancy": locks["occupancy"],
+        "already_done": cfg.get("already_done"),
+        "previous_keyframe_prompt": str(cfg.get("previous_keyframe_prompt") or "")[:1600],
+        "previous_clip_wan_prompt": str(cfg.get("previous_clip_wan_prompt") or "")[:1600],
+        "locks": locks,
+        "manager_prompt_reviewed": locks["manager_prompt_reviewed"],
     }
     return (
-        "执行当前设计节点。先看 JSON 上下文，再用工具读图/改图/拉起同伴，最后 "
+        "执行当前设计节点。先看 JSON 上下文，用工具完成本节点产物，最后 "
         "designer_node_complete。\n"
-        "CRITICAL: Call designer_node_complete before finishing. "
-        "For character/scene/frame nodes submit text specs that describe the image; "
-        "for clip/compose the pipeline will materialize real video — do not claim done "
-        "with only markdown if you can attach a video uri.\n\n"
+        "CRITICAL: Call designer_node_complete before finishing, then STOP. "
+        "Do not designer_node_run graph nodes that already exist — the scheduler "
+        "starts them after this node completes. Only designer_node_run a node you "
+        "just added with designer_graph_patch.\n"
+        "TOOLS (not heuristics): Use call_model for text reasoning; call_image_model "
+        "for stills (Qwen/image gen); call_video_model for clips (Wan); "
+        "ffmpeg_compose / mix_audio for film assemble; read_upstream for prior "
+        "outputs. Prefer tool-produced file URIs in designer_node_complete.\n"
+        "LOCKS (must keep in every tool prompt before image/video calls): "
+        "obey locks.keyframe_strategy (compose_from_solo_refs for first KF of a setting; "
+        "edit_prior_keyframe for later same-setting KFs), costume_lock, spatial_lock, "
+        "occupancy, and solo identity sheets — never invent new faces/wardrobe/architecture.\n"
+        "CONTINUITY: Obey already_done and previous_* prompts — do not restage finished "
+        "exits, entrances, or one-shot dialogue; advance this shot's beat only.\n\n"
         f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n```"
     )
 
@@ -484,6 +522,8 @@ class DesignerGraphToolkit:
         }
 
     async def node_run(self, node_id: str) -> str:
+        if self.completed is not None:
+            return "already completed this node; scheduler will start remaining graph nodes"
         target = str(node_id or "").strip()
         if not target:
             return "node_id is required"
@@ -559,47 +599,172 @@ class DesignerGraphToolkit:
             from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
 
             _seed_handler_prompt(node, agent_result)
-            logger.info(
-                "Eager media materialization on node_complete. node=%s role=%s required=%s",
-                self.ctx.node_id,
-                node_pipeline(node) or node_role(node),
-                required_family,
-            )
             try:
                 media = await get_node_handler(node).execute(node, self.ctx)
-            except Exception as exc:
-                logger.exception(
-                    "Eager media materialization failed on node_complete. node=%s",
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Eager media materialization failed node=%s: %s",
                     self.ctx.node_id,
+                    exc,
                 )
-                return f"completed {refs[0].get('uri')} (media pending: {exc})"
-            if _result_satisfies_required_media(media, node, self.ctx):
-                merged_refs: list[AssetRef] = []
-                if isinstance(media.output_ref, dict):
-                    merged_refs.append(media.output_ref)
-                for ref in media.output_refs or []:
-                    if isinstance(ref, dict) and ref not in merged_refs:
-                        merged_refs.append(ref)
-                merged_refs.extend(refs)
-                self.completed = NodeResult(
-                    output_ref=media.output_ref or merged_refs[0],
-                    output_refs=merged_refs,
-                    message=f"agent+handler: {media.message or 'media materialized'}",
-                )
-                # Publish into live run state so concurrent spawns see the media.
+                return f"completed text; media materialization deferred: {exc}"
+            if media is not None:
+                self.completed = media
                 if isinstance(self.ctx.run, dict):
                     states = self.ctx.run.setdefault("node_states", {})
                     states[self.ctx.node_id] = {
                         **dict(states.get(self.ctx.node_id) or {}),
-                        "output_ref": self.completed.output_ref,
-                        "output_refs": list(self.completed.output_refs or []),
-                        "message": self.completed.message,
+                        "output_ref": media.output_ref,
+                        "output_refs": list(media.output_refs or []),
+                        "message": media.message,
                     }
-                out_uri = ""
-                if isinstance(self.completed.output_ref, dict):
-                    out_uri = str(self.completed.output_ref.get("uri") or "")
-                return f"completed {out_uri}"
-        return f"completed {refs[0].get('uri')}"
+                return "completed with media"
+
+        return "completed"
+
+    async def call_model(self, *, prompt: str = "", system: str = "") -> str:
+        from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool
+
+        node = _node_from_ctx(self.ctx)
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        optimize = str(
+            (self.ctx.graph.get("metadata") or {}).get("optimize_for") or "quality"
+        )
+        result = await call_model_tool(
+            prompt=str(prompt or graph_prompt(self.ctx.graph, node) or "")[:6000],
+            system=str(system or cfg.get("supervisor_task") or "You are a Designer node agent.")[:4000],
+            optimize_for=optimize,
+            max_tokens=1600,
+        )
+        if not result.get("ok"):
+            return f"call_model error: {result.get('error') or 'unknown'}"
+        return str(result.get("text") or "")
+
+    async def read_upstream(self) -> str:
+        node = _node_from_ctx(self.ctx)
+        preds = data_predecessors(self.ctx.graph).get(str(node.get("id") or ""), [])
+        return json.dumps(_upstream_outputs(self.ctx, preds), ensure_ascii=False)
+
+    def _media_save_dir(self) -> Path:
+        root = get_agent_workspace_dir() / "designer_media" / self.ctx.run_id
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    async def call_image_model(
+        self,
+        *,
+        prompt: str = "",
+        size: str = "1024x1024",
+    ) -> str:
+        from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
+
+        node = _node_from_ctx(self.ctx)
+        text = str(prompt or "").strip() or str(
+            (node.get("config") or {}).get("prompt") or graph_prompt(self.ctx.graph, node) or ""
+        )
+        if not text:
+            return "call_image_model error: prompt required"
+        # Seed config so handler fallback uses the same creative direction.
+        cfg = node.get("config")
+        if not isinstance(cfg, dict):
+            cfg = {}
+            node["config"] = cfg
+        cfg["prompt"] = text[:6000]
+        try:
+            out = await generate_image(
+                prompt=text[:4000],
+                size=str(size or "1024x1024"),
+                save_dir=str(self._media_save_dir()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("call_image_model failed: %s", exc, exc_info=True)
+            return f"call_image_model error: {exc}"
+        path = ""
+        for line in str(out or "").splitlines():
+            if "Saved to:" in line:
+                path = line.split("Saved to:", 1)[-1].strip()
+                break
+        if not path:
+            # generate_image may return path-only on some backends
+            candidate = Path(str(out or "").strip())
+            if candidate.is_file():
+                path = str(candidate)
+        if path and Path(path).is_file():
+            uri = Path(path).resolve().as_uri()
+            self.completed = NodeResult(
+                output_ref=file_output_ref(Path(path), kind="image", mime_type="image/png"),
+                output_refs=[
+                    file_output_ref(Path(path), kind="image", mime_type="image/png")
+                ],
+                message="call_image_model",
+            )
+            return f"image_ready uri={uri} path={path}"
+        return str(out or "call_image_model produced no file")
+
+    async def call_video_model(
+        self,
+        *,
+        prompt: str = "",
+        duration: int = 5,
+        first_frame: str = "",
+    ) -> str:
+        from jiuwenswarm.server.runtime.designer.handlers.clip import generate_clip_video
+
+        node = _node_from_ctx(self.ctx)
+        text = str(prompt or "").strip() or str(
+            (node.get("config") or {}).get("prompt") or graph_prompt(self.ctx.graph, node) or ""
+        )
+        if not text:
+            return "call_video_model error: prompt required"
+        cfg = node.get("config")
+        if not isinstance(cfg, dict):
+            cfg = {}
+            node["config"] = cfg
+        cfg["prompt"] = text[:6000]
+        frame = str(first_frame or "").strip() or None
+        try:
+            result = await generate_clip_video(
+                prompt=text[:4000],
+                save_dir=str(self._media_save_dir()),
+                first_frame=frame,
+                duration=max(2, min(10, int(duration or 5))),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("call_video_model failed: %s", exc, exc_info=True)
+            return f"call_video_model error: {exc}"
+        video_path = str(result.get("video_path") or "").strip()
+        if not video_path or not Path(video_path).is_file():
+            return f"call_video_model error: no video_path ({result!r})"
+        path = Path(video_path)
+        self.completed = NodeResult(
+            output_ref=file_output_ref(path, kind="video", mime_type="video/mp4"),
+            output_refs=[file_output_ref(path, kind="video", mime_type="video/mp4")],
+            message="call_video_model",
+        )
+        return f"video_ready uri={path.resolve().as_uri()} path={path}"
+
+    async def ffmpeg_compose(self, *, prompt: str = "") -> str:
+        """Run the compose handler for this node (ffmpeg assemble)."""
+        from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
+
+        node = _node_from_ctx(self.ctx)
+        if prompt.strip():
+            cfg = node.get("config")
+            if not isinstance(cfg, dict):
+                cfg = {}
+                node["config"] = cfg
+            cfg["prompt"] = prompt.strip()[:4000]
+        try:
+            media = await get_node_handler(node).execute(node, self.ctx)
+        except Exception as exc:  # noqa: BLE001
+            return f"ffmpeg_compose error: {exc}"
+        self.completed = media
+        ref = media.output_ref if media else None
+        uri = str((ref or {}).get("uri") or "") if isinstance(ref, dict) else ""
+        return f"compose_ready uri={uri}" if uri else "compose_ready"
+
+    async def mix_audio(self, *, prompt: str = "") -> str:
+        return await self.ffmpeg_compose(prompt=prompt)
 
 
 def _node_from_ctx(ctx: NodeExecutionContext) -> DesignerGraphNode:
@@ -609,12 +774,53 @@ def _node_from_ctx(ctx: NodeExecutionContext) -> DesignerGraphNode:
     return {"id": ctx.node_id, "type": "text", "label": ctx.node_id}
 
 
+def _emit_ctx_activity(
+    ctx: NodeExecutionContext,
+    kind: str,
+    text: str,
+    tool: str = "",
+    *,
+    force: bool = False,
+) -> None:
+    emit = getattr(ctx, "emit_activity", None)
+    if not callable(emit):
+        return
+    try:
+        emit(kind, text, tool, force=force)
+    except TypeError:
+        emit(kind, text, tool)
+
+
 def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
     from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
+    from jiuwenswarm.common.schema.designer_graph import (
+        ACTIVITY_KIND_TOOL_CALL,
+    )
+
     def make_tool(name: str, description: str, input_params: dict[str, Any], func: Any) -> Any:
+        async def wrapped(**kwargs: Any) -> Any:
+            if toolkit.completed is not None and name == "designer_node_run":
+                return "already completed this node; scheduler will start remaining graph nodes"
+            _emit_ctx_activity(
+                toolkit.ctx,
+                ACTIVITY_KIND_TOOL_CALL,
+                f"calling {name}",
+                tool=name,
+                force=True,
+            )
+            result = await func(**kwargs)
+            preview = str(result or "")
+            _emit_ctx_activity(
+                toolkit.ctx,
+                ACTIVITY_KIND_TOOL_CALL,
+                preview[:80] or f"{name} done",
+                tool=name,
+            )
+            return result
+
         card = ToolCard(name=name, description=description, input_params=input_params)
-        return LocalFunction(card=card, func=func)
+        return LocalFunction(card=card, func=wrapped)
 
     def _payload(**kwargs: Any) -> dict[str, Any]:
         """LocalFunction invokes tools as func(**schema_fields)."""
@@ -659,7 +865,59 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
             text=str(payload.get("text") or ""),
         )
 
-    return [
+    async def call_model(**kwargs: Any) -> str:
+        payload = _payload(**kwargs)
+        return await toolkit.call_model(
+            prompt=str(payload.get("prompt") or ""),
+            system=str(payload.get("system") or ""),
+        )
+
+    async def read_upstream(**_kwargs: Any) -> str:
+        return await toolkit.read_upstream()
+
+    async def call_image_model(**kwargs: Any) -> str:
+        payload = _payload(**kwargs)
+        return await toolkit.call_image_model(
+            prompt=str(payload.get("prompt") or ""),
+            size=str(payload.get("size") or "1024x1024"),
+        )
+
+    async def call_video_model(**kwargs: Any) -> str:
+        payload = _payload(**kwargs)
+        try:
+            duration = int(payload.get("duration") or 5)
+        except (TypeError, ValueError):
+            duration = 5
+        return await toolkit.call_video_model(
+            prompt=str(payload.get("prompt") or ""),
+            duration=duration,
+            first_frame=str(payload.get("first_frame") or payload.get("firstFrame") or ""),
+        )
+
+    async def ffmpeg_compose(**kwargs: Any) -> str:
+        payload = _payload(**kwargs)
+        return await toolkit.ffmpeg_compose(prompt=str(payload.get("prompt") or ""))
+
+    async def mix_audio(**kwargs: Any) -> str:
+        payload = _payload(**kwargs)
+        return await toolkit.mix_audio(prompt=str(payload.get("prompt") or ""))
+
+    # Always expose graph tools + role tools from node.config.tools (jiuwen agents).
+    node = _node_from_ctx(toolkit.ctx)
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    wanted = {str(t).strip() for t in (cfg.get("tools") or []) if str(t).strip()}
+    # Default capability set when config.tools empty — still prefer real tools.
+    if not wanted:
+        wanted = {
+            "call_model",
+            "read_upstream",
+            "call_image_model",
+            "call_video_model",
+            "ffmpeg_compose",
+            "mix_audio",
+        }
+
+    tools: list[Any] = [
         make_tool(
             "designer_graph_get",
             "读取当前设计图、运行态和各节点产出。",
@@ -710,6 +968,88 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
             node_complete,
         ),
     ]
+    if "call_model" in wanted:
+        tools.append(
+            make_tool(
+                "call_model",
+                "Call the configured chat LLM (Settings model) for creative text/JSON.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "system": {"type": "string"},
+                    },
+                },
+                call_model,
+            )
+        )
+    if "read_upstream" in wanted:
+        tools.append(
+            make_tool(
+                "read_upstream",
+                "Read upstream node outputs for this node.",
+                {"type": "object", "properties": {}},
+                read_upstream,
+            )
+        )
+    if "call_image_model" in wanted:
+        tools.append(
+            make_tool(
+                "call_image_model",
+                "Generate a still via the configured image model (Qwen/image gen).",
+                {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "size": {"type": "string"},
+                    },
+                    "required": ["prompt"],
+                },
+                call_image_model,
+            )
+        )
+    if "call_video_model" in wanted:
+        tools.append(
+            make_tool(
+                "call_video_model",
+                "Generate a clip via the configured video model (Wan).",
+                {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "duration": {"type": "integer"},
+                        "first_frame": {"type": "string"},
+                    },
+                    "required": ["prompt"],
+                },
+                call_video_model,
+            )
+        )
+    if "ffmpeg_compose" in wanted:
+        tools.append(
+            make_tool(
+                "ffmpeg_compose",
+                "Assemble the final film with ffmpeg/compose handler.",
+                {
+                    "type": "object",
+                    "properties": {"prompt": {"type": "string"}},
+                },
+                ffmpeg_compose,
+            )
+        )
+    if "mix_audio" in wanted:
+        tools.append(
+            make_tool(
+                "mix_audio",
+                "Mix speech/music into the film (compose path).",
+                {
+                    "type": "object",
+                    "properties": {"prompt": {"type": "string"}},
+                },
+                mix_audio,
+            )
+        )
+    return tools
 
 
 class NodeAgentHost:
@@ -739,18 +1079,47 @@ class NodeAgentHost:
         ctx: NodeExecutionContext,
     ) -> NodeResult:
         toolkit = DesignerGraphToolkit(self._spawner, ctx)
-        if self._runner is not None:
-            return await self._runner(node, ctx, toolkit)
-        try:
-            agent_result = await self._run_deep_agent(node, ctx, toolkit)
-        except Exception:
-            logger.exception(
-                "Designer node agent failed; falling back to handler. node=%s",
-                ctx.node_id,
-            )
-            from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
+        from jiuwenswarm.server.runtime.designer.executor import _node_execute_timeout_sec
 
-            return await get_node_handler(node).execute(node, ctx)
+        timeout = float(_node_execute_timeout_sec(node))
+
+        async def _body() -> NodeResult:
+            if self._runner is not None:
+                return await self._runner(node, ctx, toolkit)
+            return await self._run_deep_agent(node, ctx, toolkit)
+
+        try:
+            try:
+                agent_result = await asyncio.wait_for(_body(), timeout=timeout)
+            except TimeoutError:
+                if toolkit.completed is not None:
+                    logger.warning(
+                        "Designer node agent timed out after complete; keeping output. node=%s",
+                        ctx.node_id,
+                    )
+                    agent_result = toolkit.completed
+                else:
+                    raise TimeoutError(
+                        f"node {ctx.node_id} timed out after {int(timeout)}s"
+                    ) from None
+        except Exception:
+            if toolkit.completed is not None:
+                logger.warning(
+                    "Designer node agent failed after complete; keeping output. node=%s",
+                    ctx.node_id,
+                    exc_info=True,
+                )
+                agent_result = toolkit.completed
+            elif self._runner is not None:
+                raise
+            else:
+                logger.exception(
+                    "Designer node agent failed; falling back to handler. node=%s",
+                    ctx.node_id,
+                )
+                from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
+
+                return await get_node_handler(node).execute(node, ctx)
 
         # Agents author creative direction via designer_* tools, but media
         # generation backends live on handlers. If the agent only submitted
@@ -818,6 +1187,14 @@ class NodeAgentHost:
         persona = flatten_template_prompt(template) if template else ""
         system_prompt = persona or "你是设计画布上的节点 Agent。用工具完成任务并提交产物。"
         query = build_node_user_query(node, ctx)
+        from jiuwenswarm.common.schema.designer_graph import ACTIVITY_KIND_THINKING
+
+        _emit_ctx_activity(
+            ctx,
+            ACTIVITY_KIND_THINKING,
+            f"planning {node.get('label') or ctx.node_id}",
+            force=True,
+        )
         tools = build_designer_tools(toolkit)
 
         key = self.agent_key(ctx.run_id, ctx.node_id)

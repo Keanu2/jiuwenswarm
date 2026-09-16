@@ -245,35 +245,57 @@ async def call_model_tool(
     try:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=api_key, base_url=api_base)
-        user_content = vision_user_content(prompt, images)
-        resp = await client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=max_tokens,
-            temperature=0.4 if optimize_for == "quality" else 0.7,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        if not text:
-            logger.warning("call_model_tool empty response model=%s", model_name)
-            return {
-                "ok": False,
-                "fallback": False,
-                "error": "empty_model_response",
-                "model": chosen.get("id"),
-                "model_name": model_name,
-                "text": "",
-            }
-        return {
-            "ok": True,
-            "fallback": False,
-            "model": chosen.get("id"),
-            "model_name": model_name,
-            "text": text,
-        }
+        async def _once(*, temperature: float) -> dict[str, Any]:
+            client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=90.0)
+            try:
+                user_content = vision_user_content(prompt, images)
+                resp = await client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                msg = resp.choices[0].message if resp.choices else None
+                text = ""
+                if msg is not None:
+                    text = str(getattr(msg, "content", None) or "").strip()
+                    if not text:
+                        # Some providers put text in refusal / nested fields.
+                        text = str(getattr(msg, "refusal", None) or "").strip()
+                if not text:
+                    return {
+                        "ok": False,
+                        "fallback": False,
+                        "error": "empty_model_response",
+                        "model": chosen.get("id"),
+                        "model_name": model_name,
+                        "text": "",
+                    }
+                return {
+                    "ok": True,
+                    "fallback": False,
+                    "model": chosen.get("id"),
+                    "model_name": model_name,
+                    "text": text,
+                }
+            finally:
+                try:
+                    await client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        first = await _once(temperature=0.4 if optimize_for == "quality" else 0.7)
+        if first.get("ok"):
+            return first
+        if first.get("error") == "empty_model_response":
+            logger.warning(
+                "call_model_tool empty response model=%s; retrying once", model_name
+            )
+            return await _once(temperature=0.2)
+        return first
     except Exception as exc:  # noqa: BLE001
         logger.warning("call_model_tool failed: %s", exc)
         return {

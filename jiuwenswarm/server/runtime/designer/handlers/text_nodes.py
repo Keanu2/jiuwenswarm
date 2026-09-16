@@ -73,7 +73,7 @@ Do not output storyboard drawings. Do not explain.
 Brief:
 """
 
-_MAX_STORYBOARD_SHOTS = 6
+_MAX_STORYBOARD_SHOTS = 16
 _TABLE_SEP_CELL = re.compile(r"^:?-{3,}:?$")
 
 
@@ -232,28 +232,105 @@ def shot_generate_prompt(shot: StoryboardShot) -> str:
     return "; ".join(parts)
 
 
+_DURATION_FIELD_RE = re.compile(
+    r"(?im)^(?:[-*]\s*)?(?:\*\*)?duration(?:\*\*)?\s*:?\s*~?\s*(\d{1,2}(?:\.\d+)?)",
+)
+_DURATION_INLINE_RE = re.compile(
+    r"(\d{1,2}(?:\.\d+)?)\s*-?\s*(?:seconds?|secs?|秒)",
+    re.I,
+)
+_LOGLINE_RE = re.compile(
+    r"(?im)^(?:[-*]\s*)?(?:\*\*)?logline(?:\*\*)?\s*:\s*(.+)$",
+)
+
+
+def brief_duration_seconds(text: str, default: int = 5) -> int:
+    """Read an explicit duration from a brief or user request."""
+    source = text or ""
+    field = _DURATION_FIELD_RE.search(source)
+    if field:
+        try:
+            sec = int(round(float(field.group(1))))
+        except (TypeError, ValueError):
+            sec = 0
+        if 1 <= sec <= 30:
+            return sec
+    match = _DURATION_INLINE_RE.search(source)
+    if match:
+        try:
+            sec = int(round(float(match.group(1))))
+        except (TypeError, ValueError):
+            sec = 0
+        if 1 <= sec <= 30:
+            return sec
+    return default
+
+
+def brief_logline(brief: str) -> str:
+    text = brief or ""
+    match = _LOGLINE_RE.search(text)
+    if match:
+        return match.group(1).strip().strip("*").strip()
+    match = re.search(r"(?i)\*\*logline:\*\*\s*(.+)", text)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def brief_story_focus(prompt: str) -> str:
+    text = (prompt or "").strip()
+    text = re.sub(
+        r"^(?:generate|create|make|please\s+(?:make|create))\s+"
+        r"(?:a\s+)?(?:\d{3,4}p\s+)?(?:video|film|clip|short)?"
+        r"(?:\s+in\s+\d+\s+seconds?)?"
+        r"(?:\s*,\s*(?:at least\s+)?(?:two|2)\s+cams?)?"
+        r"[,:]?\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    return text.strip(" ,.")
+
+
 def fallback_brief(prompt: str) -> str:
+    duration = brief_duration_seconds(prompt)
+    focus = brief_story_focus(prompt) or prompt
     return (
         "# Brief\n\n"
         f"**User prompt (verbatim intent):** {prompt}\n\n"
-        f"**Logline:** {prompt[:280]}\n\n"
+        f"**Logline:** {focus[:280]}\n\n"
         "- Cast: lock face/hair/body/costume per named character (solo sheets)\n"
         "- Setting: follow the user description; keep architecture/lighting consistent\n"
         "- Continuity: time-coherent actions (no reseating someone who already left)\n"
-        "- Duration: ~12-20 seconds unless prompt says otherwise\n"
+        f"- Duration: {duration} seconds\n"
         "- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
     )
 
 
 def fallback_storyboard(prompt: str) -> str:
+    duration = float(brief_duration_seconds(prompt))
+    focus = (brief_logline(prompt) or brief_story_focus(prompt) or prompt).strip()[:120]
+    if duration <= 10:
+        mid = min(4.0, max(2.0, round(duration * 0.4, 1)))
+        rows = [
+            f"| 1 | 0.0-{mid:.1f}s | wide / establishing | slow push | {focus} | hold geography | {focus} |",
+            f"| 2 | {mid:.1f}-{duration:.1f}s | medium / eye-level | hold | {focus} | no reset of prior poses | {focus} |",
+        ]
+    else:
+        t1 = round(duration / 3, 1)
+        t2 = round(duration * 2 / 3, 1)
+        rows = [
+            f"| 1 | 0.0-{t1:.1f}s | wide / establishing | slow push | {focus} | hold geography | {focus} |",
+            f"| 2 | {t1:.1f}-{t2:.1f}s | medium / eye-level | hold | {focus} | no reset of prior poses | {focus} |",
+            f"| 3 | {t2:.1f}-{duration:.1f}s | close-up / eye-level | slow pan | {focus} | prior exits stay gone | {focus} |",
+        ]
     return (
         "# Storyboard\n\n"
         "## Storyboard\n\n"
         f"| {_STORYBOARD_COLUMNS} |\n"
         "| --- | --- | --- | --- | --- | --- | --- |\n"
-        f"| 1 | 0.0-4.0s | wide / establishing | slow push | establish subjects from prompt | hold geography | {prompt[:120]} |\n"
-        "| 2 | 4.0-8.0s | medium / eye-level | hold | main action continues | no reset of prior poses | medium eye-level follow-through |\n"
-        "| 3 | 8.0-12.0s | close-up / eye-level | slow pan | reaction beat | prior exits stay gone | emotional close-up reaction |\n"
+        + "\n".join(rows)
+        + "\n"
     )
 
 

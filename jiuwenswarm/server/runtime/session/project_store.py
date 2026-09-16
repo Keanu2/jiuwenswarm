@@ -728,6 +728,35 @@ _DIR_RESERVED_NAMES = frozenset(
 )
 
 
+def sanitize_project_dir_name(name: str, *, max_len: int = 80) -> str:
+    """Turn an arbitrary prompt/title into a safe directory basename.
+
+    Collapses newlines/control chars, strips Windows-illegal path characters,
+    and truncates. Never raises — returns ``\"project\"`` if nothing usable remains.
+    """
+    import re
+
+    s = str(name or "")
+    # Prefer the first non-empty line (paste often includes a label + body).
+    for line in s.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = line.strip()
+        if line:
+            s = line
+            break
+    else:
+        s = s.strip()
+    s = re.sub(r"[\x00-\x1f\x7f]", " ", s)
+    for ch in _DIR_ILLEGAL_CHARS:
+        s = s.replace(ch, " ")
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    if len(s) > max_len:
+        s = s[:max_len].rstrip(" .")
+    upper = s.upper().rstrip(".")
+    if not s or all(c in " ." for c in s) or upper in _DIR_RESERVED_NAMES:
+        return "project"
+    return s
+
+
 def validate_project_dir_name(name: str) -> str:
     """校验项目名能否作为目录名;含非法字符或为保留名时抛 ``ValueError``。
 
@@ -741,6 +770,11 @@ def validate_project_dir_name(name: str) -> str:
     s = str(name or "").strip()
     if not s:
         raise ValueError("project name is required")
+    if any(ord(c) < 32 or c == "\x7f" for c in s):
+        raise ValueError(
+            "project name contains control characters (newlines/tabs) "
+            "which are illegal in directory names"
+        )
     bad = _DIR_ILLEGAL_CHARS.intersection(s)
     if bad:
         raise ValueError(

@@ -32,6 +32,7 @@ import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
 import { isMediaNodeType, supportsNodeToolbar } from '../../mediaNodeConfig';
+import { DesignerActivityPeek } from '../DesignerActivityPeek';
 import { DesignerNodeToolbar } from '../controls/DesignerNodeToolbar';
 import { DesignerNodeSuccessorControl } from './DesignerNodeSuccessorControl';
 
@@ -63,13 +64,27 @@ function PlaceholderBody({ nodeType }: { nodeType: string }) {
   );
 }
 
-function NodeOutputFrame({ running, children }: { running: boolean; children: ReactNode }) {
+function NodeOutputFrame({
+  nodeId,
+  running,
+  children,
+}: {
+  nodeId: string;
+  running: boolean;
+  children: ReactNode;
+}) {
+  const activity = useDesignerRunStore((state) => {
+    const nodeState = state.nodeStates[nodeId];
+    if (!nodeState) return null;
+    return { activity: nodeState.activity, activity_tail: nodeState.activity_tail };
+  });
   return (
     <span className="designer-node__output-frame">
       {children}
       {running ? (
         <span className="designer-node__running-overlay" data-testid="designer-node-running">
-          <Loader2 className="designer-node__running-icon" size={22} aria-hidden />
+          <Loader2 className="designer-node__running-icon" size={18} aria-hidden />
+          <DesignerActivityPeek state={activity} testId="designer-node-activity" />
         </span>
       ) : null}
     </span>
@@ -297,7 +312,7 @@ export function DesignerTextNode({ id, data, selected }: NodeProps<DesignerFlowN
       nodeType={DESIGNER_NODE_TYPE_TEXT}
       selected={selected}
       body={
-        <NodeOutputFrame running={status === DESIGNER_NODE_STATUS_RUNNING}>
+        <NodeOutputFrame nodeId={id} running={status === DESIGNER_NODE_STATUS_RUNNING}>
           <TextPreviewBody nodeId={id} nodeType={DESIGNER_NODE_TYPE_TEXT} />
         </NodeOutputFrame>
       }
@@ -328,7 +343,7 @@ export function DesignerTableNode({ id, data, selected }: NodeProps<DesignerFlow
       nodeType={DESIGNER_NODE_TYPE_TABLE}
       selected={selected}
       body={
-        <NodeOutputFrame running={status === DESIGNER_NODE_STATUS_RUNNING}>
+        <NodeOutputFrame nodeId={id} running={status === DESIGNER_NODE_STATUS_RUNNING}>
           <TablePreviewBody nodeId={id} />
         </NodeOutputFrame>
       }
@@ -398,7 +413,7 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
       mediaFilled={hasPreview}
       selected={selected}
       body={
-        <NodeOutputFrame running={status === DESIGNER_NODE_STATUS_RUNNING}>
+        <NodeOutputFrame nodeId={id} running={status === DESIGNER_NODE_STATUS_RUNNING}>
           {inner}
         </NodeOutputFrame>
       }

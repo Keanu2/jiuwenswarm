@@ -51,6 +51,10 @@ from jiuwenswarm.common.schema.designer_graph import (
     utc_now_ms,
 )
 from jiuwenswarm.common.schema.message import EventType
+from jiuwenswarm.server.runtime.designer.activity import (
+    emit_run_activity,
+    graph_node_states,
+)
 from jiuwenswarm.server.runtime.designer.a2a_collab import collaborate_ready_wave
 from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
 from jiuwenswarm.server.runtime.designer.handlers import (
@@ -202,29 +206,38 @@ class GraphExecutor:
         if run["status"] == RUN_STATUS_COMPLETED:
             pending = any(
                 (state or {}).get("status") == NODE_STATUS_PENDING
-                for state in (run.get("node_states") or {}).values()
+                for state in graph_node_states(run).values()
             )
             if not pending:
                 return run
         graph = self._require_graph(run["graph_id"])
         from jiuwenswarm.server.runtime.designer.model_tools import llm_available
 
-        # AI-first: keep agent delegate when models exist; handlers only as no-LLM fallback.
-        # force_handler nodes (music/speech beds) stay on the fast handler path.
+        # Framework: every node is an LLM agent with tools when models exist.
         use_agents = llm_available()
         for node in graph.get("nodes") or []:
             cfg = node.setdefault("config", {})
             if not isinstance(cfg, dict):
                 continue
-            current = str(cfg.get("delegate") or "").strip()
-            if cfg.get("force_handler") or current == CONFIG_DELEGATE_HANDLER:
-                cfg["delegate"] = CONFIG_DELEGATE_HANDLER
-            elif not current:
-                cfg["delegate"] = CONFIG_DELEGATE_AGENT if use_agents else CONFIG_DELEGATE_HANDLER
-            if use_agents and cfg.get("delegate") != CONFIG_DELEGATE_HANDLER and cfg.get("skip_llm"):
-                cfg["skip_llm"] = False
+            if use_agents:
+                cfg.pop("force_handler", None)
+                cfg["delegate"] = CONFIG_DELEGATE_AGENT
+                cfg["kind"] = "agent"
+                if cfg.get("skip_llm"):
+                    cfg["skip_llm"] = False
+                if cfg.get("prewritten") and not cfg.get("draft_prewritten"):
+                    cfg["draft_prewritten"] = cfg.pop("prewritten")
+                else:
+                    cfg.pop("prewritten", None)
+            else:
+                current = str(cfg.get("delegate") or "").strip()
+                if cfg.get("force_handler") or current == CONFIG_DELEGATE_HANDLER:
+                    cfg["delegate"] = CONFIG_DELEGATE_HANDLER
+                elif not current:
+                    cfg["delegate"] = CONFIG_DELEGATE_HANDLER
         meta = dict(graph.get("metadata") or {})
         meta["ai_agent_pipeline"] = use_agents
+        meta["all_nodes_agents"] = use_agents
         graph["metadata"] = meta
         run["status"] = RUN_STATUS_RUNNING
         run["updated_at"] = utc_now_ms()
@@ -441,9 +454,12 @@ class GraphExecutor:
         *,
         on_update: RunUpdateCallback | None,
     ) -> None:
-        if graph_uses_agent_scheduler(graph):
-            await self._execute_agent_run(graph, run, on_update=on_update)
-            return
+        # Always use the continuous wave scheduler. The agent-spawn scheduler
+        # dropped ready nodes past the concurrency cap (spawn returned
+        # "too many concurrent" and was ignored), which left the run stalled
+        # with pending nodes — UI showed Continue. Leaf agents still run via
+        # config.delegate=agent inside _run_single_node.
+        _ = graph_uses_agent_scheduler  # retained import for callers/tests
         await self._execute_wave_run(graph, run, on_update=on_update)
 
     async def _execute_agent_run(
@@ -492,7 +508,7 @@ class GraphExecutor:
                     return
                 run = self._require_run(run_id)
                 if NODE_STATUS_FAILED in {
-                    state.get("status") for state in (run.get("node_states") or {}).values()
+                    state.get("status") for state in graph_node_states(run).values()
                 }:
                     run["status"] = RUN_STATUS_FAILED
                     run["current_node_ids"] = []
@@ -570,13 +586,22 @@ class GraphExecutor:
             "heuristic_when": "llm_available() is False (no Settings chat models)",
         }
         graph["metadata"] = meta0
-        if (
+        # One-pass: skip Play-time redesign only when bootstrap truly LLM-composed.
+        already_composed = bool(meta0.get("supervisor_composed_on_bootstrap")) and not bool(
+            meta0.get("pending_llm_analysis")
+        )
+        if already_composed:
+            meta0["pending_llm_analysis"] = False
+            meta0["pending_supervisor_graph"] = False
+            graph["metadata"] = meta0
+        elif (
             str(meta0.get("scenario") or "") == "video"
             and use_llm_orch
             and (
                 meta0.get("pending_llm_analysis")
                 or str(meta0.get("script_analysis_mode") or "") != "llm"
             )
+            and not already_composed
         ):
             try:
                 from jiuwenswarm.server.runtime.designer.script_analysis import (
@@ -596,31 +621,59 @@ class GraphExecutor:
                         prompt_text, use_llm=True, timeout_sec=45.0
                     )
                     if str(analysis.get("source") or "") == "llm":
-                        old_id = str(graph.get("graph_id") or "")
-                        project_id = str(graph.get("project_id") or "")
-                        rebuilt = build_smart_video_graph(
-                            project_id=project_id,
-                            prompt=prompt_text,
-                            analysis=analysis,
-                            title=str(graph.get("title") or "") or None,
-                            optimize_for=optimize_for,
-                            ai_mode=True,
+                        # Cast shrink guard: never replace a richer solo cast with fewer humans.
+                        old_solos = sum(
+                            1
+                            for n in (graph.get("nodes") or [])
+                            if str(n.get("id") or "").startswith("n_character")
                         )
-                        rebuilt["graph_id"] = old_id
-                        rebuilt["project_id"] = project_id
-                        rebuilt["created_at"] = graph.get("created_at") or rebuilt.get(
-                            "created_at"
-                        )
-                        rebuilt = apply_runtime_delegate(rebuilt)
-                        rebuilt = attach_skills_metadata(rebuilt, prompt_text)
-                        meta_r = dict(rebuilt.get("metadata") or {})
-                        meta_r["script_analysis"] = analysis
-                        meta_r["script_analysis_mode"] = "llm"
-                        meta_r["pending_llm_analysis"] = False
-                        meta_r["ai_agent_pipeline"] = True
-                        meta_r["supervisor_analyzed"] = True
-                        rebuilt["metadata"] = meta_r
-                        graph = self._store.save_graph(rebuilt)
+                        new_chars = [
+                            c
+                            for c in (analysis.get("characters") or [])
+                            if isinstance(c, dict)
+                            and c.get("id")
+                            and not c.get("is_prop")
+                            and str(c.get("cast_kind") or "") not in {"brand_mascot", "prop"}
+                        ]
+                        if old_solos > 1 and len(new_chars) < old_solos:
+                            logger.info(
+                                "Play rebuild rejected: would shrink cast %s → %s",
+                                old_solos,
+                                len(new_chars),
+                            )
+                            meta0["pending_llm_analysis"] = False
+                            meta0["script_analysis_mode"] = str(
+                                meta0.get("script_analysis_mode") or "heuristic"
+                            )
+                            graph["metadata"] = meta0
+                            graph = self._store.save_graph(graph)
+                        else:
+                            old_id = str(graph.get("graph_id") or "")
+                            project_id = str(graph.get("project_id") or "")
+                            rebuilt = build_smart_video_graph(
+                                project_id=project_id,
+                                prompt=prompt_text,
+                                analysis=analysis,
+                                title=str(graph.get("title") or "") or None,
+                                optimize_for=optimize_for,
+                                ai_mode=True,
+                            )
+                            rebuilt["graph_id"] = old_id
+                            rebuilt["project_id"] = project_id
+                            rebuilt["created_at"] = graph.get("created_at") or rebuilt.get(
+                                "created_at"
+                            )
+                            rebuilt = apply_runtime_delegate(rebuilt)
+                            rebuilt = attach_skills_metadata(rebuilt, prompt_text)
+                            meta_r = dict(rebuilt.get("metadata") or {})
+                            meta_r["script_analysis"] = analysis
+                            meta_r["script_analysis_mode"] = "llm"
+                            meta_r["pending_llm_analysis"] = False
+                            meta_r["ai_agent_pipeline"] = True
+                            meta_r["supervisor_analyzed"] = True
+                            meta_r["supervisor_composed_on_bootstrap"] = True
+                            rebuilt["metadata"] = meta_r
+                            graph = self._store.save_graph(rebuilt)
                     else:
                         meta0["script_analysis"] = analysis
                         meta0["script_analysis_mode"] = str(
@@ -698,42 +751,8 @@ class GraphExecutor:
                 )
                 graph = self._store.save_graph(graph)
 
-            with traj.span(
-                agent_id="supervisor",
-                action="plan",
-                phase="orchestration",
-                role="supervisor",
-                tool=("llm" if use_llm_orch else "deterministic"),
-                detail={"optimize_for": optimize_for, "has_prior_feedback": bool(prior)},
-            ):
-                supervisor_skill = str(
-                    (graph.get("metadata") or {}).get("supervisor_skill_excerpt") or ""
-                )
-                if supervisor_skill:
-                    meta = dict(graph.get("metadata") or {})
-                    meta["active_supervisor_skill"] = supervisor_skill[:3000]
-                    graph["metadata"] = meta
-                plan = await SupervisorAgent().plan(
-                    graph,
-                    optimize_for=optimize_for,
-                    prior_feedback=prior,
-                    use_llm=use_llm_orch,
-                )
-                traj.record(
-                    agent_id="supervisor",
-                    action="plan_result",
-                    phase="orchestration",
-                    role="supervisor",
-                    detail={
-                        "notes": str((plan or {}).get("notes") or "")[:500],
-                        "rating_modality": (plan or {}).get("rating_modality"),
-                        "use_llm": use_llm_orch,
-                    },
-                )
-                self._store.save_graph(graph)
-
-            # Quality one-pass gate (video + LLM): brief → manager brief → storyboard →
-            # manager storyboard, then manager validate/prune. Forward only, no loops.
+            # Quality path: Brief+Storyboard → Manager lock → Supervisor rebuild graph
+            # → Supervisor plan (node tools) → Manager validate/prune/re-edit.
             scenario0 = str((graph.get("metadata") or {}).get("scenario") or "")
             if scenario0 == "video" and use_llm_orch:
                 with traj.span(
@@ -826,6 +845,72 @@ class GraphExecutor:
                     )
                     graph = self._store.save_graph(graph)
 
+                # Supervisor designs flexible multi-shot graph from locked Brief+Storyboard.
+                with traj.span(
+                    agent_id="supervisor",
+                    action="design_execution_graph",
+                    phase="orchestration",
+                    role="supervisor",
+                    tool=("llm" if use_llm_orch else "deterministic"),
+                ):
+                    graph_ack = await SupervisorAgent().design_execution_graph(
+                        graph,
+                        use_llm=use_llm_orch,
+                        optimize_for=optimize_for,
+                    )
+                    graph = self._store.save_graph(graph)
+                    # Topology changed — resync run states and push canvas update now.
+                    self._resync_run_after_graph_redesign(run, graph)
+                    self._publish(run, on_update)
+                    self._publish_graph(run, graph)
+                    traj.record(
+                        agent_id="supervisor",
+                        action="design_execution_graph_result",
+                        phase="orchestration",
+                        role="supervisor",
+                        detail={
+                            "source": graph_ack.get("source"),
+                            "shot_count": graph_ack.get("shot_count"),
+                            "frame_nodes": graph_ack.get("frame_nodes"),
+                            "node_count": len(graph.get("nodes") or []),
+                            "notes": str(graph_ack.get("notes") or "")[:400],
+                        },
+                    )
+
+            with traj.span(
+                agent_id="supervisor",
+                action="plan",
+                phase="orchestration",
+                role="supervisor",
+                tool=("llm" if use_llm_orch else "deterministic"),
+                detail={"optimize_for": optimize_for, "has_prior_feedback": bool(prior)},
+            ):
+                supervisor_skill = str(
+                    (graph.get("metadata") or {}).get("supervisor_skill_excerpt") or ""
+                )
+                if supervisor_skill:
+                    meta = dict(graph.get("metadata") or {})
+                    meta["active_supervisor_skill"] = supervisor_skill[:3000]
+                    graph["metadata"] = meta
+                plan = await SupervisorAgent().plan(
+                    graph,
+                    optimize_for=optimize_for,
+                    prior_feedback=prior,
+                    use_llm=use_llm_orch,
+                )
+                traj.record(
+                    agent_id="supervisor",
+                    action="plan_result",
+                    phase="orchestration",
+                    role="supervisor",
+                    detail={
+                        "notes": str((plan or {}).get("notes") or "")[:500],
+                        "rating_modality": (plan or {}).get("rating_modality"),
+                        "use_llm": use_llm_orch,
+                    },
+                )
+                self._store.save_graph(graph)
+
             with traj.span(
                 agent_id="manager",
                 action="validate_plan",
@@ -849,6 +934,9 @@ class GraphExecutor:
                     },
                 )
                 graph = self._store.save_graph(graph)
+                self._resync_run_after_graph_redesign(run, graph)
+                self._publish(run, on_update)
+                self._publish_graph(run, graph)
 
             remaining = {
                 node["id"]
@@ -1032,6 +1120,8 @@ class GraphExecutor:
                             "has_output": bool(state.get("output_ref")),
                         },
                     )
+                    if state.get("status") == NODE_STATUS_COMPLETED:
+                        self._handoff_scene_prompt_after_frame(graph, node_id)
 
                 run["current_node_ids"] = list(in_flight.keys())
                 await _maybe_review_storyboard()
@@ -1051,7 +1141,7 @@ class GraphExecutor:
                     break
             if self._is_cancelled(run_id):
                 return
-            statuses = {state.get("status") for state in run["node_states"].values()}
+            statuses = {state.get("status") for state in graph_node_states(run).values()}
             if NODE_STATUS_FAILED in statuses or remaining:
                 run["status"] = RUN_STATUS_FAILED
             else:
@@ -1229,10 +1319,91 @@ class GraphExecutor:
         )
         if not has_clip_pipeline:
             return graph, remaining, data_predecessors(graph), sync_groups(graph)
-        # Quality smart graphs are built with per-shot scene + solo cast wiring.
-        # Mid-run expand_shot_nodes dumps ALL cast/scenes into every frame and
-        # orphans carefully planned identity edges — sync prompts only.
+        # Flexible Supervisor graphs: if storyboard shot count differs from frame
+        # nodes, rebuild from analysis (do NOT use expand_shot_nodes — that dumps
+        # all cast into every frame and breaks identity wiring).
         meta = graph.get("metadata") or {}
+        current_frame_ids = {
+            str(node.get("id") or "")
+            for node in graph.get("nodes") or []
+            if str(node.get("id") or "").startswith("n_frame_")
+            or node_pipeline(node) == NODE_ROLE_FRAME
+        }
+        if len(current_frame_ids) != shot_count and not bool(meta.get("freeze_shot_topology")):
+            from jiuwenswarm.server.runtime.designer.smart_graph import (
+                apply_runtime_delegate,
+                build_smart_video_graph,
+            )
+
+            analysis = dict(meta.get("script_analysis") or {})
+            analysis["shots"] = [
+                {
+                    "shot_index": i,
+                    "timeline": getattr(row, "timeline", None)
+                    or (row.get("timeline") if isinstance(row, dict) else "")
+                    or f"{(i - 1) * 5:.1f}-{i * 5:.1f}s",
+                    "camera": getattr(row, "camera", None)
+                    or (row.get("camera") if isinstance(row, dict) else "")
+                    or "medium / eye-level",
+                    "action": getattr(row, "character_action", None)
+                    or getattr(row, "action", None)
+                    or (row.get("action") if isinstance(row, dict) else "")
+                    or "",
+                    "character_ids": list(
+                        getattr(row, "character_ids", None)
+                        or (row.get("character_ids") if isinstance(row, dict) else [])
+                        or []
+                    ),
+                    "keyframe_prompt": getattr(row, "keyframe_prompt", None)
+                    or (row.get("keyframe_prompt") if isinstance(row, dict) else "")
+                    or "",
+                    "setting_id": (row.get("setting_id") if isinstance(row, dict) else None)
+                    or "set_1",
+                }
+                for i, row in enumerate(shot_rows, start=1)
+            ]
+            analysis["target_shot_count"] = shot_count
+            rebuilt = build_smart_video_graph(
+                project_id=str(graph.get("project_id") or "project"),
+                prompt=str(graph.get("description") or ""),
+                analysis=analysis,
+                title=str(graph.get("title") or "") or None,
+                optimize_for=str(meta.get("optimize_for") or "quality"),
+                ai_mode=True,
+            )
+            rebuilt["graph_id"] = graph.get("graph_id") or rebuilt.get("graph_id")
+            rebuilt["project_id"] = graph.get("project_id") or rebuilt.get("project_id")
+            rmeta = dict(rebuilt.get("metadata") or {})
+            for key in (
+                "approved_brief",
+                "approved_storyboard",
+                "user_prompt",
+                "manager_lock_ack",
+                "supervisor_owns_graph",
+            ):
+                if key in meta and meta.get(key) is not None:
+                    rmeta[key] = meta.get(key)
+            rmeta["freeze_shot_topology"] = False
+            rmeta["script_analysis"] = analysis
+            rebuilt["metadata"] = rmeta
+            saved = self._store.save_graph(apply_runtime_delegate(rebuilt))
+            live_ids = {str(node.get("id") or "") for node in saved.get("nodes") or []}
+            states = run.setdefault("node_states", {})
+            for node_id in live_ids:
+                states.setdefault(node_id, {"status": NODE_STATUS_PENDING})
+            remaining = {
+                node_id
+                for node_id in live_ids
+                if (states.get(node_id) or {}).get("status") not in _TERMINAL_NODE_STATUSES
+            }
+            run["updated_at"] = utc_now_ms()
+            self._store.save_run(run)
+            self._publish(run, on_update)
+            callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
+            if callback is not None:
+                callback(deepcopy(saved))
+            return saved, remaining, data_predecessors(saved), sync_groups(saved)
+
         if bool(meta.get("freeze_shot_topology") or meta.get("lean_pipeline")):
             synced = apply_shot_generate_prompts(graph, prompts)
             if synced is graph:
@@ -1277,8 +1448,38 @@ class GraphExecutor:
                 callback(deepcopy(saved))
             return saved, remaining, data_predecessors(saved), sync_groups(saved)
 
+        # Prefer Supervisor-style rebuild over expand_shot_nodes (identity-safe).
+        from jiuwenswarm.server.runtime.designer.smart_graph import (
+            apply_runtime_delegate,
+            build_smart_video_graph,
+        )
+
+        analysis = dict(meta.get("script_analysis") or {})
+        analysis["target_shot_count"] = shot_count
+        rebuilt = build_smart_video_graph(
+            project_id=str(graph.get("project_id") or "project"),
+            prompt=str(graph.get("description") or ""),
+            analysis=analysis,
+            title=str(graph.get("title") or "") or None,
+            optimize_for=str(meta.get("optimize_for") or "quality"),
+            ai_mode=True,
+        )
+        rebuilt["graph_id"] = graph.get("graph_id") or rebuilt.get("graph_id")
+        rebuilt["project_id"] = graph.get("project_id") or rebuilt.get("project_id")
+        rmeta = dict(rebuilt.get("metadata") or {})
+        for key in (
+            "approved_brief",
+            "approved_storyboard",
+            "user_prompt",
+            "manager_lock_ack",
+            "supervisor_owns_graph",
+        ):
+            if key in meta and meta.get(key) is not None:
+                rmeta[key] = meta.get(key)
+        rmeta["freeze_shot_topology"] = False
+        rebuilt["metadata"] = rmeta
         saved = self._store.save_graph(
-            apply_shot_generate_prompts(expand_shot_nodes(graph, shot_count), prompts)
+            apply_shot_generate_prompts(apply_runtime_delegate(rebuilt), prompts)
         )
         live_ids = {str(node.get("id") or "") for node in saved.get("nodes") or []}
         states = run.setdefault("node_states", {})
@@ -1297,6 +1498,79 @@ class GraphExecutor:
         if callback is not None:
             callback(deepcopy(saved))
         return saved, remaining, data_predecessors(saved), sync_groups(saved)
+
+    def _handoff_scene_prompt_after_frame(
+        self,
+        graph: DesignerExecutionGraph,
+        frame_id: str,
+    ) -> None:
+        """Pass scene-master prompt text to later same-setting keyframes (compose path).
+
+        Visual refs stay solo character sheets; only the deterministic scene bible /
+        generate prompt is forwarded so later agents keep architecture consistent.
+        """
+        by_id = {
+            str(n.get("id") or ""): n
+            for n in (graph.get("nodes") or [])
+            if isinstance(n, dict) and n.get("id")
+        }
+        src = by_id.get(str(frame_id or "").strip())
+        if not src or node_pipeline(src) != NODE_ROLE_FRAME:
+            return
+        scfg = src.get("config") if isinstance(src.get("config"), dict) else {}
+        if not bool(scfg.get("is_scene_master")):
+            return
+        setting_id = str(scfg.get("setting_id") or "").strip()
+        if not setting_id:
+            return
+        gen = scfg.get("generate") if isinstance(scfg.get("generate"), dict) else {}
+        master_prompt = str(gen.get("prompt") or scfg.get("prompt") or "").strip()
+        bible = scfg.get("scene_bible") if isinstance(scfg.get("scene_bible"), dict) else None
+        if not bible:
+            meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+            locks = meta.get("scene_locks") if isinstance(meta.get("scene_locks"), dict) else {}
+            maybe = locks.get(setting_id) if isinstance(locks, dict) else None
+            if isinstance(maybe, dict):
+                bible = maybe
+        if not master_prompt and not bible:
+            return
+        changed = False
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            nid = str(node.get("id") or "")
+            if nid == frame_id or node_pipeline(node) != NODE_ROLE_FRAME:
+                continue
+            cfg = dict(node.get("config") or {})
+            if str(cfg.get("setting_id") or "").strip() != setting_id:
+                continue
+            if bool(cfg.get("is_scene_master")):
+                continue
+            cfg["scene_prompt_handoff_from"] = frame_id
+            if bible:
+                cfg["scene_bible"] = dict(bible)
+            if master_prompt:
+                cfg["scene_master_prompt"] = master_prompt[:2400]
+            gen2 = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
+            prompt = str(gen2.get("prompt") or "")
+            marker = "SCENE PROMPT HANDOFF"
+            if marker not in prompt and master_prompt:
+                handoff_bit = (
+                    f"{marker} from {frame_id} (same setting `{setting_id}`): keep this "
+                    f"architecture/lighting/crowd/objects; change ONLY camera view + "
+                    f"on-screen cast/actions.\nMASTER SCENE PROMPT:\n{master_prompt[:1200]}"
+                )
+                gen2["prompt"] = (prompt + "\n" + handoff_bit).strip()[:2200]
+                cfg["generate"] = gen2
+            irefs = dict(cfg.get("identity_refs") or {})
+            irefs["scene_prompt_handoff_from"] = frame_id
+            irefs["keyframe_strategy"] = "compose_from_solo_refs"
+            cfg["identity_refs"] = irefs
+            cfg["keyframe_strategy"] = "compose_from_solo_refs"
+            node["config"] = cfg
+            changed = True
+        if changed:
+            self._store.save_graph(graph)
 
     def _completed_storyboard_shots(
         self,
@@ -1455,6 +1729,28 @@ class GraphExecutor:
                 cfg["rerun_suggestion"] = prior_plan[:1500]
             node["config"] = cfg
 
+        # Manager leaf prompt gate + prior-shot handoff for frame/clip media.
+        role_for_gate = str(
+            _node_pipeline_fn(node)
+            or (node.get("config") or {}).get("role")
+            or ""
+        ).lower()
+        if role_for_gate in {"frame", "keyframe", "clip", "character", "character_design", "scene"}:
+            from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent
+
+            live_graph = self._require_graph(
+                str(run.get("graph_id") or graph.get("graph_id") or "")
+            )
+            gate = ManagerAgent().review_leaf_media_prompt(live_graph, node)
+            # Always persist Manager lock-gate stamps (even when prompt text unchanged).
+            graph = live_graph
+            self._store.save_graph(graph)
+            for n in graph.get("nodes") or []:
+                if str(n.get("id") or "") == node_id:
+                    node = n
+                    break
+            _ = gate
+
         async with lock:
             self._set_node_state(
                 run,
@@ -1487,17 +1783,51 @@ class GraphExecutor:
         )
         try:
             with span_cm as span_detail:
+                def emit_activity(
+                    kind: str,
+                    text: str,
+                    tool: str = "",
+                    *,
+                    force: bool = False,
+                ) -> None:
+                    emit_run_activity(
+                        run,
+                        node_id,
+                        kind=kind,
+                        text=text,
+                        tool=tool,
+                        on_update=on_update,
+                        force=force,
+                    )
+
+                from jiuwenswarm.common.schema.designer_graph import (
+                    ACTIVITY_KIND_STAGE,
+                    ACTIVITY_KIND_TOOL_CALL,
+                    ACTIVITY_KIND_THINKING,
+                )
+                from jiuwenswarm.server.runtime.designer.activity import stage_text_for_node
+
+                uses_agent = node_uses_agent_runtime(node)
+                emit_activity(
+                    ACTIVITY_KIND_THINKING,
+                    f"starting {node.get('label') or node_id}",
+                    force=True,
+                )
+                emit_activity(
+                    ACTIVITY_KIND_TOOL_CALL if uses_agent else ACTIVITY_KIND_STAGE,
+                    stage_text_for_node(node),
+                    tool="node_agent" if uses_agent else "handler",
+                    force=True,
+                )
                 ctx = NodeExecutionContext(
                     graph=graph,
                     run_id=run["run_id"],
                     node_id=node_id,
                     run=run,
+                    emit_activity=emit_activity,
                 )
-                if node_uses_agent_runtime(node):
-                    result = await asyncio.wait_for(
-                        self._host.execute(node, ctx),
-                        timeout=_node_execute_timeout_sec(node),
-                    )
+                if uses_agent:
+                    result = await self._host.execute(node, ctx)
                     handler_name = "NodeAgentHost"
                 else:
                     handler = get_node_handler(node)
@@ -1578,6 +1908,52 @@ class GraphExecutor:
             if node_pipeline(node) == NODE_ROLE_STORYBOARD:
                 live_graph = self._require_graph(str(run.get("graph_id") or graph.get("graph_id") or ""))
                 self._expand_clips_if_needed(live_graph, run, set(), on_update=on_update)
+            # Stamp prior-shot prompt handoff after frame/clip media completes.
+            if node_pipeline(node) in {NODE_ROLE_FRAME, NODE_ROLE_CLIP}:
+                live_graph = self._require_graph(
+                    str(run.get("graph_id") or graph.get("graph_id") or "")
+                )
+                cfg_done = dict(node.get("config") or {})
+                approved = str(
+                    cfg_done.get("last_approved_prompt")
+                    or (cfg_done.get("generate") or {}).get("prompt")
+                    or ""
+                ).strip()
+                shot_index = int(cfg_done.get("shot_index") or 0)
+                if approved:
+                    for n in live_graph.get("nodes") or []:
+                        if str(n.get("id") or "") != node_id:
+                            continue
+                        c = dict(n.get("config") or {})
+                        c["last_approved_prompt"] = approved[:4000]
+                        if node_pipeline(node) == NODE_ROLE_CLIP:
+                            c["last_wan_prompt"] = approved[:4000]
+                            c["clip_prompt_preview"] = approved[:1200]
+                        n["config"] = c
+                        break
+                    if node_pipeline(node) == NODE_ROLE_FRAME and shot_index >= 1:
+                        next_frame = f"n_frame_{shot_index + 1}"
+                        next_clip = f"n_clip_{shot_index + 1}"
+                        for n in live_graph.get("nodes") or []:
+                            nid = str(n.get("id") or "")
+                            if nid not in {next_frame, next_clip}:
+                                continue
+                            c = dict(n.get("config") or {})
+                            c["previous_keyframe_prompt"] = approved[:3500]
+                            c["previous_keyframe_node_id"] = node_id
+                            n["config"] = c
+                    if node_pipeline(node) == NODE_ROLE_CLIP and shot_index >= 1:
+                        from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+                            stamp_wan_prompt_handoff,
+                        )
+
+                        stamp_wan_prompt_handoff(
+                            live_graph,
+                            shot_index=shot_index,
+                            prompt=approved,
+                            node_id=node_id,
+                        )
+                    graph = self._store.save_graph(live_graph)
         except Exception as exc:  # noqa: BLE001
             async with lock:
                 self._set_node_state(
@@ -1587,7 +1963,7 @@ class GraphExecutor:
                         "status": NODE_STATUS_FAILED,
                         "started_at": started_at,
                         "completed_at": utc_now_ms(),
-                        "error": str(exc),
+                        "error": _exception_text(exc),
                     },
                 )
                 run["status"] = RUN_STATUS_FAILED
@@ -1599,14 +1975,14 @@ class GraphExecutor:
                     role=role,
                     tool=tool_name,
                     status="error",
-                    detail={"error": str(exc)},
+                    detail={"error": _exception_text(exc)},
                 )
             if agent_feedback is not None:
                 agent_feedback[node_id] = {
                     "agent_id": node_id,
                     "role": role,
                     "self_score": 2,
-                    "notes": str(exc),
+                    "notes": _exception_text(exc),
                     "suggestion_for_next": "Retry with adjusted params from manager plan",
                     "tool": tool_name,
                 }
@@ -1625,6 +2001,37 @@ class GraphExecutor:
     def _is_cancelled(self, run_id: str) -> bool:
         cancel_flag = self._cancel_flags.get(run_id)
         return cancel_flag is not None and cancel_flag.is_set()
+
+    def _resync_run_after_graph_redesign(
+        self,
+        run: DesignerExecutionRun,
+        graph: DesignerExecutionGraph,
+    ) -> None:
+        """Keep run.node_states aligned after Supervisor redesigns topology."""
+        live_ids = {
+            str(node.get("id") or "")
+            for node in (graph.get("nodes") or [])
+            if isinstance(node, dict) and node.get("id")
+        }
+        states = dict(run.get("node_states") or {})
+        # Drop states for removed nodes; seed pending for new ones.
+        states = {nid: st for nid, st in states.items() if nid in live_ids}
+        for nid in live_ids:
+            if nid not in states:
+                states[nid] = {"status": NODE_STATUS_PENDING}
+        run["node_states"] = states
+        run["updated_at"] = utc_now_ms()
+        self._store.save_run(run)
+        self._live_runs[str(run.get("run_id") or "")] = run
+
+    def _publish_graph(
+        self,
+        run: DesignerExecutionRun,
+        graph: DesignerExecutionGraph,
+    ) -> None:
+        callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
+        if callback is not None:
+            callback(deepcopy(graph))
 
     @staticmethod
     def _set_node_state(
@@ -1763,16 +2170,29 @@ def _node_by_id(graph: DesignerExecutionGraph, node_id: str) -> DesignerGraphNod
     raise KeyError(f"node not found: {node_id}")
 
 
+def _exception_text(exc: BaseException) -> str:
+    text = str(exc).strip()
+    if text:
+        return text
+    if isinstance(exc, TimeoutError):
+        return "timed out"
+    return type(exc).__name__
+
+
 def _node_execute_timeout_sec(node: DesignerGraphNode) -> float:
-    """Hard cap so one leaf cannot hang the ready-queue forever."""
+    """Hard cap so one leaf cannot hang the ready-queue forever.
+
+    Agent + media materialization share this budget (DeepAgent turns then
+    image/video backends), so keep it generous for Wan / image_gen latency.
+    """
     pipeline = node_pipeline(node)
     if pipeline in {NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}:
-        return 480.0
+        return 1800.0
     if pipeline in {NODE_ROLE_FRAME, "character", "character_design", "scene"}:
-        return 300.0
+        return 1200.0
     if pipeline in {"speech", "music"}:
-        return 120.0
-    return 180.0
+        return 600.0
+    return 900.0
 
 
 def _is_ready(

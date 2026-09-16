@@ -30,6 +30,8 @@ import { useDesignerStore } from '../designerStore';
 import { designerEdgeTypes } from './edges/DesignerEdge';
 import { designerNodeTypes } from './nodes/designerNodes';
 import { DesignerCanvasDock } from './DesignerCanvasDock';
+import { DesignerActivityPeek } from './DesignerActivityPeek';
+import { selectLeaderPeek, useDesignerRunStore } from '../designerRunStore';
 import {
   DESIGNER_ASSET_DRAG_MIME,
   buildNodeFromLibraryAsset,
@@ -78,6 +80,22 @@ function toDesignerEdges(edges: Edge[]): DesignerReactFlowEdge[] {
     type: edge.type ?? 'designer',
     label: typeof edge.label === 'string' ? edge.label : undefined,
   }));
+}
+
+function DesignerLeaderStrip() {
+  const peek = useDesignerRunStore((state) => selectLeaderPeek(state));
+  const bootstrapInProgress = useDesignerStore((state) => state.bootstrapInProgress);
+  if (!peek && !bootstrapInProgress) return null;
+  return (
+    <div className="designer-leader-strip" data-testid="designer-leader-strip">
+      <span className="designer-leader-strip__label">Leader</span>
+      <DesignerActivityPeek
+        state={peek}
+        variant="leader"
+        testId="designer-leader-activity"
+      />
+    </div>
+  );
 }
 
 function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
@@ -250,6 +268,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
 
   return (
     <div className={`designer-canvas-shell${handMode ? ' is-hand' : ''}`}>
+      <DesignerLeaderStrip />
       <ReactFlow
         className="designer-page__canvas"
         nodes={nodes}

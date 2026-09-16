@@ -26,6 +26,29 @@ export const designerGraphClient = {
       patch,
     }),
 
+  chat: (params: {
+    graphId: string;
+    message: string;
+    selectedNodeId?: string;
+    runNewNodes?: boolean;
+  }) =>
+    webRequest<{
+      graph: DesignerExecutionGraph;
+      summary?: string;
+      intent?: string;
+      run_node_ids?: string[];
+      run?: DesignerExecutionRun | null;
+    }>(
+      'designer.graph.chat',
+      {
+        graph_id: params.graphId,
+        message: params.message,
+        ...(params.selectedNodeId ? { selected_node_id: params.selectedNodeId } : {}),
+        ...(params.runNewNodes ? { run_new_nodes: true } : {}),
+      },
+      { timeoutMs: 300000 },
+    ),
+
   bootstrap: (params: {
     prompt: string;
     title?: string;
@@ -52,11 +75,15 @@ export const designerGraphClient = {
           ? { references: params.references }
           : {}),
       },
-      { timeoutMs: 120000 },
+      { timeoutMs: 300000 },
     ),
 
   startRun: (params: { graphId?: string; runId?: string; nodeId?: string }) =>
-    webRequest<{ run: DesignerExecutionRun }>('designer.run.start', {
+    webRequest<{
+      run: DesignerExecutionRun;
+      warning?: string | null;
+      warnings?: string[] | null;
+    }>('designer.run.start', {
       ...(params.graphId ? { graph_id: params.graphId } : {}),
       ...(params.runId ? { run_id: params.runId } : {}),
       ...(params.nodeId ? { node_id: params.nodeId } : {}),

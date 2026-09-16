@@ -8,7 +8,11 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useWorkspaceStore } from '../../../stores';
-import { bootstrapDesignerFromChat } from '../designerEntry';
+import { bootstrapDesignerFromChat, chatDesignerGraph, isNewDesignerBrief } from '../designerEntry';
+import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
+import { useDesignerStore } from '../designerStore';
+import { designerActivityText } from '../designerActivity';
+import { selectLeaderPeek, useDesignerRunStore } from '../designerRunStore';
 import { useDesignerChatStore } from '../designerChatStore';
 import { useDesignerOptimizeStore } from '../designerOptimizeStore';
 import {
@@ -96,6 +100,8 @@ export function DesignerChatPanel() {
   const { t } = useTranslation();
   const messages = useDesignerChatStore((state) => state.messages);
   const bootstrapPhase = useDesignerChatStore((state) => state.bootstrapPhase);
+  const domainGraph = useDesignerStore((state) => state.domainGraph);
+  const selectedNodeId = useDesignerStore((state) => state.selectedNodeId);
   const selectedProject = useWorkspaceStore((state) => state.selectedProject);
   const workMode = useWorkspaceStore((state) => state.workMode);
   const loadProjects = useWorkspaceStore((state) => state.loadProjects);
@@ -117,6 +123,21 @@ export function DesignerChatPanel() {
     if (!el || tab !== 'assistant') return;
     el.scrollTop = el.scrollHeight;
   }, [messages, tab]);
+
+  const leaderPeek = useDesignerRunStore((state) => selectLeaderPeek(state));
+  useEffect(() => {
+    const thinking = messages.find((item) => item.kind === 'thinking');
+    if (!thinking) return;
+    const latest = designerActivityText(leaderPeek?.activity) || leaderPeek?.activity_tail?.at(-1);
+    if (!latest || latest === thinking.content) return;
+    useDesignerChatStore.getState().removeMessage(thinking.id);
+    useDesignerChatStore.getState().appendMessage({
+      id: thinking.id,
+      role: 'assistant',
+      content: latest,
+      kind: 'thinking',
+    });
+  }, [leaderPeek, messages]);
 
   const limitError = useCallback(
     (kind: DesignerReferenceKind) => {
@@ -197,6 +218,19 @@ export function DesignerChatPanel() {
         const useExistingProject = Boolean(
           projectId && projectId !== 'default' && projectId !== 'default_code',
         );
+        const existingGraph =
+          domainGraph && !isDesignerPreviewGraph(domainGraph) ? domainGraph : null;
+        // New film/design briefs always compose a fresh Supervisor graph on Enter.
+        // Small edit requests (add node / refine) keep Leader chat on the current graph.
+        if (existingGraph?.graph_id && !isNewDesignerBrief(content)) {
+          return chatDesignerGraph({
+            graphId: existingGraph.graph_id,
+            prompt: content,
+            selectedNodeId: selectedNodeId || undefined,
+            thinkingText: t('designer.chat.updating'),
+            errorText: t('designer.chat.updateError'),
+          });
+        }
         return bootstrapDesignerFromChat({
           prompt: content,
           references: converted.refs,
@@ -217,9 +251,11 @@ export function DesignerChatPanel() {
   }, [
     attachments,
     chatBusy,
+    domainGraph,
     draft,
     loadProjects,
     optimizeFor,
+    selectedNodeId,
     selectedProject?.project_dir,
     selectedProject?.project_id,
     t,

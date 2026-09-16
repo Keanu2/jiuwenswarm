@@ -3,9 +3,21 @@ import { useDesignerStore } from './designerStore';
 import { useDesignerChatStore } from './designerChatStore';
 import { designerGraphClient } from './designerGraphClient';
 import { useDesignerOptimizeStore } from './designerOptimizeStore';
+import { useDesignerRunStore } from './designerRunStore';
 import type { DesignerBootstrapReference, DesignerStoredReference } from './designerReferences';
 
-export const DESIGNER_BOOTSTRAP_THINKING_MS = 1200;
+export const DESIGNER_BOOTSTRAP_THINKING_MS = 0;
+
+/** True when the message is a new film/design brief (not a small canvas edit). */
+export function isNewDesignerBrief(text: string): boolean {
+  const t = String(text || '').trim();
+  if (t.length < 48) return false;
+  return (
+    /\b(video|film|story|shot|scene|valentine|create|make|second|vertical|keyframe|cartoon|sequence|storyboard)\b/i.test(
+      t,
+    ) || /视频|分镜|短片|情人节|镜头|创作|帮我/.test(t)
+  );
+}
 
 export type LaunchDesignerFromTaskParams = {
   prompt: string;
@@ -22,12 +34,6 @@ export type LaunchDesignerFromTaskParams = {
   doneText?: string;
   errorText?: string;
 };
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-}
 
 /**
  * Design canvas Assistant send: already on Design page, no nav jump; bootstrap onto canvas.
@@ -62,13 +68,12 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
 
   const optimizeFor =
     params.optimizeFor ?? useDesignerOptimizeStore.getState().optimizeFor ?? 'quality';
-  const thinkingMs = params.thinkingMs ?? DESIGNER_BOOTSTRAP_THINKING_MS;
   const thinkingText =
     params.thinkingText ??
     `Decomposing your request into an agentic ${optimizeFor}-optimized design graph…`;
   const doneText =
     params.doneText ??
-    'Workflow composed. Tweak parameters and rerun nodes as needed.';
+    'Supervisor composed the workflow. Tweak nodes or hit Play when ready.';
   const errorText = params.errorText ?? 'Failed to compose the design workflow. Please retry.';
 
   const designerStore = useDesignerStore.getState();
@@ -99,10 +104,11 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
     content: thinkingText,
     kind: 'thinking',
   });
-
-  await sleep(thinkingMs);
-
-  chatStore.removeMessage(thinkingId);
+  useDesignerRunStore.getState().applyLeaderActivity({
+    kind: 'thinking',
+    text: thinkingText,
+    at: Date.now(),
+  });
   chatStore.setBootstrapPhase('bootstrapping');
 
   try {
@@ -120,6 +126,8 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
       throw new Error('bootstrap response missing graph');
     }
     useDesignerStore.getState().applyGraph(graph);
+    useDesignerRunStore.getState().applyLeaderActivity(null);
+    useDesignerChatStore.getState().removeMessage(thinkingId);
     useDesignerChatStore.getState().bindGraph(graph.graph_id);
     void useWorkspaceStore.getState().loadDesignerGraphs();
     const scenario = String(graph.metadata?.scenario || 'auto');
@@ -133,11 +141,63 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     useDesignerStore.getState().failBootstrapEntry(message);
+    useDesignerChatStore.getState().removeMessage(thinkingId);
     useDesignerChatStore.getState().appendMessage({
       role: 'assistant',
       content: `${errorText}${message ? ` (${message})` : ''}`,
       kind: 'bootstrap_error',
     });
     useDesignerChatStore.getState().setBootstrapPhase('error');
+  }
+}
+
+export async function chatDesignerGraph(params: {
+  graphId: string;
+  prompt: string;
+  selectedNodeId?: string;
+  thinkingText?: string;
+  errorText?: string;
+}): Promise<void> {
+  const prompt = params.prompt.trim();
+  if (!prompt) return;
+  const chatStore = useDesignerChatStore.getState();
+  chatStore.appendMessage({ role: 'user', content: prompt, kind: 'user' });
+  const thinkingId = chatStore.appendMessage({
+    role: 'assistant',
+    content: params.thinkingText || 'Updating the workflow…',
+    kind: 'thinking',
+  });
+  useDesignerRunStore.getState().applyLeaderActivity({
+    kind: 'thinking',
+    text: params.thinkingText || 'Updating the workflow…',
+    at: Date.now(),
+  });
+  try {
+    const result = await designerGraphClient.chat({
+      graphId: params.graphId,
+      message: prompt,
+      selectedNodeId: params.selectedNodeId,
+    });
+    chatStore.removeMessage(thinkingId);
+    useDesignerRunStore.getState().applyLeaderActivity(null);
+    if (result.graph?.graph_id) {
+      useDesignerStore.getState().applyGraph(result.graph);
+    }
+    if (result.run) {
+      useDesignerRunStore.getState().applyRun(result.run);
+    }
+    chatStore.appendMessage({
+      role: 'assistant',
+      content: String(result.summary || 'Updated the workflow.').trim(),
+      kind: 'chat_ack',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    chatStore.removeMessage(thinkingId);
+    chatStore.appendMessage({
+      role: 'assistant',
+      content: `${params.errorText || 'Could not update the workflow.'}${message ? ` (${message})` : ''}`,
+      kind: 'chat_error',
+    });
   }
 }

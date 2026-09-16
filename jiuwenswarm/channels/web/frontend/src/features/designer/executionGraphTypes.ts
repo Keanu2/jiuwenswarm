@@ -127,6 +127,9 @@ type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
   interaction_mode?: 'generate' | 'upload' | 'edit';
   materials?: DesignerMediaMaterialSlot[];
   shot_index?: number;
+  /** Canvas-added by the user (Supervisor onboards as LLM agent when available). */
+  user_added?: boolean;
+  kind?: string;
 };
 
 export type DesignerNodeConfig =
@@ -156,6 +159,8 @@ export type DesignerNodeConfig =
       interaction_mode?: string;
       materials?: DesignerMediaMaterialSlot[];
       shot_index?: number;
+      user_added?: boolean;
+      kind?: string;
     };
 
 export const DESIGNER_EDGE_KIND_DATA = 'data' as const;
@@ -173,6 +178,25 @@ export const DESIGNER_NODE_STATUS_RUNNING = 'running' as const;
 export const DESIGNER_NODE_STATUS_COMPLETED = 'completed' as const;
 export const DESIGNER_NODE_STATUS_FAILED = 'failed' as const;
 export const DESIGNER_NODE_STATUS_CANCELLED = 'cancelled' as const;
+
+export const DESIGNER_LEADER_NODE_ID = '__leader__' as const;
+export const DESIGNER_ACTIVITY_KIND_THINKING = 'thinking' as const;
+export const DESIGNER_ACTIVITY_KIND_TOOL_CALL = 'tool_call' as const;
+export const DESIGNER_ACTIVITY_KIND_STAGE = 'stage' as const;
+export const DESIGNER_ACTIVITY_KINDS = [
+  DESIGNER_ACTIVITY_KIND_THINKING,
+  DESIGNER_ACTIVITY_KIND_TOOL_CALL,
+  DESIGNER_ACTIVITY_KIND_STAGE,
+] as const;
+
+export type DesignerActivityKind = (typeof DESIGNER_ACTIVITY_KINDS)[number];
+
+export type DesignerNodeActivity = {
+  kind: DesignerActivityKind | string;
+  text: string;
+  tool?: string;
+  at?: number;
+};
 
 export const DESIGNER_RUN_STATUS_DRAFT = 'draft' as const;
 export const DESIGNER_RUN_STATUS_RUNNING = 'running' as const;
@@ -245,6 +269,8 @@ export type DesignerNodeState = {
   candidate_output_refs?: AssetRef[] | null;
   error?: string | null;
   blocked_by?: string[];
+  activity?: DesignerNodeActivity | null;
+  activity_tail?: string[] | null;
 };
 
 export type DesignerExecutionRun = {
@@ -257,6 +283,8 @@ export type DesignerExecutionRun = {
   current_node_ids: string[];
   created_at?: number;
   updated_at?: number;
+  warning?: string | null;
+  warnings?: string[] | null;
 };
 
 export type DesignerGraphSummary = {

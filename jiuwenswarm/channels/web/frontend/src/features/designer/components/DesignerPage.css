@@ -196,6 +196,73 @@
   inset: 0;
 }
 
+.designer-leader-strip {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, calc(100% - 48px));
+  padding: 8px 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-surface-card) 88%, transparent);
+  box-shadow: var(--effect-shadow-sm);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.designer-leader-strip__label {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.designer-activity-peek {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.25;
+}
+
+.designer-activity-peek em,
+.designer-activity-peek strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: normal;
+}
+
+.designer-activity-peek em {
+  color: var(--color-text-muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.designer-activity-peek strong {
+  color: var(--color-text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.designer-activity-peek--node {
+  max-width: 90%;
+  text-align: center;
+}
+
+.designer-node__running-overlay {
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
 .designer-canvas-shell.is-hand .react-flow__pane {
   cursor: grab;
 }
@@ -1637,6 +1704,14 @@
   padding: 8px 20px;
   font-size: 12px;
   color: var(--color-feedback-danger, #cf1322);
+}
+
+.designer-page__warning {
+  margin: 0;
+  padding: 8px 20px;
+  font-size: 12px;
+  color: var(--color-feedback-warning, #ad6800);
+  background: color-mix(in srgb, var(--color-feedback-warning, #ad6800) 10%, transparent);
 }
 
 .designer-page__materials {

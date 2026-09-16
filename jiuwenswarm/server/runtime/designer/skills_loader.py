@@ -208,8 +208,43 @@ def skill_bundle_for_graph(
     }
 
 
+def load_tool_skill(tool_key: str) -> str:
+    return load_skill(f"tools/{tool_key}", tool_key)
+
+
+def _tool_skills_for_role(role: str) -> str:
+    """Append media-tool playbooks used by this leaf."""
+    role_l = str(role or "").strip().lower()
+    chunks: list[str] = []
+    if role_l in {
+        "character",
+        "character_design",
+        "frame",
+        "keyframe",
+        "scene",
+        "image",
+    }:
+        text = load_tool_skill("qwen_image")
+        if text:
+            chunks.append(text)
+    if role_l in {"clip", "video"}:
+        text = load_tool_skill("wan_video")
+        if text:
+            chunks.append(text)
+    if role_l in {"compose", "final", "film"}:
+        text = load_tool_skill("ffmpeg")
+        if text:
+            chunks.append(text)
+    return "\n\n".join(chunks).strip()
+
+
 def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> dict[str, Any]:
     """Attach task-specific agent skills to nodes; overall skills only on orchestration meta."""
+    # Fresh disk index after skill file edits (dev restarts).
+    try:
+        _skill_index.cache_clear()
+    except Exception:
+        pass
     meta = dict(graph.get("metadata") or {})
     scenario = str(meta.get("scenario") or "video")
     text = prompt or str(graph.get("description") or "")
@@ -218,15 +253,30 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
         cfg = dict(node.get("config") or {})
         role = str(node_pipeline(node) or cfg.get("role") or cfg.get("agent_role") or node.get("id") or "")
         roles.append(role)
-        # Leaf agents: only their own agent skill (short). No scenario / supervisor dump.
+        # Leaf agents: role skill + matching tool playbook (Qwen / Wan / ffmpeg).
         skill_text = load_agent_skill(role) or load_agent_skill(str(node.get("id") or ""))
-        if skill_text:
+        tool_text = _tool_skills_for_role(role)
+        merged = "\n\n".join(x for x in (skill_text, tool_text) if x).strip()
+        if merged:
             cfg["skill_id"] = _ROLE_ALIASES.get(role, role)
-            cfg["skill_excerpt"] = skill_text[:1200]
+            cfg["skill_excerpt"] = merged[:2200]
         else:
             cfg.pop("skill_excerpt", None)
         # Do not attach subject encyclopedia to every node here.
         cfg.pop("scenario_skill_excerpt", None)
+        # Media playbook for frame/clip agents.
+        try:
+            from jiuwenswarm.server.runtime.designer.media_model_playbook import (
+                playbook_for_role,
+            )
+
+            pb = playbook_for_role(role)
+            if pb and "QWEN" not in str(cfg.get("skill_excerpt") or ""):
+                cfg["skill_excerpt"] = (
+                    str(cfg.get("skill_excerpt") or "") + "\n\n" + pb
+                ).strip()[:2400]
+        except Exception:
+            pass
         node["config"] = cfg
     bundle = skill_bundle_for_graph(scenario=scenario, prompt=text, node_roles=roles)
     # Overall skills live only on graph metadata for supervisor / manager.
@@ -238,8 +288,8 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
     meta["audio_intent"] = bundle.get("audio") or {}
     meta["skill_guided"] = True
     meta["skill_policy"] = (
-        "Leaf nodes: agents/<role>.md only. "
-        "Supervisor/manager: orchestration + scenario skills in metadata."
+        "Leaf nodes: agents/<role>.md + tools/(qwen_image|wan_video|ffmpeg).md. "
+        "Supervisor/manager: orchestration skills in metadata."
     )
     graph["metadata"] = meta
     return graph

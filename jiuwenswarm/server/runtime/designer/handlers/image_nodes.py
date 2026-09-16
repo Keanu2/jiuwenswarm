@@ -41,6 +41,22 @@ from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
 
+def _resolve_image_size(cfg: dict, graph: dict | None = None) -> str:
+    """Prefer Manager-stamped aspect_lock image_size (~1K), then node config."""
+    aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
+    if not aspect and isinstance(graph, dict):
+        meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+        aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
+        if not aspect:
+            analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+            aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
+    return str(
+        cfg.get("image_size")
+        or (aspect or {}).get("image_size")
+        or "1K"
+    ).strip() or "1K"
+
+
 def _character_prompt(source: str, *, combined_cast: bool = False) -> str:
     if combined_cast:
         return (
@@ -62,15 +78,15 @@ def _scene_prompt(source: str, *, derive_from_master: bool = False) -> str:
     if derive_from_master:
         return (
             "EDIT / REFRAME the provided master environment reference. "
-            "Same building, pulpit location, aisle, windows, floor, and lighting direction. "
+            "Same landmarks, buildings, terrain, props, and lighting direction. "
             "Only change camera angle/framing for this shot. Environment only — no people. "
-            "Do NOT invent a new interior. Be fast — one clear image.\n"
+            "Do NOT invent a new location. Be fast — one clear image.\n"
             f"{source}"
         )
     return (
         "Cinematic establishing shot of the environment only, no people. "
-        "Show space, weather, lighting, signage, and ground so a character can be placed later. "
-        "Empty pews only (no crowd). This is the CANONICAL plate — freeze architecture. "
+        "Show space, weather, lighting, and ground so a character can be placed later. "
+        "This is the CANONICAL plate — freeze geography. "
         "Be fast — one clear image. No people, no subtitles, no storyboard grid.\n"
         f"{source}"
     )
@@ -133,11 +149,12 @@ def _shot_frame_prompt(
     if has_character and has_scene:
         if prior_edit:
             lead += (
-                " This is image-to-image EDIT of the prior keyframe (first reference). "
-                f"Keep the same faces and costumes"
-                f"{f' for {who}' if who else ''}; only change pose/action/blocking for this beat. "
-                "Additional references are canonical solo cast sheets and the scene — "
-                "do not invent a new wardrobe (e.g. suit vs robe)."
+                " This is image-to-image EDIT of the prior keyframe of the SAME setting "
+                "(first reference). Keep architecture, lighting, landmarks, faces, and costumes "
+                f"{f' for {who}' if who else ''}; only change camera/pose/blocking/who is "
+                "on-screen for this beat. Additional refs may include the scene-master compose "
+                "still (architecture lock) and solo cast sheets (identity only). "
+                "Never regenerate the set; never jump to another setting."
             )
         elif combined_cast_ref or (len(names) > 1 and n_refs == 1):
             lead += (
@@ -149,22 +166,28 @@ def _shot_frame_prompt(
         elif n_refs > 1:
             lead += (
                 f" This is image-to-image. The first {n_refs} references are CANONICAL solo "
-                f"cast sheets{f' for {who}' if who else ''}; the next is the scene. "
-                "Compose every listed character into that scene. "
+                f"cast sheets{f' for {who}' if who else ''}. COMPOSE a new SCENE MASTER still: "
+                "generate the place AND place every listed on-screen character into it. "
                 "IDENTITY LOCK: same face, hair, body, and costume as each sheet — "
-                "never redesign wardrobe between shots."
+                "never redesign wardrobe between shots. No empty environment plate."
             )
         else:
             lead += (
-                " This is image-to-image. The first reference is the canonical character sheet; "
-                "the second is the scene. Place that character in that scene and keep "
-                "identity, costume, materials, location, lighting, and weather."
+                " This is image-to-image. The first reference is the canonical character sheet. "
+                "Compose a SCENE MASTER still: generate the place and place that character. "
+                "Keep identity and costume from the sheet."
             )
     elif has_character:
-        lead += (
-            " Character look, costume, and materials must match the character reference exactly. "
-            "Do not invent a new design or alternate wardrobe."
-        )
+        if prior_edit:
+            lead += (
+                " Edit the prior same-setting keyframe (first ref). Keep the place and identity; "
+                "only update this beat's action/framing."
+            )
+        else:
+            lead += (
+                " Compose SCENE MASTER from solo sheet(s): generate the setting and place "
+                "the listed on-screen cast. Character look and costume must match the sheet(s)."
+            )
     elif has_scene:
         lead += " Location, lighting, and weather must match the scene reference."
     if costume_lock:
@@ -176,11 +199,11 @@ def _shot_frame_prompt(
     )
     lead += (
         " ANTI-CLONE: exactly one body per named character — never duplicate the same face "
-        "(e.g. preacher both at the pulpit and walking the aisle)."
+        "in two places at once."
     )
     lead += (
-        " CROWD LOCK: if the brief needs a listening congregation, show the SAME seated crowd "
-        "layout in the pews across shots (same coats/positions). Do not empty the pews in one "
+        " CROWD LOCK: if the brief needs extras, show the SAME group layout "
+        "across shots (same coats/positions). Do not empty the crowd in one "
         "shot and invent a new crowd in another. Featured cast must stay distinct from extras."
     )
     visual = _strip_markdown_tables(brief)
@@ -245,8 +268,9 @@ async def _image_or_notes(
     kind_if_text: str,
     reference_images: list[str] | None = None,
     size: str = "1024x1024",
-    max_tries: int = 4,
+    max_tries: int = 2,
     require_image: bool = True,
+    ctx: NodeExecutionContext | None = None,
 ) -> NodeResult:
     refs = [str(p) for p in (reference_images or []) if str(p).strip()]
     # Only pass real image files — markdown/extra stubs break DashScope uploads.
@@ -257,6 +281,12 @@ async def _image_or_notes(
         if path.is_file() and path.suffix.lower() in _IMG:
             clean_refs.append(str(path.resolve()))
     clean_refs = clean_refs[:3]
+    emit = getattr(ctx, "emit_activity", None) if ctx is not None else None
+    if callable(emit):
+        try:
+            emit("stage", "calling image model", "image_gen")
+        except TypeError:
+            emit("stage", "calling image model", "image_gen")
 
     generated = await handler_io.generate_designer_image(
         prompt,
@@ -331,9 +361,9 @@ class CharacterDesignNodeHandler:
         focused = str(cfg.get("prompt") or "").strip()
         source = focused or _aligned_source(ctx, NODE_ROLE_CHARACTER_DESIGN, node)
         name = str(cfg.get("character_name") or node.get("label") or "Character")
-        size = str(cfg.get("image_size") or "1024x1024")
+        size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
         combined = bool(cfg.get("combined_cast"))
-        max_tries = int(cfg.get("max_image_calls") or 1)
+        max_tries = max(2, int(cfg.get("max_image_calls") or 1))
         user_images = [str(path) for path in user_reference_image_paths(ctx.graph)]
         roster = prompt_slot_roster(graph_user_references(ctx.graph))
         prompt = _character_prompt(f"{name}\n{source}", combined_cast=combined)
@@ -349,6 +379,7 @@ class CharacterDesignNodeHandler:
             size=size,
             max_tries=max_tries,
             reference_images=user_images or None,
+            ctx=ctx,
         )
         return _with_card_ref(result, ctx, NODE_ROLE_CHARACTER_DESIGN)
 
@@ -358,8 +389,8 @@ class SceneNodeHandler:
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         focused = str(cfg.get("prompt") or "").strip()
         source = focused or _aligned_source(ctx, NODE_ROLE_SCENE, node)
-        size = str(cfg.get("image_size") or "1024x1024")
-        max_tries = int(cfg.get("max_image_calls") or 1)
+        size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
+        max_tries = max(2, int(cfg.get("max_image_calls") or 1))
         strategy = str(cfg.get("scene_strategy") or "").strip()
         derive = strategy == "edit_master_view"
         refs: list[str] = []
@@ -395,8 +426,9 @@ class SceneNodeHandler:
             stem=f"designer_scene_{ctx.run_id}_{ctx.node_id}",
             kind_if_text=NODE_TYPE_TEXT,
             size=size,
-            max_tries=max(4, max_tries),
+            max_tries=max_tries,
             reference_images=refs or None,
+            ctx=ctx,
         )
         return _with_card_ref(result, ctx, NODE_ROLE_SCENE)
 
@@ -409,11 +441,24 @@ class FrameNodeHandler:
         all_chars = role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN)
         all_scenes = role_output_image_paths(ctx, NODE_ROLE_SCENE)
         visual = brief or graph_prompt(ctx.graph, node)
-        if not all_chars or not all_scenes:
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        generate = cfg.get("generate") if isinstance(cfg.get("generate"), dict) else {}
+        identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+        keyframe_strategy = str(
+            identity.get("keyframe_strategy") or cfg.get("keyframe_strategy") or ""
+        )
+        meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
+        skip_scene_plate = bool(meta.get("skip_scene_plate"))
+        # Quality v5 compose-first: no empty Scene plates; KF generates setting+cast.
+        allow_without_scene = skip_scene_plate or keyframe_strategy in {
+            "compose_from_solo_refs",
+            "edit_prior_keyframe",
+        }
+        if not all_chars or (not all_scenes and not allow_without_scene):
             missing = []
             if not all_chars:
                 missing.append("Character")
-            if not all_scenes:
+            if not all_scenes and not allow_without_scene:
                 missing.append("Scene")
             raise RuntimeError(
                 "Keyframe generation must send "
@@ -421,10 +466,9 @@ class FrameNodeHandler:
                 + " with this shot. Finish the Character and Scene nodes first."
             )
         refs_paths = collect_frame_reference_images(ctx, node)
-        refs = [str(p) for p in (refs_paths or [*all_chars[:3], *all_scenes[:1]])]
+        fallback_refs = [*all_chars[:3], *all_scenes[:1]] if all_scenes else list(all_chars[:4])
+        refs = [str(p) for p in (refs_paths or fallback_refs)]
         shots = storyboard_shots_or_default(storyboard, visual)
-        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        generate = cfg.get("generate") if isinstance(cfg.get("generate"), dict) else {}
         planned_action = str(cfg.get("shot_action") or generate.get("prompt") or "").strip()
         cast_names = [
             str(x).strip()
@@ -441,10 +485,6 @@ class FrameNodeHandler:
             or (cfg.get("character_node_ids") or [])
             if str(x).strip()
         ]
-        identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
-        keyframe_strategy = str(
-            identity.get("keyframe_strategy") or cfg.get("keyframe_strategy") or ""
-        )
         costume_lock = str(identity.get("costume_lock") or cfg.get("costume_lock") or "")
         # Detect combined cast from attached character nodes when available.
         combined_cast_ref = False
@@ -484,18 +524,27 @@ class FrameNodeHandler:
             shot["comment"] = override
         elif planned_action and not str(shot.get("comment") or "").strip():
             shot["comment"] = planned_action
-        size = str(cfg.get("image_size") or "1024x1024")
-        max_tries = int(cfg.get("max_image_calls") or 1)
+        size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
+        max_tries = max(2, int(cfg.get("max_image_calls") or 1))
         frame_prompt = _shot_frame_prompt(
             shot,
             visual,
-            has_character=True,
-            has_scene=True,
+            has_character=bool(all_chars),
+            has_scene=bool(all_scenes),
             cast_names=cast_names,
             character_ref_count=char_ref_count,
             combined_cast_ref=combined_cast_ref,
             keyframe_strategy=keyframe_strategy,
             costume_lock=costume_lock,
+        )
+        from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+            apply_keyframe_call_locks,
+        )
+
+        frame_prompt = apply_keyframe_call_locks(
+            frame_prompt,
+            cfg=cfg,
+            graph=ctx.graph if isinstance(ctx.graph, dict) else {},
         )
         roster = prompt_slot_roster(graph_user_references(ctx.graph))
         if roster:
@@ -503,6 +552,12 @@ class FrameNodeHandler:
                 f"{frame_prompt}\nUser reference slots (original files are visual authority):\n"
                 f"{roster}"
             )
+        emit = getattr(ctx, "emit_activity", None)
+        if callable(emit):
+            try:
+                emit("stage", "calling image model", "image_gen")
+            except TypeError:
+                emit("stage", "calling image model", "image_gen")
         generated = await handler_io.generate_designer_image(
             frame_prompt,
             size=size,

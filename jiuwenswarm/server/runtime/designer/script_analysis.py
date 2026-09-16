@@ -15,11 +15,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_MAX_CHARS = 6
-_MAX_SHOTS = 6
-_MAX_SCENES = 3
+_MAX_CHARS = 12
+_MAX_SHOTS = 16
+_MAX_SCENES = 8
 # Keep under typical UI bootstrap budgets while still allowing a real LLM call.
-_DEFAULT_LLM_TIMEOUT_SEC = 12.0
+_DEFAULT_LLM_TIMEOUT_SEC = 90.0
 
 # Generic role nouns — not tied to any one story.
 _ROLE_NOUNS = (
@@ -28,6 +28,7 @@ _ROLE_NOUNS = (
     "chef|pilot|driver|farmer|scientist|engineer|artist|singer|dancer|"
     "detective|spy|robot|android|hero|villain|warrior|hunter|merchant|"
     "mother|father|parent|brother|sister|friend|stranger|leader|captain|"
+    "partner|girlfriend|boyfriend|wife|husband|date|spouse|"
     "boy|girl|child|kid|man|woman|person|guy|lady"
 )
 
@@ -39,8 +40,46 @@ def _clamp_list(items: list[Any], limit: int) -> list[Any]:
 def _title_case_label(raw: str) -> str:
     cleaned = re.sub(r"\s+", " ", raw.strip())
     if not cleaned:
-        return "Lead"
+        return ""
     return cleaned[:1].upper() + cleaned[1:]
+
+
+def infer_primary_subject_name(prompt: str) -> str:
+    """Best-effort subject label from the user prompt when cast extraction is empty."""
+    text = _strip_prompt_filler(_strip_reference_appendix(prompt))
+    match = re.search(
+        rf"\b((?:young|old|elderly|little|small|tall|beautiful|handsome|pretty|"
+        rf"sad|happy|angry|scared|lonely|brave)\s+)?(({_ROLE_NOUNS}))\b",
+        text,
+        flags=re.I,
+    )
+    if match:
+        phrase = f"{match.group(1) or ''}{match.group(2)}".strip()
+        label = _title_case_label(phrase)
+        if label:
+            return label
+    art = re.search(rf"\b(?:a|an|the)\s+(({_ROLE_NOUNS}))\b", text, flags=re.I)
+    if art:
+        label = _title_case_label(art.group(1))
+        if label:
+            return label
+    chunk = text.split(".")[0].split(",")[0].strip()[:48]
+    if chunk and len(chunk.split()) <= 6:
+        label = _title_case_label(chunk)
+        if label:
+            return label
+    return "Subject"
+
+
+def _strip_reference_appendix(text: str) -> str:
+    """Drop attachment roster so it is not treated as a cinematic beat."""
+    cleaned = re.split(
+        r"\n+\s*(?:User attached reference media|REFERENCE_MEDIA)\b",
+        text or "",
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    return cleaned.strip()
 
 
 def _strip_prompt_filler(text: str) -> str:
@@ -135,7 +174,8 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
         )
 
     for match in re.finditer(
-        rf"\b(?:a|an|the)\s+((?:{_ROLE_NOUNS}))\b",
+        # Allow 0–2 adjectives: "a young man", "the elderly pastor"
+        rf"\b(?:a|an|the|his|her|their)\s+(?:[A-Za-z-]+\s+){{0,2}}((?:{_ROLE_NOUNS}))\b",
         text,
         flags=re.I,
     ):
@@ -147,7 +187,8 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
         end_i = min(len(text), match.end() + 80)
         clause = text[start_i:end_i].split(".")[0].strip(" ,.;")
         nxt = re.search(
-            rf"\b(?:a|an|the|another|a second|the other)\s+(?:{_ROLE_NOUNS})\b",
+            rf"\b(?:a|an|the|another|a second|the other|his|her|their)\s+"
+            rf"(?:[A-Za-z-]+\s+){{0,2}}(?:{_ROLE_NOUNS})\b",
             clause[len(match.group(0)) :],
             flags=re.I,
         )
@@ -156,9 +197,42 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
         if re.match(r"^(?:the|a|an)\s+man\s+is\s+saying\b", clause, flags=re.I):
             continue
         label = _contextual_character_name(role, clause, another=False)
+        # Prefer fuller phrase when adjectives present ("Young Man").
+        full = match.group(0).strip()
+        full_label = _title_case_label(
+            re.sub(r"^(?:a|an|the|his|her|their)\s+", "", full, flags=re.I)
+        )
+        if full_label and len(full_label.split()) <= 4:
+            label = full_label
+        # "a date" (appointment) is not a character; "his partner/date" is.
+        if role.lower() == "date" and not re.search(
+            r"\b(?:his|her|their)\s+date\b", match.group(0), flags=re.I
+        ):
+            continue
         if label.lower() in used and role.lower() == "man":
             continue
         add(label, clause or f"{label} from the user prompt")
+        if len(found) >= _MAX_CHARS:
+            break
+
+    # Bare role mentions without article: "pastor preaches", "young man realizes"
+    for match in re.finditer(
+        rf"(?:^|[.!?]\s+|,\s+)((?:[A-Za-z-]+\s+){{0,1}}(?:{_ROLE_NOUNS}))\b",
+        text,
+        flags=re.I,
+    ):
+        phrase = match.group(1).strip()
+        role = phrase.split()[-1].lower()
+        if role in {"person", "people", "guy", "date"}:
+            continue
+        label = _title_case_label(phrase)
+        if label.lower() in used:
+            continue
+        if len(label.split()) > 3:
+            continue
+        if re.match(r"^(?:while|when|and|or|as|if|with)\b", label, flags=re.I):
+            continue
+        add(label, phrase)
         if len(found) >= _MAX_CHARS:
             break
 
@@ -180,7 +254,7 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
             )
 
     if not found:
-        add("Lead", "primary subject inferred from the user prompt")
+        add(infer_primary_subject_name(text), "primary subject inferred from the user prompt")
     return _clamp_list(found, _MAX_CHARS)
 
 
@@ -219,7 +293,7 @@ def _focus_character_ids(chunk: str, characters: list[dict[str, Any]]) -> list[s
 
 def _split_prompt_beats(prompt: str) -> list[str]:
     """Split into cinematic beats; avoid treating continuity 'while still…' as a new shot."""
-    text = _strip_prompt_filler(prompt)
+    text = _strip_prompt_filler(_strip_reference_appendix(prompt))
     if not text:
         return ["Establish the scene"]
 
@@ -381,21 +455,49 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
 
 
 def _heuristic_scenes(prompt: str) -> list[dict[str, str]]:
-    """Pick a primary setting from common place nouns; otherwise generic."""
+    """Infer a primary setting from place nouns in the prompt (domain-agnostic)."""
     lower = prompt.lower()
-    place_patterns: list[tuple[str, str, str]] = [
-        (r"\b(?:church|cathedral|chapel|temple|mosque|synagogue)\b", "Religious interior", "interior of the place of worship described"),
-        (r"\b(?:office|boardroom|classroom|lab|laboratory|hospital)\b", "Indoor workplace", "indoor workplace setting from the prompt"),
-        (r"\b(?:kitchen|living room|bedroom|apartment|house|home)\b", "Domestic interior", "home / domestic interior"),
-        (r"\b(?:street|alley|road|sidewalk|plaza|market)\b", "Street / outdoor", "outdoor urban environment"),
-        (r"\b(?:forest|beach|mountain|desert|lake|river|field)\b", "Nature", "natural outdoor setting"),
-        (r"\b(?:cafe|restaurant|bar|shop|store|mall)\b", "Public venue", "public commercial venue"),
-        (r"\b(?:spaceship|station|bridge|cockpit)\b", "Sci-fi interior", "vehicle / station interior"),
-    ]
+    # Capture the place word itself — no genre templates.
+    place_re = re.compile(
+        r"\b(?:in|at|inside|outside|near|from)\s+(?:a|an|the|his|her|their)?\s*"
+        r"([a-z][a-z\-]*(?:\s+[a-z][a-z\-]*){0,2})\b",
+        flags=re.I,
+    )
+    stop = {
+        "the",
+        "a",
+        "an",
+        "his",
+        "her",
+        "their",
+        "this",
+        "that",
+        "moment",
+        "time",
+        "day",
+        "night",
+        "way",
+        "while",
+        "front",
+        "back",
+    }
     scenes: list[dict[str, str]] = []
-    for pattern, name, desc in place_patterns:
-        if re.search(pattern, lower):
-            scenes.append({"id": f"scene_{len(scenes) + 1}", "name": name, "description": desc})
+    for match in place_re.finditer(lower):
+        phrase = re.sub(r"\s+", " ", match.group(1).strip())
+        words = [w for w in phrase.split() if w not in stop]
+        if not words:
+            continue
+        name = " ".join(words)[:48]
+        if name.lower() in {str(s.get("name") or "").lower() for s in scenes}:
+            continue
+        scenes.append(
+            {
+                "id": f"scene_{len(scenes) + 1}",
+                "name": name.title(),
+                "description": f"setting mentioned in the prompt: {name}",
+            }
+        )
+        if len(scenes) >= 2:
             break
     if not scenes:
         scenes.append(
@@ -514,6 +616,7 @@ def _supervisor_pipeline_decisions(
 def heuristic_analysis(prompt: str) -> dict[str, Any]:
     from jiuwenswarm.server.runtime.designer.skills_loader import detect_audio_intent
 
+    prompt = _strip_reference_appendix(prompt)
     characters = _heuristic_characters(prompt)
     scenes = _heuristic_scenes(prompt)
     shots = _heuristic_shots(prompt, characters)
@@ -683,17 +786,69 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         cids = [str(x) for x in (sh.get("character_ids") or []) if str(x) in valid_ids]
         if not cids and norm_chars:
             cids = [norm_chars[(i - 1) % len(norm_chars)]["id"]]
-        norm_shots.append(
-            {
-                "shot_index": i,
-                "title": str(sh.get("title") or f"Shot {i}"),
-                "action": str(sh.get("action") or "")[:500],
-                "camera": str(sh.get("camera") or "medium / eye-level"),
-                "character_ids": cids,
-                "keyframe_prompt": str(sh.get("keyframe_prompt") or sh.get("action") or "")[:600],
-                "timeline": str(sh.get("timeline") or f"{(i - 1) * 2:.1f}-{i * 2:.1f}s"),
-            }
-        )
+        ensemble = [
+            str(x)
+            for x in (sh.get("ensemble_cast_ids") or sh.get("character_ids") or [])
+            if str(x) in valid_ids
+        ] or list(cids)
+        featured = [
+            str(x)
+            for x in (sh.get("featured_cast_ids") or [])
+            if str(x) in valid_ids
+        ] or list(cids[:1])
+        exiting = [
+            str(x)
+            for x in (sh.get("exiting_character_ids") or [])
+            if str(x) in valid_ids
+        ]
+        on_screen = [
+            str(x)
+            for x in (
+                sh.get("on_screen")
+                or sh.get("visible_cast_ids")
+                or sh.get("character_ids")
+                or []
+            )
+            if str(x) in valid_ids
+        ] or list(cids)
+        offscreen = [
+            str(x)
+            for x in (sh.get("offscreen") or sh.get("off_screen_cast_ids") or [])
+            if str(x) in valid_ids and str(x) not in on_screen
+        ]
+        cast_actions: dict[str, str] = {}
+        raw_actions = sh.get("cast_actions") or sh.get("doing")
+        if isinstance(raw_actions, dict):
+            for k, v in raw_actions.items():
+                cid = str(k).strip()
+                if cid in valid_ids and str(v or "").strip():
+                    cast_actions[cid] = str(v).strip()[:240]
+        strategy = str(sh.get("keyframe_strategy") or "").strip()
+        setting_id = str(sh.get("setting_id") or sh.get("scene_id") or f"set_{i}").strip()
+        # Prefer on_screen as the drawn cast for this beat.
+        cids = list(on_screen) or cids
+        entry: dict[str, Any] = {
+            "shot_index": i,
+            "title": str(sh.get("title") or f"Shot {i}"),
+            "action": str(sh.get("action") or "")[:500],
+            "camera": str(sh.get("camera") or "medium / eye-level"),
+            "character_ids": cids,
+            "on_screen": on_screen or list(cids),
+            "visible_cast_ids": on_screen or list(cids),
+            "offscreen": offscreen,
+            "off_screen_cast_ids": offscreen,
+            "ensemble_cast_ids": ensemble,
+            "featured_cast_ids": featured,
+            "exiting_character_ids": exiting,
+            "setting_id": setting_id or f"set_{i}",
+            "keyframe_prompt": str(sh.get("keyframe_prompt") or sh.get("action") or "")[:600],
+            "timeline": str(sh.get("timeline") or f"{(i - 1) * 2:.1f}-{i * 2:.1f}s"),
+        }
+        if cast_actions:
+            entry["cast_actions"] = cast_actions
+        if strategy in {"compose_from_solo_refs", "edit_prior_keyframe"}:
+            entry["keyframe_strategy"] = strategy
+        norm_shots.append(entry)
     if not norm_shots:
         return None
     audio = parsed.get("audio") if isinstance(parsed.get("audio"), dict) else base.get("audio")
@@ -741,6 +896,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         "scenes": norm_scenes,
         "shots": norm_shots,
         "audio": audio,
+        "skip_scene_plate": bool(parsed.get("skip_scene_plate", True)),
         "summary": str(parsed.get("summary") or "")[:500]
         or f"{len(norm_chars)} characters, {len(norm_shots)} shots",
         **decisions,
@@ -770,108 +926,78 @@ async def analyze_creative_brief(
     duration_sec = target_duration_sec or 6
     try:
         from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool
-        from jiuwenswarm.server.runtime.designer.skills_loader import load_orchestration_skill
 
-        skill = load_orchestration_skill("supervisor")
         if short_clip:
             duration_rule = (
-                f"User asked for a ~{duration_sec}-second film/clip: set target_duration_sec={duration_sec}, "
-                "target_shot_count=1 (or 2 max), timeline covering ~0.0-"
-                f"{duration_sec:.1f}s total, prefer a single continuous beat. "
+                f"Film ~{duration_sec}s total: set target_duration_sec={duration_sec}. "
+                "Use as many shots as the story needs."
             )
         else:
-            duration_rule = (
-                "Set target_shot_count high enough to cover every major character beat (usually 3-4). "
-                "Omit target_duration_sec unless the prompt states a duration. "
-            )
-        system = ((skill[:1800] + "\n\n") if skill else "") + (
-            "You are the Designer Casting & Shot Planner (supervisor). "
-            "Extract distinct characters (not extras), primary scenes, and only the shots needed. "
-            "Give each person a clear, distinct name from the prompt "
-            "(e.g. Speaker vs Visitor leaving vs Woman vs Child — use whatever roles the prompt implies). "
-            "For each shot, list ONLY the character_ids who are the visual focus of that beat — "
-            "do not reuse an earlier character on a later beat about someone else. "
-            "Background continuity is not a reason to force them into character_ids "
-            "unless they are clearly on screen as subjects. "
-            "Decide cast_layout: 'single' | 'combined' | 'hybrid' | 'split'. "
-            "Set prefer_combined_cast true when any shot has 2+ focus characters. "
-            "Write precise keyframe_prompt that names every focus person and their action. "
-            "If the user attached original images, they are visual authority: assign "
-            "slots/roles (character vs scene vs style) from what you see. "
-            "Do not replace an image with a prose description of the picture. "
+            duration_rule = "Use enough shots for every major beat (typically 3–8)."
+        # Compact schema — long prompts make deepseek-flash return prose/empty.
+        system = (
+            "You are the Designer Supervisor. Domain-agnostic: use only places/people from the prompt. "
+            "Extract EVERY named human into characters[]. Anonymous crowd is not a character. "
+            "Return multiple shots grouped by setting_id (different places = different setting_id). "
+            "NOT every character in every scene. Per shot: on_screen (visible), offscreen "
+            "(in scene, not in frame), cast_actions {id: doing-what}. "
+            "First shot of a setting: compose_from_solo_refs; later same setting: edit_prior_keyframe. "
             + duration_rule
-            + "CRITICAL: Reply with a single raw JSON object only. "
-            "No markdown fences, no prose before or after, no second JSON object. Schema: "
+            + " Output ONLY one JSON object (no markdown). "
             '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
-            '"scenes":[{"id":"scene_1","name":"...","description":"..."}],'
-            '"shots":[{"shot_index":1,"title":"...","action":"...","camera":"...",'
-            '"character_ids":["char_1"],"keyframe_prompt":"...","timeline":"0.0-'
-            + f"{duration_sec:.1f}"
-            + 's"}],'
-            '"cast_layout":"combined|hybrid|split|single",'
-            + (
-                f'"target_shot_count":1,"target_duration_sec":{duration_sec},'
-                if short_clip
-                else '"target_shot_count":3,'
-            )
-            + '"prefer_combined_cast":false,"prefer_split_cast":false,'
-            '"audio":{"policy":"speech|music|speech_and_music|silent|optional_music",'
-            '"include_speech":false,"include_music":true,"notes":"..."},'
-            '"summary":"..."}'
+            '"shots":[{"shot_index":1,"action":"...","camera":"...","on_screen":["char_1"],'
+            '"offscreen":[],"cast_actions":{"char_1":"..."},"featured_cast_ids":["char_1"],'
+            '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s"}],'
+            '"skip_scene_plate":true,"target_shot_count":4'
+            + (f',"target_duration_sec":{duration_sec}' if short_clip else "")
+            + "}"
         )
         user_payload = {
-            "user_prompt": prompt,
-            "instructions": (
-                "Return JSON only matching the schema. "
-                + (
-                    f"This is a {duration_sec}s film clip — keep shot count minimal."
-                    if short_clip
-                    else "Cover all major character beats."
-                )
-            ),
-            "short_clip": short_clip,
-            "target_duration_sec": duration_sec if short_clip else None,
-            "heuristic_hint": {
-                "characters": base.get("characters"),
-                "scenes": base.get("scenes"),
-                "shot_count_hint": 1 if short_clip else len(base.get("shots") or []),
-            },
+            "user_prompt": prompt[:3000],
+            "instructions": "JSON only. Every named human must appear in characters[].",
         }
 
-        async def _call(*, reinforce_json: bool = False) -> dict[str, Any]:
+        async def _call(*, reinforce_json: bool = False) -> dict[str, Any] | None:
+            """Return normalized LLM analysis, or None on soft failure (caller retries)."""
             sys_msg = system
-            payload = dict(user_payload)
+            payload: dict[str, Any] = {
+                "user_prompt": prompt[:3000] if not reinforce_json else prompt[:2000],
+                "instructions": "JSON only. Every named human in characters[].",
+            }
             if reinforce_json:
                 sys_msg = (
-                    system
-                    + "\nYour previous reply was invalid. Output ONLY the JSON object. "
-                    "Start with '{' and end with '}'. Nothing else."
+                    "Output ONLY one JSON object starting with '{'. "
+                    '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
+                    '"shots":[{"shot_index":1,"action":"...","camera":"...",'
+                    '"character_ids":["char_1"],"ensemble_cast_ids":["char_1"],'
+                    '"featured_cast_ids":["char_1"],"setting_id":"set_1",'
+                    '"keyframe_prompt":"...","timeline":"0-5s"}],"skip_scene_plate":true}'
                 )
                 payload["retry"] = True
             result = await call_model_tool(
                 prompt=json.dumps(payload, ensure_ascii=False),
                 system=sys_msg,
                 optimize_for="quality",
-                # Script JSON can be large; avoid mid-object truncation.
-                max_tokens=3200,
-                images=reference_images,
+                max_tokens=1800,
+                images=list(reference_images or []) or None,
             )
-            if result.get("fallback") or not result.get("ok"):
+            if result.get("fallback"):
+                logger.info("LLM script analysis used local fallback")
+                return None
+            if not result.get("ok"):
                 logger.info(
-                    "LLM script analysis tool fallback/err (fallback=%s err=%s)",
-                    result.get("fallback"),
+                    "LLM script analysis tool err=%s; soft-fail",
                     result.get("error"),
                 )
-                return base
+                return None
             text = str(result.get("text") or "")
             parsed = _extract_json_object(text)
             if not parsed:
                 logger.info(
-                    "LLM script analysis returned non-JSON (len=%s); %s",
+                    "LLM script analysis returned non-JSON (len=%s); soft-fail",
                     len(text),
-                    "will retry" if not reinforce_json else "using heuristic",
                 )
-                return base
+                return None
             chars = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
             placeholder = False
             for ch in chars:
@@ -882,50 +1008,53 @@ async def analyze_creative_brief(
                     placeholder = True
                     break
             if placeholder or not chars:
-                logger.info("LLM script analysis looked like schema echo; using heuristic base")
-                return base
+                logger.info("LLM script analysis looked like schema echo; soft-fail")
+                return None
             if short_clip:
-                parsed.setdefault("target_shot_count", 1)
                 parsed.setdefault("target_duration_sec", duration_sec)
-                try:
-                    if int(parsed.get("target_shot_count") or 0) > 2:
-                        parsed["target_shot_count"] = 1
-                except (TypeError, ValueError):
-                    parsed["target_shot_count"] = 1
             normalized = _normalize_llm_analysis(parsed, base)
             if not normalized:
-                return base
+                return None
             if short_clip and normalized.get("shots"):
-                keep = max(1, min(2, int(normalized.get("target_shot_count") or 1)))
-                normalized["shots"] = list(normalized["shots"])[:keep]
-                for i, shot in enumerate(normalized["shots"], start=1):
+                shots_n = list(normalized["shots"])
+                n = max(1, len(shots_n))
+                for i, shot in enumerate(shots_n, start=1):
                     shot["shot_index"] = i
                     if not str(shot.get("timeline") or "").strip():
-                        if len(normalized["shots"]) == 1:
-                            shot["timeline"] = f"0.0-{duration_sec:.1f}s"
-                        else:
-                            half = duration_sec / len(normalized["shots"])
-                            shot["timeline"] = f"{(i - 1) * half:.1f}-{i * half:.1f}s"
+                        half = float(duration_sec) / n
+                        shot["timeline"] = f"{(i - 1) * half:.1f}-{i * half:.1f}s"
+                normalized["shots"] = shots_n
                 normalized["target_duration_sec"] = duration_sec
-                normalized["target_shot_count"] = len(normalized["shots"])
-            # Successful LLM parse must never report heuristic.
+                normalized["target_shot_count"] = len(shots_n)
             normalized["source"] = "llm"
             return normalized
 
+        # Prefer LLM; one reinforce if first reply empty/non-JSON (max 2 attempts).
         first = await asyncio.wait_for(_call(), timeout=max(3.0, float(timeout_sec)))
-        if first.get("source") == "llm":
+        if isinstance(first, dict) and first.get("source") == "llm":
             return first
-        # One reinforced retry when first parse failed soft (returned heuristic base).
-        remaining = max(5.0, float(timeout_sec) * 0.5)
-        return await asyncio.wait_for(
-            _call(reinforce_json=True), timeout=remaining
-        )
+        remaining = max(8.0, float(timeout_sec) * 0.4)
+        second = await asyncio.wait_for(_call(reinforce_json=True), timeout=remaining)
+        if isinstance(second, dict) and second.get("source") == "llm":
+            return second
+        # LLM configured but both attempts failed — mark pending so Supervisor re-authors.
+        pending = dict(base)
+        pending["source"] = "heuristic_pending_llm"
+        pending["llm_pending"] = True
+        logger.info("LLM script analysis exhausted retries; marking heuristic_pending_llm")
+        return pending
     except asyncio.TimeoutError:
-        logger.info("LLM script analysis timed out after %.1fs; using heuristic", timeout_sec)
-        return base
+        logger.info("LLM script analysis timed out after %.1fs; marking pending", timeout_sec)
+        pending = dict(base)
+        pending["source"] = "heuristic_pending_llm"
+        pending["llm_pending"] = True
+        return pending
     except Exception as exc:  # noqa: BLE001
-        logger.info("LLM script analysis failed, using heuristic: %s", exc)
-        return base
+        logger.info("LLM script analysis failed, marking pending: %s", exc)
+        pending = dict(base)
+        pending["source"] = "heuristic_pending_llm"
+        pending["llm_pending"] = True
+        return pending
 
 
 def analyze_creative_brief_sync(
@@ -935,10 +1064,9 @@ def analyze_creative_brief_sync(
     timeout_sec: float = _DEFAULT_LLM_TIMEOUT_SEC,
     reference_images: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Sync wrapper for bootstrap threads (safe if no running loop)."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
+    """Sync wrapper — always uses a dedicated event loop (never skips LLM on nest)."""
+
+    def _run() -> dict[str, Any]:
         return asyncio.run(
             analyze_creative_brief(
                 prompt,
@@ -947,7 +1075,14 @@ def analyze_creative_brief_sync(
                 reference_images=reference_images,
             )
         )
-    # Already on a loop — fall back to heuristics to avoid nested asyncio.run.
-    if use_llm and _llm_configured():
-        logger.info("Skipping nested LLM analysis on running loop; using heuristic")
-    return heuristic_analysis(prompt)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _run()
+    # Already on a loop: run in a worker thread with its own loop.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(_run)
+        return fut.result(timeout=max(30.0, float(timeout_sec) + 30.0))

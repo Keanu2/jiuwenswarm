@@ -81,6 +81,8 @@
       "collapse": "收起聊天",
       "expand": "展开聊天",
       "thinking": "正在思考如何搭建设计工作流…",
+      "updating": "正在根据你的要求改图…",
+      "updateError": "改图失败，请稍后重试。",
       "bootstrapDone": "已为你搭建初始设计工作流。",
       "bootstrapError": "搭建工作流失败，请稍后重试。",
       "notImplemented": "未实现",

@@ -11,7 +11,7 @@ export type DesignerStoredChatMessage = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  kind: 'user' | 'thinking' | 'bootstrap_done' | 'bootstrap_error' | 'not_implemented';
+  kind: 'user' | 'thinking' | 'bootstrap_done' | 'bootstrap_error' | 'chat_ack' | 'chat_error' | 'not_implemented';
   createdAt: number;
   references?: DesignerStoredReference[];
 };
@@ -38,6 +38,8 @@ const MESSAGE_KINDS = new Set([
   'thinking',
   'bootstrap_done',
   'bootstrap_error',
+  'chat_ack',
+  'chat_error',
   'not_implemented',
 ]);
 

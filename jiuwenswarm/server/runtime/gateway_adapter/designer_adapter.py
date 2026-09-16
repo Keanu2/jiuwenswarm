@@ -226,6 +226,29 @@ def _run_update_callback(request: AgentRequest):
     return on_update
 
 
+def _leader_progress_callback(request: AgentRequest):
+    loop = asyncio.get_running_loop()
+
+    def on_progress(kind: str, text: str, tool: str = "") -> None:
+        activity = {
+            "kind": str(kind or "stage"),
+            "text": str(text or ""),
+            "tool": str(tool or ""),
+            "at": utc_now_ms(),
+        }
+
+        async def _emit() -> None:
+            await _push_designer_event(
+                request=request,
+                event_type=EventType.DESIGNER_LEADER_ACTIVITY.value,
+                payload={"activity": activity},
+            )
+
+        loop.call_soon_threadsafe(lambda: asyncio.create_task(_emit()))
+
+    return on_progress
+
+
 def _graph_update_callback(request: AgentRequest):
     loop = asyncio.get_running_loop()
 
@@ -249,7 +272,14 @@ def _save_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | No
     if not isinstance(raw_graph, dict):
         return None, "graph is required", "BAD_REQUEST"
     try:
-        saved = _store.save_graph(normalize_execution_graph(raw_graph))
+        graph = normalize_execution_graph(raw_graph)
+        try:
+            from jiuwenswarm.server.runtime.designer.orchestration import SupervisorAgent
+
+            SupervisorAgent().onboard_user_added_nodes(graph)
+        except Exception:
+            logger.debug("Supervisor user-node onboard on save failed", exc_info=True)
+        saved = _store.save_graph(graph)
     except DesignerGraphValidationError as exc:
         return None, str(exc), "BAD_REQUEST"
     return {"graph": dict(saved)}, None, None
@@ -277,7 +307,31 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
             if key in params
         }
     try:
-        saved = _store.save_graph(apply_graph_patch(graph, raw_patch))
+        # Mark upserted nodes as user-added when the patch did not already set it
+        # (canvas dock / successor add paths stamp this on the client).
+        if isinstance(raw_patch, dict):
+            upsert = raw_patch.get("upsert_nodes")
+            if isinstance(upsert, list):
+                stamped = []
+                for item in upsert:
+                    if not isinstance(item, dict):
+                        stamped.append(item)
+                        continue
+                    node = dict(item)
+                    cfg = dict(node.get("config") or {})
+                    if "user_added" not in cfg:
+                        cfg["user_added"] = True
+                    node["config"] = cfg
+                    stamped.append(node)
+                raw_patch = {**raw_patch, "upsert_nodes": stamped}
+        next_graph = apply_graph_patch(graph, raw_patch)
+        try:
+            from jiuwenswarm.server.runtime.designer.orchestration import SupervisorAgent
+
+            SupervisorAgent().onboard_user_added_nodes(next_graph)
+        except Exception:
+            logger.debug("Supervisor user-node onboard on patch failed", exc_info=True)
+        saved = _store.save_graph(next_graph)
     except DesignerGraphValidationError as exc:
         return None, str(exc), "BAD_REQUEST"
     return {"graph": dict(saved)}, None, None
@@ -287,6 +341,7 @@ def _bootstrap_graph(
     params: dict[str, Any],
     channel_id: str,
     analysis: dict[str, Any] | None = None,
+    on_progress: Any | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     prompt = str(params.get("prompt") or "").strip()
     raw_references = params.get("references")
@@ -310,7 +365,19 @@ def _bootstrap_graph(
             return None, "project not found", "NOT_FOUND"
         resolved_project_dir = str(getattr(project, "project_dir", "") or "")
     else:
-        name = str(params.get("name") or prompt[:40] or "Designer Project").strip()
+        name = str(params.get("name") or "").strip()
+        if not name:
+            from jiuwenswarm.server.runtime.session.project_store import (
+                sanitize_project_dir_name,
+            )
+
+            name = sanitize_project_dir_name(prompt[:80] or "Designer Project")
+        else:
+            from jiuwenswarm.server.runtime.session.project_store import (
+                sanitize_project_dir_name,
+            )
+
+            name = sanitize_project_dir_name(name)
         work_mode, mode_error = resolve_request_work_mode(params, channel_id)
         if mode_error is not None:
             return None, f"invalid work_mode: {params.get('work_mode')!r}", mode_error
@@ -370,7 +437,6 @@ def _bootstrap_graph(
         detect_scenario,
     )
     from jiuwenswarm.server.runtime.designer.script_analysis import (
-        analyze_creative_brief_sync,
         heuristic_analysis,
         _llm_configured,
     )
@@ -395,29 +461,24 @@ def _bootstrap_graph(
     analysis_prompt = analysis_prompt_with_references(prompt, user_refs)
 
     detected = scenario or detect_scenario(analysis_prompt)
-    # Prefer supervisor-style LLM cast/shot analysis when models exist; heuristics only as fallback.
+    if callable(on_progress):
+        on_progress("thinking", "Supervisor · Reading brief")
+    # Never call LLM from this sync thread (asyncio.run breaks AsyncOpenAI).
+    # Caller passes LLM analysis from the main event loop when available.
     if detected == "video":
         if analysis is None:
-            if _llm_configured():
-                try:
-                    analysis = analyze_creative_brief_sync(
-                        analysis_prompt,
-                        use_llm=True,
-                        timeout_sec=20.0,
-                        reference_images=[
-                            str(item.get("path") or "")
-                            for item in user_refs
-                            if str(item.get("kind") or "") == "image"
-                            and str(item.get("path") or "").strip()
-                        ],
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.info("Bootstrap LLM analysis failed; using heuristics", exc_info=True)
-                    analysis = heuristic_analysis(analysis_prompt)
-            else:
-                analysis = heuristic_analysis(analysis_prompt)
+            if callable(on_progress):
+                on_progress("stage", "Supervisor · Provisional cast skeleton")
+            analysis = heuristic_analysis(analysis_prompt)
         if not isinstance(analysis, dict):
             analysis = heuristic_analysis(analysis_prompt)
+        analysis_mode = str(analysis.get("source") or "heuristic")
+        if callable(on_progress):
+            on_progress(
+                "tool_call",
+                "Supervisor · Materializing graph",
+                "build_smart_video_graph",
+            )
         graph = _prefer_runtime_pipeline(
             build_smart_video_graph(
                 project_id=project_id,
@@ -432,16 +493,33 @@ def _bootstrap_graph(
         meta["optimize_for"] = optimize_for
         meta["scenario"] = "video"
         meta["script_analysis"] = analysis
-        meta["script_analysis_mode"] = str(analysis.get("source") or "heuristic")
-        # Play may still refine analysis/plan with supervisor+manager agents once.
-        meta["pending_llm_analysis"] = bool(
-            _llm_configured() and str(analysis.get("source") or "") != "llm"
-        )
-        meta["one_pass"] = True
+        meta["script_analysis_mode"] = analysis_mode
+        meta["pending_llm_analysis"] = analysis_mode != "llm"
+        meta["pending_supervisor_graph"] = bool(_llm_configured())
+        meta["supervisor_composed_on_bootstrap"] = False
+        meta["supervisor_owns_graph"] = True
+        meta["freeze_shot_topology"] = False
+        meta["one_pass"] = False
         meta["auto_accept_outputs"] = True
         graph["metadata"] = meta
         graph = attach_skills_metadata(graph, prompt)
+        if callable(on_progress):
+            cast_n = sum(
+                1
+                for n in (graph.get("nodes") or [])
+                if str(n.get("id") or "").startswith("n_character")
+            )
+            on_progress(
+                "stage",
+                f"Supervisor · Graph materialised ({cast_n} solo cards, source={analysis_mode})",
+            )
     else:
+        if callable(on_progress):
+            on_progress(
+                "tool_call",
+                "Supervisor · Composing non-video workflow",
+                "compose_execution_graph",
+            )
         graph = _prefer_runtime_pipeline(
             compose_execution_graph(
                 project_id=project_id,
@@ -453,6 +531,8 @@ def _bootstrap_graph(
         )
     if user_refs:
         graph = attach_user_references_to_graph(graph, user_refs)
+    if callable(on_progress):
+        on_progress("stage", "Manager · Saving graph")
     saved = _store.save_graph(graph)
     payload: dict[str, Any] = {"graph": dict(saved), "project_id": project_id}
     if project_payload is not None:
@@ -496,6 +576,16 @@ def _start_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | Non
     run_id = str(params.get("run_id") or "").strip()
     node_id = str(params.get("node_id") or "").strip()
     graph = _store.get_graph(graph_id) if graph_id else None
+    contribution_warning = ""
+    if graph is not None:
+        try:
+            from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent
+
+            audit = ManagerAgent().audit_contribution_for_run(graph)
+            contribution_warning = str(audit.get("warning") or "")
+            _store.save_graph(graph)
+        except Exception:
+            logger.debug("Manager contribution audit failed", exc_info=True)
     if run_id:
         existing = _store.get_run(run_id)
         if existing is None:
@@ -532,7 +622,26 @@ def _start_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | Non
         return None, "graph_id or run_id is required", "BAD_REQUEST"
     if graph is None:
         return None, "graph not found", "NOT_FOUND"
-    return {"run_id": run_id, "graph_id": graph["graph_id"]}, None, None
+    # Stamp warning onto the run record so the UI can show it without blocking.
+    if contribution_warning:
+        try:
+            run_obj = _store.get_run(run_id)
+            if isinstance(run_obj, dict):
+                run_obj = dict(run_obj)
+                run_obj["warning"] = contribution_warning
+                warnings = list(run_obj.get("warnings") or [])
+                if contribution_warning not in warnings:
+                    warnings.append(contribution_warning)
+                run_obj["warnings"] = warnings[:8]
+                _store.save_run(run_obj)
+        except Exception:
+            logger.debug("Failed to stamp run contribution warning", exc_info=True)
+    return {
+        "run_id": run_id,
+        "graph_id": graph["graph_id"],
+        "warning": contribution_warning or None,
+        "warnings": [contribution_warning] if contribution_warning else [],
+    }, None, None
 
 
 def _pause_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -574,6 +683,265 @@ def _choose_output(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str |
     return {"run": dict(run)}, None, None
 
 
+async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    from jiuwenswarm.server.runtime.designer.leader_chat import run_leader_chat
+
+    graph_id = str(params.get("graph_id") or "").strip()
+    message = str(params.get("message") or params.get("prompt") or "").strip()
+    if not graph_id:
+        return None, "graph_id is required", "BAD_REQUEST"
+    if not message:
+        return None, "message is required", "BAD_REQUEST"
+    graph = _store.get_graph(graph_id)
+    if graph is None:
+        return None, "graph not found", "NOT_FOUND"
+    graph = _executor.reconcile_loaded_graph(graph)
+    selected_node_id = str(params.get("selected_node_id") or params.get("node_id") or "").strip()
+    run_new_nodes = bool(params.get("run_new_nodes") or params.get("runNewNodes"))
+    progress = _leader_progress_callback(request)
+    try:
+        result = await run_leader_chat(
+            graph,
+            message,
+            selected_node_id=selected_node_id,
+            run_new_nodes=run_new_nodes,
+            progress=progress,
+        )
+    except DesignerGraphValidationError as exc:
+        return None, str(exc), "BAD_REQUEST"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DesignerAdapter] graph chat failed: %s", exc)
+        return None, str(exc), "INTERNAL_ERROR"
+
+    next_graph = result.get("graph") or graph
+    saved = _store.save_graph(next_graph) if result.get("changed") else graph
+    run_payload = None
+    run_ids = list(result.get("run_node_ids") or [])
+    if run_ids:
+        start_params: dict[str, Any] = {"graph_id": saved["graph_id"], "node_id": run_ids[0]}
+        latest = _store.get_latest_run_for_graph(saved["graph_id"])
+        if latest is not None:
+            start_params["run_id"] = str(latest.get("run_id") or "")
+        payload, error, code = _start_run(start_params)
+        if error is None and payload is not None:
+            run = await _executor.start_run(
+                str(payload["run_id"]),
+                on_update=_run_update_callback(request),
+                on_graph_update=_graph_update_callback(request),
+            )
+            run_payload = dict(run)
+            await _push_designer_event(
+                request=request,
+                event_type=EventType.DESIGNER_RUN_UPDATED.value,
+                payload={"run": run_payload},
+            )
+        elif error:
+            result["summary"] = f"{result.get('summary') or ''} ({error})".strip()
+    return {
+        "graph": dict(saved),
+        "summary": result.get("summary") or "",
+        "intent": result.get("intent") or "answer",
+        "run_node_ids": run_ids,
+        "run": run_payload,
+    }, None, None
+
+
+async def _bootstrap_graph_with_supervisor(
+    params: dict[str, Any],
+    channel_id: str,
+    on_progress: Any | None = None,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """LLM analysis on the main event loop, then Supervisor/Manager approval chain.
+
+    Never runs AsyncOpenAI inside ``asyncio.to_thread`` / ``asyncio.run`` — that
+    path returned empty model responses and forced heuristic cast names.
+    """
+    from jiuwenswarm.server.runtime.designer.composer import detect_scenario
+    from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+    from jiuwenswarm.server.runtime.designer.script_analysis import analyze_creative_brief
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        analysis_prompt_with_references,
+        normalize_user_references,
+    )
+
+    prompt = str(params.get("prompt") or "").strip() or "根据参考素材创作"
+    scenario_raw = params.get("scenario")
+    scenario = (
+        str(scenario_raw).strip().lower()
+        if isinstance(scenario_raw, str) and scenario_raw.strip()
+        else None
+    )
+    raw_references = params.get("references")
+    if raw_references is None:
+        raw_references = params.get("user_references")
+    # Lightweight refs for analysis images (full normalize happens in _bootstrap_graph).
+    analysis: dict[str, Any] | None = None
+    try:
+        user_refs_preview = (
+            normalize_user_references(raw_references, dest_dir=None)
+            if isinstance(raw_references, list) and raw_references
+            else []
+        )
+    except Exception:  # noqa: BLE001
+        user_refs_preview = []
+    analysis_prompt = analysis_prompt_with_references(prompt, user_refs_preview)
+    detected = scenario or detect_scenario(analysis_prompt)
+
+    if detected == "video" and llm_available():
+        if callable(on_progress):
+            on_progress("thinking", "Supervisor · Extracting cast and scenes (LLM tool)")
+        try:
+            analysis = await analyze_creative_brief(
+                analysis_prompt,
+                use_llm=True,
+                timeout_sec=90.0,
+                reference_images=[
+                    str(item.get("path") or "")
+                    for item in user_refs_preview
+                    if str(item.get("kind") or "") == "image"
+                    and str(item.get("path") or "").strip()
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Async LLM analysis failed: %s", exc, exc_info=True)
+            analysis = None
+        if isinstance(analysis, dict) and str(analysis.get("source") or "") == "llm":
+            if callable(on_progress):
+                n = len(analysis.get("characters") or [])
+                on_progress(
+                    "stage",
+                    f"Supervisor · LLM cast locked ({n} characters)",
+                )
+        else:
+            # Do not stamp heuristic_pending / failed cast as final — chain re-authors.
+            if callable(on_progress):
+                on_progress(
+                    "thinking",
+                    "Supervisor · Analysis soft-failed; Manager chain will re-author via LLM",
+                )
+            # Keep pending marker if present so bootstrap graph stays provisional.
+            if isinstance(analysis, dict) and analysis.get("llm_pending"):
+                pass
+            else:
+                analysis = None
+
+    payload, error, code = await asyncio.to_thread(
+        _bootstrap_graph,
+        params,
+        channel_id,
+        analysis,
+        on_progress,
+    )
+    if error is not None or not isinstance(payload, dict):
+        return payload, error, code
+    graph = payload.get("graph")
+    if not isinstance(graph, dict):
+        return payload, error, code
+
+    if not llm_available():
+        return payload, None, None
+    if str((graph.get("metadata") or {}).get("scenario") or "") != "video":
+        return payload, None, None
+
+    from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent, SupervisorAgent
+    from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
+
+    optimize_for = str(
+        params.get("optimize_for")
+        or (graph.get("metadata") or {}).get("optimize_for")
+        or "quality"
+    )
+    try:
+        if callable(on_progress):
+            on_progress("thinking", "Supervisor · Authoring brief (LLM)")
+        await SupervisorAgent().author_creative_brief(graph, use_llm=True)
+        if callable(on_progress):
+            on_progress("thinking", "Manager · Reviewing brief (LLM)")
+        await ManagerAgent().review_brief(graph, use_llm=True)
+        if callable(on_progress):
+            on_progress("thinking", "Supervisor · Designing storyboard (LLM)")
+        await SupervisorAgent().author_storyboard(graph, use_llm=True)
+        if callable(on_progress):
+            on_progress("thinking", "Manager · Approving storyboard (LLM)")
+        await ManagerAgent().review_storyboard(graph, use_llm=True)
+        if callable(on_progress):
+            on_progress(
+                "tool_call",
+                "Supervisor · Designing execution graph (LLM)",
+                "design_execution_graph",
+            )
+        await SupervisorAgent().design_execution_graph(
+            graph,
+            use_llm=True,
+            optimize_for=optimize_for,
+        )
+        if callable(on_progress):
+            on_progress("thinking", "Manager · Validating plan (LLM)")
+        await ManagerAgent().validate_plan(graph, use_llm=True)
+        graph = apply_runtime_delegate(graph)
+        meta = dict(graph.get("metadata") or {})
+        analysis_now = (
+            meta.get("script_analysis")
+            if isinstance(meta.get("script_analysis"), dict)
+            else {}
+        )
+        cast_n = sum(
+            1
+            for n in (graph.get("nodes") or [])
+            if str(n.get("id") or "").startswith("n_character")
+        )
+        analysis_source = str(analysis_now.get("source") or "")
+        ack = meta.get("supervisor_graph_ack") if isinstance(meta.get("supervisor_graph_ack"), dict) else {}
+        story_ack = (
+            meta.get("supervisor_storyboard_ack")
+            if isinstance(meta.get("supervisor_storyboard_ack"), dict)
+            else {}
+        )
+        truly_llm = analysis_source == "llm" or str(ack.get("source") or "") == "llm" or (
+            str(story_ack.get("source") or "") == "llm" and cast_n >= 1
+        )
+        # Never claim LLM mode just because heuristic guessed multiple role-nouns.
+        meta["pending_llm_analysis"] = not truly_llm
+        meta["pending_supervisor_graph"] = not truly_llm
+        meta["supervisor_composed_on_bootstrap"] = truly_llm
+        meta["script_analysis_mode"] = "llm" if truly_llm else (
+            analysis_source or str(meta.get("script_analysis_mode") or "heuristic")
+        )
+        meta["agent_runtime_bootstrap"] = {
+            "analysis": "analyze_creative_brief via call_model_tool",
+            "orchestration": "SupervisorAgent + ManagerAgent approval chain",
+            "leaves": "NodeAgentHost / openjiuwen tools on Play",
+        }
+        meta["one_pass"] = False
+        graph["metadata"] = meta
+        if callable(on_progress):
+            on_progress(
+                "stage",
+                f"Manager · Approved — {cast_n} solo cards (mode={meta['script_analysis_mode']})",
+            )
+        saved = _store.save_graph(graph)
+        payload = dict(payload)
+        payload["graph"] = dict(saved)
+        return payload, None, None
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "Supervisor bootstrap redesign failed; keeping graph: %s",
+            exc,
+            exc_info=True,
+        )
+        meta = dict(graph.get("metadata") or {})
+        meta["pending_supervisor_graph"] = False
+        meta["supervisor_composed_on_bootstrap"] = True
+        graph["metadata"] = meta
+        try:
+            saved = _store.save_graph(graph)
+            payload = dict(payload)
+            payload["graph"] = dict(saved)
+        except Exception:  # noqa: BLE001
+            pass
+        return payload, None, None
+
+
 class DesignerAdapter(GatewayAdapter):
     """Designer execution graph adapter."""
 
@@ -584,6 +952,7 @@ class DesignerAdapter(GatewayAdapter):
             ReqMethod.DESIGNER_GRAPH_SAVE.value,
             ReqMethod.DESIGNER_GRAPH_BOOTSTRAP.value,
             ReqMethod.DESIGNER_GRAPH_PATCH.value,
+            ReqMethod.DESIGNER_GRAPH_CHAT.value,
             ReqMethod.DESIGNER_RUN_START.value,
             ReqMethod.DESIGNER_RUN_GET.value,
             ReqMethod.DESIGNER_RUN_PAUSE.value,
@@ -603,17 +972,16 @@ class DesignerAdapter(GatewayAdapter):
             elif method == ReqMethod.DESIGNER_GRAPH_SAVE:
                 payload, error, code = await asyncio.to_thread(_save_graph, params)
             elif method == ReqMethod.DESIGNER_GRAPH_BOOTSTRAP:
-                # Never block the UI RPC on LLM casting — that caused Request timed out.
-                # Build immediately with heuristics (or a precomputed analysis); LLM may
-                # refine later when the user hits Run via supervisor metadata only.
-                payload, error, code = await asyncio.to_thread(
-                    _bootstrap_graph,
+                # Enter: provisional graph, then Supervisor/Manager LLM approval chain.
+                payload, error, code = await _bootstrap_graph_with_supervisor(
                     params,
                     request.channel_id,
-                    None,
+                    _leader_progress_callback(request),
                 )
             elif method == ReqMethod.DESIGNER_GRAPH_PATCH:
                 payload, error, code = await asyncio.to_thread(_patch_graph, params)
+            elif method == ReqMethod.DESIGNER_GRAPH_CHAT:
+                payload, error, code = await _chat_graph(request, params)
             elif method == ReqMethod.DESIGNER_RUN_GET:
                 payload, error, code = await asyncio.to_thread(_get_run, params)
             elif method == ReqMethod.DESIGNER_RUN_START:
@@ -624,12 +992,32 @@ class DesignerAdapter(GatewayAdapter):
                         on_update=_run_update_callback(request),
                         on_graph_update=_graph_update_callback(request),
                     )
+                    run_out = dict(run)
+                    warning = str(payload.get("warning") or "").strip()
+                    warnings = [
+                        str(x)
+                        for x in (payload.get("warnings") or [])
+                        if str(x).strip()
+                    ]
+                    if warning:
+                        run_out["warning"] = warning
+                        if warning not in warnings:
+                            warnings = [warning, *warnings]
+                    if warnings:
+                        run_out["warnings"] = warnings[:8]
                     await _push_designer_event(
                         request=request,
                         event_type=EventType.DESIGNER_RUN_UPDATED.value,
-                        payload={"run": dict(run)},
+                        payload={"run": run_out},
                     )
-                    return _ok_response(request, {"run": dict(run)})
+                    return _ok_response(
+                        request,
+                        {
+                            "run": run_out,
+                            "warning": warning or None,
+                            "warnings": warnings,
+                        },
+                    )
             elif method == ReqMethod.DESIGNER_RUN_PAUSE:
                 payload, error, code = await asyncio.to_thread(_pause_run, params)
             elif method == ReqMethod.DESIGNER_RUN_CANCEL:
@@ -651,6 +1039,7 @@ class DesignerAdapter(GatewayAdapter):
         if isinstance(payload, dict) and payload.get("graph") is not None and method in {
             ReqMethod.DESIGNER_GRAPH_BOOTSTRAP,
             ReqMethod.DESIGNER_GRAPH_PATCH,
+            ReqMethod.DESIGNER_GRAPH_CHAT,
         }:
             await _push_designer_event(
                 request=request,

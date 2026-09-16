@@ -100,8 +100,9 @@ def analysis_prompt_with_references(prompt: str, refs: list[dict[str, Any]] | No
     prefix = text or "根据参考素材创作"
     return (
         f"{prefix}\n\n"
-        "User attached reference media. Original files are the authority; "
-        "do not reduce them to a style-only summary. Slots in attachment order:\n"
+        "REFERENCE_MEDIA (not a story beat; do not turn into a shot):\n"
+        "Original files are the authority; do not reduce them to a style-only summary. "
+        "Slots in attachment order:\n"
         f"{roster}"
     )
 
@@ -173,15 +174,21 @@ def attach_user_references_to_graph(
 def normalize_user_references(
     raw: Any,
     *,
-    dest_dir: Path,
+    dest_dir: Path | None,
 ) -> list[dict[str, Any]]:
-    """Copy / decode attachments into dest_dir and return ordered source records."""
+    """Copy / decode attachments into dest_dir and return ordered source records.
+
+    When ``dest_dir`` is None, return lightweight preview records (no disk copy)
+    suitable for LLM analysis before the project directory exists.
+    """
     if raw in (None, ""):
         return []
     if not isinstance(raw, list):
         raise UserReferenceError("references must be an array")
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    preview_only = dest_dir is None
+    if not preview_only:
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
     counts = {KIND_IMAGE: 0, KIND_VIDEO: 0, KIND_AUDIO: 0}
     out: list[dict[str, Any]] = []
     for index, item in enumerate(raw, start=1):
@@ -197,10 +204,45 @@ def normalize_user_references(
             raise UserReferenceError(
                 f"at most {limit} {kind} reference(s) can be attached"
             )
-        record = _materialize_reference(item, kind=kind, dest_dir=dest_dir, index=index)
+        if preview_only:
+            record = _preview_reference(item, kind=kind, index=index)
+        else:
+            record = _materialize_reference(
+                item, kind=kind, dest_dir=dest_dir, index=index
+            )
         counts[kind] += 1
         out.append(record)
     return out
+
+
+def _preview_reference(item: dict[str, Any], *, kind: str, index: int) -> dict[str, Any]:
+    """In-memory reference slot for analysis (no materialize / mkdir)."""
+    path_raw = str(item.get("path") or "").strip()
+    uri = str(item.get("uri") or "").strip()
+    filename = str(item.get("filename") or Path(path_raw or uri).name or f"{kind}-{index}")
+    path = Path(path_raw) if path_raw else Path()
+    if not path_raw and uri.startswith("file:"):
+        try:
+            from urllib.parse import unquote, urlparse
+            from urllib.request import url2pathname
+
+            parsed = urlparse(uri)
+            path = Path(url2pathname(unquote(parsed.path)))
+            path_raw = str(path)
+        except Exception:  # noqa: BLE001
+            path_raw = ""
+    return {
+        "id": str(item.get("id") or f"ref_{index:02d}"),
+        "kind": kind,
+        "role": str(item.get("role") or DEFAULT_ROLE),
+        "filename": filename,
+        "mime_type": str(item.get("mime_type") or item.get("mimeType") or ""),
+        "path": path_raw,
+        "uri": uri or (path.resolve().as_uri() if path_raw and path.exists() else ""),
+        "size_bytes": int(item.get("size_bytes") or 0),
+        "order": index,
+        "preview": True,
+    }
 
 
 def _public_record(item: dict[str, Any], index: int) -> dict[str, Any]:

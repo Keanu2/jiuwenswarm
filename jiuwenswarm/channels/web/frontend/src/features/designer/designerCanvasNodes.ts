@@ -215,6 +215,8 @@ export function buildManualDesignerNode(params: {
       role: params.template.role,
       delegate: DESIGNER_CONFIG_DELEGATE_HANDLER,
       interaction_mode: interactionMode,
+      user_added: true,
+      kind: 'agent',
       ...(params.upload ? { upload: params.upload } : {}),
     },
     layout: {

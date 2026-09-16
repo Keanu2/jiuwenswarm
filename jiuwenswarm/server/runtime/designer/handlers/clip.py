@@ -146,7 +146,7 @@ def collect_clip_reference_images(
     """I2V refs: prefer keyframe only.
 
     Passing solo cast sheets *plus* a keyframe that already contains those faces
-    commonly clones the pastor (one walking, one stuck on the pulpit). When a
+    commonly clones a person (one moving, one frozen in the previous pose). When a
     keyframe exists, use it alone as the first-frame / identity source.
     """
     from jiuwenswarm.server.runtime.designer.handlers.common import (
@@ -249,9 +249,8 @@ def _clip_prompt_lead(
         f"Create shot {shot_index} as a {duration}-second video — unique action for THIS shot only."
         f"{extras}{focus} "
         "Animate ONLY the attached first-frame keyframe. "
-        "ONE instance per person — never clone/duplicate a face (e.g. do NOT show the same "
-        "pastor both walking AND still standing at the pulpit). "
-        "Do not invent new people or a new congregation; keep the same crowd layout as the keyframe. "
+        "ONE instance per person — never clone/duplicate a face in two places at once. "
+        "Do not invent new people or a new crowd; keep the same extras layout as the keyframe. "
         "Keep identity and location consistent; camera/action must match this shot only. "
         "No subtitles, no cutaways.\n\n"
     )
@@ -347,6 +346,32 @@ def build_clip_prompt(
     override = str((cfg.get("generate") or {}).get("prompt") or "").strip() if isinstance(cfg.get("generate"), dict) else ""
     if override:
         parts.append(f"Supervisor shot brief: {override}")
+    # Prior clip / already_done handoff (Manager-stamped).
+    prior_clip = str(cfg.get("previous_clip_wan_prompt") or "").strip()
+    if prior_clip:
+        parts.append(
+            "PRIOR CLIP CONTINUITY (do NOT redo these beats):\n"
+            + prior_clip[:1200]
+        )
+    already_done = [str(x) for x in (cfg.get("already_done") or []) if str(x)]
+    if already_done:
+        parts.append("ALREADY_DONE (do not restage): " + "; ".join(already_done[:12]))
+    occupancy = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
+    if occupancy:
+        parts.append(
+            f"OCCUPANCY: must_appear={occupancy.get('must_appear')}; "
+            f"featured={occupancy.get('featured')}."
+        )
+    from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+        collect_prior_clip_prompts,
+        handoff_clause_for_prompt,
+    )
+
+    clause = handoff_clause_for_prompt(
+        collect_prior_clip_prompts(graph, shot_index=shot_index)
+    )
+    if clause and "PRIOR CLIP CONTINUITY" not in "\n".join(parts):
+        parts.append(clause)
     from jiuwenswarm.server.runtime.designer.user_references import (
         graph_user_references,
         prompt_slot_roster,
@@ -382,6 +407,8 @@ async def generate_clip_video(
     reference_file: str | None = None,
     duration: int = 5,
     audio: bool | None = None,
+    size: str | None = None,
+    resolution: str | None = None,
 ) -> dict[str, Any]:
     """Call the shared video-generation stack. Tests monkeypatch this function."""
     from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
@@ -404,11 +431,14 @@ async def generate_clip_video(
     except Exception:
         logger.debug("Failed to apply video_gen model config from yaml", exc_info=True)
 
+    # Cost-save default: 480P; honor film aspect_lock size when stamped by Manager.
+    video_size = str(size or "854*480").strip() or "854*480"
+    video_res = str(resolution or "480P").strip() or "480P"
+
     result = await _invoke_model_video_generation(
         prompt,
-        # wan3.0: 480P for I2V; matching WxH for T2V/R2V
-        size="854*480",
-        resolution="480P",
+        size=video_size,
+        resolution=video_res,
         first_frame=first_frame,
         reference_images=reference_images,
         reference_file=reference_file,
@@ -457,7 +487,29 @@ class ClipNodeHandler:
             )
         _, shot = _shot_for_node(ctx.graph, node, ctx)
         duration = parse_shot_duration_seconds((shot or {}).get("timeline") or "", default=5)
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         prompt = build_clip_prompt(ctx.graph, node, ctx)
+        from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+            apply_wan_call_locks,
+        )
+
+        prompt = apply_wan_call_locks(
+            prompt,
+            cfg=cfg,
+            graph=ctx.graph if isinstance(ctx.graph, dict) else {},
+            shot_index=shot_index,
+            has_first_frame=first_frame is not None,
+        )
+        aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
+        if not aspect:
+            meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
+            aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
+        video_size = str(
+            cfg.get("video_size") or (aspect or {}).get("video_size") or "854*480"
+        ).strip()
+        video_res = str(
+            cfg.get("video_resolution") or (aspect or {}).get("video_resolution") or "480P"
+        ).strip()
         # Do not re-send the keyframe as a second identity sheet (causes pastor clones).
         ff_key = str(first_frame.resolve()) if first_frame is not None else ""
         extra_refs = [
@@ -483,6 +535,8 @@ class ClipNodeHandler:
                 reference_images=extra_refs or None,
                 reference_file=reference_file,
                 duration=duration,
+                size=video_size,
+                resolution=video_res,
             )
             path = Path(str(result["video_path"]))
             message = f"clip {shot_index} generated"
