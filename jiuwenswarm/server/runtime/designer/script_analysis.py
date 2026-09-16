@@ -806,11 +806,18 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
             for x in (
                 sh.get("on_screen")
                 or sh.get("visible_cast_ids")
-                or sh.get("character_ids")
+                or sh.get("featured_cast_ids")
                 or []
             )
             if str(x) in valid_ids
-        ] or list(cids)
+        ]
+        # Fail closed: do not promote full character_ids / ensemble when on_screen absent.
+        if not on_screen:
+            on_screen = [
+                str(x)
+                for x in (sh.get("character_ids") or [])[:1]
+                if str(x) in valid_ids
+            ]
         offscreen = [
             str(x)
             for x in (sh.get("offscreen") or sh.get("off_screen_cast_ids") or [])
@@ -978,7 +985,7 @@ async def analyze_creative_brief(
                 prompt=json.dumps(payload, ensure_ascii=False),
                 system=sys_msg,
                 optimize_for="quality",
-                max_tokens=1800,
+                max_tokens=16384,
                 images=list(reference_images or []) or None,
             )
             if result.get("fallback"):

@@ -168,13 +168,22 @@ def node_ids_output_image_paths(ctx: NodeExecutionContext, node_ids: list[str]) 
 
 
 def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
-    """Continuity refs for keyframes: solo character sheets (+ optional user refs).
+    """Continuity refs for keyframes: on_screen solo sheets only (+ optional user refs).
 
     Scene consistency comes from scene_bible + prompt handoff text — not prior KF images.
-    Never attach empty scene plates.
+    Never attach empty scene plates or off-screen cast sheets.
     """
     cfg = dict(node.get("config") or {})
     identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+    occ = identity.get("occupancy") if isinstance(identity.get("occupancy"), dict) else {}
+    on_screen_raw = (
+        cfg.get("on_screen")
+        or occ.get("must_appear")
+        or cfg.get("character_ids")
+        or identity.get("character_ids")
+        or []
+    )
+    on_screen = [str(x) for x in on_screen_raw if str(x).strip()]
     preferred = [
         str(x)
         for x in (
@@ -184,9 +193,10 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
         )
         if str(x).strip()
     ]
+    # Prefer preferred list when it already matches on_screen; otherwise resolve solos by cid.
     paths = node_ids_output_image_paths(ctx, preferred) if preferred else []
-    if not paths:
-        solo_ids: list[str] = []
+    if on_screen:
+        solo_by_cid: dict[str, str] = {}
         for other in ctx.graph.get("nodes") or []:
             if not isinstance(other, dict):
                 continue
@@ -195,10 +205,15 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
                 continue
             if oc.get("combined_cast"):
                 continue
-            solo_ids.append(str(other.get("id") or ""))
-        paths = node_ids_output_image_paths(ctx, [x for x in solo_ids if x])
-    if not paths:
-        paths = list(role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN))
+            cids = [str(x) for x in (oc.get("character_ids") or []) if str(x)]
+            if len(cids) == 1:
+                solo_by_cid[cids[0]] = str(other.get("id") or "")
+        on_screen_nodes = [solo_by_cid[c] for c in on_screen if c in solo_by_cid]
+        if on_screen_nodes:
+            paths = node_ids_output_image_paths(ctx, on_screen_nodes)
+    # Fail closed: never fall back to ALL character sheets (cast bleed into wrong KF).
+    if not paths and preferred:
+        paths = node_ids_output_image_paths(ctx, preferred)
 
     handoff_id = str(
         identity.get("scene_prompt_handoff_from")
@@ -230,7 +245,7 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
     user_paths = user_reference_image_paths(ctx.graph if isinstance(ctx.graph, dict) else None)
 
     # Do NOT pull empty NODE_ROLE_SCENE plates or prior keyframe images into refs.
-    # Continuity is scene_bible + prompt handoff; visual identity is solo sheets only.
+    # Continuity is scene_bible + prompt handoff; visual identity is on_screen solos only.
     ordered = [*user_paths, *paths]
 
     merged: list[Path] = []

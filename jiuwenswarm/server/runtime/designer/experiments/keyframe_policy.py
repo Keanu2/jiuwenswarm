@@ -204,9 +204,11 @@ def resolve_shot_cast_roles(
         or shot.get("off_screen_cast_ids"),
         exclude=ban,
     )
-    # If storyboard only listed character_ids, treat as visible; rest of setting = offscreen.
-    if not visible and ensemble:
-        visible = list(ensemble)
+    # Fail closed: never promote the whole setting ensemble to on_screen.
+    # Empty visible → featured-only or first explicit character_id, else [].
+    if not visible:
+        featured_only = _cid_list(shot.get("featured_cast_ids"), exclude=ban)
+        visible = list(featured_only[:1]) if featured_only else []
     # Visible wins over offscreen if both listed.
     off_set = {c for c in offscreen if c not in visible}
     # Anyone in setting ensemble not visible → offscreen (still "in scene").
@@ -214,12 +216,12 @@ def resolve_shot_cast_roles(
         if c not in visible and c not in off_set:
             off_set.add(c)
     offscreen = [c for c in offscreen if c in off_set] or sorted(off_set)
-    # Keep storyboard order for visible; drop people not in this setting when ensemble known.
+    # Keep storyboard order for visible; do NOT fall back to full ensemble.
     if ensemble:
         ens_set = set(ensemble)
         visible = [c for c in visible if c in ens_set] or [
             c for c in ensemble if c in set(visible)
-        ] or list(ensemble[:1])
+        ]
         offscreen = [c for c in offscreen if c in ens_set and c not in visible]
     featured = _cid_list(
         shot.get("featured_cast_ids") or visible[:1],

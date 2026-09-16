@@ -100,15 +100,17 @@ def stamp_wan_prompt_handoff(
             continue
         if idx <= int(shot_index or 0):
             continue
-        # Immediate next clip gets the full previous prompt; later clips get chain via collect.
+        # Immediate next always gets the full previous Wan prompt.
+        # Later clips keep the most recent prior if none stamped yet.
+        is_immediate_next = idx == int(shot_index or 0) + 1
         prev_id = str(cfg.get("continuity_clip_node_id") or "")
-        is_immediate_next = idx == int(shot_index or 0) + 1 or prev_id == key
-        if is_immediate_next or idx == int(shot_index or 0) + 1:
-            cfg["previous_clip_wan_prompt"] = text[:3500]
-            cfg["previous_clip_node_id"] = key
-            cfg["previous_clip_shot_index"] = int(shot_index or 0)
-            node["config"] = cfg
-            notes.append(f"{nid}: received previous_clip_wan_prompt from {key}")
+        if is_immediate_next or prev_id == key or not str(cfg.get("previous_clip_wan_prompt") or "").strip():
+            if is_immediate_next or prev_id == key or idx == int(shot_index or 0) + 1:
+                cfg["previous_clip_wan_prompt"] = text[:3500]
+                cfg["previous_clip_node_id"] = key
+                cfg["previous_clip_shot_index"] = int(shot_index or 0)
+                node["config"] = cfg
+                notes.append(f"{nid}: received previous_clip_wan_prompt from {key}")
     return notes
 
 

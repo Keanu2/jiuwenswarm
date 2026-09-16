@@ -751,10 +751,17 @@ class GraphExecutor:
                 )
                 graph = self._store.save_graph(graph)
 
-            # Quality path: Brief+Storyboard → Manager lock → Supervisor rebuild graph
-            # → Supervisor plan (node tools) → Manager validate/prune/re-edit.
+            # Quality path: Brief+Storyboard redesign ONLY when Enter did not compose
+            # or user explicitly asked Run again with prior feedback.
             scenario0 = str((graph.get("metadata") or {}).get("scenario") or "")
-            if scenario0 == "video" and use_llm_orch:
+            meta_play = dict(graph.get("metadata") or {})
+            already_composed = bool(meta_play.get("supervisor_composed_on_bootstrap")) and not bool(
+                meta_play.get("pending_llm_analysis")
+            )
+            run_enter_redesign = scenario0 == "video" and use_llm_orch and (
+                use_prior or not already_composed
+            )
+            if run_enter_redesign:
                 with traj.span(
                     agent_id="supervisor",
                     action="author_creative_brief",
@@ -876,6 +883,17 @@ class GraphExecutor:
                             "notes": str(graph_ack.get("notes") or "")[:400],
                         },
                     )
+            elif scenario0 == "video":
+                traj.record(
+                    agent_id="supervisor",
+                    action="skip_enter_redesign",
+                    phase="orchestration",
+                    role="supervisor",
+                    detail={
+                        "reason": "supervisor_composed_on_bootstrap",
+                        "use_prior_feedback": use_prior,
+                    },
+                )
 
             with traj.span(
                 agent_id="supervisor",

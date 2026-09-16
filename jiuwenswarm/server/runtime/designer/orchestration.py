@@ -857,6 +857,63 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return _shared_extract_json_object(text)
 
 
+def validate_plan_occupancy(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Code validators after Manager patch (no LLM): setting_id, on_screen, scene_locks, ids."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    characters = [c for c in (analysis.get("characters") or []) if isinstance(c, dict)]
+    shots = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
+    scenes = [s for s in (analysis.get("scenes") or []) if isinstance(s, dict)]
+    scene_locks = (
+        analysis.get("scene_locks")
+        if isinstance(analysis.get("scene_locks"), dict)
+        else {}
+    )
+    valid_ids = {str(c.get("id") or "") for c in characters if str(c.get("id") or "")}
+    if not characters:
+        errors.append("no_characters")
+    if not shots:
+        errors.append("no_shots")
+    for i, shot in enumerate(shots, start=1):
+        idx = int(shot.get("shot_index") or i)
+        sid = str(shot.get("setting_id") or shot.get("scene_id") or "").strip()
+        if not sid:
+            errors.append(f"shot{idx}_missing_setting_id")
+        on_screen = [
+            str(x)
+            for x in (
+                shot.get("on_screen")
+                or shot.get("visible_cast_ids")
+                or shot.get("featured_cast_ids")
+                or []
+            )
+            if str(x)
+        ]
+        if not on_screen:
+            errors.append(f"shot{idx}_empty_on_screen")
+        for cid in on_screen:
+            if cid not in valid_ids:
+                errors.append(f"shot{idx}_unknown_on_screen:{cid}")
+        if sid and sid not in scene_locks and scenes:
+            # Prefer explicit locks; warn if missing (builder may synthesize).
+            warnings.append(f"shot{idx}_missing_scene_lock:{sid}")
+        # Phase 3 light check: multi-shot same setting should diversify views when present.
+    by_setting: dict[str, list[str]] = {}
+    for shot in shots:
+        sid = str(shot.get("setting_id") or "").strip()
+        vk = str(shot.get("view_key") or "").strip()
+        if sid and vk:
+            by_setting.setdefault(sid, []).append(vk)
+    for sid, views in by_setting.items():
+        if len(views) >= 2 and len(set(views)) < 2:
+            warnings.append(f"setting_{sid}_views_not_diverse")
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
 class SupervisorAgent:
     """Assigns tasks / tools / models for every node agent (one-pass, no loop)."""
 
@@ -1348,6 +1405,106 @@ class SupervisorAgent:
         meta = dict(graph.get("metadata") or {})
         meta["supervisor_plan"] = plan
         graph["metadata"] = meta
+        return plan
+
+    async def author_plan_one_pass(
+        self,
+        prompt: str,
+        *,
+        optimize_for: str = "quality",
+        reference_images: list[str] | None = None,
+        timeout_sec: float = 120.0,
+    ) -> dict[str, Any]:
+        """Single Supervisor LLM call: brief + storyboard + cast + occupancy + scene_locks."""
+        from jiuwenswarm.server.runtime.designer.script_analysis import (
+            _normalize_llm_analysis,
+            heuristic_analysis,
+        )
+
+        base = heuristic_analysis(prompt)
+        system = (
+            "You are the Designer Supervisor. ONE JSON plan for Enter (schema plan.v1). "
+            "Stay faithful to the user prompt — do not invent plot or people. "
+            "Extract EVERY named human into characters[]. "
+            "Shots MUST have setting_id (new place/meet/leave/exterior → new setting_id). "
+            "Per shot REQUIRED: on_screen (visible only), offscreen, cast_actions, "
+            "featured_cast_ids, setting_id, action, camera, timeline, keyframe_prompt, view_key. "
+            "NEVER put later-meet cast into earlier on_screen. "
+            "Include scene_locks[setting_id]={place,lighting,objects,crowd,coherence_rule,views}. "
+            "Include brief_markdown and storyboard_markdown for UI. "
+            "Max 8 shots. Output ONLY one JSON object. Schema: "
+            '{"schema":"plan.v1","characters":[{"id":"char_1","name":"...","description":"..."}],'
+            '"scenes":[{"id":"set_1","name":"...","description":"..."}],'
+            '"shots":[{"shot_index":1,"timeline":"0-5s","camera":"...","action":"...",'
+            '"on_screen":["char_1"],"offscreen":[],"cast_actions":{"char_1":"..."},'
+            '"featured_cast_ids":["char_1"],"setting_id":"set_1","view_key":"front",'
+            '"keyframe_prompt":"..."}],'
+            '"scene_locks":{"set_1":{"place":"...","lighting":"...","objects":[],'
+            '"crowd":"...","coherence_rule":"...","views":{"front":"..."}}},'
+            '"audio":{"include_speech":false,"include_music":false},'
+            '"brief_markdown":"...","storyboard_markdown":"...","notes":"..."}'
+        )
+        payload: dict[str, Any] = {
+            "user_prompt": prompt[:3000],
+            "rule": (
+                "Occupancy is authoritative. Man alone in office → only man on_screen; "
+                "woman appears only in later meet beat on_screen."
+            ),
+        }
+        if reference_images:
+            payload["reference_image_count"] = len(reference_images)
+
+        async def _call(*, reinforce: bool = False) -> dict[str, Any] | None:
+            sys_msg = system
+            body = dict(payload)
+            if reinforce:
+                sys_msg = (
+                    "Output ONLY one JSON object starting with '{'. "
+                    "Required keys: characters, shots, scene_locks, brief_markdown, "
+                    "storyboard_markdown. Every shot needs non-empty on_screen + setting_id."
+                )
+                body["retry"] = True
+            result = await call_model_tool(
+                prompt=json.dumps(body, ensure_ascii=False),
+                system=sys_msg,
+                optimize_for=optimize_for,
+                max_tokens=32768,
+            )
+            parsed = _extract_json_object(str(result.get("text") or "")) or {}
+            if not isinstance(parsed, dict) or not parsed:
+                return None
+            # Prefer shared normalizer when possible; preserve extra plan fields.
+            norm = _normalize_llm_analysis(parsed, base)
+            if not isinstance(norm, dict):
+                return None
+            for key in (
+                "scene_locks",
+                "brief_markdown",
+                "storyboard_markdown",
+                "notes",
+                "audio",
+                "scenes",
+            ):
+                if key in parsed and parsed[key] is not None:
+                    norm[key] = parsed[key]
+            if isinstance(parsed.get("scenes"), list) and parsed["scenes"]:
+                norm["scenes"] = parsed["scenes"]
+            norm["source"] = "llm"
+            norm["schema"] = "plan.v1"
+            return norm
+
+        try:
+            plan = await _call(reinforce=False)
+            if plan is None:
+                plan = await _call(reinforce=True)
+        except Exception:  # noqa: BLE001
+            logger.info("author_plan_one_pass LLM failed", exc_info=True)
+            plan = None
+        if not isinstance(plan, dict):
+            base["source"] = "heuristic"
+            base["schema"] = "plan.v1"
+            base["llm_pending"] = False
+            return base
         return plan
 
     async def author_creative_brief(
@@ -2670,14 +2827,92 @@ class ManagerAgent:
             changed = True
 
         occupancy = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
+        if not occupancy and isinstance(identity.get("occupancy"), dict):
+            occupancy = dict(identity["occupancy"])
+        config_on_screen = [
+            str(x)
+            for x in (
+                cfg.get("on_screen")
+                or occupancy.get("must_appear")
+                or cfg.get("character_ids")
+                or []
+            )
+            if str(x)
+        ]
         if occupancy and "OCCUPANCY:" not in prompt:
             prompt = (
                 prompt
-                + f"\nOCCUPANCY: must_appear={occupancy.get('must_appear')}; "
-                f"featured={occupancy.get('featured')}."
+                + f"\nOCCUPANCY: must_appear={occupancy.get('must_appear') or config_on_screen}; "
+                f"featured={occupancy.get('featured')}; "
+                f"offscreen={occupancy.get('offscreen') or cfg.get('offscreen') or []}."
             )
             notes.append("inject_occupancy")
             changed = True
+        # Reject/rewrite when prompt names cast outside config on_screen.
+        if role in {"frame", "keyframe", "clip"} and config_on_screen:
+            analysis_cast = (
+                (graph.get("metadata") or {}).get("script_analysis") or {}
+            )
+            id_to_name = {
+                str(c.get("id")): str(c.get("name") or c.get("id"))
+                for c in (analysis_cast.get("characters") or [])
+                if isinstance(c, dict) and c.get("id")
+            }
+            allowed_names = {
+                id_to_name.get(cid, cid).lower() for cid in config_on_screen
+            }
+            allowed_ids = set(config_on_screen)
+            prompt_l = prompt.lower()
+            leaked: list[str] = []
+            for cid, name in id_to_name.items():
+                if cid in allowed_ids:
+                    continue
+                nlow = name.lower()
+                if len(nlow) < 3:
+                    continue
+                if nlow in prompt_l or cid.lower() in prompt_l:
+                    leaked.append(name)
+            if leaked:
+                prompt = (
+                    prompt
+                    + "\nOCCUPANCY ENFORCE: draw ONLY "
+                    + ", ".join(id_to_name.get(c, c) for c in config_on_screen)
+                    + f". Do NOT draw or mention: {', '.join(leaked)}."
+                )
+                notes.append(f"reject_offscreen_in_prompt:{','.join(leaked[:6])}")
+                changed = True
+            # Keep solo_ids aligned to on_screen only.
+            solo_by_cid = {
+                str(c): sid
+                for c, sid in zip(
+                    cfg.get("character_ids") or [],
+                    solo_ids,
+                )
+                if str(c)
+            }
+            # Prefer resolving from graph solos when available.
+            for other in graph.get("nodes") or []:
+                if not isinstance(other, dict):
+                    continue
+                oc = other.get("config") if isinstance(other.get("config"), dict) else {}
+                if _role_key(other) not in {"character", "character_design"}:
+                    continue
+                if oc.get("combined_cast"):
+                    continue
+                cids = [str(x) for x in (oc.get("character_ids") or []) if str(x)]
+                if len(cids) == 1:
+                    solo_by_cid[cids[0]] = str(other.get("id") or "")
+            aligned = [solo_by_cid[c] for c in config_on_screen if c in solo_by_cid]
+            if aligned and aligned != solo_ids:
+                solo_ids = aligned
+                cfg["character_node_ids"] = list(aligned)
+                if isinstance(identity, dict):
+                    identity = dict(identity)
+                    identity["character_node_ids"] = list(aligned)
+                    identity["character_ids"] = list(config_on_screen)
+                    cfg["identity_refs"] = identity
+                notes.append("align_refs_to_on_screen")
+                changed = True
 
         crowd = cfg.get("crowd_lock") if isinstance(cfg.get("crowd_lock"), dict) else {}
         if not crowd and isinstance(occupancy.get("crowd_lock"), dict):
@@ -2786,6 +3021,50 @@ class ManagerAgent:
                     changed = True
 
         if role == "clip":
+            # Scene bible + setting isolation for clips (same locks as keyframes).
+            bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+            if not bible:
+                meta_b = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+                locks_b = meta_b.get("scene_locks") if isinstance(meta_b.get("scene_locks"), dict) else {}
+                if isinstance(locks_b.get(setting_id), dict):
+                    bible = dict(locks_b[setting_id])
+                    cfg["scene_bible"] = bible
+            if bible and "SCENE BIBLE" not in prompt:
+                prompt = (
+                    prompt
+                    + f"\nSCENE BIBLE: place={bible.get('place')}; lighting={bible.get('lighting')}; "
+                    f"objects={', '.join(str(x) for x in (bible.get('objects') or [])[:6])}; "
+                    f"crowd={bible.get('crowd')}; coherence={bible.get('coherence_rule')}."
+                )
+                notes.append("enforce_scene_bible_clip")
+                changed = True
+            if setting_id and f"setting={setting_id}" not in prompt.lower() and "Setting lock" not in prompt:
+                prompt = (
+                    prompt
+                    + f"\nSETTING LOCK: animate only `{setting_id}` from THIS shot's keyframe; "
+                    "do not import architecture or cast from another scene."
+                )
+                notes.append("enforce_setting_lock_clip")
+                changed = True
+            # Pull prior clip Wan prompt from continuity node if not stamped yet.
+            cont_clip = str(cfg.get("continuity_clip_node_id") or cfg.get("previous_clip_node_id") or "").strip()
+            if cont_clip and not str(cfg.get("previous_clip_wan_prompt") or "").strip():
+                for n in graph.get("nodes") or []:
+                    if str(n.get("id") or "") != cont_clip:
+                        continue
+                    pcfg = n.get("config") if isinstance(n.get("config"), dict) else {}
+                    prior_txt = str(
+                        pcfg.get("last_wan_prompt")
+                        or pcfg.get("last_approved_prompt")
+                        or (pcfg.get("generate") or {}).get("prompt")
+                        or ""
+                    ).strip()
+                    if prior_txt:
+                        cfg["previous_clip_wan_prompt"] = prior_txt[:3500]
+                        cfg["previous_clip_node_id"] = cont_clip
+                        notes.append("pull_prior_clip_wan_from_dep")
+                        changed = True
+                    break
             prior_clips = collect_prior_clip_prompts(graph, shot_index=shot_index)
             clause = handoff_clause_for_prompt(prior_clips)
             if clause and "PRIOR CLIP CONTINUITY" not in prompt:
@@ -2793,9 +3072,20 @@ class ManagerAgent:
                 notes.append("inject_prior_clip_handoff")
                 changed = True
             prev_clip = str(cfg.get("previous_clip_wan_prompt") or "").strip()
-            if prev_clip and "previous_clip_wan_prompt" not in prompt.lower():
-                # already covered by clause when present; keep stamp for leaf JSON
-                cfg["previous_clip_wan_prompt"] = prev_clip[:3500]
+            if prev_clip and "PRIOR CLIP CONTINUITY" not in prompt:
+                prompt = (
+                    prompt
+                    + "\n\nPRIOR CLIP CONTINUITY (do NOT redo these beats; continue forward):\n"
+                    + prev_clip[:1600]
+                )
+                notes.append("inject_previous_clip_wan_prompt")
+                changed = True
+            # Storyboard beat for THIS shot only (avoid full-board mix).
+            action = str(cfg.get("shot_action") or "").strip()
+            if action and f"Primary action for shot {shot_index}" not in prompt:
+                prompt = prompt + f"\nPrimary action for shot {shot_index}: {action}"
+                notes.append("inject_this_shot_action")
+                changed = True
 
         # Soft anti-repeat: if prompt re-states a finished exit verb from already_done, flag.
         for item in already_done:
@@ -3097,6 +3387,119 @@ class ManagerAgent:
             node["config"] = cfg
         return notes
 
+    async def patch_plan_one_pass(
+        self,
+        plan: dict[str, Any],
+        *,
+        user_prompt: str,
+        optimize_for: str = "quality",
+    ) -> dict[str, Any]:
+        """One Manager LLM fidelity patch on plan JSON — occupancy/setting/locks only."""
+        out = dict(plan)
+        if not user_prompt.strip():
+            return out
+        system = (
+            "You are the Designer Manager. Diff-only fidelity patch on plan.v1. "
+            "Do NOT invent characters or plot. Do NOT paste the full user_prompt into actions. "
+            "Fix: empty on_screen, wrong setting_id inheritance across meet/leave/exterior, "
+            "cast bleed (later people into early on_screen), missing scene_locks, "
+            "desynced character_ids vs on_screen (update on_screen/character_ids/occupancy together). "
+            "Respond JSON only: "
+            '{"ok":true,"characters":[...],"shots":[...],"scene_locks":{...},'
+            '"brief_markdown":"...","storyboard_markdown":"...","notes":"..."} '
+            "Omit unchanged top-level keys; include full shots[] if any shot changes."
+        )
+        try:
+            result = await call_model_tool(
+                prompt=json.dumps(
+                    {
+                        "user_prompt": user_prompt[:2000],
+                        "plan": {
+                            "characters": out.get("characters") or [],
+                            "shots": out.get("shots") or [],
+                            "scenes": out.get("scenes") or [],
+                            "scene_locks": out.get("scene_locks") or {},
+                            "brief_markdown": str(out.get("brief_markdown") or "")[:2000],
+                            "storyboard_markdown": str(out.get("storyboard_markdown") or "")[:2000],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                system=system,
+                optimize_for=optimize_for,
+                max_tokens=16384,
+            )
+            parsed = _extract_json_object(str(result.get("text") or "")) or {}
+        except Exception:  # noqa: BLE001
+            logger.info("patch_plan_one_pass LLM failed", exc_info=True)
+            parsed = {}
+        if not isinstance(parsed, dict) or not parsed:
+            return out
+        # Never invent cast — only allow subset/rename of existing ids unless Supervisor had none.
+        existing_ids = {
+            str(c.get("id") or "")
+            for c in (out.get("characters") or [])
+            if isinstance(c, dict) and c.get("id")
+        }
+        if isinstance(parsed.get("characters"), list) and parsed["characters"]:
+            cleaned_chars: list[dict[str, Any]] = []
+            for i, raw in enumerate(parsed["characters"], start=1):
+                if not isinstance(raw, dict):
+                    continue
+                cid = str(raw.get("id") or f"char_{i}").strip() or f"char_{i}"
+                if existing_ids and cid not in existing_ids:
+                    continue
+                cleaned_chars.append(
+                    {
+                        "id": cid,
+                        "name": str(raw.get("name") or cid).strip() or cid,
+                        "description": str(raw.get("description") or "")[:600],
+                    }
+                )
+            if cleaned_chars:
+                out["characters"] = cleaned_chars
+                existing_ids = {str(c.get("id")) for c in cleaned_chars}
+        if isinstance(parsed.get("shots"), list) and parsed["shots"]:
+            cleaned_shots: list[dict[str, Any]] = []
+            for i, raw in enumerate(parsed["shots"], start=1):
+                if not isinstance(raw, dict):
+                    continue
+                shot = dict(raw)
+                shot["shot_index"] = int(shot.get("shot_index") or i)
+                on_screen = [
+                    str(x)
+                    for x in (
+                        shot.get("on_screen")
+                        or shot.get("visible_cast_ids")
+                        or shot.get("featured_cast_ids")
+                        or []
+                    )
+                    if str(x) and (not existing_ids or str(x) in existing_ids)
+                ]
+                shot["on_screen"] = on_screen
+                shot["visible_cast_ids"] = list(on_screen)
+                shot["character_ids"] = list(on_screen)
+                off = [
+                    str(x)
+                    for x in (shot.get("offscreen") or shot.get("off_screen_cast_ids") or [])
+                    if str(x) and str(x) not in on_screen
+                    and (not existing_ids or str(x) in existing_ids)
+                ]
+                shot["offscreen"] = off
+                shot["off_screen_cast_ids"] = off
+                if not str(shot.get("setting_id") or "").strip():
+                    shot["setting_id"] = f"set_{i}"
+                cleaned_shots.append(shot)
+            if cleaned_shots:
+                out["shots"] = cleaned_shots
+        if isinstance(parsed.get("scene_locks"), dict) and parsed["scene_locks"]:
+            out["scene_locks"] = parsed["scene_locks"]
+        for key in ("brief_markdown", "storyboard_markdown", "notes"):
+            if isinstance(parsed.get(key), str) and parsed[key].strip():
+                out[key] = parsed[key]
+        out["manager_patched"] = True
+        return out
+
     async def review_brief(
         self, graph: DesignerExecutionGraph, *, use_llm: bool = False
     ) -> dict[str, Any]:
@@ -3253,14 +3656,9 @@ class ManagerAgent:
                 lock.setdefault("time", "forward-only continuity with prior beats")
                 shot["continuity_lock"] = lock
                 patched.append(f"continuity:shot{idx}")
-            # Mild enhancement when action is too short.
-            action = str(shot.get("action") or "").strip()
-            if len(action) < 40 and user_prompt:
-                shot["action"] = (
-                    f"{action} — enrich atmosphere (crowd reaction, lighting, depth) "
-                    f"while staying faithful to: {user_prompt[:160]}"
-                )[:500]
-                patched.append(f"enhance:shot{idx}")
+            # Never paste the full user_prompt into short actions — that injects
+            # later-meet cast into early beats. Sparse actions stay sparse;
+            # LLM shot_fixes below may enrich without copying the whole brief.
 
         if use_llm:
             try:

@@ -495,12 +495,17 @@ def _bootstrap_graph(
         meta["script_analysis"] = analysis
         meta["script_analysis_mode"] = analysis_mode
         meta["pending_llm_analysis"] = analysis_mode != "llm"
-        meta["pending_supervisor_graph"] = bool(_llm_configured())
-        meta["supervisor_composed_on_bootstrap"] = False
+        # One-pass Enter already authored the plan — no Play redesign pending.
+        meta["pending_supervisor_graph"] = False if analysis_mode == "llm" else bool(
+            _llm_configured()
+        )
+        meta["supervisor_composed_on_bootstrap"] = analysis_mode == "llm"
         meta["supervisor_owns_graph"] = True
         meta["freeze_shot_topology"] = False
-        meta["one_pass"] = False
+        meta["one_pass"] = analysis_mode == "llm"
         meta["auto_accept_outputs"] = True
+        if isinstance(analysis.get("scene_locks"), dict) and analysis["scene_locks"]:
+            meta["scene_locks"] = analysis["scene_locks"]
         graph["metadata"] = meta
         graph = attach_skills_metadata(graph, prompt)
         if callable(on_progress):
@@ -751,10 +756,9 @@ async def _bootstrap_graph_with_supervisor(
     channel_id: str,
     on_progress: Any | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    """LLM analysis on the main event loop, then Supervisor/Manager approval chain.
+    """Enter: seed cast → Brief/Manager → Storyboard/Manager → Graph/Manager.
 
-    Never runs AsyncOpenAI inside ``asyncio.to_thread`` / ``asyncio.run`` — that
-    path returned empty model responses and forced heuristic cast names.
+    Never runs AsyncOpenAI inside ``asyncio.to_thread`` / ``asyncio.run``.
     """
     from jiuwenswarm.server.runtime.designer.composer import detect_scenario
     from jiuwenswarm.server.runtime.designer.model_tools import llm_available
@@ -774,7 +778,6 @@ async def _bootstrap_graph_with_supervisor(
     raw_references = params.get("references")
     if raw_references is None:
         raw_references = params.get("user_references")
-    # Lightweight refs for analysis images (full normalize happens in _bootstrap_graph).
     analysis: dict[str, Any] | None = None
     try:
         user_refs_preview = (
@@ -789,12 +792,12 @@ async def _bootstrap_graph_with_supervisor(
 
     if detected == "video" and llm_available():
         if callable(on_progress):
-            on_progress("thinking", "Supervisor · Extracting cast and scenes (LLM tool)")
+            on_progress("thinking", "Supervisor · Extracting cast and scenes (LLM)")
         try:
             analysis = await analyze_creative_brief(
                 analysis_prompt,
                 use_llm=True,
-                timeout_sec=90.0,
+                timeout_sec=120.0,
                 reference_images=[
                     str(item.get("path") or "")
                     for item in user_refs_preview
@@ -813,13 +816,11 @@ async def _bootstrap_graph_with_supervisor(
                     f"Supervisor · LLM cast locked ({n} characters)",
                 )
         else:
-            # Do not stamp heuristic_pending / failed cast as final — chain re-authors.
             if callable(on_progress):
                 on_progress(
                     "thinking",
                     "Supervisor · Analysis soft-failed; Manager chain will re-author via LLM",
                 )
-            # Keep pending marker if present so bootstrap graph stays provisional.
             if isinstance(analysis, dict) and analysis.get("llm_pending"):
                 pass
             else:
@@ -856,13 +857,13 @@ async def _bootstrap_graph_with_supervisor(
             on_progress("thinking", "Supervisor · Authoring brief (LLM)")
         await SupervisorAgent().author_creative_brief(graph, use_llm=True)
         if callable(on_progress):
-            on_progress("thinking", "Manager · Reviewing brief (LLM)")
+            on_progress("thinking", "Manager · Reviewing / approving brief")
         await ManagerAgent().review_brief(graph, use_llm=True)
         if callable(on_progress):
             on_progress("thinking", "Supervisor · Designing storyboard (LLM)")
         await SupervisorAgent().author_storyboard(graph, use_llm=True)
         if callable(on_progress):
-            on_progress("thinking", "Manager · Approving storyboard (LLM)")
+            on_progress("thinking", "Manager · Reviewing / approving storyboard")
         await ManagerAgent().review_storyboard(graph, use_llm=True)
         if callable(on_progress):
             on_progress(
@@ -876,7 +877,7 @@ async def _bootstrap_graph_with_supervisor(
             optimize_for=optimize_for,
         )
         if callable(on_progress):
-            on_progress("thinking", "Manager · Validating plan (LLM)")
+            on_progress("thinking", "Manager · Validating / approving graph + locks")
         await ManagerAgent().validate_plan(graph, use_llm=True)
         graph = apply_runtime_delegate(graph)
         meta = dict(graph.get("metadata") or {})
@@ -900,7 +901,6 @@ async def _bootstrap_graph_with_supervisor(
         truly_llm = analysis_source == "llm" or str(ack.get("source") or "") == "llm" or (
             str(story_ack.get("source") or "") == "llm" and cast_n >= 1
         )
-        # Never claim LLM mode just because heuristic guessed multiple role-nouns.
         meta["pending_llm_analysis"] = not truly_llm
         meta["pending_supervisor_graph"] = not truly_llm
         meta["supervisor_composed_on_bootstrap"] = truly_llm
@@ -909,10 +909,14 @@ async def _bootstrap_graph_with_supervisor(
         )
         meta["agent_runtime_bootstrap"] = {
             "analysis": "analyze_creative_brief via call_model_tool",
-            "orchestration": "SupervisorAgent + ManagerAgent approval chain",
+            "orchestration": (
+                "Supervisor brief → Manager approve → Supervisor storyboard → "
+                "Manager approve → Supervisor graph → Manager validate/locks"
+            ),
             "leaves": "NodeAgentHost / openjiuwen tools on Play",
         }
         meta["one_pass"] = False
+        meta["enter_approval_chain"] = True
         graph["metadata"] = meta
         if callable(on_progress):
             on_progress(
@@ -925,13 +929,14 @@ async def _bootstrap_graph_with_supervisor(
         return payload, None, None
     except Exception as exc:  # noqa: BLE001
         logger.info(
-            "Supervisor bootstrap redesign failed; keeping graph: %s",
+            "Supervisor bootstrap approval chain failed; keeping graph: %s",
             exc,
             exc_info=True,
         )
         meta = dict(graph.get("metadata") or {})
         meta["pending_supervisor_graph"] = False
         meta["supervisor_composed_on_bootstrap"] = True
+        meta["enter_approval_chain"] = True
         graph["metadata"] = meta
         try:
             saved = _store.save_graph(graph)

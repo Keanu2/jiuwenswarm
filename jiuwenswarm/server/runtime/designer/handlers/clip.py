@@ -309,6 +309,22 @@ def build_clip_prompt(
     if camera:
         parts.append(f"Camera for shot {shot_index}: {camera}")
     identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+    setting_id = str(cfg.get("setting_id") or (shot or {}).get("setting_id") or "").strip()
+    if setting_id:
+        parts.append(f"Setting lock for this clip only: {setting_id} — do not borrow another scene.")
+    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+    if not bible and isinstance(identity.get("scene_bible"), dict):
+        bible = identity["scene_bible"]
+    if bible:
+        parts.append(
+            "SCENE BIBLE (architecture/objects/light — keep; only animate this beat): "
+            f"place={bible.get('place')}; lighting={bible.get('lighting')}; "
+            f"objects={', '.join(str(x) for x in (bible.get('objects') or [])[:6])}; "
+            f"crowd={bible.get('crowd')}."
+        )
+    view_key = str(cfg.get("view_key") or "").strip()
+    if view_key:
+        parts.append(f"Active view_key: {view_key}")
     costume_lock = str(identity.get("costume_lock") or cfg.get("costume_lock") or "").strip()
     if costume_lock:
         parts.append(f"Costume / identity lock (do not redesign): {costume_lock}")
@@ -338,20 +354,23 @@ def build_clip_prompt(
         clause = continuity_prompt_clause(lock)
         if clause:
             parts.append(clause.strip())
+    # THIS shot only — never dump the full storyboard (homogenizes / mixes scenes).
     if shot is not None:
         parts.append(_format_shot_block(shot, shot_index))
     else:
-        storyboard = role_output_text(ctx, NODE_ROLE_STORYBOARD) if ctx is not None else ""
-        parts.append(storyboard or graph_prompt(graph, node))
+        parts.append(
+            f"Storyboard beat for shot {shot_index} only "
+            f"(action={action or 'see keyframe'}; camera={camera or 'match keyframe'})."
+        )
     override = str((cfg.get("generate") or {}).get("prompt") or "").strip() if isinstance(cfg.get("generate"), dict) else ""
     if override:
         parts.append(f"Supervisor shot brief: {override}")
-    # Prior clip / already_done handoff (Manager-stamped).
+    # Prior clip / already_done handoff (Manager-stamped) — REQUIRED for sequential continuity.
     prior_clip = str(cfg.get("previous_clip_wan_prompt") or "").strip()
     if prior_clip:
         parts.append(
-            "PRIOR CLIP CONTINUITY (do NOT redo these beats):\n"
-            + prior_clip[:1200]
+            "PRIOR CLIP CONTINUITY (do NOT redo these beats; continue forward from them):\n"
+            + prior_clip[:1600]
         )
     already_done = [str(x) for x in (cfg.get("already_done") or []) if str(x)]
     if already_done:
@@ -360,7 +379,8 @@ def build_clip_prompt(
     if occupancy:
         parts.append(
             f"OCCUPANCY: must_appear={occupancy.get('must_appear')}; "
-            f"featured={occupancy.get('featured')}."
+            f"featured={occupancy.get('featured')}; "
+            f"offscreen={occupancy.get('offscreen') or cfg.get('offscreen') or []}."
         )
     from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
         collect_prior_clip_prompts,

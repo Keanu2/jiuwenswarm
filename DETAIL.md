@@ -16,30 +16,29 @@ Short companion notes: `a.md`.
 ```mermaid
 flowchart TD
   U["User prompt in Designer UI"] --> BOOT["designer.graph.bootstrap"]
-  BOOT --> SA["script_analysis.analyze_creative_brief<br/>cast / scenes / shots / occupancy"]
-  SA --> POL["apply_compose_solos_setting_policy<br/>scene_bible + hierarchical views"]
-  POL --> G0["build_smart_video_graph v5<br/>skip_scene_plate=true"]
-  G0 --> UI["Canvas: named agents<br/>character: Name / scene n: keyframe n / clip n"]
-  UI --> PLAY["Play → designer.run.start"]
-  PLAY --> SCH["GraphExecutor._execute_wave_run<br/>ready-queue + concurrency 3"]
-  SCH --> DIR["Supervisor Director"]
-  DIR --> BR["author_creative_brief"]
-  BR --> M1["Manager review_brief"]
-  M1 --> SB["Supervisor author_storyboard<br/>scene bible: objects, lighting, crowd, views"]
-  SB --> M2["Manager review_storyboard lock"]
+  BOOT --> SA["analyze_creative_brief cast/shots seed"]
+  SA --> G0["build_smart_video_graph provisional"]
+  G0 --> BR["Supervisor author_creative_brief"]
+  BR --> M1["Manager review/approve brief"]
+  M1 --> SB["Supervisor author_storyboard<br/>scene bible + occupancy"]
+  SB --> M2["Manager review/approve storyboard"]
   M2 --> DG["Supervisor design_execution_graph"]
-  DG --> PL["Supervisor.plan tools"]
-  PL --> MV["Manager.validate_plan prune + re-edit"]
-  MV --> Q["Ready queue"]
-  Q --> SOLO["All solo character sheets"]
-  SOLO --> KF1["First KF per setting_id<br/>SCENE MASTER compose from solos"]
-  KF1 --> HO["Prompt handoff: scene_master_prompt + scene_bible"]
-  HO --> KF2["Later same-setting KFs<br/>compose_from_solo_refs + view lock"]
-  KF2 --> CLIP["n_clip_* I2V from keyframe"]
-  CLIP --> AUD["n_speech / n_music if backends else clip-embedded"]
-  AUD --> FILM["n_compose ffmpeg"]
+  DG --> MV["Manager validate_plan + locks"]
+  MV --> UI["Canvas named agents"]
+  UI --> PLAY["Play → designer.run.start"]
+  PLAY --> SCH["GraphExecutor wave run"]
+  SCH --> SKIP["Skip Enter redesign if composed"]
+  SKIP --> PL["Supervisor.plan tools"]
+  PL --> Q["Ready queue"]
+  Q --> SOLO["Solo character sheets"]
+  SOLO --> KF1["Scene-master KF compose"]
+  KF1 --> HO["Prompt handoff same setting"]
+  HO --> KF2["Later KFs"]
+  KF2 --> C1["n_clip_1 I2V"]
+  C1 --> C2["n_clip_2 waits on clip_1<br/>prior Wan prompt handoff"]
+  C2 --> C3["n_clip_N serial + locks"]
+  C3 --> FILM["n_compose ffmpeg"]
   FILM --> RATE["Dual raters write-only"]
-  RATE --> FB["feedback JSON apply_on=run_again_only"]
 ```
 
 **Continuity rule (current):** every keyframe **composes from character solo
@@ -267,22 +266,35 @@ for the master prompt without treating the prior still as an edit source.
 
 ## 6. LLM orchestration (detail)
 
+### Enter (bootstrap) — Supervisor/Manager approval chain
+
+```
+1. analyze_creative_brief → cast/shots seed (LLM; heuristic soft-fail)
+2. Provisional build_smart_video_graph
+3. Supervisor.author_creative_brief → Manager.review_brief (approve/edit)
+4. Supervisor.author_storyboard → Manager.review_storyboard (approve + locks)
+5. Supervisor.design_execution_graph → Manager.validate_plan (approve + prune/locks)
+```
+
+Occupancy stays authoritative (no name→on_screen / dump-to-shot-1 / ensemble fallback).
+Clips are **serial in film order** (`n_clip_N` depends on `n_clip_{N-1}`) so prior
+Wan prompts hand off before the next clip runs. Manager leaf gate enforces scene
+bible, setting lock, occupancy, and PRIOR CLIP CONTINUITY on every clip.
+
 ### Play-time order (video + LLM)
 
 ```
 1. Stamp metadata.agent_runtime (ai | heuristic)
-2. Optional one-time LLM rebuild if pending_llm_analysis
+2. Skip Enter redesign when supervisor_composed_on_bootstrap
+   (re-run brief/SB/design_execution_graph only if use_prior_feedback / pending)
 3. Manager.decide_capabilities
-4. Supervisor.author_creative_brief → Manager.review_brief
-5. Supervisor.author_storyboard → Manager.review_storyboard (lock + scene bible)
-6. Supervisor.design_execution_graph (LLM expands multi-shot topology)
-7. Supervisor.plan (minimal tools / node directives)
-8. Manager.validate_plan (prune + Brief/SB/lock re-edit + identity stamp)
-9. Ready-queue leaves; Manager.review_leaf_media_prompt before each frame/clip
-10. Scene-master prompt handoff after first KF of each setting
-11. Prior clip Wan-prompt handoff
-12. SupervisorReviewer.finalize + Manager.review + dual_rate_final
-13. write_run_feedback (apply_on=run_again_only)
+4. Supervisor.plan (minimal tools / node directives)
+5. Manager.validate_plan (prune if DAG broken + identity stamp)
+6. Ready-queue leaves; Manager.review_leaf_media_prompt before each frame/clip
+7. Scene-master prompt handoff after first KF of each setting
+8. Serial clips: after each clip, stamp Wan prompt onto next clip
+9. SupervisorReviewer.finalize + Manager.review + dual_rate_final
+10. write_run_feedback (apply_on=run_again_only)
 ```
 
 Duration in the user prompt constrains **total film time / timelines**, not
@@ -290,10 +302,10 @@ shot count. A short film can still have many keyframes.
 
 ### Script analysis
 
-`script_analysis.analyze_creative_brief(prompt, use_llm=True)` → cast, scenes,
-shots (`on_screen` / `offscreen` / `cast_actions`), audio intent. Async-first;
-empty LLM JSON retries. `build_smart_video_graph` stamps `setting_id` and
-applies `apply_compose_solos_setting_policy`.
+Enter seeds with `analyze_creative_brief`, then Supervisor/Manager re-author
+Brief + Storyboard + Graph. Heuristic fallback only if LLM soft-fails.
+`build_smart_video_graph` stamps `setting_id` and applies
+`apply_compose_solos_setting_policy`.
 
 ### Media honesty
 

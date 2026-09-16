@@ -405,26 +405,54 @@ def _shot_budget(analysis: dict[str, Any], shots: list[dict[str, Any]]) -> int:
 def _ensure_characters_referenced(
     characters: list[dict[str, Any]], shots: list[dict[str, Any]]
 ) -> None:
-    """Attach uncovered cast to the best-matching shot (never blindly dump onto shot 1)."""
-    from jiuwenswarm.server.runtime.designer.script_analysis import _score_character_in_text
+    """Only attach uncovered cast to a shot that already lists them on_screen/ids.
 
-    covered = {str(cid) for s in shots for cid in (s.get("character_ids") or [])}
+    Never dump onto shot 1 by lexical score — that puts later-meet cast into the
+    establishing beat (e.g. woman into alone-in-office).
+    """
+    covered = {
+        str(cid)
+        for s in shots
+        if isinstance(s, dict)
+        for cid in (
+            list(s.get("on_screen") or [])
+            + list(s.get("visible_cast_ids") or [])
+            + list(s.get("character_ids") or [])
+            + list(s.get("offscreen") or [])
+            + list(s.get("off_screen_cast_ids") or [])
+        )
+        if str(cid)
+    }
     for ch in characters:
         cid = str(ch.get("id") or "")
         if not cid or cid in covered or not shots:
             continue
-        best_i = len(shots) - 1
-        best_sc = -1
-        for i, shot in enumerate(shots):
-            blob = f"{shot.get('action') or ''} {shot.get('keyframe_prompt') or ''}"
-            sc = _score_character_in_text(ch, blob)
-            if sc > best_sc:
-                best_sc = sc
-                best_i = i
-        shots[best_i]["character_ids"] = list(
-            dict.fromkeys([*(shots[best_i].get("character_ids") or []), cid])
-        )
-        covered.add(cid)
+        # Already listed somewhere under another field — sync character_ids only.
+        placed = False
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            listed = {
+                str(x)
+                for x in (
+                    list(shot.get("on_screen") or [])
+                    + list(shot.get("visible_cast_ids") or [])
+                    + list(shot.get("offscreen") or [])
+                    + list(shot.get("off_screen_cast_ids") or [])
+                )
+                if str(x)
+            }
+            if cid not in listed:
+                continue
+            shot["character_ids"] = list(
+                dict.fromkeys([*(shot.get("character_ids") or []), cid])
+            )
+            covered.add(cid)
+            placed = True
+            break
+        if not placed:
+            # Leave uncovered — Manager/validators must reject or Supervisor must list them.
+            continue
 
 
 def _plan_cast_sheets(
@@ -729,24 +757,53 @@ def _ensure_setting_ids(
     shots: list[dict[str, Any]],
     scenes: list[dict[str, Any]],
 ) -> None:
-    """Stamp setting_id on every shot (domain-agnostic).
+    """Stamp setting_id on every shot.
 
-    Prefer explicit setting_id / scene_id; otherwise carry previous setting so
-    book/search/plan language does not invent a location jump.
+    Prefer explicit setting_id / scene_id. Only inherit the previous setting when
+    the beat clearly stays in the same place; meet/leave/exterior language gets a
+    new setting id so later cast is not folded into the office ensemble.
     """
     default = "set_1"
     if scenes:
         default = str(scenes[0].get("id") or "set_1").strip() or "set_1"
+    scene_ids = [
+        str(s.get("id") or "").strip()
+        for s in scenes
+        if isinstance(s, dict) and str(s.get("id") or "").strip()
+    ]
     prev = default
-    for shot in shots:
+    new_place_re = re.compile(
+        r"\b("
+        r"meet|meets|meeting|later|then|outside|street|exterior|outdoor|"
+        r"leaves?|leaving|exit|exits|arrive|arrives|another (place|room|location)|"
+        r"new (place|scene|location)|cut to|elsewhere"
+        r")\b",
+        re.I,
+    )
+    for i, shot in enumerate(shots):
         if not isinstance(shot, dict):
             continue
         sid = str(shot.get("setting_id") or shot.get("scene_id") or "").strip()
         if sid:
             prev = sid
+            shot["setting_id"] = sid
+            continue
+        blob = f"{shot.get('action') or ''} {shot.get('keyframe_prompt') or ''} {shot.get('title') or ''}"
+        if i > 0 and new_place_re.search(blob):
+            # Prefer next unused scene id from analysis; else synthesize.
+            used = {
+                str(s.get("setting_id") or "")
+                for s in shots
+                if isinstance(s, dict) and s.get("setting_id")
+            }
+            candidate = next((x for x in scene_ids if x not in used and x != prev), "")
+            if not candidate:
+                candidate = f"set_{i + 1}"
+            sid = candidate
         else:
             sid = prev
         shot["setting_id"] = sid
+        prev = sid
 
 
 def build_smart_video_graph(
@@ -1074,18 +1131,8 @@ def build_smart_video_graph(
             if isinstance(shot.get("cast_actions"), dict)
             else (occ0.get("cast_actions") if isinstance(occ0.get("cast_actions"), dict) else {})
         )
-        # Domain-agnostic: if action text names a cast member, keep them visible.
-        action_l = str(shot.get("action") or shot.get("keyframe_prompt") or "").lower()
-        for c in characters:
-            cid = str(c.get("id") or "")
-            name = str(c.get("name") or "").lower()
-            if not cid or cid in focus_cids:
-                continue
-            tokens = [t for t in name.replace("-", " ").split() if len(t) > 2]
-            if tokens and any(t in action_l for t in tokens):
-                focus_cids.append(cid)
-                if cid in offscreen_cids:
-                    offscreen_cids = [x for x in offscreen_cids if x != cid]
+        # Do NOT expand on_screen from name tokens in action text — that bleeds
+        # later-meet cast into early beats. Trust Supervisor/Manager occupancy.
         shot["character_ids"] = list(dict.fromkeys(focus_cids))
         shot["on_screen"] = list(shot["character_ids"])
         shot["offscreen"] = [c for c in offscreen_cids if c not in shot["character_ids"]]
@@ -1152,6 +1199,10 @@ def build_smart_video_graph(
         clip_inputs = ["n_storyboard", frame_id]
         if prompt_handoff_from:
             clip_inputs.append(prompt_handoff_from)
+        # Film-order serial clips so prior Wan prompt can hand off before next runs.
+        # Without this edge, concurrency runs clips in parallel and continuity is empty.
+        if prev_clip_global:
+            clip_inputs.append(prev_clip_global)
         clip_inputs = list(dict.fromkeys(clip_inputs))
         y = 40 + (idx - 1) * 160
         occupancy = shot.get("occupancy") if isinstance(shot.get("occupancy"), dict) else {}
@@ -1349,6 +1400,14 @@ def build_smart_video_graph(
         )
         timeline = str(shot.get("timeline") or "").strip() or f"{(idx-1)*5:.1f}-{idx*5:.1f}s"
         speech_line = str(shot.get("speech_line") or shot.get("dialogue") or "").strip()
+        bible_for_clip = ""
+        if scene_bible:
+            bible_for_clip = (
+                f"SCENE BIBLE `{setting_id}` (keep place/objects/light; animate this beat only): "
+                f"place={scene_bible.get('place')}; lighting={scene_bible.get('lighting')}; "
+                f"objects={', '.join(str(x) for x in (scene_bible.get('objects') or [])[:6])}; "
+                f"crowd={scene_bible.get('crowd')}. "
+            )
         clip_cfg: dict[str, Any] = {
             "role": NODE_ROLE_CLIP,
             "shot_index": idx,
@@ -1356,7 +1415,11 @@ def build_smart_video_graph(
             "shot_action": action,
             "camera": camera,
             "setting_id": setting_id,
+            "view_key": view_key,
+            "scene_bible": scene_bible or None,
             "character_ids": focus_cids,
+            "on_screen": list(focus_cids),
+            "offscreen": list(shot.get("offscreen") or []),
             "character_node_ids": focus_char_nodes,
             "cast_names": focus_names,
             "identity_refs": identity_refs,
@@ -1374,7 +1437,7 @@ def build_smart_video_graph(
             "allow_still_clip_fallback": False,
             "generate": {
                 "prompt": (
-                    f"Film shot {idx} only ({timeline}). Setting {setting_id}. "
+                    f"Film shot {idx} only ({timeline}). Setting {setting_id} view={view_key}. "
                     f"Camera {camera}. Action: {action}. "
                     f"Cast on screen: {cast_who}. "
                     + (f"All of {cast_who} must be visible and acting. " if multi else "")
@@ -1383,14 +1446,16 @@ def build_smart_video_graph(
                     + "ANTI-CLONE: one body per person. "
                     + f"Costume lock: {costume_lock}. "
                     + f"{lock_line} "
+                    + bible_for_clip
                     + (f"CONTINUITY: {cont_bits}. " if cont_bits else "")
                     + occ_bits
                     + crowd_bits
                     + done_bits
                     + (f"Speech this beat: {speech_line}. " if speech_line else "")
                     + "DETAIL: motion direction, gaze targets, relative L/R from prior beat. "
+                    + "Use PRIOR CLIP CONTINUITY when present — advance time; do not redo prior beats. "
                     + "Real I2V motion required — never still freezes. "
-                    + "Distinct action from other clips; same faces/costumes/architecture/crowd."
+                    + "Distinct action from other clips; same faces/costumes for this setting."
                 )
             },
             "max_video_calls": 1,
@@ -1408,8 +1473,8 @@ def build_smart_video_graph(
         }
         if prompt_handoff_from:
             clip_cfg["continuity_frame_node_id"] = prompt_handoff_from
-        # Temporal handoff: next clip will read this node's Wan prompt via clip_prompt_handoff.
-        prev_clip_id = prev_clip_by_setting.get(setting_id) or prev_clip_global
+        # Temporal handoff: previous clip in FILM order (serial DAG above).
+        prev_clip_id = prev_clip_global
         if prev_clip_id:
             clip_cfg["continuity_clip_node_id"] = prev_clip_id
         nodes.append(

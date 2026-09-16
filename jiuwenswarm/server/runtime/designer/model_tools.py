@@ -14,6 +14,54 @@ from jiuwenswarm.common.config import get_config, get_model_names, resolve_env_v
 
 logger = logging.getLogger(__name__)
 
+# DeepSeek allows up to 393216; keep a high practical ceiling for designer plans.
+# Thinking mode shares this budget with final content — we disable thinking below.
+_DESIGNER_MAX_TOKENS_CAP = 32768
+_DESIGNER_DEFAULT_MAX_TOKENS = 8192
+
+
+def _clamp_max_tokens(value: int | None) -> int:
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n < 1:
+        n = _DESIGNER_DEFAULT_MAX_TOKENS
+    return max(256, min(_DESIGNER_MAX_TOKENS_CAP, n))
+
+
+def _thinking_disabled_extra_body() -> dict[str, Any]:
+    """Provider-neutral knobs so reasoning does not eat the output budget."""
+    return {
+        "thinking": {"type": "disabled"},
+        "reasoning": {"enabled": False},
+        "enable_thinking": False,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def _message_text(msg: Any) -> str:
+    """Prefer visible content; fall back to reasoning_content if content is empty."""
+    if msg is None:
+        return ""
+    text = str(getattr(msg, "content", None) or "").strip()
+    if text:
+        return text
+    text = str(getattr(msg, "refusal", None) or "").strip()
+    if text:
+        return text
+    # DeepSeek thinking models may put usable text only in reasoning_content
+    # when the visible budget was exhausted — better than a total soft-fail.
+    text = str(getattr(msg, "reasoning_content", None) or "").strip()
+    if text:
+        return text
+    extra = getattr(msg, "model_extra", None)
+    if isinstance(extra, dict):
+        text = str(extra.get("reasoning_content") or "").strip()
+        if text:
+            return text
+    return ""
+
 
 def llm_available() -> bool:
     """True when Settings has a usable chat model with credentials for Designer agents."""
@@ -171,7 +219,7 @@ async def call_model_tool(
     system: str,
     optimize_for: str,
     preferred_model: str | None = None,
-    max_tokens: int = 800,
+    max_tokens: int = _DESIGNER_DEFAULT_MAX_TOKENS,
     images: list[str] | None = None,
 ) -> dict[str, Any]:
     """Call a configured chat model (OpenAI-compatible) as an agent tool."""
@@ -183,6 +231,8 @@ async def call_model_tool(
         load_dotenv_runtime(dotenv_path=get_env_file(), override=False)
     except Exception:  # noqa: BLE001
         pass
+
+    max_tokens = _clamp_max_tokens(max_tokens)
 
     models = list_configured_models()
     chosen: dict[str, Any] | None = None
@@ -246,7 +296,8 @@ async def call_model_tool(
         from openai import AsyncOpenAI
 
         async def _once(*, temperature: float) -> dict[str, Any]:
-            client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=90.0)
+            # Large plans need more wall time than the old 90s default.
+            client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=180.0)
             try:
                 user_content = vision_user_content(prompt, images)
                 resp = await client.chat.completions.create(
@@ -257,14 +308,12 @@ async def call_model_tool(
                     ],
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    extra_body=_thinking_disabled_extra_body(),
                 )
-                msg = resp.choices[0].message if resp.choices else None
-                text = ""
-                if msg is not None:
-                    text = str(getattr(msg, "content", None) or "").strip()
-                    if not text:
-                        # Some providers put text in refusal / nested fields.
-                        text = str(getattr(msg, "refusal", None) or "").strip()
+                choice = resp.choices[0] if resp.choices else None
+                msg = choice.message if choice is not None else None
+                text = _message_text(msg)
+                finish = str(getattr(choice, "finish_reason", None) or "")
                 if not text:
                     return {
                         "ok": False,
@@ -273,6 +322,8 @@ async def call_model_tool(
                         "model": chosen.get("id"),
                         "model_name": model_name,
                         "text": "",
+                        "finish_reason": finish or None,
+                        "max_tokens": max_tokens,
                     }
                 return {
                     "ok": True,
@@ -280,6 +331,8 @@ async def call_model_tool(
                     "model": chosen.get("id"),
                     "model_name": model_name,
                     "text": text,
+                    "finish_reason": finish or None,
+                    "max_tokens": max_tokens,
                 }
             finally:
                 try:
@@ -292,7 +345,10 @@ async def call_model_tool(
             return first
         if first.get("error") == "empty_model_response":
             logger.warning(
-                "call_model_tool empty response model=%s; retrying once", model_name
+                "call_model_tool empty response model=%s finish=%s max_tokens=%s; retrying once",
+                model_name,
+                first.get("finish_reason"),
+                max_tokens,
             )
             return await _once(temperature=0.2)
         return first
