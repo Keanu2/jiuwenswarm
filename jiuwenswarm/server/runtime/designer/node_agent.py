@@ -457,8 +457,9 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "keyframe_strategy": locks["keyframe_strategy"],
         "occupancy": locks["occupancy"],
         "already_done": cfg.get("already_done"),
-        "previous_keyframe_prompt": str(cfg.get("previous_keyframe_prompt") or "")[:1600],
-        "previous_clip_wan_prompt": str(cfg.get("previous_clip_wan_prompt") or "")[:1600],
+        "previous_keyframe_continuity_card": cfg.get("previous_keyframe_continuity_card"),
+        "previous_clip_continuity_card": cfg.get("previous_clip_continuity_card"),
+        "scene_architecture_clause": str(cfg.get("scene_architecture_clause") or "")[:900],
         "locks": locks,
         "manager_prompt_reviewed": locks["manager_prompt_reviewed"],
     }
@@ -477,8 +478,10 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "obey locks.keyframe_strategy (compose_from_solo_refs for first KF of a setting; "
         "edit_prior_keyframe for later same-setting KFs), costume_lock, spatial_lock, "
         "occupancy, and solo identity sheets — never invent new faces/wardrobe/architecture.\n"
-        "CONTINUITY: Obey already_done and previous_* prompts — do not restage finished "
-        "exits, entrances, or one-shot dialogue; advance this shot's beat only.\n\n"
+        "CONTINUITY: Obey already_done and continuity cards — do not restage finished "
+        "onsets/exits/dialogue (e.g. do not start running again if already started). "
+        "Advance this shot's beat only unless the storyboard asks for an explicit repeat. "
+        "Never copy a prior shot's full prompt.\n\n"
         f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n```"
     )
 
@@ -722,12 +725,41 @@ class DesignerGraphToolkit:
             node["config"] = cfg
         cfg["prompt"] = text[:6000]
         frame = str(first_frame or "").strip() or None
+        from jiuwenswarm.server.runtime.designer.audio_locks import (
+            audio_lock_prompt_block,
+            resolve_audio_intent_flags,
+            resolve_video_audio_request,
+        )
+
+        meta = self.ctx.graph.get("metadata") if isinstance(self.ctx.graph, dict) else {}
+        meta = meta if isinstance(meta, dict) else {}
+        flags = resolve_audio_intent_flags(meta, cfg)
+        block = audio_lock_prompt_block(
+            language_lock=str(flags.get("language_lock") or ""),
+            speech_by_character=flags.get("speech_by_character") or {},
+            speech_line=str(flags.get("speech_line") or ""),
+            bgm_lock=flags.get("bgm_lock") or {},
+            include_speech=bool(flags.get("include_speech")),
+            include_music=bool(flags.get("include_music")),
+            clip_embedded=bool(flags.get("clip_embedded")),
+        )
+        if block and "LANGUAGE LOCK" not in text:
+            text = (text + "\n" + block).strip()[:6000]
+            cfg["prompt"] = text
+        want_audio, model_override = resolve_video_audio_request(cfg, meta)
+        if callable(getattr(self.ctx, "on_prompt_artifact", None)):
+            try:
+                self.ctx.on_prompt_artifact(text)
+            except Exception:  # noqa: BLE001
+                logger.debug("call_video_model early prompt handoff failed", exc_info=True)
         try:
             result = await generate_clip_video(
                 prompt=text[:4000],
                 save_dir=str(self._media_save_dir()),
                 first_frame=frame,
                 duration=max(2, min(10, int(duration or 5))),
+                audio=True if want_audio else False,
+                model=model_override,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("call_video_model failed: %s", exc, exc_info=True)
@@ -739,9 +771,9 @@ class DesignerGraphToolkit:
         self.completed = NodeResult(
             output_ref=file_output_ref(path, kind="video", mime_type="video/mp4"),
             output_refs=[file_output_ref(path, kind="video", mime_type="video/mp4")],
-            message="call_video_model",
+            message="call_video_model" + ("_audio" if want_audio else ""),
         )
-        return f"video_ready uri={path.resolve().as_uri()} path={path}"
+        return f"video_ready uri={path.resolve().as_uri()} path={path} audio={want_audio}"
 
     async def ffmpeg_compose(self, *, prompt: str = "") -> str:
         """Run the compose handler for this node (ffmpeg assemble)."""

@@ -198,11 +198,37 @@ def _shot_for_node(
     shots = parse_storyboard_shots(text)
     if shots and 1 <= index <= len(shots):
         shot = dict(shots[index - 1])
+        # Prefer storyboard action — never dump a Manager-contaminated generate.prompt into comment.
+        action = str(
+            (node.get("config") or {}).get("shot_action")
+            or shot.get("character_action")
+            or shot.get("comment")
+            or ""
+        ).strip()
         override = node_generate_prompt(node)
-        if override:
+        if override and not _looks_like_contaminated_prompt(override):
             shot["comment"] = override
+        elif action:
+            shot["comment"] = action
         return index, shot
     return index, None
+
+
+def _looks_like_contaminated_prompt(text: str) -> bool:
+    raw = (text or "").upper()
+    needles = (
+        "PRIOR KEYFRAME PROMPT",
+        "PRIOR CLIP CONTINUITY",
+        "MASTER SCENE PROMPT",
+        "CONTINUITY CARD (MANAGER)",
+        "LANGUAGE LOCK",
+        "ASPECT LOCK",
+        "STYLE LOCK",
+        "SCENE BIBLE",
+    )
+    if any(n in raw for n in needles):
+        return True
+    return len(text or "") > 500
 
 
 def _format_shot_block(shot: StoryboardShot, shot_index: int) -> str:
@@ -363,18 +389,28 @@ def build_clip_prompt(
             f"(action={action or 'see keyframe'}; camera={camera or 'match keyframe'})."
         )
     override = str((cfg.get("generate") or {}).get("prompt") or "").strip() if isinstance(cfg.get("generate"), dict) else ""
-    if override:
-        parts.append(f"Supervisor shot brief: {override}")
-    # Prior clip / already_done handoff (Manager-stamped) — REQUIRED for sequential continuity.
-    prior_clip = str(cfg.get("previous_clip_wan_prompt") or "").strip()
-    if prior_clip:
-        parts.append(
-            "PRIOR CLIP CONTINUITY (do NOT redo these beats; continue forward from them):\n"
-            + prior_clip[:1600]
+    if override and not _looks_like_contaminated_prompt(override):
+        parts.append(f"Supervisor shot brief: {override[:400]}")
+    # Slim continuity card / already_done — never paste full prior Wan prompt.
+    prior_card = (
+        cfg.get("previous_clip_continuity_card")
+        if isinstance(cfg.get("previous_clip_continuity_card"), dict)
+        else None
+    )
+    if prior_card:
+        from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+            continuity_card_clause,
         )
+
+        clause_card = continuity_card_clause(prior_card)
+        if clause_card:
+            parts.append(clause_card)
     already_done = [str(x) for x in (cfg.get("already_done") or []) if str(x)]
-    if already_done:
-        parts.append("ALREADY_DONE (do not restage): " + "; ".join(already_done[:12]))
+    if already_done and not any("ALREADY_DONE" in p for p in parts):
+        parts.append(
+            "ALREADY_DONE (do not restage unless storyboard explicitly repeats): "
+            + "; ".join(already_done[:12])
+        )
     occupancy = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
     if occupancy:
         parts.append(
@@ -390,7 +426,8 @@ def build_clip_prompt(
     clause = handoff_clause_for_prompt(
         collect_prior_clip_prompts(graph, shot_index=shot_index)
     )
-    if clause and "PRIOR CLIP CONTINUITY" not in "\n".join(parts):
+    joined = "\n".join(parts)
+    if clause and "CONTINUITY CARD (Manager)" not in joined:
         parts.append(clause)
     from jiuwenswarm.server.runtime.designer.user_references import (
         graph_user_references,
@@ -416,6 +453,25 @@ def build_clip_prompt(
             "Attached audio 1 is a soundtrack/voice reference only; "
             "do not invent a conflicting score."
         )
+    # Locked speech / language / BGM (Supervisor storyboard + Manager).
+    from jiuwenswarm.server.runtime.designer.audio_locks import (
+        audio_lock_prompt_block,
+        resolve_audio_intent_flags,
+    )
+
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    flags = resolve_audio_intent_flags(meta, cfg if isinstance(cfg, dict) else {})
+    block = audio_lock_prompt_block(
+        language_lock=str(flags.get("language_lock") or ""),
+        speech_by_character=flags.get("speech_by_character") or {},
+        speech_line=str(flags.get("speech_line") or ""),
+        bgm_lock=flags.get("bgm_lock") or {},
+        include_speech=bool(flags.get("include_speech")),
+        include_music=bool(flags.get("include_music")),
+        clip_embedded=bool(flags.get("clip_embedded")),
+    )
+    if block and "LANGUAGE LOCK" not in "\n".join(parts) and "SPEECH LOCK" not in "\n".join(parts):
+        parts.append(block)
     return "\n\n".join(part.strip() for part in parts if part.strip())[:6000]
 
 
@@ -429,6 +485,7 @@ async def generate_clip_video(
     audio: bool | None = None,
     size: str | None = None,
     resolution: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Call the shared video-generation stack. Tests monkeypatch this function."""
     from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
@@ -464,6 +521,7 @@ async def generate_clip_video(
         reference_file=reference_file,
         duration=max(2, min(10, int(duration or 5))),
         audio=audio,
+        model=(str(model).strip() or None) if model else None,
     )
     if "error" in result:
         raise RuntimeError(str(result["error"]))
@@ -520,6 +578,11 @@ class ClipNodeHandler:
             shot_index=shot_index,
             has_first_frame=first_frame is not None,
         )
+        if ctx is not None and callable(getattr(ctx, "on_prompt_artifact", None)):
+            try:
+                ctx.on_prompt_artifact(prompt)
+            except Exception:  # noqa: BLE001
+                logger.debug("clip early prompt handoff failed", exc_info=True)
         aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
         if not aspect:
             meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
@@ -548,6 +611,10 @@ class ClipNodeHandler:
             if user_video is not None and user_video.is_file()
             else None
         )
+        from jiuwenswarm.server.runtime.designer.audio_locks import resolve_video_audio_request
+
+        meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
+        want_audio, model_override = resolve_video_audio_request(cfg, meta)
         try:
             result = await generate_clip_video(
                 prompt,
@@ -557,9 +624,11 @@ class ClipNodeHandler:
                 duration=duration,
                 size=video_size,
                 resolution=video_res,
+                audio=True if want_audio else False,
+                model=model_override,
             )
             path = Path(str(result["video_path"]))
-            message = f"clip {shot_index} generated"
+            message = f"clip {shot_index} generated" + (" (with audio)" if want_audio else "")
         except Exception as exc:
             meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
             allow_still = bool(

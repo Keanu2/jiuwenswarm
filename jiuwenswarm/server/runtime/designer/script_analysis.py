@@ -640,7 +640,9 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
     for i, shot in enumerate(shots, start=1):
         shot["shot_index"] = i
     decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
-    return {
+    from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+
+    payload = {
         "schema_version": "designer-script-analysis.v1",
         "source": "heuristic",
         "characters": characters,
@@ -653,6 +655,7 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         ),
         **decisions,
     }
+    return ensure_audio_locks_on_analysis(payload, prompt)
 
 
 def _llm_configured() -> bool:

@@ -57,6 +57,25 @@ def _resolve_image_size(cfg: dict, graph: dict | None = None) -> str:
     ).strip() or "1K"
 
 
+def _frame_prompt_looks_contaminated(text: str) -> bool:
+    raw = (text or "").upper()
+    needles = (
+        "PRIOR KEYFRAME PROMPT",
+        "PRIOR CLIP CONTINUITY",
+        "MASTER SCENE PROMPT",
+        "CONTINUITY CARD (MANAGER)",
+        "LANGUAGE LOCK",
+        "ASPECT LOCK",
+        "STYLE LOCK",
+        "SCENE BIBLE",
+        "SPEECH LOCK",
+        "BGM LOCK",
+    )
+    if any(n in raw for n in needles):
+        return True
+    return len(text or "") > 500
+
+
 def _character_prompt(source: str, *, combined_cast: bool = False) -> str:
     if combined_cast:
         return (
@@ -520,10 +539,13 @@ class FrameNodeHandler:
         else:
             shot = dict(shots[shot_index - 1])
         override = handler_io.node_generate_prompt(node)
-        if override:
+        planned = str(planned_action or shot.get("character_action") or shot.get("comment") or "").strip()
+        if override and not _frame_prompt_looks_contaminated(override):
             shot["comment"] = override
-        elif planned_action and not str(shot.get("comment") or "").strip():
-            shot["comment"] = planned_action
+        elif planned and not str(shot.get("comment") or "").strip():
+            shot["comment"] = planned
+        elif planned and _frame_prompt_looks_contaminated(str(shot.get("comment") or "")):
+            shot["comment"] = planned
         size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
         max_tries = max(2, int(cfg.get("max_image_calls") or 1))
         frame_prompt = _shot_frame_prompt(

@@ -117,6 +117,11 @@ def detect_subjects(prompt: str) -> list[str]:
 
 def detect_audio_intent(prompt: str) -> dict[str, Any]:
     """Infer speech / music / silence policy from the user prompt."""
+    from jiuwenswarm.server.runtime.designer.audio_locks import (
+        infer_bgm_lock,
+        infer_language_lock,
+    )
+
     text = (prompt or "").lower()
     silent_markers = (
         "no sound",
@@ -141,11 +146,23 @@ def detect_audio_intent(prompt: str) -> dict[str, Any]:
         "spoken",
         "say ",
         "says ",
+        "said ",
+        "speaking",
+        "speaks",
+        "talking",
+        "talks",
+        "whisper",
+        "preach",
+        "sermon",
+        "quotes",
+        "lines",
         "配音",
         "旁白",
         "对白",
         "台词",
         "语音",
+        "说",
+        "讲",
     )
     music_markers = (
         "music",
@@ -157,11 +174,14 @@ def detect_audio_intent(prompt: str) -> dict[str, Any]:
         "音乐",
         "b gm",
     )
+    language_lock = infer_language_lock(prompt or "")
     if any(m in text for m in silent_markers):
         return {
             "policy": "silent",
             "include_speech": False,
             "include_music": False,
+            "language_lock": language_lock,
+            "bgm_lock": {},
             "notes": "User requested silence / no audio.",
         }
     include_speech = any(m in text for m in speech_markers)
@@ -169,18 +189,22 @@ def detect_audio_intent(prompt: str) -> dict[str, Any]:
     if include_speech and include_music:
         policy = "speech_and_music"
     elif include_speech:
-        policy = "speech"
+        include_music = True  # keep soft bed under dialogue unless silent
+        policy = "speech_and_music"
     elif include_music:
         policy = "music"
     else:
-        # Video default: optional soft bed unless silent
+        # Video default: optional soft bed unless silent; speech lines come from storyboard.
         policy = "optional_music"
         include_music = True
+    bgm_lock = infer_bgm_lock(prompt or "", {"policy": policy, "include_music": include_music})
     return {
         "policy": policy,
         "include_speech": include_speech,
         "include_music": include_music,
-        "notes": f"Detected audio policy={policy}",
+        "language_lock": language_lock,
+        "bgm_lock": bgm_lock,
+        "notes": f"Detected audio policy={policy}; language={language_lock}",
     }
 
 

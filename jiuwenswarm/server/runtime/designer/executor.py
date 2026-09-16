@@ -38,12 +38,15 @@ from jiuwenswarm.common.schema.designer_graph import (
     RUN_STATUS_RUNNING,
     apply_graph_patch,
     apply_shot_generate_prompts,
+    artifact_dependency_satisfied,
     clip_node_id,
-    data_predecessors,
+    execution_predecessors,
     expand_shot_nodes,
+    filter_ready_by_dependency_order,
     frame_node_id,
     graph_uses_agent_scheduler,
     initial_node_states,
+    is_soft_artifact_dependency,
     new_run_id,
     node_pipeline,
     node_uses_agent_runtime,
@@ -110,6 +113,144 @@ class GraphExecutor:
         self._on_graph_updates: dict[str, GraphUpdateCallback] = {}
         self._live_runs: dict[str, DesignerExecutionRun] = {}
         self._host = NodeAgentHost(self, runner=runner)
+        self._handoff_wake: dict[str, asyncio.Event] = {}
+
+    def _get_handoff_wake(self, run_id: str) -> asyncio.Event:
+        ev = self._handoff_wake.get(run_id)
+        if ev is None:
+            ev = asyncio.Event()
+            self._handoff_wake[run_id] = ev
+        return ev
+
+    def _signal_handoff_wake(self, run_id: str) -> None:
+        ev = self._handoff_wake.get(run_id)
+        if ev is not None:
+            ev.set()
+
+    def _publish_prompt_artifact_early(
+        self,
+        graph: DesignerExecutionGraph,
+        run: DesignerExecutionRun,
+        node: DesignerGraphNode,
+        *,
+        prompt: str = "",
+        on_update: RunUpdateCallback | None = None,
+    ) -> None:
+        """Publish finalized leaf prompt so soft dependents can start before media finishes."""
+        node_id = str(node.get("id") or "")
+        if not node_id:
+            return
+        cfg = dict(node.get("config") or {})
+        text = str(
+            prompt
+            or cfg.get("last_approved_prompt")
+            or cfg.get("last_wan_prompt")
+            or (cfg.get("generate") or {}).get("prompt")
+            or cfg.get("prompt")
+            or ""
+        ).strip()
+        if not text:
+            return
+        role = node_pipeline(node)
+        shot_index = int(cfg.get("shot_index") or 0)
+        live = self._require_graph(str(run.get("graph_id") or graph.get("graph_id") or ""))
+        for n in live.get("nodes") or []:
+            if str(n.get("id") or "") != node_id:
+                continue
+            c = dict(n.get("config") or {})
+            c["handoff_artifact_ready"] = True
+            c["last_approved_prompt"] = text[:4000]
+            if role in {NODE_ROLE_CLIP, "clip", "video"}:
+                c["last_wan_prompt"] = text[:4000]
+                c["clip_prompt_preview"] = text[:1200]
+            if role in {NODE_ROLE_FRAME, "frame", "keyframe"} and bool(c.get("is_scene_master")):
+                from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+                    architecture_clause_from_bible,
+                )
+
+                bible_m = c.get("scene_bible") if isinstance(c.get("scene_bible"), dict) else None
+                arch_m = architecture_clause_from_bible(bible_m)
+                c["scene_architecture_clause"] = arch_m or text[:900]
+                c["scene_master_prompt"] = (arch_m or text)[:900]
+            n["config"] = c
+            node = n
+            break
+        if role in {NODE_ROLE_CLIP, "clip", "video"} and shot_index >= 1:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+                stamp_wan_prompt_handoff,
+            )
+
+            stamp_wan_prompt_handoff(
+                live,
+                shot_index=shot_index,
+                prompt=text,
+                node_id=node_id,
+                shot_action=str(cfg.get("shot_action") or ""),
+                speech_line=str(cfg.get("speech_line") or ""),
+            )
+        if role in {NODE_ROLE_FRAME, "frame", "keyframe"} and shot_index >= 1:
+            from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+                architecture_clause_from_bible,
+                continuity_card_from_prior,
+            )
+
+            bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+            if not bible:
+                meta0 = live.get("metadata") if isinstance(live.get("metadata"), dict) else {}
+                locks0 = meta0.get("scene_locks") if isinstance(meta0.get("scene_locks"), dict) else {}
+                sid = str(cfg.get("setting_id") or "").strip()
+                if sid and isinstance(locks0.get(sid), dict):
+                    bible = locks0[sid]
+            arch = architecture_clause_from_bible(bible)
+            card = continuity_card_from_prior(
+                prior_action=str(cfg.get("shot_action") or ""),
+                prior_prompt=text,
+                shot_index=shot_index,
+                node_id=node_id,
+                bible=bible,
+                storyboard_hints=str(cfg.get("shot_action") or ""),
+            )
+            next_ids = {f"n_frame_{shot_index + 1}", f"n_clip_{shot_index + 1}"}
+            for n in live.get("nodes") or []:
+                if not isinstance(n, dict):
+                    continue
+                nid = str(n.get("id") or "")
+                if not nid or nid == node_id:
+                    continue
+                c = dict(n.get("config") or {})
+                needs = {
+                    str(c.get("scene_prompt_handoff_from") or "").strip(),
+                    str(c.get("scene_master_frame_id") or "").strip(),
+                    str(c.get("continuity_frame_node_id") or "").strip(),
+                }
+                if node_id not in needs and nid not in next_ids:
+                    continue
+                changed = False
+                if arch and not str(c.get("scene_architecture_clause") or "").strip():
+                    c["scene_architecture_clause"] = arch
+                    changed = True
+                if node_id in needs and arch and not str(c.get("scene_master_prompt") or "").strip():
+                    # Architecture-only stand-in (never full prior action prompt).
+                    c["scene_master_prompt"] = arch[:900]
+                    changed = True
+                if not isinstance(c.get("previous_keyframe_continuity_card"), dict):
+                    c["previous_keyframe_continuity_card"] = card
+                    c["previous_keyframe_node_id"] = node_id
+                    c.pop("previous_keyframe_prompt", None)
+                    changed = True
+                if changed:
+                    n["config"] = c
+        self._store.save_graph(live)
+        # Keep caller's graph object in sync when possible.
+        graph["nodes"] = live.get("nodes")
+        graph["edges"] = live.get("edges")
+        graph["metadata"] = live.get("metadata")
+        self._signal_handoff_wake(str(run.get("run_id") or ""))
+        if on_update is not None:
+            try:
+                on_update(run, node_id)
+            except Exception:  # noqa: BLE001
+                logger.debug("handoff wake publish failed", exc_info=True)
 
     def create_run(self, graph: DesignerExecutionGraph) -> DesignerExecutionRun:
         now = utc_now_ms()
@@ -137,7 +278,7 @@ class GraphExecutor:
         node_ids = {node["id"] for node in graph.get("nodes", [])}
         if node_id not in node_ids:
             raise KeyError(f"node not found: {node_id}")
-        incoming = data_predecessors(graph)
+        incoming = execution_predecessors(graph)
         groups = sync_groups(graph)
         source_states = source_run.get("node_states") or {}
         for pred in incoming.get(node_id, []):
@@ -478,13 +619,19 @@ class GraphExecutor:
                     return
                 run = self._require_run(run_id)
                 graph = self._require_graph(str(run.get("graph_id") or graph.get("graph_id") or ""))
-                incoming = data_predecessors(graph)
+                incoming = execution_predecessors(graph)
                 groups = sync_groups(graph)
                 ready_ids = [
                     node["id"]
                     for node in graph.get("nodes") or []
-                    if _is_ready(node["id"], run, incoming, groups)
+                    if _is_ready(node["id"], run, incoming, groups, graph)
                 ]
+                ready_ids = filter_ready_by_dependency_order(
+                    ready_ids,
+                    preds=incoming,
+                    in_flight=set(),
+                    graph=graph,
+                )
                 if not ready_ids:
                     pending = any(
                         (run.get("node_states") or {}).get(node["id"], {}).get("status")
@@ -962,7 +1109,7 @@ class GraphExecutor:
                 if (run.get("node_states") or {}).get(node["id"], {}).get("status")
                 not in _TERMINAL_NODE_STATUSES
             }
-            incoming = data_predecessors(graph)
+            incoming = execution_predecessors(graph)
             groups = sync_groups(graph)
             graph, remaining, incoming, groups = self._expand_clips_if_needed(
                 graph, run, remaining, on_update=on_update
@@ -1079,8 +1226,15 @@ class GraphExecutor:
                 newly_ready = [
                     node_id
                     for node_id in list(remaining)
-                    if node_id not in in_flight and _is_ready(node_id, run, incoming, groups)
+                    if node_id not in in_flight
+                    and _is_ready(node_id, run, incoming, groups, graph)
                 ]
+                newly_ready = filter_ready_by_dependency_order(
+                    newly_ready,
+                    preds=incoming,
+                    in_flight=set(in_flight.keys()),
+                    graph=graph,
+                )
                 if newly_ready:
                     enable_a2a = bool((graph.get("metadata") or {}).get("enable_a2a_collab"))
                     if enable_a2a:
@@ -1110,12 +1264,27 @@ class GraphExecutor:
                         return
                     break
 
+                # Wake early when an in-flight node publishes a prompt artifact so
+                # soft dependents can join (still capped by the concurrency semaphore).
+                wake = self._get_handoff_wake(run_id)
+                wake.clear()
+                wake_task = asyncio.create_task(wake.wait(), name=f"handoff-wake-{run_id}")
+                wait_set: set[asyncio.Task[Any]] = set(in_flight.values())
+                wait_set.add(wake_task)
                 done, _pending = await asyncio.wait(
-                    set(in_flight.values()),
+                    wait_set,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if not wake_task.done():
+                    wake_task.cancel()
+                    try:
+                        await wake_task
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
                 finished_ids: list[str] = []
                 for task in done:
+                    if task is wake_task:
+                        continue
                     for nid, t in list(in_flight.items()):
                         if t is task:
                             finished_ids.append(nid)
@@ -1324,7 +1493,7 @@ class GraphExecutor:
     ]:
         shot_rows = self._completed_storyboard_shots(graph, run)
         if shot_rows is None:
-            return graph, remaining, data_predecessors(graph), sync_groups(graph)
+            return graph, remaining, execution_predecessors(graph), sync_groups(graph)
         shot_count = max(1, min(len(shot_rows) or 1, MAX_SHOT_CLIP_NODES))
         from jiuwenswarm.server.runtime.designer.handlers.text_nodes import shot_generate_prompt
 
@@ -1336,7 +1505,7 @@ class GraphExecutor:
             for node in graph.get("nodes") or []
         )
         if not has_clip_pipeline:
-            return graph, remaining, data_predecessors(graph), sync_groups(graph)
+            return graph, remaining, execution_predecessors(graph), sync_groups(graph)
         # Flexible Supervisor graphs: if storyboard shot count differs from frame
         # nodes, rebuild from analysis (do NOT use expand_shot_nodes — that dumps
         # all cast into every frame and breaks identity wiring).
@@ -1420,17 +1589,17 @@ class GraphExecutor:
             callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
             if callback is not None:
                 callback(deepcopy(saved))
-            return saved, remaining, data_predecessors(saved), sync_groups(saved)
+            return saved, remaining, execution_predecessors(saved), sync_groups(saved)
 
         if bool(meta.get("freeze_shot_topology") or meta.get("lean_pipeline")):
             synced = apply_shot_generate_prompts(graph, prompts)
             if synced is graph:
-                return graph, remaining, data_predecessors(graph), sync_groups(graph)
+                return graph, remaining, execution_predecessors(graph), sync_groups(graph)
             saved = self._store.save_graph(synced)
             callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
             if callback is not None:
                 callback(deepcopy(saved))
-            return saved, remaining, data_predecessors(saved), sync_groups(saved)
+            return saved, remaining, execution_predecessors(saved), sync_groups(saved)
         current_clip_ids = {
             str(node.get("id") or "")
             for node in graph.get("nodes") or []
@@ -1459,12 +1628,12 @@ class GraphExecutor:
         if topology_matches and not bundled_frames:
             synced = apply_shot_generate_prompts(graph, prompts)
             if synced is graph:
-                return graph, remaining, data_predecessors(graph), sync_groups(graph)
+                return graph, remaining, execution_predecessors(graph), sync_groups(graph)
             saved = self._store.save_graph(synced)
             callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
             if callback is not None:
                 callback(deepcopy(saved))
-            return saved, remaining, data_predecessors(saved), sync_groups(saved)
+            return saved, remaining, execution_predecessors(saved), sync_groups(saved)
 
         # Prefer Supervisor-style rebuild over expand_shot_nodes (identity-safe).
         from jiuwenswarm.server.runtime.designer.smart_graph import (
@@ -1515,7 +1684,7 @@ class GraphExecutor:
         callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
         if callback is not None:
             callback(deepcopy(saved))
-        return saved, remaining, data_predecessors(saved), sync_groups(saved)
+        return saved, remaining, execution_predecessors(saved), sync_groups(saved)
 
     def _handoff_scene_prompt_after_frame(
         self,
@@ -1541,8 +1710,6 @@ class GraphExecutor:
         setting_id = str(scfg.get("setting_id") or "").strip()
         if not setting_id:
             return
-        gen = scfg.get("generate") if isinstance(scfg.get("generate"), dict) else {}
-        master_prompt = str(gen.get("prompt") or scfg.get("prompt") or "").strip()
         bible = scfg.get("scene_bible") if isinstance(scfg.get("scene_bible"), dict) else None
         if not bible:
             meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
@@ -1550,7 +1717,12 @@ class GraphExecutor:
             maybe = locks.get(setting_id) if isinstance(locks, dict) else None
             if isinstance(maybe, dict):
                 bible = maybe
-        if not master_prompt and not bible:
+        from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+            architecture_clause_from_bible,
+        )
+
+        arch = architecture_clause_from_bible(bible)
+        if not arch and not bible:
             return
         changed = False
         for node in graph.get("nodes") or []:
@@ -1567,16 +1739,17 @@ class GraphExecutor:
             cfg["scene_prompt_handoff_from"] = frame_id
             if bible:
                 cfg["scene_bible"] = dict(bible)
-            if master_prompt:
-                cfg["scene_master_prompt"] = master_prompt[:2400]
+            if arch:
+                cfg["scene_architecture_clause"] = arch
+                # Architecture-only (no full prior action / generate prompt paste).
+                cfg["scene_master_prompt"] = arch[:900]
             gen2 = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             prompt = str(gen2.get("prompt") or "")
             marker = "SCENE PROMPT HANDOFF"
-            if marker not in prompt and master_prompt:
+            if marker not in prompt and arch:
                 handoff_bit = (
-                    f"{marker} from {frame_id} (same setting `{setting_id}`): keep this "
-                    f"architecture/lighting/crowd/objects; change ONLY camera view + "
-                    f"on-screen cast/actions.\nMASTER SCENE PROMPT:\n{master_prompt[:1200]}"
+                    f"{marker} from {frame_id} (same setting `{setting_id}`): "
+                    f"{arch} Change ONLY camera view + on-screen cast/actions for THIS beat."
                 )
                 gen2["prompt"] = (prompt + "\n" + handoff_bit).strip()[:2200]
                 cfg["generate"] = gen2
@@ -1768,6 +1941,11 @@ class GraphExecutor:
                     node = n
                     break
             _ = gate
+            # Early unlock: publish approved prompt so soft dependents can start while
+            # this node still calls image/video tools (concurrency cap unchanged).
+            self._publish_prompt_artifact_early(
+                graph, run, node, on_update=on_update
+            )
 
         async with lock:
             self._set_node_state(
@@ -1837,12 +2015,23 @@ class GraphExecutor:
                     tool="node_agent" if uses_agent else "handler",
                     force=True,
                 )
+
+                def _on_prompt_artifact(text: str) -> None:
+                    self._publish_prompt_artifact_early(
+                        graph,
+                        run,
+                        node,
+                        prompt=str(text or ""),
+                        on_update=on_update,
+                    )
+
                 ctx = NodeExecutionContext(
                     graph=graph,
                     run_id=run["run_id"],
                     node_id=node_id,
                     run=run,
                     emit_activity=emit_activity,
+                    on_prompt_artifact=_on_prompt_artifact,
                 )
                 if uses_agent:
                     result = await self._host.execute(node, ctx)
@@ -2218,6 +2407,7 @@ def _is_ready(
     run: DesignerExecutionRun,
     incoming: dict[str, list[str]],
     groups: dict[str, frozenset[str]],
+    graph: DesignerExecutionGraph | None = None,
 ) -> bool:
     state = run.get("node_states", {}).get(node_id) or {}
     if state.get("status") != NODE_STATUS_PENDING:
@@ -2231,6 +2421,14 @@ def _is_ready(
             if member == node_id:
                 continue
             member_status = (run.get("node_states", {}).get(member) or {}).get("status")
+            if member_status == NODE_STATUS_COMPLETED:
+                continue
+            # Soft artifact deps (clip prompt / scene prompt handoff): unlock as soon as
+            # the upstream node has published what we need — even while still generating media.
+            if graph is not None and is_soft_artifact_dependency(graph, member, node_id):
+                if artifact_dependency_satisfied(graph, node_id, member):
+                    continue
+                return False
             if member_status != NODE_STATUS_COMPLETED:
                 return False
     return True

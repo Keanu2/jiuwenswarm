@@ -731,30 +731,64 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
                 cfg = dict(n.get("config") or {})
                 if str(cfg.get("role") or "") != "clip":
                     continue
-                cfg["clip_embedded_audio"] = True
-                gen = dict(cfg.get("generate") or {})
-                p = str(gen.get("prompt") or "")
-                if "clip-embedded" not in p.lower():
-                    gen["prompt"] = (
-                        p
-                        + " AUDIO (clip-embedded): include diegetic speech timing and light "
-                        "underscoring when the storyboard calls for sound."
-                    ).strip()
-                    cfg["generate"] = gen
+                from jiuwenswarm.server.runtime.designer.audio_locks import (
+                    stamp_audio_fields_on_clip_config,
+                )
+
+                analysis = (
+                    meta.get("script_analysis")
+                    if isinstance(meta.get("script_analysis"), dict)
+                    else {}
+                )
+                idx = int(cfg.get("shot_index") or 0)
+                shot_row = next(
+                    (
+                        s
+                        for s in (analysis.get("shots") or [])
+                        if isinstance(s, dict) and int(s.get("shot_index") or 0) == idx
+                    ),
+                    {},
+                )
+                cfg = stamp_audio_fields_on_clip_config(
+                    cfg,
+                    shot=shot_row if isinstance(shot_row, dict) else {},
+                    analysis=analysis,
+                    meta=meta,
+                    clip_embedded=True,
+                )
                 n["config"] = cfg
             prune_non_contributing_nodes(graph)
         routing["clip_embedded"] = True
         routing["can_speech"] = can_speech
         routing["can_music"] = can_music
+        routing["can_video_audio"] = bool(backends.get("can_video_audio", True))
+        routing["video_audio_model"] = str(backends.get("video_audio_model") or "")
         meta["audio_routing"] = routing
+        meta["prefer_wan3_clip_audio"] = True
+        if isinstance(meta.get("script_analysis"), dict):
+            from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+
+            meta["script_analysis"] = ensure_audio_locks_on_analysis(
+                meta["script_analysis"],
+                str(graph.get("description") or meta.get("user_prompt") or ""),
+            )
+            meta["language_lock"] = str(
+                meta["script_analysis"].get("language_lock")
+                or meta.get("language_lock")
+                or "en"
+            )
+            if isinstance(meta["script_analysis"].get("bgm_lock"), dict):
+                meta["bgm_lock"] = meta["script_analysis"]["bgm_lock"]
         graph["metadata"] = meta
         meta["supervisor_audio_assignment"] = {
             "can_speech": can_speech,
             "can_music": can_music,
+            "can_video_audio": bool(backends.get("can_video_audio", True)),
             "assigned": ["clip_embedded"],
             "ensured_nodes": [],
             "backends": backends,
             "clip_embedded": True,
+            "prefer_wan3_clip_audio": True,
         }
         return meta["supervisor_audio_assignment"]
 
@@ -1633,7 +1667,12 @@ class SupervisorAgent:
                     "NO empty scene plates. Crowd/extras persist across same-setting shots "
                     "unless they exit. Each shot needs timeline, camera, action, "
                     "on_screen, offscreen, cast_actions, featured_cast_ids, setting_id, "
-                    "continuity_lock, keyframe_prompt, exiting_character_ids. "
+                    "continuity_lock, keyframe_prompt, exiting_character_ids, "
+                    "speech_by_character (map character_id→exact spoken line for THIS beat; "
+                    "empty {} if silent), speech_line (joined fallback). "
+                    "Film-wide locks: language_lock (e.g. en/zh — ALL dialogue in that "
+                    "language), bgm_lock {mood,style,instruments,continuity,rule}, "
+                    "include_speech, include_music. "
                     "Respond JSON only: "
                     '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
                     '"shots":[{"shot_index":1,"timeline":"0-5s","camera":"...",'
@@ -1642,7 +1681,12 @@ class SupervisorAgent:
                     '"ensemble_cast_ids":["char_1","char_2"],"setting_id":"set_1",'
                     '"keyframe_strategy":"compose_from_solo_refs",'
                     '"continuity_lock":{"forbid":"..."},"keyframe_prompt":"...",'
-                    '"exiting_character_ids":[]}],'
+                    '"exiting_character_ids":[],'
+                    '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
+                    '"language_lock":"en",'
+                    '"bgm_lock":{"mood":"...","style":"...","instruments":"...",'
+                    '"continuity":"same bed","rule":"non-vocal underscore"},'
+                    '"include_speech":true,"include_music":true,'
                     '"storyboard_markdown":"...","notes":"...","target_shot_count":N,'
                     '"skip_scene_plate":true}'
                 )
@@ -1702,6 +1746,14 @@ class SupervisorAgent:
                             shot["continuity_lock"] = _infer_continuity_lock(
                                 str(shot.get("action") or "")
                             )
+                        if isinstance(shot.get("speech_by_character"), dict):
+                            shot["speech_by_character"] = {
+                                str(k): str(v)[:280]
+                                for k, v in shot["speech_by_character"].items()
+                                if str(v).strip()
+                            }
+                        if shot.get("speech_line"):
+                            shot["speech_line"] = str(shot.get("speech_line"))[:500]
                         cleaned.append(shot)
                     if cleaned:
                         shots = cleaned
@@ -1710,6 +1762,27 @@ class SupervisorAgent:
                         notes = str(parsed.get("notes") or "Supervisor LLM authored storyboard.")[
                             :1000
                         ]
+                # Film-wide audio locks from Supervisor storyboard JSON.
+                audio = dict(analysis.get("audio") or {})
+                if parsed.get("language_lock"):
+                    analysis["language_lock"] = str(parsed.get("language_lock"))[:16]
+                    audio["language_lock"] = analysis["language_lock"]
+                if isinstance(parsed.get("bgm_lock"), dict):
+                    analysis["bgm_lock"] = {
+                        str(k): str(v)[:280] for k, v in parsed["bgm_lock"].items()
+                    }
+                    audio["bgm_lock"] = analysis["bgm_lock"]
+                if "include_speech" in parsed:
+                    audio["include_speech"] = bool(parsed.get("include_speech"))
+                if "include_music" in parsed:
+                    audio["include_music"] = bool(parsed.get("include_music"))
+                if audio.get("include_speech") and audio.get("include_music"):
+                    audio["policy"] = "speech_and_music"
+                elif audio.get("include_speech"):
+                    audio["policy"] = "speech"
+                elif audio.get("include_music"):
+                    audio["policy"] = audio.get("policy") or "optional_music"
+                analysis["audio"] = audio
                 md_candidate = str(parsed.get("storyboard_markdown") or "").strip()
                 if md_candidate and len(md_candidate) > 40:
                     sb_md = md_candidate
@@ -1717,6 +1790,15 @@ class SupervisorAgent:
                     analysis["source"] = "llm"
             except Exception:  # noqa: BLE001
                 logger.info("Supervisor author_storyboard LLM failed", exc_info=True)
+
+        from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+
+        analysis = ensure_audio_locks_on_analysis(analysis, user_prompt)
+        shots = list(analysis.get("shots") or shots)
+        characters = list(analysis.get("characters") or characters)
+        meta["language_lock"] = str(analysis.get("language_lock") or "en")
+        if isinstance(analysis.get("bgm_lock"), dict):
+            meta["bgm_lock"] = analysis["bgm_lock"]
 
         if shots:
             analysis["shots"] = shots
@@ -1744,7 +1826,9 @@ class SupervisorAgent:
         if shots:
             analysis["target_shot_count"] = len(shots)
             meta["script_analysis"] = analysis
-        # Propagate timelines/continuity into frame/clip configs once.
+        # Propagate timelines/continuity/audio locks into frame/clip configs once.
+        from jiuwenswarm.server.runtime.designer.audio_locks import stamp_audio_fields_on_clip_config
+
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
             if _role_key(node) not in {"frame", "clip", "keyframe"}:
@@ -1763,6 +1847,23 @@ class SupervisorAgent:
                     cfg["continuity_lock"] = shot["continuity_lock"]
                 if isinstance(shot.get("character_ids"), list):
                     cfg["character_ids"] = [str(x) for x in shot["character_ids"] if str(x)]
+                if _role_key(node) == "clip":
+                    routing = meta.get("audio_routing") if isinstance(meta.get("audio_routing"), dict) else {}
+                    cfg = stamp_audio_fields_on_clip_config(
+                        cfg,
+                        shot=shot,
+                        analysis=analysis,
+                        meta=meta,
+                        clip_embedded=bool(routing.get("clip_embedded")),
+                    )
+                else:
+                    if shot.get("speech_line"):
+                        cfg["speech_line"] = str(shot.get("speech_line"))[:500]
+                    if isinstance(shot.get("speech_by_character"), dict):
+                        cfg["speech_by_character"] = shot["speech_by_character"]
+                    cfg["language_lock"] = str(
+                        shot.get("language_lock") or analysis.get("language_lock") or "en"
+                    )
                 node["config"] = cfg
                 break
 
@@ -1773,6 +1874,8 @@ class SupervisorAgent:
             "notes": notes,
             "stamped": stamped,
             "shot_count": len(shots),
+            "language_lock": meta.get("language_lock"),
+            "bgm_lock": bool(meta.get("bgm_lock")),
         }
         graph["metadata"] = meta
         return dict(meta["supervisor_storyboard_ack"])
@@ -2679,6 +2782,14 @@ class ManagerAgent:
             collect_prior_clip_prompts,
             handoff_clause_for_prompt,
         )
+        from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+            architecture_clause_from_bible,
+            continuity_card_clause,
+            continuity_card_from_prior,
+            extract_already_done_beats,
+            merge_already_done,
+            strip_prior_prompt_pastes,
+        )
 
         cfg = dict(node.get("config") or {})
         role = _role_key(node)
@@ -2686,9 +2797,12 @@ class ManagerAgent:
             return {"patched": False, "notes": "skip_non_media"}
         shot_index = int(cfg.get("shot_index") or 0)
         gen = dict(cfg.get("generate") or {})
-        prompt = str(gen.get("prompt") or cfg.get("prompt") or "").strip()
+        prompt = strip_prior_prompt_pastes(str(gen.get("prompt") or cfg.get("prompt") or "").strip())
         notes: list[str] = []
         changed = False
+        if prompt != str(gen.get("prompt") or cfg.get("prompt") or "").strip():
+            notes.append("strip_prior_prompt_pastes")
+            changed = True
 
         setting_id = str(cfg.get("setting_id") or "set_1").strip() or "set_1"
         strategy = str(
@@ -2752,18 +2866,40 @@ class ManagerAgent:
                 notes.append("enforce_scene_bible")
                 changed = True
             if handoff and "SCENE PROMPT HANDOFF" not in prompt:
+                arch = str(cfg.get("scene_architecture_clause") or "").strip() or architecture_clause_from_bible(bible)
                 prompt = (
                     prompt
-                    + f"\nSCENE PROMPT HANDOFF from {handoff}: reuse master scene prompt; "
-                    "change only camera view + on_screen cast/actions."
+                    + f"\nSCENE PROMPT HANDOFF from {handoff}: "
+                    + (arch or "reuse scene architecture only")
+                    + " — change only camera view + on_screen cast/actions."
                 )
                 notes.append("enforce_scene_prompt_handoff")
                 changed = True
+            # Architecture only — never paste full master action prompt.
+            arch = str(cfg.get("scene_architecture_clause") or "").strip()
+            if not arch:
+                arch = architecture_clause_from_bible(bible)
             master_prompt = str(cfg.get("scene_master_prompt") or "").strip()
-            if master_prompt and "MASTER SCENE PROMPT" not in prompt:
-                prompt = prompt + f"\nMASTER SCENE PROMPT:\n{master_prompt[:900]}"
-                notes.append("inject_master_scene_prompt")
+            if master_prompt and (
+                "Primary action" in master_prompt
+                or "PRIOR KEYFRAME" in master_prompt
+                or len(master_prompt) > 900
+            ):
+                # Contaminated full prompt — replace with architecture.
+                master_prompt = arch
+                cfg["scene_master_prompt"] = arch[:900] if arch else ""
+                notes.append("slim_contaminated_scene_master_prompt")
                 changed = True
+            if arch and "SCENE ARCHITECTURE LOCK" not in prompt and "MASTER SCENE PROMPT" not in prompt:
+                prompt = prompt + "\n" + arch
+                notes.append("inject_scene_architecture")
+                changed = True
+            elif master_prompt and "SCENE ARCHITECTURE LOCK" not in prompt and "MASTER SCENE PROMPT" not in prompt:
+                # Only allow if it already looks like an architecture clause.
+                if master_prompt.startswith("SCENE ARCHITECTURE") or "place=" in master_prompt[:80]:
+                    prompt = prompt + "\n" + master_prompt[:900]
+                    notes.append("inject_scene_architecture_from_master")
+                    changed = True
 
         if costume_lock and "Costume lock" not in prompt and "costume lock" not in prompt.lower():
             prompt = prompt + f"\nCostume lock (must keep): {costume_lock}"
@@ -2785,29 +2921,55 @@ class ManagerAgent:
             notes.append("inject_identity_solos")
             changed = True
 
-        # Inject prior keyframe approved prompt for subsequent same-film leaves.
-        prior_kf_prompt = str(cfg.get("previous_keyframe_prompt") or "").strip()
-        if not prior_kf_prompt and shot_index > 1:
+        # Prior keyframe → slim continuity card (never paste full prior prompt).
+        prior_card = (
+            cfg.get("previous_keyframe_continuity_card")
+            if isinstance(cfg.get("previous_keyframe_continuity_card"), dict)
+            else None
+        )
+        if prior_card is None and shot_index > 1:
             prev_id = prior_kf_id or f"n_frame_{shot_index - 1}"
             for n in graph.get("nodes") or []:
                 if str(n.get("id") or "") != prev_id:
                     continue
                 pcfg = n.get("config") if isinstance(n.get("config"), dict) else {}
-                prior_kf_prompt = str(
+                prior_action = str(pcfg.get("shot_action") or "").strip()
+                prior_seed = prior_action or str(
                     pcfg.get("last_approved_prompt")
                     or (pcfg.get("generate") or {}).get("prompt")
                     or ""
                 ).strip()
+                if prior_seed or isinstance(pcfg.get("continuity_card"), dict):
+                    prior_card = pcfg.get("continuity_card") if isinstance(
+                        pcfg.get("continuity_card"), dict
+                    ) else continuity_card_from_prior(
+                        prior_action=prior_action,
+                        prior_prompt=prior_seed,
+                        shot_index=shot_index - 1,
+                        node_id=prev_id,
+                        bible=pcfg.get("scene_bible")
+                        if isinstance(pcfg.get("scene_bible"), dict)
+                        else None,
+                        storyboard_hints=prior_action,
+                    )
+                    cfg["previous_keyframe_continuity_card"] = prior_card
+                    cfg["previous_keyframe_node_id"] = prev_id
+                    cfg.pop("previous_keyframe_prompt", None)
+                    notes.append("build_prior_keyframe_continuity_card")
+                    changed = True
                 break
-        if prior_kf_prompt and "PRIOR KEYFRAME PROMPT" not in prompt:
-            prompt = (
-                prompt
-                + "\n\nPRIOR KEYFRAME PROMPT (do not redo the same beat; advance time):\n"
-                + prior_kf_prompt[:1600]
+        if prior_card and "CONTINUITY CARD (Manager)" not in prompt:
+            clause = continuity_card_clause(prior_card)
+            if clause:
+                prompt = prompt + "\n\n" + clause
+                notes.append("inject_prior_keyframe_continuity_card")
+                changed = True
+            cfg["already_done"] = merge_already_done(
+                cfg.get("already_done") if isinstance(cfg.get("already_done"), list) else None,
+                prior_card.get("already_done")
+                if isinstance(prior_card.get("already_done"), list)
+                else None,
             )
-            notes.append("inject_prior_keyframe_prompt")
-            changed = True
-            cfg["previous_keyframe_prompt"] = prior_kf_prompt[:3500]
 
         already_done = [str(x) for x in (cfg.get("already_done") or []) if str(x)]
         if not already_done:
@@ -2817,10 +2979,35 @@ class ManagerAgent:
                     already_done = [str(x) for x in (s.get("already_done") or []) if str(x)]
                     cfg["already_done"] = already_done
                     break
+        # Derive from prior shot actions when storyboard left already_done empty.
+        if not already_done and shot_index > 1:
+            analysis = (graph.get("metadata") or {}).get("script_analysis") or {}
+            derived: list[str] = []
+            for s in analysis.get("shots") or []:
+                if not isinstance(s, dict):
+                    continue
+                si = int(s.get("shot_index") or 0)
+                if si <= 0 or si >= shot_index:
+                    continue
+                act = str(s.get("action") or s.get("character_action") or s.get("comment") or "")
+                derived.extend(
+                    extract_already_done_beats(
+                        act,
+                        shot_index=si,
+                        allow_repeat_hints=str(
+                            cfg.get("shot_action") or s.get("repeat_hint") or ""
+                        ),
+                    )
+                )
+            if derived:
+                already_done = merge_already_done(derived)
+                cfg["already_done"] = already_done
+                notes.append("derive_already_done_from_prior_actions")
+                changed = True
         if already_done and "ALREADY_DONE" not in prompt:
             prompt = (
                 prompt
-                + "\nALREADY_DONE (do not restage): "
+                + "\nALREADY_DONE (do not restage unless storyboard explicitly repeats): "
                 + "; ".join(already_done[:12])
             )
             notes.append("inject_already_done")
@@ -3046,46 +3233,121 @@ class ManagerAgent:
                 )
                 notes.append("enforce_setting_lock_clip")
                 changed = True
-            # Pull prior clip Wan prompt from continuity node if not stamped yet.
+            # Pull prior clip continuity card from continuity node if not stamped yet.
             cont_clip = str(cfg.get("continuity_clip_node_id") or cfg.get("previous_clip_node_id") or "").strip()
-            if cont_clip and not str(cfg.get("previous_clip_wan_prompt") or "").strip():
+            if cont_clip and not isinstance(cfg.get("previous_clip_continuity_card"), dict):
                 for n in graph.get("nodes") or []:
                     if str(n.get("id") or "") != cont_clip:
                         continue
                     pcfg = n.get("config") if isinstance(n.get("config"), dict) else {}
-                    prior_txt = str(
-                        pcfg.get("last_wan_prompt")
-                        or pcfg.get("last_approved_prompt")
-                        or (pcfg.get("generate") or {}).get("prompt")
-                        or ""
-                    ).strip()
-                    if prior_txt:
-                        cfg["previous_clip_wan_prompt"] = prior_txt[:3500]
-                        cfg["previous_clip_node_id"] = cont_clip
-                        notes.append("pull_prior_clip_wan_from_dep")
-                        changed = True
+                    pcard = (
+                        pcfg.get("continuity_card")
+                        if isinstance(pcfg.get("continuity_card"), dict)
+                        else None
+                    )
+                    if pcard is None:
+                        pcard = continuity_card_from_prior(
+                            prior_action=str(pcfg.get("shot_action") or ""),
+                            prior_prompt=str(
+                                pcfg.get("last_wan_prompt")
+                                or pcfg.get("last_approved_prompt")
+                                or (pcfg.get("generate") or {}).get("prompt")
+                                or ""
+                            ),
+                            shot_index=int(pcfg.get("shot_index") or 0) or None,
+                            node_id=cont_clip,
+                            speech_line=str(pcfg.get("speech_line") or ""),
+                            bible=pcfg.get("scene_bible")
+                            if isinstance(pcfg.get("scene_bible"), dict)
+                            else None,
+                            storyboard_hints=str(pcfg.get("shot_action") or ""),
+                        )
+                    cfg["previous_clip_continuity_card"] = pcard
+                    cfg["previous_clip_node_id"] = cont_clip
+                    cfg["previous_clip_handoff_ready"] = True
+                    cfg.pop("previous_clip_wan_prompt", None)
+                    cfg["already_done"] = merge_already_done(
+                        cfg.get("already_done") if isinstance(cfg.get("already_done"), list) else None,
+                        pcard.get("already_done")
+                        if isinstance(pcard.get("already_done"), list)
+                        else None,
+                    )
+                    notes.append("pull_prior_clip_continuity_card")
+                    changed = True
                     break
             prior_clips = collect_prior_clip_prompts(graph, shot_index=shot_index)
             clause = handoff_clause_for_prompt(prior_clips)
-            if clause and "PRIOR CLIP CONTINUITY" not in prompt:
+            if clause and "CONTINUITY CARD (Manager)" not in prompt:
                 prompt = prompt + "\n\n" + clause
-                notes.append("inject_prior_clip_handoff")
+                notes.append("inject_prior_clip_continuity_card")
                 changed = True
-            prev_clip = str(cfg.get("previous_clip_wan_prompt") or "").strip()
-            if prev_clip and "PRIOR CLIP CONTINUITY" not in prompt:
-                prompt = (
-                    prompt
-                    + "\n\nPRIOR CLIP CONTINUITY (do NOT redo these beats; continue forward):\n"
-                    + prev_clip[:1600]
-                )
-                notes.append("inject_previous_clip_wan_prompt")
-                changed = True
+            elif isinstance(cfg.get("previous_clip_continuity_card"), dict) and (
+                "CONTINUITY CARD (Manager)" not in prompt
+            ):
+                clause2 = continuity_card_clause(cfg["previous_clip_continuity_card"])
+                if clause2:
+                    prompt = prompt + "\n\n" + clause2
+                    notes.append("inject_stamped_clip_continuity_card")
+                    changed = True
             # Storyboard beat for THIS shot only (avoid full-board mix).
             action = str(cfg.get("shot_action") or "").strip()
             if action and f"Primary action for shot {shot_index}" not in prompt:
                 prompt = prompt + f"\nPrimary action for shot {shot_index}: {action}"
                 notes.append("inject_this_shot_action")
                 changed = True
+
+            # Language / speech / BGM locks — Manager enforces on every clip.
+            from jiuwenswarm.server.runtime.designer.audio_locks import (
+                audio_lock_prompt_block,
+                resolve_audio_intent_flags,
+                stamp_audio_fields_on_clip_config,
+            )
+
+            analysis_a = (
+                meta.get("script_analysis")
+                if isinstance(meta.get("script_analysis"), dict)
+                else {}
+            )
+            shot_row = next(
+                (
+                    s
+                    for s in (analysis_a.get("shots") or [])
+                    if isinstance(s, dict) and int(s.get("shot_index") or 0) == shot_index
+                ),
+                {},
+            )
+            routing = meta.get("audio_routing") if isinstance(meta.get("audio_routing"), dict) else {}
+            cfg = stamp_audio_fields_on_clip_config(
+                cfg,
+                shot=shot_row if isinstance(shot_row, dict) else {},
+                analysis=analysis_a,
+                meta=meta,
+                clip_embedded=bool(
+                    routing.get("clip_embedded")
+                    or cfg.get("clip_embedded_audio")
+                    or meta.get("prefer_wan3_clip_audio")
+                ),
+            )
+            flags = resolve_audio_intent_flags(meta, cfg)
+            block = audio_lock_prompt_block(
+                language_lock=str(flags.get("language_lock") or ""),
+                speech_by_character=flags.get("speech_by_character") or {},
+                speech_line=str(flags.get("speech_line") or ""),
+                bgm_lock=flags.get("bgm_lock") or {},
+                include_speech=bool(flags.get("include_speech")),
+                include_music=bool(flags.get("include_music")),
+                clip_embedded=bool(flags.get("clip_embedded")),
+            )
+            if block and ("LANGUAGE LOCK" not in prompt or "SPEECH LOCK" not in prompt or "BGM LOCK" not in prompt):
+                # Replace soft fragments with full lock block once.
+                if "LANGUAGE LOCK" not in prompt:
+                    prompt = prompt + "\n" + block
+                    notes.append("inject_audio_locks")
+                    changed = True
+                elif "SPEECH LOCK" not in prompt or "BGM LOCK" not in prompt:
+                    prompt = prompt + "\n" + block
+                    notes.append("reinforce_audio_locks")
+                    changed = True
 
         # Soft anti-repeat: if prompt re-states a finished exit verb from already_done, flag.
         for item in already_done:
@@ -3116,6 +3378,11 @@ class ManagerAgent:
             "video_resolution": cfg.get("video_resolution"),
             "solo_ids": solo_ids,
             "prior_keyframe_node_id": prior_kf_id or None,
+            "language_lock": cfg.get("language_lock") or meta.get("language_lock"),
+            "speech_lock": bool(cfg.get("speech_line") or cfg.get("speech_by_character")),
+            "bgm_lock": bool(cfg.get("bgm_lock") or meta.get("bgm_lock")),
+            "clip_embedded_audio": bool(cfg.get("clip_embedded_audio")),
+            "video_audio": bool(cfg.get("video_audio") or cfg.get("prefer_wan3_clip_audio")),
         }
         gen["prompt"] = prompt.strip()
         cfg["generate"] = gen
@@ -3668,10 +3935,16 @@ class ManagerAgent:
                     "story beats (no new plot). Fix missing characters/views, enhance sparse shots "
                     "(crowd, atmosphere), set shot durations, enforce time-coherent continuity, and "
                     "keep geography locked (same landmarks/layout/light across views). "
-                    "Respond JSON only: "
+                    "Also approve/enforce film audio locks: language_lock (one language for all "
+                    "speech), per-shot speech_by_character (exact lines or {} if silent), and "
+                    "film-wide bgm_lock. Respond JSON only: "
                     '{"ok":true,"shot_fixes":[{"shot_index":1,"action":"...","camera":"...",'
-                    '"timeline":"0-5s","continuity_lock":{"forbid":"..."},"character_ids":["char_1"]}],'
-                    '"notes":"..."}'
+                    '"timeline":"0-5s","continuity_lock":{"forbid":"..."},'
+                    '"character_ids":["char_1"],'
+                    '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
+                    '"language_lock":"en",'
+                    '"bgm_lock":{"mood":"...","style":"...","rule":"..."},'
+                    '"include_speech":true,"include_music":true,"notes":"..."}'
                 )
                 result = await call_model_tool(
                     prompt=json.dumps(
@@ -3697,7 +3970,7 @@ class ManagerAgent:
                     for shot in shots:
                         if int(shot.get("shot_index") or 0) != idx:
                             continue
-                        for key in ("action", "camera", "timeline", "keyframe_prompt"):
+                        for key in ("action", "camera", "timeline", "keyframe_prompt", "speech_line"):
                             if fix.get(key):
                                 shot[key] = str(fix[key])[:600]
                         if isinstance(fix.get("continuity_lock"), dict):
@@ -3706,11 +3979,44 @@ class ManagerAgent:
                             }
                         if isinstance(fix.get("character_ids"), list):
                             shot["character_ids"] = [str(x) for x in fix["character_ids"] if str(x)]
+                        if isinstance(fix.get("speech_by_character"), dict):
+                            shot["speech_by_character"] = {
+                                str(k): str(v)[:280]
+                                for k, v in fix["speech_by_character"].items()
+                                if str(v).strip()
+                            }
                         patched.append(f"llm:shot{idx}")
+                if parsed.get("language_lock"):
+                    analysis["language_lock"] = str(parsed.get("language_lock"))[:16]
+                    patched.append("language_lock")
+                if isinstance(parsed.get("bgm_lock"), dict):
+                    analysis["bgm_lock"] = {
+                        str(k): str(v)[:280] for k, v in parsed["bgm_lock"].items()
+                    }
+                    patched.append("bgm_lock")
+                audio = dict(analysis.get("audio") or {})
+                if "include_speech" in parsed:
+                    audio["include_speech"] = bool(parsed.get("include_speech"))
+                if "include_music" in parsed:
+                    audio["include_music"] = bool(parsed.get("include_music"))
+                if parsed.get("language_lock"):
+                    audio["language_lock"] = str(parsed.get("language_lock"))[:16]
+                if isinstance(parsed.get("bgm_lock"), dict):
+                    audio["bgm_lock"] = analysis.get("bgm_lock")
+                analysis["audio"] = audio
                 ack["source"] = "llm"
                 ack["notes"] = str(parsed.get("notes") or ack["notes"])[:1000]
             except Exception:  # noqa: BLE001
                 logger.info("Manager storyboard LLM review failed; keeping heuristic", exc_info=True)
+
+        from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+
+        analysis = ensure_audio_locks_on_analysis(analysis, user_prompt)
+        shots = list(analysis.get("shots") or shots)
+        meta["language_lock"] = str(analysis.get("language_lock") or meta.get("language_lock") or "en")
+        if isinstance(analysis.get("bgm_lock"), dict):
+            meta["bgm_lock"] = analysis["bgm_lock"]
+        patched.append("audio_locks_approved")
 
         if shots:
             analysis["shots"] = shots
@@ -3723,6 +4029,10 @@ class ManagerAgent:
 
                 characters = list(analysis.get("characters") or [])
                 sb_md = _write_storyboard_markdown(shots, characters)
+                from jiuwenswarm.server.runtime.designer.audio_locks import (
+                    stamp_audio_fields_on_clip_config,
+                )
+
                 for node in graph.get("nodes") or []:
                     cfg = dict(node.get("config") or {})
                     role = _role_key(node)
@@ -3733,29 +4043,42 @@ class ManagerAgent:
                             cfg["draft_prewritten"] = sb_md
                         cfg["planned_shots"] = shots
                         node["config"] = cfg
-                    elif role in {"frame", "clip", "keyframe"}:
-                        idx = int(cfg.get("shot_index") or 0)
-                        for shot in shots:
-                            if int(shot.get("shot_index") or 0) != idx:
-                                continue
-                            if shot.get("action"):
-                                cfg["shot_action"] = str(shot["action"])[:500]
-                            if shot.get("camera"):
-                                cfg["camera"] = str(shot["camera"])[:120]
-                            if isinstance(shot.get("continuity_lock"), dict):
-                                cfg["continuity_lock"] = shot["continuity_lock"]
-                            gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
-                            if shot.get("action") and gen.get("prompt"):
-                                # Append continuity clause if missing.
-                                lock = shot.get("continuity_lock") or {}
-                                forbid = str(lock.get("forbid") or "")
-                                prompt = str(gen.get("prompt") or "")
-                                if forbid and forbid not in prompt:
-                                    gen["prompt"] = (prompt + f" CONTINUITY LOCK: {forbid}")[:1200]
-                                    cfg["generate"] = gen
-                            node["config"] = cfg
+                        continue
+                    if role not in {"frame", "clip", "keyframe"}:
+                        continue
+                    idx = int(cfg.get("shot_index") or 0)
+                    for shot in shots:
+                        if int(shot.get("shot_index") or 0) != idx:
+                            continue
+                        if shot.get("action"):
+                            cfg["shot_action"] = str(shot["action"])[:500]
+                        if shot.get("camera"):
+                            cfg["camera"] = str(shot["camera"])[:120]
+                        if shot.get("timeline"):
+                            cfg["timeline"] = str(shot["timeline"])[:40]
+                        if isinstance(shot.get("continuity_lock"), dict):
+                            cfg["continuity_lock"] = shot["continuity_lock"]
+                        if role == "clip":
+                            routing = (
+                                meta.get("audio_routing")
+                                if isinstance(meta.get("audio_routing"), dict)
+                                else {}
+                            )
+                            cfg = stamp_audio_fields_on_clip_config(
+                                cfg,
+                                shot=shot,
+                                analysis=analysis,
+                                meta=meta,
+                                clip_embedded=bool(
+                                    routing.get("clip_embedded")
+                                    or meta.get("prefer_wan3_clip_audio")
+                                ),
+                            )
+                        node["config"] = cfg
+                        break
+                meta["approved_storyboard"] = sb_md
             except Exception:  # noqa: BLE001
-                logger.info("Storyboard patch into nodes failed", exc_info=True)
+                logger.info("Manager storyboard patch of leaf configs failed", exc_info=True)
 
         # After storyboard edits: prune unused + keep spatial graph coherent for final clip.
         prune_notes = _manager_prune_and_cohere(graph)

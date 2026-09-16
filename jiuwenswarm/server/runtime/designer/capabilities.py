@@ -191,9 +191,28 @@ def detect_audio_backends() -> dict[str, Any]:
     """Public helper: whether speech/music generation backends exist."""
     speech = _audio_backend_configured("speech")
     music = _audio_backend_configured("music")
+    can_video_audio = False
+    video_audio_model = ""
+    try:
+        import os
+
+        from jiuwenswarm.server.runtime.designer.audio_locks import (
+            video_model_supports_native_audio,
+            wan3_audio_model_name,
+        )
+
+        model = (os.environ.get("VIDEO_GEN_MODEL_NAME") or "").strip()
+        can_video_audio = video_model_supports_native_audio(model) or True
+        # Wan stack can always fall back to wan3 for native audio when TTS/BGM missing.
+        video_audio_model = model if video_model_supports_native_audio(model) else wan3_audio_model_name()
+    except Exception:  # noqa: BLE001
+        can_video_audio = True
+        video_audio_model = "wan3.0-video"
     return {
         "can_speech": bool(speech.get("available")),
         "can_music": bool(music.get("available")),
+        "can_video_audio": bool(can_video_audio),
+        "video_audio_model": video_audio_model,
         "speech": speech,
         "music": music,
     }

@@ -1,14 +1,20 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Pass completed clip Wan prompts to later clip leaves (domain-agnostic).
+"""Pass slim continuity cards to later clip leaves (domain-agnostic).
 
-Keeps Plan A v12 leaf freedom: no frozen Clip Prompt Board. After each clip is
-authored/generated, stamp the prompt onto the next clip node so the next leaf
-LLM sees what already happened (beats, exits, L/R, style) and does not redo it.
+After each clip is authored, stamp ALREADY_DONE / CONTINUITY LOCK onto later
+clip nodes. Do NOT paste the full prior Wan prompt into the next leaf — that
+contaminates shot identity (shot N looks like shot N-1).
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+    continuity_card_clause,
+    continuity_card_from_prior,
+    merge_already_done,
+)
 
 
 def _clip_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
@@ -37,6 +43,16 @@ def wan_prompt_from_clip_node(node: dict[str, Any] | None) -> str:
     return str(gen.get("prompt") or cfg.get("prompt") or "").strip()
 
 
+def _action_from_clip_node(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ""
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    action = str(cfg.get("shot_action") or "").strip()
+    if action:
+        return action
+    return str(cfg.get("character_action") or "").strip()
+
+
 def collect_prior_clip_prompts(
     graph: dict[str, Any],
     *,
@@ -44,23 +60,38 @@ def collect_prior_clip_prompts(
     max_chars_each: int = 1600,
     max_clips: int = 6,
 ) -> list[dict[str, Any]]:
-    """All earlier clip Wan prompts (oldest → newest) for this film."""
+    """Earlier clip continuity seeds (oldest → newest). Prefer action, keep wan for internal use only."""
     out: list[dict[str, Any]] = []
     for node in _clip_nodes(graph):
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         idx = int(cfg.get("shot_index") or 0) or 0
         if idx <= 0 or idx >= int(shot_index or 0):
             continue
+        action = _action_from_clip_node(node)
         prompt = wan_prompt_from_clip_node(node)
-        if not prompt:
+        card = cfg.get("continuity_card") if isinstance(cfg.get("continuity_card"), dict) else None
+        if not action and not prompt and not card:
             continue
+        bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+        if card is None:
+            card = continuity_card_from_prior(
+                prior_action=action,
+                prior_prompt=prompt,
+                shot_index=idx,
+                node_id=str(node.get("id") or ""),
+                speech_line=str(cfg.get("speech_line") or ""),
+                bible=bible,
+                storyboard_hints=action,
+            )
         out.append(
             {
                 "node_id": str(node.get("id") or ""),
                 "shot_index": idx,
-                "wan_prompt": prompt[: max(200, int(max_chars_each))],
-                "shot_action": str(cfg.get("shot_action") or "")[:200],
+                # Keep wan_prompt for readiness/debug — never inject full text into next prompt.
+                "wan_prompt": (prompt or "")[: max(200, int(max_chars_each))],
+                "shot_action": (action or "")[:200],
                 "speech_line": str(cfg.get("speech_line") or "")[:200],
+                "continuity_card": card,
             }
         )
     return out[-max(1, int(max_clips)) :]
@@ -72,18 +103,38 @@ def stamp_wan_prompt_handoff(
     shot_index: int,
     prompt: str,
     node_id: str = "",
+    shot_action: str = "",
+    speech_line: str = "",
 ) -> list[str]:
-    """Save this clip's Wan prompt and inject it onto later clip nodes' context."""
+    """Save this clip's Wan prompt on self; stamp slim continuity cards onto later clips."""
     notes: list[str] = []
     text = (prompt or "").strip()
-    if not text:
+    if not text and not shot_action:
         return notes
     meta = dict(graph.get("metadata") or {})
     log = dict(meta.get("clip_wan_prompt_log") or {})
     key = str(node_id or f"n_clip_{shot_index}")
+    src_node = next(
+        (n for n in _clip_nodes(graph) if str(n.get("id") or "") == key),
+        None,
+    )
+    src_cfg = src_node.get("config") if isinstance(src_node, dict) else {}
+    action = (shot_action or _action_from_clip_node(src_node) or "").strip()
+    speech = (speech_line or str((src_cfg or {}).get("speech_line") or "")).strip()
+    bible = (src_cfg or {}).get("scene_bible") if isinstance((src_cfg or {}).get("scene_bible"), dict) else None
+    card = continuity_card_from_prior(
+        prior_action=action,
+        prior_prompt=text,
+        shot_index=int(shot_index or 0),
+        node_id=key,
+        speech_line=speech,
+        bible=bible,
+        storyboard_hints=action,
+    )
     log[key] = {
         "shot_index": int(shot_index or 0),
         "prompt": text[:4000],
+        "continuity_card": card,
     }
     meta["clip_wan_prompt_log"] = log
     graph["metadata"] = meta
@@ -93,50 +144,70 @@ def stamp_wan_prompt_handoff(
         idx = int(cfg.get("shot_index") or 0) or 0
         nid = str(node.get("id") or "")
         if idx == int(shot_index or 0) or nid == key:
-            cfg["last_wan_prompt"] = text[:4000]
-            cfg["clip_prompt_preview"] = text[:1200]
+            if text:
+                cfg["last_wan_prompt"] = text[:4000]
+                cfg["clip_prompt_preview"] = text[:1200]
+            cfg["continuity_card"] = card
+            cfg["handoff_artifact_ready"] = True
             node["config"] = cfg
-            notes.append(f"{nid}: saved last_wan_prompt")
+            notes.append(f"{nid}: saved last_wan_prompt + continuity_card")
             continue
         if idx <= int(shot_index or 0):
             continue
-        # Immediate next always gets the full previous Wan prompt.
-        # Later clips keep the most recent prior if none stamped yet.
         is_immediate_next = idx == int(shot_index or 0) + 1
         prev_id = str(cfg.get("continuity_clip_node_id") or "")
-        if is_immediate_next or prev_id == key or not str(cfg.get("previous_clip_wan_prompt") or "").strip():
+        has_card = isinstance(cfg.get("previous_clip_continuity_card"), dict)
+        if is_immediate_next or prev_id == key or not has_card:
             if is_immediate_next or prev_id == key or idx == int(shot_index or 0) + 1:
-                cfg["previous_clip_wan_prompt"] = text[:3500]
+                cfg["previous_clip_continuity_card"] = card
                 cfg["previous_clip_node_id"] = key
                 cfg["previous_clip_shot_index"] = int(shot_index or 0)
+                # Artifact readiness marker without pasting the full prior prompt.
+                cfg["previous_clip_handoff_ready"] = True
+                # Clear legacy full-prompt stamp so Manager/handlers cannot re-inject it.
+                cfg.pop("previous_clip_wan_prompt", None)
+                cfg["already_done"] = merge_already_done(
+                    cfg.get("already_done") if isinstance(cfg.get("already_done"), list) else None,
+                    card.get("already_done") if isinstance(card.get("already_done"), list) else None,
+                )
+                if isinstance(card.get("continuity_lock"), dict):
+                    cfg["continuity_lock"] = dict(card["continuity_lock"])
                 node["config"] = cfg
-                notes.append(f"{nid}: received previous_clip_wan_prompt from {key}")
+                notes.append(f"{nid}: received continuity_card from {key}")
     return notes
 
 
 def handoff_clause_for_prompt(prior: list[dict[str, Any]] | None) -> str:
-    """Text block injected into Wan / leaf context — do not redo prior beats."""
-    items = [p for p in (prior or []) if isinstance(p, dict) and p.get("wan_prompt")]
+    """Slim continuity clause — already_done / forbid only; never paste full Wan text."""
+    items = [p for p in (prior or []) if isinstance(p, dict)]
     if not items:
         return ""
     latest = items[-1]
-    bits = [
-        "PRIOR CLIP CONTINUITY (do NOT redo these beats; continue the film forward):",
-        f"- Previous shot {latest.get('shot_index')} ({latest.get('node_id')}): "
-        f"{str(latest.get('wan_prompt') or '')[:1200]}",
-    ]
-    if latest.get("speech_line"):
-        bits.append(f"- Prior speech already delivered: {str(latest.get('speech_line'))[:160]}")
-    if len(items) > 1:
-        earlier = "; ".join(
-            f"shot {p.get('shot_index')}: {(p.get('shot_action') or p.get('wan_prompt') or '')[:80]}"
-            for p in items[:-1]
+    card = latest.get("continuity_card") if isinstance(latest.get("continuity_card"), dict) else None
+    if card is None:
+        card = continuity_card_from_prior(
+            prior_action=str(latest.get("shot_action") or ""),
+            prior_prompt=str(latest.get("wan_prompt") or ""),
+            shot_index=int(latest.get("shot_index") or 0) or None,
+            node_id=str(latest.get("node_id") or ""),
+            speech_line=str(latest.get("speech_line") or ""),
+            storyboard_hints=str(latest.get("shot_action") or ""),
         )
-        bits.append(f"- Earlier clips already covered: {earlier}")
-    bits.append(
-        "STATE CARRY: keep STYLE HOLD, screen L/R seats, landmarks, wardrobe, crowd/extras, "
-        "and exit state from prior prompts. If someone left or moved screen-right, they must "
-        "stay gone or stay on the right — never reset to the opening blocking. "
-        "Animate THIS shot's keyframe only with NEW motion/gaze/camera for this beat."
-    )
-    return "\n".join(bits)
+    clause = continuity_card_clause(card)
+    if len(items) > 1:
+        earlier_done: list[str] = []
+        for p in items[:-1]:
+            c = p.get("continuity_card") if isinstance(p.get("continuity_card"), dict) else None
+            if c and isinstance(c.get("already_done"), list):
+                earlier_done.extend(str(x) for x in c["already_done"] if str(x).strip())
+            else:
+                act = str(p.get("shot_action") or "")[:80]
+                if act:
+                    earlier_done.append(f"shot {p.get('shot_index')}: already covered — {act}")
+        if earlier_done:
+            clause = (
+                clause
+                + "\nEarlier ALREADY_DONE:\n"
+                + "\n".join(f"  - {x}" for x in earlier_done[:8])
+            )
+    return clause

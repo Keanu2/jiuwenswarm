@@ -201,16 +201,23 @@ def apply_wan_call_locks(
             handoff_clause_for_prompt,
         )
 
-        if "PREVIOUS CLIP WAN PROMPT" not in text and "prior clip" not in text.lower():
+        if "CONTINUITY CARD" not in text and "prior clip" not in text.lower():
             prior = collect_prior_clip_prompts(graph, shot_index=int(shot_index) or 0)
             if not prior:
-                prev_one = str(cfg.get("previous_clip_wan_prompt") or "").strip()
-                if prev_one:
+                prev_card = (
+                    cfg.get("previous_clip_continuity_card")
+                    if isinstance(cfg.get("previous_clip_continuity_card"), dict)
+                    else None
+                )
+                if prev_card:
                     prior = [
                         {
                             "node_id": str(cfg.get("previous_clip_node_id") or ""),
-                            "shot_index": int(cfg.get("previous_clip_shot_index") or (int(shot_index) or 1) - 1),
-                            "wan_prompt": prev_one,
+                            "shot_index": int(
+                                cfg.get("previous_clip_shot_index") or (int(shot_index) or 1) - 1
+                            ),
+                            "shot_action": str(prev_card.get("prior_action_summary") or ""),
+                            "continuity_card": prev_card,
                         }
                     ]
             handoff = handoff_clause_for_prompt(prior)

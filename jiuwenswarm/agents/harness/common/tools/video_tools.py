@@ -919,6 +919,7 @@ async def _invoke_model_video_generation(
     reference_images: list[str] | None = None,
     reference_file: str | None = None,
     audio: bool | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Generate a video via DashScope / MiniMax / 火山方舟 backends."""
     cfg = get_config() or {}
@@ -934,7 +935,8 @@ async def _invoke_model_video_generation(
         return {"error": "[ERROR]: VIDEO_GEN_API_KEY is not configured for video generation."}
 
     model = str(
-        mc.get("model_name")
+        model
+        or mc.get("model_name")
         or mc.get("model")
         or os.getenv("VIDEO_GEN_MODEL_NAME")
         or "wan2.6-t2v"

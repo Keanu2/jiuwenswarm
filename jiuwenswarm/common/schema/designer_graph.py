@@ -1866,6 +1866,411 @@ def data_predecessors(graph: DesignerExecutionGraph) -> dict[str, list[str]]:
     return incoming
 
 
+def _node_schedule_priority(node: DesignerGraphNode | dict[str, Any]) -> tuple[int, int, str]:
+    """Lower tuple = should finish earlier when breaking dependency cycles."""
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    role = str(cfg.get("role") or cfg.get("pipeline") or node.get("type") or "").strip().lower()
+    role_rank = {
+        "text": 10,
+        "brief": 10,
+        "table": 20,
+        "storyboard": 20,
+        "character": 30,
+        "character_design": 30,
+        "scene": 40,
+        "image": 45,
+        "frame": 50,
+        "keyframe": 50,
+        "speech": 55,
+        "tts": 55,
+        "music": 55,
+        "audio": 55,
+        "audio_bed": 55,
+        "clip": 60,
+        "video": 60,
+        "compose": 70,
+        "film": 70,
+    }.get(role, 50)
+    try:
+        shot = int(cfg.get("shot_index") or 0)
+    except (TypeError, ValueError):
+        shot = 0
+    return (role_rank, max(0, shot), str(node.get("id") or ""))
+
+
+def _config_soft_predecessors(node: DesignerGraphNode | dict[str, Any]) -> list[str]:
+    """Declared deps on the node config that may not yet be mirrored as edges."""
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    ids: list[str] = []
+    for key in (
+        "inputs",
+        "character_node_ids",
+    ):
+        raw = cfg.get(key)
+        if isinstance(raw, list):
+            ids.extend(str(x) for x in raw if str(x).strip())
+    for key in (
+        "continuity_clip_node_id",
+        "previous_clip_node_id",
+        "scene_prompt_handoff_from",
+        "prior_keyframe_node_id",
+        "scene_master_frame_id",
+        "continuity_frame_node_id",
+        "master_scene_node_id",
+    ):
+        val = str(cfg.get(key) or "").strip()
+        if val:
+            ids.append(val)
+    identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+    for key in (
+        "scene_prompt_handoff_from",
+        "prior_keyframe_node_id",
+        "scene_master_frame_id",
+        "scene_node_id",
+    ):
+        val = str(identity.get(key) or "").strip()
+        if val:
+            ids.append(val)
+    for cid in identity.get("character_node_ids") or []:
+        if str(cid).strip():
+            ids.append(str(cid))
+    self_id = str(node.get("id") or "")
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in ids:
+        if not item or item == self_id or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def raw_execution_predecessors(graph: DesignerExecutionGraph) -> dict[str, list[str]]:
+    """Union of data-edge preds and config-declared soft deps (may contain cycles)."""
+    incoming = data_predecessors(graph)
+    known = set(incoming)
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("id") or "")
+        if not nid or nid not in known:
+            continue
+        for pred in _config_soft_predecessors(node):
+            if pred in known and pred not in incoming[nid]:
+                incoming[nid].append(pred)
+    return incoming
+
+
+def _strongly_connected_components(preds: dict[str, list[str]]) -> list[list[str]]:
+    """Tarjan SCC over nodes with directed edges pred → node."""
+    nodes = list(preds.keys())
+    succ: dict[str, list[str]] = {n: [] for n in nodes}
+    for nid, parents in preds.items():
+        for p in parents:
+            if p in succ:
+                succ[p].append(nid)
+
+    index = 0
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    indices: dict[str, int] = {}
+    lowlink: dict[str, int] = {}
+    components: list[list[str]] = []
+
+    def strongconnect(v: str) -> None:
+        nonlocal index
+        indices[v] = index
+        lowlink[v] = index
+        index += 1
+        stack.append(v)
+        on_stack.add(v)
+        for w in succ.get(v, []):
+            if w not in indices:
+                strongconnect(w)
+                lowlink[v] = min(lowlink[v], lowlink[w])
+            elif w in on_stack:
+                lowlink[v] = min(lowlink[v], indices[w])
+        if lowlink[v] == indices[v]:
+            comp: list[str] = []
+            while True:
+                w = stack.pop()
+                on_stack.discard(w)
+                comp.append(w)
+                if w == v:
+                    break
+            components.append(comp)
+
+    for v in nodes:
+        if v not in indices:
+            strongconnect(v)
+    return components
+
+
+def break_cycles_for_schedule(
+    preds: dict[str, list[str]],
+    graph: DesignerExecutionGraph,
+) -> dict[str, list[str]]:
+    """Drop back-edges inside SCCs so dependents never schedule before dependencies.
+
+    Within a cycle, keep edges from earlier schedule-priority → later priority and
+    drop the reverse, so shot/role order decides who may run first.
+    """
+    by_id = {
+        str(n.get("id") or ""): n
+        for n in (graph.get("nodes") or [])
+        if isinstance(n, dict) and n.get("id")
+    }
+    priority = {
+        nid: _node_schedule_priority(by_id[nid]) if nid in by_id else (50, 0, nid)
+        for nid in preds
+    }
+    scc_id: dict[str, int] = {}
+    for i, comp in enumerate(_strongly_connected_components(preds)):
+        for nid in comp:
+            scc_id[nid] = i
+
+    dag: dict[str, list[str]] = {nid: [] for nid in preds}
+    for nid, parents in preds.items():
+        kept: list[str] = []
+        for pred in parents:
+            if pred not in preds:
+                continue
+            if scc_id.get(pred) != scc_id.get(nid):
+                kept.append(pred)
+                continue
+            # Same SCC (cycle): only keep forward priority edges.
+            if priority[pred] < priority[nid]:
+                kept.append(pred)
+        # Stable unique
+        seen: set[str] = set()
+        for pred in kept:
+            if pred not in seen:
+                seen.add(pred)
+                dag[nid].append(pred)
+    return dag
+
+
+def execution_predecessors(graph: DesignerExecutionGraph) -> dict[str, list[str]]:
+    """Schedule predecessors: edges + config deps, cycles broken safely."""
+    return break_cycles_for_schedule(raw_execution_predecessors(graph), graph)
+
+
+def _pipeline_role(node: DesignerGraphNode | dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ""
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    return str(
+        cfg.get("role") or cfg.get("pipeline") or node.get("type") or ""
+    ).strip().lower()
+
+
+def is_soft_artifact_dependency(
+    graph: DesignerExecutionGraph,
+    pred_id: str,
+    node_id: str,
+) -> bool:
+    """True when the dependent only needs an early artifact (e.g. Wan prompt), not full completion.
+
+    Clip→clip continuity and same-setting scene-prompt handoffs are soft: once the
+    upstream node has published its prompt, the downstream node may start even while
+    upstream media generation is still running.
+    """
+    by_id = {
+        str(n.get("id") or ""): n
+        for n in (graph.get("nodes") or [])
+        if isinstance(n, dict) and n.get("id")
+    }
+    pred = by_id.get(str(pred_id or ""))
+    node = by_id.get(str(node_id or ""))
+    if pred is None or node is None:
+        return False
+    prole = _pipeline_role(pred)
+    nrole = _pipeline_role(node)
+    ncfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    pcfg = pred.get("config") if isinstance(pred.get("config"), dict) else {}
+
+    clip_roles = {"clip", "video"}
+    frame_roles = {"frame", "keyframe"}
+
+    # Serial clip continuity: only the prior Wan prompt is required.
+    if nrole in clip_roles and prole in clip_roles:
+        return True
+
+    # Same-setting KF handoff: later compose KFs need master scene prompt text.
+    if nrole in frame_roles and prole in frame_roles:
+        handoff = str(
+            ncfg.get("scene_prompt_handoff_from")
+            or ncfg.get("scene_master_frame_id")
+            or ""
+        ).strip()
+        if handoff == str(pred_id):
+            return True
+        if str(ncfg.get("continuity_frame_node_id") or "").strip() == str(pred_id):
+            strategy = str(
+                ncfg.get("keyframe_strategy")
+                or ((ncfg.get("identity_refs") or {}) if isinstance(ncfg.get("identity_refs"), dict) else {}).get(
+                    "keyframe_strategy"
+                )
+                or ""
+            )
+            if "compose" in strategy or strategy == "compose_from_solo_refs":
+                return True
+        return False
+
+    # Clip depending on another shot's frame only for scene/prompt text (not own KF image).
+    if nrole in clip_roles and prole in frame_roles:
+        try:
+            own_shot = int(ncfg.get("shot_index") or 0)
+        except (TypeError, ValueError):
+            own_shot = 0
+        try:
+            pred_shot = int(pcfg.get("shot_index") or 0)
+        except (TypeError, ValueError):
+            pred_shot = 0
+        if own_shot and (pred_shot == own_shot or str(pred_id) == f"n_frame_{own_shot}"):
+            return False  # own keyframe image is a hard media dep
+        soft_ids = {
+            str(ncfg.get("continuity_frame_node_id") or "").strip(),
+            str(ncfg.get("scene_prompt_handoff_from") or "").strip(),
+            str(ncfg.get("scene_master_frame_id") or "").strip(),
+        }
+        return str(pred_id) in soft_ids and bool(str(pred_id))
+
+    return False
+
+
+def artifact_dependency_satisfied(
+    graph: DesignerExecutionGraph,
+    node_id: str,
+    pred_id: str,
+) -> bool:
+    """Whether the soft artifact this node needs from ``pred_id`` is already available."""
+    by_id = {
+        str(n.get("id") or ""): n
+        for n in (graph.get("nodes") or [])
+        if isinstance(n, dict) and n.get("id")
+    }
+    pred = by_id.get(str(pred_id or ""))
+    node = by_id.get(str(node_id or ""))
+    if pred is None or node is None:
+        return False
+    ncfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    pcfg = pred.get("config") if isinstance(pred.get("config"), dict) else {}
+    prole = _pipeline_role(pred)
+    nrole = _pipeline_role(node)
+    clip_roles = {"clip", "video"}
+    frame_roles = {"frame", "keyframe"}
+
+    if nrole in clip_roles and prole in clip_roles:
+        if isinstance(ncfg.get("previous_clip_continuity_card"), dict):
+            return True
+        if bool(ncfg.get("previous_clip_handoff_ready")):
+            return True
+        if str(ncfg.get("previous_clip_wan_prompt") or "").strip():
+            return True
+        if bool(pcfg.get("handoff_artifact_ready")) and (
+            isinstance(pcfg.get("continuity_card"), dict)
+            or str(
+                pcfg.get("last_wan_prompt")
+                or pcfg.get("last_approved_prompt")
+                or pcfg.get("clip_prompt_preview")
+                or ""
+            ).strip()
+        ):
+            return True
+        return bool(
+            isinstance(pcfg.get("continuity_card"), dict)
+            or str(
+                pcfg.get("last_wan_prompt")
+                or pcfg.get("last_approved_prompt")
+                or pcfg.get("clip_prompt_preview")
+                or ""
+            ).strip()
+        )
+
+    if (nrole in frame_roles and prole in frame_roles) or (
+        nrole in clip_roles and prole in frame_roles
+    ):
+        if isinstance(ncfg.get("previous_keyframe_continuity_card"), dict):
+            return True
+        if str(
+            ncfg.get("scene_architecture_clause")
+            or ncfg.get("scene_master_prompt")
+            or ncfg.get("previous_keyframe_prompt")
+            or ""
+        ).strip():
+            return True
+        return bool(
+            str(
+                pcfg.get("scene_architecture_clause")
+                or pcfg.get("scene_master_prompt")
+                or pcfg.get("last_approved_prompt")
+                or (pcfg.get("generate") or {}).get("prompt")
+                or ""
+            ).strip()
+        ) and (
+            bool(pcfg.get("handoff_artifact_ready"))
+            or bool(
+                str(
+                    pcfg.get("last_approved_prompt")
+                    or pcfg.get("scene_master_prompt")
+                    or pcfg.get("scene_architecture_clause")
+                    or ""
+                ).strip()
+            )
+        )
+
+    return False
+
+
+def filter_ready_by_dependency_order(
+    ready_ids: list[str],
+    *,
+    preds: dict[str, list[str]],
+    in_flight: set[str] | frozenset[str] | None = None,
+    graph: DesignerExecutionGraph | None = None,
+) -> list[str]:
+    """From a same-level ready set, never start a node whose hard pred is also starting/running.
+
+    Soft artifact preds may already be in-flight: if their prompt artifact is published,
+    the dependent may join the batch (still subject to the global concurrency semaphore).
+    """
+    if not ready_ids:
+        return []
+    by_id = {
+        str(n.get("id") or ""): n
+        for n in ((graph or {}).get("nodes") or [])
+        if isinstance(n, dict) and n.get("id")
+    } if graph else {}
+    flying = set(in_flight or ())
+    ordered = sorted(
+        ready_ids,
+        key=lambda nid: _node_schedule_priority(by_id[nid]) if nid in by_id else (50, 0, nid),
+    )
+    selected: list[str] = []
+    selected_set: set[str] = set()
+    for nid in ordered:
+        blocked = False
+        for pred in preds.get(nid, []):
+            if pred in selected_set:
+                blocked = True
+                break
+            if pred not in flying:
+                continue
+            soft = bool(
+                graph is not None and is_soft_artifact_dependency(graph, pred, nid)
+            )
+            if soft and graph is not None and artifact_dependency_satisfied(graph, nid, pred):
+                continue
+            blocked = True
+            break
+        if blocked:
+            continue
+        selected.append(nid)
+        selected_set.add(nid)
+    return selected
+
+
 def sync_groups(graph: DesignerExecutionGraph) -> dict[str, frozenset[str]]:
     """Union-find over undirected ``sync`` edges."""
     parent: dict[str, str] = {node["id"]: node["id"] for node in graph.get("nodes", [])}

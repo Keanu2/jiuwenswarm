@@ -377,6 +377,16 @@ def _write_storyboard_markdown(shots: list[dict[str, Any]], characters: list[dic
             lines.append(f"- Action: {shot.get('action') or shot.get('keyframe_prompt') or ''}")
             if shot.get("scene_distinctness"):
                 lines.append(f"- Scene note: {shot.get('scene_distinctness')}")
+            speech_line = str(shot.get("speech_line") or "").strip()
+            by_char = shot.get("speech_by_character") if isinstance(shot.get("speech_by_character"), dict) else {}
+            if by_char:
+                bits = "; ".join(f"{cid}: {line}" for cid, line in by_char.items() if str(line).strip())
+                if bits:
+                    lines.append(f"- Speech by character: {bits}")
+            elif speech_line:
+                lines.append(f"- Speech: {speech_line}")
+            if shot.get("language_lock"):
+                lines.append(f"- Language lock: {shot.get('language_lock')}")
             if crowd:
                 lines.append(
                     f"- Crowd lock: present={crowd.get('present')}; "
@@ -829,6 +839,9 @@ def build_smart_video_graph(
         ai_mode = llm_available()
     prompt_text = prompt.strip()
     mode = "cost" if str(optimize_for).strip().lower() == "cost" else "quality"
+    from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+
+    analysis = ensure_audio_locks_on_analysis(dict(analysis or {}), prompt_text)
     characters = list(analysis.get("characters") or [])
     scenes = list(analysis.get("scenes") or [])
     shots = list(analysis.get("shots") or [])
@@ -1399,7 +1412,15 @@ def build_smart_video_graph(
             }
         )
         timeline = str(shot.get("timeline") or "").strip() or f"{(idx-1)*5:.1f}-{idx*5:.1f}s"
-        speech_line = str(shot.get("speech_line") or shot.get("dialogue") or "").strip()
+        from jiuwenswarm.server.runtime.designer.audio_locks import (
+            normalize_speech_by_character,
+            speech_line_from_by_character,
+        )
+
+        speech_by_character = normalize_speech_by_character(shot, characters)
+        speech_line = speech_line_from_by_character(speech_by_character) or str(
+            shot.get("speech_line") or shot.get("dialogue") or ""
+        ).strip()
         bible_for_clip = ""
         if scene_bible:
             bible_for_clip = (
@@ -1429,6 +1450,22 @@ def build_smart_video_graph(
             "crowd_lock": crowd or None,
             "already_done": already_done or None,
             "speech_line": speech_line,
+            "speech_by_character": speech_by_character,
+            "language_lock": str(
+                shot.get("language_lock")
+                or (analysis.get("language_lock") if isinstance(analysis, dict) else "")
+                or (audio.get("language_lock") if isinstance(audio, dict) else "")
+                or "en"
+            ),
+            "bgm_lock": (
+                shot.get("bgm_lock")
+                if isinstance(shot.get("bgm_lock"), dict)
+                else (
+                    analysis.get("bgm_lock")
+                    if isinstance(analysis.get("bgm_lock"), dict)
+                    else (audio.get("bgm_lock") if isinstance(audio.get("bgm_lock"), dict) else None)
+                )
+            ),
             "spatial_lock": shot_spatial,
             "master_scene_node_id": None,
             "scene_master_frame_id": scene_master_id
@@ -1453,7 +1490,8 @@ def build_smart_video_graph(
                     + done_bits
                     + (f"Speech this beat: {speech_line}. " if speech_line else "")
                     + "DETAIL: motion direction, gaze targets, relative L/R from prior beat. "
-                    + "Use PRIOR CLIP CONTINUITY when present — advance time; do not redo prior beats. "
+                    + "Use CONTINUITY CARD / ALREADY_DONE when present — advance time; "
+                    "do not redo prior beats or copy a prior prompt. "
                     + "Real I2V motion required — never still freezes. "
                     + "Distinct action from other clips; same faces/costumes for this setting."
                 )
@@ -1637,26 +1675,34 @@ def build_smart_video_graph(
             edges.append(_edge("e_sb_music", "n_storyboard", "n_music"))
             edges.append(_edge("e_brief_music", "n_brief", "n_music"))
         if clip_embedded:
+            from jiuwenswarm.server.runtime.designer.audio_locks import stamp_audio_fields_on_clip_config
+
             for n in nodes:
                 if not isinstance(n, dict):
                     continue
                 cfg = n.get("config") if isinstance(n.get("config"), dict) else {}
                 if str(cfg.get("role") or "") != NODE_ROLE_CLIP:
                     continue
-                gen = dict(cfg.get("generate") or {})
-                prompt_c = str(gen.get("prompt") or "")
-                speech_bit = str(cfg.get("speech_line") or "").strip()
-                extra = (
-                    " AUDIO (clip-embedded — no separate TTS/BGM backend): include natural "
-                    "diegetic speech timing and light underscoring mood in this clip when the "
-                    "storyboard calls for sound."
+                idx = int(cfg.get("shot_index") or 0)
+                shot_row = next(
+                    (
+                        s
+                        for s in shots
+                        if isinstance(s, dict) and int(s.get("shot_index") or 0) == idx
+                    ),
+                    {},
                 )
-                if speech_bit:
-                    extra += f" Spoken line this beat: {speech_bit}."
-                gen["prompt"] = (prompt_c + extra).strip()
-                cfg["generate"] = gen
-                cfg["clip_embedded_audio"] = True
+                cfg = stamp_audio_fields_on_clip_config(
+                    dict(cfg),
+                    shot=shot_row if isinstance(shot_row, dict) else {},
+                    analysis=analysis,
+                    meta={"audio_intent": audio, "audio_routing": {"can_speech": can_speech, "can_music": can_music}},
+                    clip_embedded=True,
+                )
                 n["config"] = cfg
+            # Film-wide prefer wan3 native audio when backends are missing.
+            # (Stamped again on metadata below.)
+            pass
 
     compose_inputs = [*clip_ids, *audio_ids]
     nodes.append(
@@ -1706,9 +1752,20 @@ def build_smart_video_graph(
                 "clip_embedded": bool(clip_embedded),
                 "can_speech": can_speech,
                 "can_music": can_music,
+                "can_video_audio": bool(backends.get("can_video_audio", True)),
+                "video_audio_model": str(backends.get("video_audio_model") or ""),
                 "speech_nodes": "n_speech" in audio_ids,
                 "music_nodes": "n_music" in audio_ids,
             },
+            "language_lock": str(
+                analysis.get("language_lock") or audio.get("language_lock") or "en"
+            ),
+            "bgm_lock": (
+                analysis.get("bgm_lock")
+                if isinstance(analysis.get("bgm_lock"), dict)
+                else (audio.get("bgm_lock") if isinstance(audio.get("bgm_lock"), dict) else {})
+            ),
+            "prefer_wan3_clip_audio": bool(clip_embedded),
             "skip_scene_plate": True,
             "scene_continuity_mode": "compose_solos_shared_scene_prompt",
             "scene_masters": dict(scene_master_by_setting),
