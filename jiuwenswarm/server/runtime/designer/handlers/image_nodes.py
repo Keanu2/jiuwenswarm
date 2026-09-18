@@ -61,7 +61,11 @@ def _frame_prompt_looks_contaminated(text: str) -> bool:
     raw = (text or "").upper()
     needles = (
         "PRIOR KEYFRAME PROMPT",
+        "PREVIOUS KEYFRAME HAD",
         "PRIOR CLIP CONTINUITY",
+        "PREVIOUS CLIP HAD",
+        "YOUR ASSIGNMENT",
+        "STAGING LOCK",
         "MASTER SCENE PROMPT",
         "CONTINUITY CARD (MANAGER)",
         "LANGUAGE LOCK",
@@ -135,6 +139,7 @@ def _shot_frame_prompt(
     combined_cast_ref: bool = False,
     keyframe_strategy: str = "",
     costume_lock: str = "",
+    staging_lock: str = "",
 ) -> str:
     timeline = f" ({shot['timeline']})" if shot["timeline"] else ""
     comment = str(shot.get("comment") or "").strip()
@@ -210,7 +215,17 @@ def _shot_frame_prompt(
     elif has_scene:
         lead += " Location, lighting, and weather must match the scene reference."
     if costume_lock:
-        lead += f" Costume lock: {costume_lock}."
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+                clothing_lock_clause,
+            )
+
+            cloth = clothing_lock_clause(costume_lock, for_clip=False)
+            lead += f" {cloth}" if cloth else f" Costume lock: {costume_lock}."
+        except Exception:  # noqa: BLE001
+            lead += f" Costume lock: {costume_lock}."
+    if staging_lock:
+        lead += f" {staging_lock}"
     lead += (
         " The image must be the cinematic scene itself. "
         "No subtitles, no storyboard grid, no table, no spreadsheet, no cell borders. "
@@ -485,15 +500,8 @@ class FrameNodeHandler:
                 + " with this shot. Finish the Character and Scene nodes first."
             )
         refs_paths = collect_frame_reference_images(ctx, node)
-        fallback_refs = [*all_chars[:3], *all_scenes[:1]] if all_scenes else list(all_chars[:4])
-        refs = [str(p) for p in (refs_paths or fallback_refs)]
-        shots = storyboard_shots_or_default(storyboard, visual)
-        planned_action = str(cfg.get("shot_action") or generate.get("prompt") or "").strip()
-        cast_names = [
-            str(x).strip()
-            for x in (cfg.get("cast_names") or [])
-            if str(x).strip()
-        ]
+        # Never dump every solo sheet when occupancy is empty/wrong — that paints
+        # off-screen cast into the still. Prefer on_screen identity refs only.
         preferred_char_nodes = [
             str(x)
             for x in (
@@ -504,7 +512,48 @@ class FrameNodeHandler:
             or (cfg.get("character_node_ids") or [])
             if str(x).strip()
         ]
+        on_screen_cfg = [
+            str(x)
+            for x in (
+                cfg.get("on_screen")
+                or (identity.get("occupancy") or {}).get("must_appear")
+                or cfg.get("character_ids")
+                or identity.get("character_ids")
+                or []
+            )
+            if str(x).strip()
+        ]
+        if refs_paths:
+            refs = [str(p) for p in refs_paths]
+        elif preferred_char_nodes:
+            from jiuwenswarm.server.runtime.designer.handlers.common import (
+                node_ids_output_image_paths,
+            )
+
+            refs = [str(p) for p in node_ids_output_image_paths(ctx, preferred_char_nodes)]
+        else:
+            # Fail closed: no occupancy → no cast refs (scene plate only if present).
+            refs = [str(p) for p in (all_scenes[:1] if all_scenes else [])]
+        shots = storyboard_shots_or_default(storyboard, visual)
+        planned_action = str(cfg.get("shot_action") or generate.get("prompt") or "").strip()
+        cast_names = [
+            str(x).strip()
+            for x in (cfg.get("cast_names") or [])
+            if str(x).strip()
+        ]
         costume_lock = str(identity.get("costume_lock") or cfg.get("costume_lock") or "")
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+                ensure_cfg_staging_locks,
+            )
+
+            analysis_chars = list(
+                ((ctx.graph.get("metadata") or {}).get("script_analysis") or {}).get("characters")
+                or []
+            )
+            staging_lock = ensure_cfg_staging_locks(cfg, characters=analysis_chars)
+        except Exception:  # noqa: BLE001
+            staging_lock = ""
         # Detect combined cast from attached character nodes when available.
         combined_cast_ref = False
         for other in ctx.graph.get("nodes") or []:
@@ -521,7 +570,14 @@ class FrameNodeHandler:
                         for x in (oc.get("character_names") or [])
                         if str(x).strip()
                     ] or ([str(oc.get("character_name") or "").strip()] if oc.get("character_name") else [])
-        char_ref_count = max(1, len(preferred_char_nodes) or 1)
+        # Ref count follows on_screen / cast_names, not every attached solo predecessor.
+        char_ref_count = max(
+            1,
+            len(cast_names)
+            or len(on_screen_cfg)
+            or len(preferred_char_nodes)
+            or 1,
+        )
         if shot_index > len(shots) and planned_action:
             shot = {
                 "shot_no": str(shot_index),
@@ -558,6 +614,7 @@ class FrameNodeHandler:
             combined_cast_ref=combined_cast_ref,
             keyframe_strategy=keyframe_strategy,
             costume_lock=costume_lock,
+            staging_lock=staging_lock,
         )
         from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
             apply_keyframe_call_locks,

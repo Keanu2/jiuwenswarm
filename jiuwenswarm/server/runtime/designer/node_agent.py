@@ -434,6 +434,11 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "setting_id": cfg.get("setting_id") or identity.get("setting_id"),
         "keyframe_strategy": cfg.get("keyframe_strategy") or identity.get("keyframe_strategy"),
         "costume_lock": cfg.get("costume_lock") or identity.get("costume_lock"),
+        "positioning_lock": cfg.get("positioning_lock"),
+        "action_lock": cfg.get("action_lock"),
+        "relationship_lock": cfg.get("relationship_lock"),
+        "cast_actions": cfg.get("cast_actions"),
+        "blocking": cfg.get("blocking"),
         "spatial_lock": spatial or None,
         "occupancy": cfg.get("occupancy") or identity.get("occupancy"),
         "character_node_ids": cfg.get("character_node_ids") or identity.get("character_node_ids"),
@@ -449,6 +454,9 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "label": node.get("label"),
         "type": node.get("type"),
         "prompt": graph_prompt(graph, node),
+        "shot_index": cfg.get("shot_index"),
+        "shot_action": str(cfg.get("shot_action") or "")[:500],
+        "camera": str(cfg.get("camera") or "")[:120],
         "agent_template": node_agent_template(node),
         "upstream_node_ids": preds,
         "suggested_next_node_ids": [item for item in suggested if isinstance(item, str)],
@@ -457,8 +465,10 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "keyframe_strategy": locks["keyframe_strategy"],
         "occupancy": locks["occupancy"],
         "already_done": cfg.get("already_done"),
-        "previous_keyframe_continuity_card": cfg.get("previous_keyframe_continuity_card"),
-        "previous_clip_continuity_card": cfg.get("previous_clip_continuity_card"),
+        "previous_keyframe_prompt": str(cfg.get("previous_keyframe_prompt") or "")[:800],
+        "previous_keyframe_action": str(cfg.get("previous_keyframe_action") or "")[:300],
+        "previous_clip_wan_prompt": str(cfg.get("previous_clip_wan_prompt") or "")[:800],
+        "previous_clip_action": str(cfg.get("previous_clip_action") or "")[:300],
         "scene_architecture_clause": str(cfg.get("scene_architecture_clause") or "")[:900],
         "locks": locks,
         "manager_prompt_reviewed": locks["manager_prompt_reviewed"],
@@ -471,17 +481,17 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "starts them after this node completes. Only designer_node_run a node you "
         "just added with designer_graph_patch.\n"
         "TOOLS (not heuristics): Use call_model for text reasoning; call_image_model "
-        "for stills (Qwen/image gen); call_video_model for clips (Wan); "
-        "ffmpeg_compose / mix_audio for film assemble; read_upstream for prior "
-        "outputs. Prefer tool-produced file URIs in designer_node_complete.\n"
+        "for stills (configured image model); call_video_model for clips (configured "
+        "video model); ffmpeg_compose / mix_audio for film assemble; read_upstream "
+        "for prior outputs. Prefer tool-produced file URIs in designer_node_complete.\n"
         "LOCKS (must keep in every tool prompt before image/video calls): "
         "obey locks.keyframe_strategy (compose_from_solo_refs for first KF of a setting; "
         "edit_prior_keyframe for later same-setting KFs), costume_lock, spatial_lock, "
         "occupancy, and solo identity sheets — never invent new faces/wardrobe/architecture.\n"
-        "CONTINUITY: Obey already_done and continuity cards — do not restage finished "
-        "onsets/exits/dialogue (e.g. do not start running again if already started). "
-        "Advance this shot's beat only unless the storyboard asks for an explicit repeat. "
-        "Never copy a prior shot's full prompt.\n\n"
+        "CONTINUITY: When previous_* prompts are present, read them fully and continue — "
+        "do not restage finished onsets/exits/dialogue. Keep character consistency "
+        "(same faces/costumes) on every clip call. Advance this shot only unless the "
+        "storyboard asks for an explicit repeat.\n\n"
         f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n```"
     )
 
@@ -637,7 +647,7 @@ class DesignerGraphToolkit:
             prompt=str(prompt or graph_prompt(self.ctx.graph, node) or "")[:6000],
             system=str(system or cfg.get("supervisor_task") or "You are a Designer node agent.")[:4000],
             optimize_for=optimize,
-            max_tokens=1600,
+            max_tokens=16384,
         )
         if not result.get("ok"):
             return f"call_model error: {result.get('error') or 'unknown'}"
@@ -711,12 +721,36 @@ class DesignerGraphToolkit:
         duration: int = 5,
         first_frame: str = "",
     ) -> str:
-        from jiuwenswarm.server.runtime.designer.handlers.clip import generate_clip_video
+        from jiuwenswarm.server.runtime.designer.handlers.clip import (
+            _looks_like_contaminated_prompt,
+            build_clip_prompt,
+            generate_clip_video,
+        )
 
         node = _node_from_ctx(self.ctx)
-        text = str(prompt or "").strip() or str(
-            (node.get("config") or {}).get("prompt") or graph_prompt(self.ctx.graph, node) or ""
-        )
+        # Always ground I2V in storyboard-aligned clip prompt (do not let the leaf
+        # invent a freeform motion brief that ignores the shot row).
+        structured = ""
+        try:
+            structured = str(build_clip_prompt(self.ctx.graph, node, self.ctx) or "").strip()
+        except Exception:  # noqa: BLE001
+            logger.debug("build_clip_prompt failed in call_video_model", exc_info=True)
+        agent_text = str(prompt or "").strip()
+        if structured:
+            text = structured
+            if (
+                agent_text
+                and len(agent_text) < 400
+                and not _looks_like_contaminated_prompt(agent_text)
+                and agent_text[:120].casefold() not in structured.casefold()
+            ):
+                text = f"{structured}\nAgent motion note: {agent_text[:300]}"
+        else:
+            text = agent_text or str(
+                (node.get("config") or {}).get("prompt")
+                or graph_prompt(self.ctx.graph, node)
+                or ""
+            )
         if not text:
             return "call_video_model error: prompt required"
         cfg = node.get("config")
@@ -746,12 +780,13 @@ class DesignerGraphToolkit:
         if block and "LANGUAGE LOCK" not in text:
             text = (text + "\n" + block).strip()[:6000]
             cfg["prompt"] = text
-        want_audio, model_override = resolve_video_audio_request(cfg, meta)
+        want_audio, _model_override = resolve_video_audio_request(cfg, meta)
         if callable(getattr(self.ctx, "on_prompt_artifact", None)):
             try:
                 self.ctx.on_prompt_artifact(text)
             except Exception:  # noqa: BLE001
                 logger.debug("call_video_model early prompt handoff failed", exc_info=True)
+        # Always use the user-configured video model — never override.
         try:
             result = await generate_clip_video(
                 prompt=text[:4000],
@@ -759,7 +794,7 @@ class DesignerGraphToolkit:
                 first_frame=frame,
                 duration=max(2, min(10, int(duration or 5))),
                 audio=True if want_audio else False,
-                model=model_override,
+                model=None,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("call_video_model failed: %s", exc, exc_info=True)
@@ -777,9 +812,31 @@ class DesignerGraphToolkit:
 
     async def ffmpeg_compose(self, *, prompt: str = "") -> str:
         """Run the compose handler for this node (ffmpeg assemble)."""
+        from jiuwenswarm.common.schema.designer_graph import (
+            NODE_ROLE_CLIP,
+            is_compose_sink_node,
+            node_pipeline,
+        )
         from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
 
         node = _node_from_ctx(self.ctx)
+        if is_compose_sink_node(node):
+            states = (self.ctx.run or {}).get("node_states") or {}
+            waiting: list[str] = []
+            for n in self.ctx.graph.get("nodes") or []:
+                if node_pipeline(n) != NODE_ROLE_CLIP:
+                    continue
+                nid = str(n.get("id") or "")
+                st = states.get(nid) if isinstance(states.get(nid), dict) else {}
+                status = str((st or {}).get("status") or "").strip().lower()
+                if status not in {"completed", "complete", "done", "success"}:
+                    waiting.append(f"{nid}:{status or 'pending'}")
+            if waiting:
+                return (
+                    "ffmpeg_compose blocked: waiting for clips "
+                    + ", ".join(waiting[:8])
+                    + " — do not assemble an empty film"
+                )
         if prompt.strip():
             cfg = node.get("config")
             if not isinstance(cfg, dict):

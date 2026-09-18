@@ -348,7 +348,7 @@ async def llm_refine_axis_locks(
             prompt=json.dumps(payload, ensure_ascii=False)[:7000],
             system=system,
             optimize_for="quality",
-            max_tokens=1200,
+            max_tokens=16384,
         )
         text = str(result.get("text") or "")
         parsed = _extract_json_obj(text)

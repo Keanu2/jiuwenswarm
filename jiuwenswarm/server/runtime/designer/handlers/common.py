@@ -313,7 +313,7 @@ def role_output_text(ctx: NodeExecutionContext, role: str) -> str:
     return ""
 
 
-async def complete_designer_text(prompt: str, *, max_tokens: int = 1200) -> str:
+async def complete_designer_text(prompt: str, *, max_tokens: int = 8192) -> str:
     """Call the default chat model. Tests monkeypatch this function."""
     from jiuwenswarm.common.config import get_config, get_default_models
     from openjiuwen.core.foundation.llm import Model
@@ -417,7 +417,7 @@ async def generate_designer_image(
     reference_image: str | None = None,
     reference_images: list[str] | None = None,
     max_tries: int = 2,
-    timeout_sec: float = 600.0,
+    timeout_sec: float = 1200.0,
 ) -> dict[str, str] | None:
     """Call image_gen when configured. Tests monkeypatch this function.
 
@@ -468,10 +468,10 @@ async def generate_designer_image(
                         reference_images=refs or None,
                         max_tries=1,
                     ),
-                    timeout=max(60.0, float(timeout_sec or 600.0)),
+                    timeout=max(60.0, float(timeout_sec or 1200.0)),
                 )
             except asyncio.TimeoutError:
-                last_error = f"image_gen timed out after {int(timeout_sec or 600)}s"
+                last_error = f"image_gen timed out after {int(timeout_sec or 1200)}s"
                 logger.info("Designer image generation timed out (attempt %s/%s)", attempt, attempts)
                 result = {"error": last_error}
             except Exception as exc:  # noqa: BLE001

@@ -157,13 +157,25 @@ def pipeline_node_label(role: str, shot_index: int = 1) -> str:
 
 
 def english_pipeline_label(label: str, role: str, shot_index: int = 1) -> str:
-    """Rewrite known pipeline titles to modality names; leave custom names alone."""
-    desired = pipeline_node_label(role, shot_index)
-    if not desired:
-        return label
+    """Rewrite known pipeline titles to modality names; leave semantic / custom names alone."""
     text = (label or "").strip()
     if not text:
-        return desired
+        desired = pipeline_node_label(role, shot_index)
+        return desired or text
+    # Designer semantic scheme (Brief: … / Character N: … / Scene N: Shot …) must survive.
+    try:
+        from jiuwenswarm.server.runtime.designer.node_labels import is_semantic_canvas_label
+
+        if is_semantic_canvas_label(text):
+            return text
+    except Exception:  # noqa: BLE001
+        pass
+    # Any label with a descriptive suffix after ":" is author/LLM-owned.
+    if ":" in text and not _INDEXED_LABEL_RE.match(text):
+        return text
+    desired = pipeline_node_label(role, shot_index)
+    if not desired:
+        return text
     if text in _LEGACY_PIPELINE_TITLES or text.casefold() in {
         item.casefold() for item in _LEGACY_PIPELINE_TITLES
     }:
@@ -1288,11 +1300,23 @@ def expand_shot_nodes(
             default_x=1120.0,
             default_y=240.0,
         )
+        from jiuwenswarm.server.runtime.designer.node_labels import (
+            derive_shot_name,
+            label_clip,
+            label_shot,
+        )
+
+        shot_name = derive_shot_name(
+            {"title": f"Shot {index}", "action": ""},
+            fallback_index=index,
+        )
         frame_nodes.append(
             {
                 "id": frame_id,
                 "type": NODE_TYPE_IMAGE,
-                "label": modality_node_label(NODE_TYPE_IMAGE, index + 2),
+                "label": label_shot(
+                    scene_number=1, shot_number=index, shot_name=shot_name
+                ),
                 "config": frame_config,
                 "layout": frame_layout,
             }
@@ -1301,7 +1325,9 @@ def expand_shot_nodes(
             {
                 "id": clip_id,
                 "type": NODE_TYPE_VIDEO,
-                "label": modality_node_label(NODE_TYPE_VIDEO, index),
+                "label": label_clip(
+                    scene_number=1, clip_number=index, clip_name=shot_name
+                ),
                 "config": clip_config,
                 "layout": clip_layout,
             }
@@ -2064,6 +2090,69 @@ def _pipeline_role(node: DesignerGraphNode | dict[str, Any] | None) -> str:
     ).strip().lower()
 
 
+def is_compose_sink_node(node: DesignerGraphNode | dict[str, Any] | None) -> bool:
+    """True for the final ffmpeg/film assemble node."""
+    if not isinstance(node, dict):
+        return False
+    nid = str(node.get("id") or "").strip().lower()
+    if nid in {"n_compose", "n_final"} or nid.startswith("n_compose"):
+        return True
+    role = _pipeline_role(node)
+    return role in {"compose", "film"}
+
+
+def compose_required_predecessor_ids(graph: DesignerExecutionGraph) -> list[str]:
+    """Every clip + separate speech/music node that must finish before ffmpeg compose.
+
+    Edges/inputs alone can drift; this always collects live media nodes so compose
+    cannot start after only the last clip or a soft prompt handoff.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("id") or "").strip()
+        if not nid or nid in seen:
+            continue
+        role = _pipeline_role(node)
+        pipeline = ""
+        try:
+            pipeline = str(node_pipeline(node) or "").strip().lower()  # type: ignore[misc]
+        except Exception:  # noqa: BLE001
+            pipeline = role
+        is_clip = (
+            role in {"clip"}
+            or pipeline == "clip"
+            or (nid.startswith("n_clip") and role not in {"compose", "film"})
+        )
+        is_audio = role in {"speech", "tts", "music", "audio", "audio_bed"} or pipeline in {
+            "speech",
+            "music",
+        }
+        if is_clip or is_audio:
+            seen.add(nid)
+            out.append(nid)
+    # Stable: clips by shot, then audio ids.
+    def _sort_key(nid: str) -> tuple[int, int, str]:
+        by_id = {
+            str(n.get("id") or ""): n
+            for n in (graph.get("nodes") or [])
+            if isinstance(n, dict)
+        }
+        n = by_id.get(nid) or {}
+        role = _pipeline_role(n)
+        cfg = n.get("config") if isinstance(n.get("config"), dict) else {}
+        try:
+            shot = int(cfg.get("shot_index") or 0)
+        except (TypeError, ValueError):
+            shot = 0
+        kind = 0 if role in {"clip"} or nid.startswith("n_clip") else 1
+        return (kind, shot, nid)
+
+    return sorted(out, key=_sort_key)
+
+
 def is_soft_artifact_dependency(
     graph: DesignerExecutionGraph,
     pred_id: str,
@@ -2074,6 +2163,8 @@ def is_soft_artifact_dependency(
     Clip→clip continuity and same-setting scene-prompt handoffs are soft: once the
     upstream node has published its prompt, the downstream node may start even while
     upstream media generation is still running.
+
+    Compose/ffmpeg is NEVER soft — it must wait for all clips (and separate audio).
     """
     by_id = {
         str(n.get("id") or ""): n
@@ -2084,17 +2175,19 @@ def is_soft_artifact_dependency(
     node = by_id.get(str(node_id or ""))
     if pred is None or node is None:
         return False
+    # Final film assemble always hard-waits for media completion.
+    if is_compose_sink_node(node):
+        return False
     prole = _pipeline_role(pred)
     nrole = _pipeline_role(node)
     ncfg = node.get("config") if isinstance(node.get("config"), dict) else {}
     pcfg = pred.get("config") if isinstance(pred.get("config"), dict) else {}
 
-    clip_roles = {"clip", "video"}
-    frame_roles = {"frame", "keyframe"}
-
-    # Serial clip continuity: only the prior Wan prompt is required.
-    if nrole in clip_roles and prole in clip_roles:
+    # Only real clip leaves (role=clip), never type=video compose sinks.
+    if nrole == "clip" and prole == "clip":
         return True
+
+    frame_roles = {"frame", "keyframe"}
 
     # Same-setting KF handoff: later compose KFs need master scene prompt text.
     if nrole in frame_roles and prole in frame_roles:
@@ -2118,7 +2211,7 @@ def is_soft_artifact_dependency(
         return False
 
     # Clip depending on another shot's frame only for scene/prompt text (not own KF image).
-    if nrole in clip_roles and prole in frame_roles:
+    if nrole == "clip" and prole in frame_roles:
         try:
             own_shot = int(ncfg.get("shot_index") or 0)
         except (TypeError, ValueError):
@@ -2158,13 +2251,14 @@ def artifact_dependency_satisfied(
     pcfg = pred.get("config") if isinstance(pred.get("config"), dict) else {}
     prole = _pipeline_role(pred)
     nrole = _pipeline_role(node)
-    clip_roles = {"clip", "video"}
     frame_roles = {"frame", "keyframe"}
 
-    if nrole in clip_roles and prole in clip_roles:
+    if nrole in {"clip"} and prole in {"clip"}:
         if isinstance(ncfg.get("previous_clip_continuity_card"), dict):
             return True
         if bool(ncfg.get("previous_clip_handoff_ready")):
+            return True
+        if str(ncfg.get("previous_clip_action") or "").strip():
             return True
         if str(ncfg.get("previous_clip_wan_prompt") or "").strip():
             return True
@@ -2174,6 +2268,7 @@ def artifact_dependency_satisfied(
                 pcfg.get("last_wan_prompt")
                 or pcfg.get("last_approved_prompt")
                 or pcfg.get("clip_prompt_preview")
+                or pcfg.get("shot_action")
                 or ""
             ).strip()
         ):
@@ -2184,18 +2279,20 @@ def artifact_dependency_satisfied(
                 pcfg.get("last_wan_prompt")
                 or pcfg.get("last_approved_prompt")
                 or pcfg.get("clip_prompt_preview")
+                or pcfg.get("shot_action")
                 or ""
             ).strip()
         )
 
     if (nrole in frame_roles and prole in frame_roles) or (
-        nrole in clip_roles and prole in frame_roles
+        nrole == "clip" and prole in frame_roles
     ):
         if isinstance(ncfg.get("previous_keyframe_continuity_card"), dict):
             return True
         if str(
             ncfg.get("scene_architecture_clause")
             or ncfg.get("scene_master_prompt")
+            or ncfg.get("previous_keyframe_action")
             or ncfg.get("previous_keyframe_prompt")
             or ""
         ).strip():

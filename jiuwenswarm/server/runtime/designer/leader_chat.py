@@ -350,7 +350,7 @@ async def _llm_leader_plan(
             prompt=json.dumps(snapshot, ensure_ascii=False),
             system=_LEADER_SYSTEM,
             optimize_for="quality",
-            max_tokens=1600,
+            max_tokens=16384,
         )
     except Exception:  # noqa: BLE001
         logger.info("Leader chat model call failed", exc_info=True)

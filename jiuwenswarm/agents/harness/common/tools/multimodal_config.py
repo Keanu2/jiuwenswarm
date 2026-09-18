@@ -321,7 +321,7 @@ def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
 
     Priority:
     1. models.video_gen.model_config / VIDEO_GEN_* env
-    2. Built-in DashScope defaults (api_base + wan2.6-t2v)
+    2. api_base default only (model must come from user config — no hard-coded wan*)
     """
     if not isinstance(config_base, dict):
         config_base = {}
@@ -338,7 +338,7 @@ def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         mc.get("model_name")
         or mc.get("model")
         or os.getenv("VIDEO_GEN_MODEL_NAME")
-        or "wan2.6-t2v"
+        or ""
     ).strip()
     provider = str(
         mc.get("client_provider")

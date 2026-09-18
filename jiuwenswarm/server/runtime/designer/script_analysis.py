@@ -153,6 +153,62 @@ def _match_terms_for_character(name: str, description: str) -> list[str]:
     return terms
 
 
+def _cast_id_maps(
+    characters: list[dict[str, Any]],
+) -> tuple[set[str], dict[str, str]]:
+    """valid ids + lowercase name/alias → id (exact name match only)."""
+    valid: set[str] = set()
+    by_name: dict[str, str] = {}
+    for ch in characters:
+        if not isinstance(ch, dict):
+            continue
+        cid = str(ch.get("id") or "").strip()
+        if not cid:
+            continue
+        valid.add(cid)
+        by_name[cid.lower()] = cid
+        name = str(ch.get("name") or "").strip()
+        if name:
+            by_name[name.lower()] = cid
+        for alias in ch.get("aliases") or []:
+            a = str(alias or "").strip()
+            if a:
+                by_name[a.lower()] = cid
+    return valid, by_name
+
+
+def resolve_cast_token(token: object, *, valid_ids: set[str], by_name: dict[str, str]) -> str:
+    """Map a cast token (id or display name) to a character id; else ''."""
+    raw = str(token or "").strip()
+    if not raw:
+        return ""
+    if raw in valid_ids:
+        return raw
+    hit = by_name.get(raw.lower())
+    if hit:
+        return hit
+    m = re.search(r"(char_\d+)", raw, flags=re.I)
+    if m and m.group(1) in valid_ids:
+        return m.group(1)
+    return ""
+
+
+def resolve_cast_token_list(
+    tokens: object,
+    *,
+    valid_ids: set[str],
+    by_name: dict[str, str],
+) -> list[str]:
+    if not isinstance(tokens, list):
+        return []
+    out: list[str] = []
+    for tok in tokens:
+        cid = resolve_cast_token(tok, valid_ids=valid_ids, by_name=by_name)
+        if cid and cid not in out:
+            out.append(cid)
+    return out
+
+
 def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
     """General cast extraction from role nouns / a|the X phrases."""
     text = prompt.strip()
@@ -174,7 +230,7 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
         )
 
     for match in re.finditer(
-        # Allow 0–2 adjectives: "a young man", "the elderly pastor"
+        # Allow 0–2 adjectives before a role noun from _ROLE_NOUNS.
         rf"\b(?:a|an|the|his|her|their)\s+(?:[A-Za-z-]+\s+){{0,2}}((?:{_ROLE_NOUNS}))\b",
         text,
         flags=re.I,
@@ -215,7 +271,7 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
         if len(found) >= _MAX_CHARS:
             break
 
-    # Bare role mentions without article: "pastor preaches", "young man realizes"
+    # Bare role mentions without article (any role from _ROLE_NOUNS).
     for match in re.finditer(
         rf"(?:^|[.!?]\s+|,\s+)((?:[A-Za-z-]+\s+){{0,1}}(?:{_ROLE_NOUNS}))\b",
         text,
@@ -284,7 +340,7 @@ def _focus_character_ids(chunk: str, characters: list[dict[str, Any]]) -> list[s
     if not scored:
         return []
     scored.sort(key=lambda x: (-x[0], x[1]))
-    # Absolute floor so co-focus (woman + child) survives a high-scoring lead.
+    # Absolute floor so co-focus cast survives a high-scoring lead.
     focus = [cid for sc, cid in scored if sc >= 4]
     if not focus:
         focus = [scored[0][1]]
@@ -394,6 +450,15 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
 
     # Ensure every character has a dedicated or shared beat — prefer new shot over
     # dumping them onto an unrelated establishing shot.
+    # Respect explicit N-shot / N分镜 ceiling when present.
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+            _explicit_shot_count_from_prompt,
+        )
+
+        shot_ceiling = _explicit_shot_count_from_prompt(prompt) or _MAX_SHOTS
+    except Exception:  # noqa: BLE001
+        shot_ceiling = _MAX_SHOTS
     covered = {cid for s in shots for cid in s.get("character_ids") or []}
     for ch in characters:
         cid = str(ch.get("id") or "")
@@ -413,7 +478,7 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
             )
             covered.add(cid)
             continue
-        if len(shots) < _MAX_SHOTS:
+        if len(shots) < min(_MAX_SHOTS, shot_ceiling):
             shots.append(
                 {
                     "shot_index": len(shots) + 1,
@@ -426,18 +491,18 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
                 }
             )
             covered.add(cid)
-        elif shots:
-            # Last resort: attach to the shot with best lexical overlap, else last shot
-            # (never force onto shot 1 if another beat scores higher).
-            target = best_i if best_i is not None else (len(shots) - 1)
-            shots[target]["character_ids"] = list(
-                dict.fromkeys([*(shots[target].get("character_ids") or []), cid])
+        elif shots and best_i is not None and best_sc >= 4:
+            # Budget full: only attach when the action already mentions them.
+            shots[best_i]["character_ids"] = list(
+                dict.fromkeys([*(shots[best_i].get("character_ids") or []), cid])
             )
             covered.add(cid)
 
     for i, shot in enumerate(shots, start=1):
         shot["shot_index"] = i
-        shot["title"] = shot.get("title") or f"Shot {i}"
+        from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
+
+        shot["title"] = derive_shot_name(shot, fallback_index=i)
         # If a beat still has no cast, pick the single best character — not a round-robin leak.
         if not shot.get("character_ids") and characters:
             ranked = sorted(
@@ -449,9 +514,8 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
             )
             if ranked and ranked[0][0] > 0:
                 shot["character_ids"] = [ranked[0][1]]
-            else:
-                shot["character_ids"] = [str(characters[(i - 1) % len(characters)]["id"])]
-    return _clamp_list(shots, _MAX_SHOTS)
+            # else leave empty — fail closed; Supervisor/Manager must fill on_screen
+    return _clamp_list(shots, min(_MAX_SHOTS, shot_ceiling))
 
 
 def _heuristic_scenes(prompt: str) -> list[dict[str, str]]:
@@ -515,7 +579,7 @@ def _select_shots_for_budget(
     budget: int,
     characters: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep up to budget shots while preserving cast coverage (do not drop woman/child)."""
+    """Keep up to budget shots while preserving cast coverage (do not drop uncovered cast)."""
     if len(shots) <= budget:
         return list(shots)
     selected: list[dict[str, Any]] = []
@@ -544,23 +608,9 @@ def _select_shots_for_budget(
                 best_i = i
         take(best_i)
 
-    # If still missing cast and we have room somehow, already at budget — fold
-    # missing ids into the best-matching kept shot (not always shot 0).
-    all_ids = [str(c.get("id")) for c in characters if c.get("id")]
-    missing = [cid for cid in all_ids if cid not in covered]
-    id_to_ch = {str(c.get("id")): c for c in characters}
-    for cid in missing:
-        ch = id_to_ch.get(cid) or {}
-        best_i = 0
-        best_sc = -1
-        for i, shot in enumerate(selected):
-            sc = _score_character_in_text(ch, str(shot.get("action") or ""))
-            if sc > best_sc:
-                best_sc = sc
-                best_i = i
-        selected[best_i]["character_ids"] = list(
-            dict.fromkeys([*(selected[best_i].get("character_ids") or []), cid])
-        )
+    # Uncovered cast stays uncovered (Manager/Supervisor must list them).
+    # Never fold into on_screen/character_ids via action-text scoring — that bleeds
+    # later-meet people into early beats.
     for i, shot in enumerate(selected, start=1):
         shot["shot_index"] = i
     return selected
@@ -581,9 +631,20 @@ def _supervisor_pipeline_decisions(
         budget = min(3, n_shots)
     else:
         budget = min(4, n_shots)
-    # Multi-cast stories need enough beats so later subjects (woman/child) survive.
+    # Multi-cast stories need enough beats so later subjects survive budget trim.
     if n_chars >= 3:
         budget = max(budget, min(4, n_shots, max(3, n_chars - 1)))
+    # Explicit N-shot / N分镜 language is a HARD ceiling (and floor when larger).
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+            _explicit_shot_count_from_prompt,
+        )
+
+        explicit = _explicit_shot_count_from_prompt(prompt or "")
+        if explicit >= 1:
+            budget = explicit
+    except Exception:  # noqa: BLE001
+        pass
     budget = max(1, min(_MAX_SHOTS, budget))
 
     multi = any(len(s.get("character_ids") or []) >= 2 for s in shots if isinstance(s, dict))
@@ -613,13 +674,47 @@ def _supervisor_pipeline_decisions(
     }
 
 
+def _heuristic_lean_shot(
+    prompt: str,
+    characters: list[dict[str, Any]],
+    *,
+    story_name: str = "",
+) -> dict[str, Any]:
+    """One full-narrative beat: no LLM → prefer a single KF/clip over naive multi-beat split."""
+    from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
+
+    all_ids = [str(c.get("id")) for c in characters if str(c.get("id") or "").strip()]
+    title = (story_name or derive_shot_name({"title": "", "action": prompt}, fallback_index=1))[:80]
+    body = _strip_prompt_filler(prompt)[:1200] or prompt[:1200]
+    return {
+        "shot_index": 1,
+        "title": title or "Full narrative",
+        "action": body[:800],
+        "camera": "medium / eye-level",
+        "character_ids": list(all_ids),
+        "on_screen": list(all_ids),
+        "featured_cast_ids": list(all_ids[:1]),
+        "ensemble_cast_ids": list(all_ids),
+        "offscreen": [],
+        "keyframe_prompt": body[:1200],
+        "setting_id": "set_1",
+        "timeline": "0-8s",
+        "occupancy": {
+            "must_appear": list(all_ids),
+            "offscreen": [],
+            "cast_actions": {},
+        },
+    }
+
+
 def heuristic_analysis(prompt: str) -> dict[str, Any]:
+    from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+    from jiuwenswarm.server.runtime.designer.node_labels import derive_story_name
     from jiuwenswarm.server.runtime.designer.skills_loader import detect_audio_intent
 
     prompt = _strip_reference_appendix(prompt)
     characters = _heuristic_characters(prompt)
     scenes = _heuristic_scenes(prompt)
-    shots = _heuristic_shots(prompt, characters)
     audio = detect_audio_intent(prompt)
     lower = prompt.lower()
     if any(
@@ -633,25 +728,55 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
                 "policy": "speech_and_music" if audio.get("include_music") else "speech",
                 "notes": "Dialogue/speech cues detected; include speech.",
             }
-    decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
-    shots = _select_shots_for_budget(
-        shots, int(decisions["target_shot_count"]), characters
-    )
-    for i, shot in enumerate(shots, start=1):
-        shot["shot_index"] = i
-    decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
-    from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+
+    story_name = derive_story_name(prompt=prompt)
+    explicit = 0
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+            _explicit_shot_count_from_prompt,
+        )
+
+        explicit = int(_explicit_shot_count_from_prompt(prompt) or 0)
+    except Exception:  # noqa: BLE001
+        explicit = 0
+
+    # No LLM: default to ONE keyframe + ONE clip covering the full prompt + all cast.
+    # Explicit N-shot / N分镜 is the only general multi-shot escape hatch.
+    if explicit >= 2:
+        shots = _heuristic_shots(prompt, characters)
+        decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
+        decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
+        shots = _select_shots_for_budget(
+            shots, int(decisions["target_shot_count"]), characters
+        )
+        for i, shot in enumerate(shots, start=1):
+            shot["shot_index"] = i
+        decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
+        decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
+        if len(shots) > explicit:
+            shots = shots[:explicit]
+    else:
+        shots = [_heuristic_lean_shot(prompt, characters, story_name=story_name)]
+        n_chars = len(characters)
+        decisions = {
+            "target_shot_count": 1,
+            "cast_layout": "combined" if n_chars > 1 else "single",
+            "prefer_combined_cast": n_chars > 1,
+            "prefer_split_cast": False,
+        }
 
     payload = {
         "schema_version": "designer-script-analysis.v1",
         "source": "heuristic",
+        "user_prompt": prompt,
+        "story_name": story_name,
         "characters": characters,
         "scenes": scenes,
         "shots": shots,
         "audio": audio,
         "summary": (
             f"{len(characters)} characters, {len(scenes)} scenes, {len(shots)} shots, "
-            f"cast={decisions['cast_layout']}"
+            f"cast={decisions['cast_layout']}, lean={explicit < 2}"
         ),
         **decisions,
     }
@@ -768,7 +893,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         norm_chars.append(entry)
     if not norm_chars:
         return None
-    valid_ids = {c["id"] for c in norm_chars}
+    valid_ids, by_name = _cast_id_maps(norm_chars)
     norm_scenes: list[dict[str, str]] = []
     for i, sc in enumerate(scenes[:_MAX_SCENES], start=1):
         if not isinstance(sc, dict):
@@ -786,52 +911,57 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
     for i, sh in enumerate(shots[:_MAX_SHOTS], start=1):
         if not isinstance(sh, dict):
             continue
-        cids = [str(x) for x in (sh.get("character_ids") or []) if str(x) in valid_ids]
-        if not cids and norm_chars:
-            cids = [norm_chars[(i - 1) % len(norm_chars)]["id"]]
-        ensemble = [
-            str(x)
-            for x in (sh.get("ensemble_cast_ids") or sh.get("character_ids") or [])
-            if str(x) in valid_ids
-        ] or list(cids)
-        featured = [
-            str(x)
-            for x in (sh.get("featured_cast_ids") or [])
-            if str(x) in valid_ids
-        ] or list(cids[:1])
-        exiting = [
-            str(x)
-            for x in (sh.get("exiting_character_ids") or [])
-            if str(x) in valid_ids
-        ]
-        on_screen = [
-            str(x)
-            for x in (
-                sh.get("on_screen")
-                or sh.get("visible_cast_ids")
-                or sh.get("featured_cast_ids")
-                or []
-            )
-            if str(x) in valid_ids
-        ]
+        cids = resolve_cast_token_list(
+            sh.get("character_ids") or [],
+            valid_ids=valid_ids,
+            by_name=by_name,
+        )
+        # Fail closed: never invent round-robin cast when the shot omitted ids.
+        ensemble = resolve_cast_token_list(
+            sh.get("ensemble_cast_ids") or sh.get("character_ids") or [],
+            valid_ids=valid_ids,
+            by_name=by_name,
+        ) or list(cids)
+        featured = resolve_cast_token_list(
+            sh.get("featured_cast_ids") or [],
+            valid_ids=valid_ids,
+            by_name=by_name,
+        ) or list(cids[:1])
+        exiting = resolve_cast_token_list(
+            sh.get("exiting_character_ids") or [],
+            valid_ids=valid_ids,
+            by_name=by_name,
+        )
+        on_screen = resolve_cast_token_list(
+            sh.get("on_screen")
+            or sh.get("visible_cast_ids")
+            or sh.get("featured_cast_ids")
+            or [],
+            valid_ids=valid_ids,
+            by_name=by_name,
+        )
         # Fail closed: do not promote full character_ids / ensemble when on_screen absent.
         if not on_screen:
-            on_screen = [
-                str(x)
-                for x in (sh.get("character_ids") or [])[:1]
-                if str(x) in valid_ids
-            ]
+            on_screen = resolve_cast_token_list(
+                (sh.get("character_ids") or [])[:1],
+                valid_ids=valid_ids,
+                by_name=by_name,
+            )
         offscreen = [
-            str(x)
-            for x in (sh.get("offscreen") or sh.get("off_screen_cast_ids") or [])
-            if str(x) in valid_ids and str(x) not in on_screen
+            cid
+            for cid in resolve_cast_token_list(
+                sh.get("offscreen") or sh.get("off_screen_cast_ids") or [],
+                valid_ids=valid_ids,
+                by_name=by_name,
+            )
+            if cid not in on_screen
         ]
         cast_actions: dict[str, str] = {}
         raw_actions = sh.get("cast_actions") or sh.get("doing")
         if isinstance(raw_actions, dict):
             for k, v in raw_actions.items():
-                cid = str(k).strip()
-                if cid in valid_ids and str(v or "").strip():
+                cid = resolve_cast_token(k, valid_ids=valid_ids, by_name=by_name)
+                if cid and str(v or "").strip():
                     cast_actions[cid] = str(v).strip()[:240]
         strategy = str(sh.get("keyframe_strategy") or "").strip()
         setting_id = str(sh.get("setting_id") or sh.get("scene_id") or f"set_{i}").strip()
@@ -839,7 +969,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         cids = list(on_screen) or cids
         entry: dict[str, Any] = {
             "shot_index": i,
-            "title": str(sh.get("title") or f"Shot {i}"),
+            "title": str(sh.get("title") or ""),
             "action": str(sh.get("action") or "")[:500],
             "camera": str(sh.get("camera") or "medium / eye-level"),
             "character_ids": cids,
@@ -858,6 +988,9 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
             entry["cast_actions"] = cast_actions
         if strategy in {"compose_from_solo_refs", "edit_prior_keyframe"}:
             entry["keyframe_strategy"] = strategy
+        from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
+
+        entry["title"] = derive_shot_name(entry, fallback_index=i)
         norm_shots.append(entry)
     if not norm_shots:
         return None
@@ -866,9 +999,38 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         tsc = int(parsed.get("target_shot_count") or 0)
     except (TypeError, ValueError):
         tsc = 0
-    decisions = _supervisor_pipeline_decisions("", norm_chars, norm_shots)
-    if 1 <= tsc <= _MAX_SHOTS:
+    from jiuwenswarm.server.runtime.designer.node_labels import derive_story_name
+
+    story_name = derive_story_name(
+        analysis={
+            "story_name": parsed.get("story_name") or parsed.get("film_title") or parsed.get("title"),
+            "title": parsed.get("title"),
+        },
+        prompt=str(base.get("user_prompt") or base.get("summary") or ""),
+        graph_title=str(parsed.get("story_name") or ""),
+    )
+    user_prompt = str(base.get("user_prompt") or base.get("summary") or "")
+    decisions = _supervisor_pipeline_decisions(user_prompt, norm_chars, norm_shots)
+    heuristic_budget = int(decisions["target_shot_count"])
+    explicit = 0
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+            _explicit_shot_count_from_prompt,
+        )
+
+        explicit = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
+    except Exception:  # noqa: BLE001
+        explicit = 0
+    # LLM owns N via shots[] / target_shot_count. Explicit user N-shot is a hard ceiling.
+    # Soft safety only: never exceed _MAX_SHOTS. Heuristic budget is fallback when LLM omits N.
+    if explicit >= 1:
+        decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
+    elif 1 <= tsc <= _MAX_SHOTS:
         decisions["target_shot_count"] = tsc
+    elif norm_shots:
+        decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, len(norm_shots)))
+    else:
+        decisions["target_shot_count"] = heuristic_budget
     # Honor explicit LLM layout only when it matches co-appearance reality.
     raw_layout = str(parsed.get("cast_layout") or "").strip().lower()
     if raw_layout in {"single", "split", "combined", "hybrid"}:
@@ -889,19 +1051,28 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
             decisions["cast_layout"] = "single"
             decisions["prefer_combined_cast"] = False
             decisions["prefer_split_cast"] = False
-    # Prefer coverage-preserving selection over naive first-N truncate + dump onto shot 1.
-    if 1 <= tsc <= _MAX_SHOTS:
-        decisions["target_shot_count"] = max(int(decisions["target_shot_count"]), tsc)
-        decisions["target_shot_count"] = min(decisions["target_shot_count"], _MAX_SHOTS)
-    norm_shots = _select_shots_for_budget(
-        norm_shots, int(decisions["target_shot_count"]), norm_chars
-    )
-    decisions = _supervisor_pipeline_decisions("", norm_chars, norm_shots)
-    if 1 <= tsc <= _MAX_SHOTS:
-        decisions["target_shot_count"] = min(max(tsc, len(norm_shots)), _MAX_SHOTS)
+    # Prefer coverage-preserving selection over naive first-N truncate.
+    ceiling = max(1, min(int(decisions["target_shot_count"]), _MAX_SHOTS))
+    if explicit < 1 and len(norm_shots) > ceiling and 1 <= tsc <= _MAX_SHOTS:
+        # shots[] longer than declared target_shot_count → trust the longer list (soft max).
+        ceiling = max(1, min(len(norm_shots), _MAX_SHOTS))
+    decisions["target_shot_count"] = ceiling
+    norm_shots = _select_shots_for_budget(norm_shots, ceiling, norm_chars)
+    layout_decisions = _supervisor_pipeline_decisions(user_prompt, norm_chars, norm_shots)
+    for key in ("cast_layout", "prefer_combined_cast", "prefer_split_cast"):
+        if key in layout_decisions:
+            decisions[key] = layout_decisions[key]
+    # Keep LLM-owned N after layout refresh (do not re-clamp to heuristic 2–4).
+    if explicit >= 1:
+        decisions["target_shot_count"] = max(1, min(explicit, _MAX_SHOTS))
+    else:
+        decisions["target_shot_count"] = max(1, min(len(norm_shots) or ceiling, _MAX_SHOTS))
+    if len(norm_shots) > int(decisions["target_shot_count"]):
+        norm_shots = norm_shots[: int(decisions["target_shot_count"])]
     out: dict[str, Any] = {
         "schema_version": "designer-script-analysis.v1",
         "source": "llm",
+        "story_name": story_name,
         "characters": norm_chars,
         "scenes": norm_scenes,
         "shots": norm_shots,
@@ -937,34 +1108,61 @@ async def analyze_creative_brief(
     try:
         from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool
 
+        shot_count_rule = (
+            "YOU decide target_shot_count (soft prefer ≤8, hard max 16; typical 1–6). "
+            "One clip = one continuous beat — no rapid scene changes inside a Wan I2V clip. "
+            "Reuse one KF when location/wardrobe/lighting/identity hold and only local "
+            "subject motion or ONE camera move (pan/dolly/push/orbit/static) changes. "
+            "New KF when: hard cut, new setting_id, wardrobe/prop set change, large "
+            "pose/framing jump, or on-screen cast set changes materially. "
+            "Qwen KF: lock identity+wardrobe in the still (entity+scene+light); change "
+            "only pose/action or one camera variable; first setting KF = "
+            "compose_from_solo_refs, later same setting = edit_prior_keyframe; prefer "
+            "≤2–3 people with refs. "
+            "Wan I2V prompt = motion+camera only (image already fixes look); aim ~3–5s "
+            "per clip for stability (up to ~10–15s if motion stays simple). "
+            "Explicit user N-shot / N分镜 is a HARD ceiling. "
+        )
         if short_clip:
             duration_rule = (
                 f"Film ~{duration_sec}s total: set target_duration_sec={duration_sec}. "
-                "Use as many shots as the story needs."
             )
         else:
-            duration_rule = "Use enough shots for every major beat (typically 3–8)."
+            duration_rule = ""
         # Compact schema — long prompts make deepseek-flash return prose/empty.
         system = (
             "You are the Designer Supervisor. Domain-agnostic: use only places/people from the prompt. "
             "Extract EVERY named human into characters[]. Anonymous crowd is not a character. "
-            "Return multiple shots grouped by setting_id (different places = different setting_id). "
+            "Each character description MUST lock wardrobe garments: shirt/top style+color, "
+            "trousers/skirt/bottom style+color, footwear, outerwear/accessories if any "
+            "(example: 'light blue short-sleeve shirt; dark charcoal trousers; black sneakers'). "
+            "Per shot also lock staging: cast_actions (posture/doing), blocking positions "
+            "(zone/facing), who looks_at whom, who talks_to whom, adjacency (next_to). "
+            "Shots grouped by setting_id (different places = different setting_id). "
             "NOT every character in every scene. Per shot: on_screen (visible), offscreen "
             "(in scene, not in frame), cast_actions {id: doing-what}. "
-            "First shot of a setting: compose_from_solo_refs; later same setting: edit_prior_keyframe. "
+            + shot_count_rule
             + duration_rule
             + " Output ONLY one JSON object (no markdown). "
-            '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
-            '"shots":[{"shot_index":1,"action":"...","camera":"...","on_screen":["char_1"],'
+            '{"story_name":"short film title any language",'
+            '"characters":[{"id":"char_1","name":"...","description":"..."}],'
+            '"shots":[{"shot_index":1,"title":"2-4 word beat name NEVER Shot N",'
+            '"action":"...","camera":"...","on_screen":["char_1"],'
             '"offscreen":[],"cast_actions":{"char_1":"..."},"featured_cast_ids":["char_1"],'
             '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s"}],'
-            '"skip_scene_plate":true,"target_shot_count":4'
+            '"skip_scene_plate":true,"target_shot_count":N'
             + (f',"target_duration_sec":{duration_sec}' if short_clip else "")
             + "}"
         )
         user_payload = {
             "user_prompt": prompt[:3000],
-            "instructions": "JSON only. Every named human must appear in characters[].",
+            "instructions": (
+                "JSON only. Every named human must appear in characters[]. "
+                "Decide shot count wisely (prefer fewer; merge pans/same-cast continuous "
+                "action into one beat). Set target_shot_count = len(shots). "
+                "Each shot title MUST be a 2–4 word description of the beat "
+                "(any language; e.g. 'Open Door', 'Quiet Glance', '离开房间') — never 'Shot 1'."
+            ),
         }
 
         async def _call(*, reinforce_json: bool = False) -> dict[str, Any] | None:
@@ -988,7 +1186,7 @@ async def analyze_creative_brief(
                 prompt=json.dumps(payload, ensure_ascii=False),
                 system=sys_msg,
                 optimize_for="quality",
-                max_tokens=16384,
+                max_tokens=32768,
                 images=list(reference_images or []) or None,
             )
             if result.get("fallback"):

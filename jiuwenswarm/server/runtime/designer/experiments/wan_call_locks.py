@@ -91,6 +91,38 @@ def apply_keyframe_call_locks(
             + "; ".join(f"{k}={v}" for k, v in spatial.items() if str(v).strip())
         )
 
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            clothing_lock_clause,
+            ensure_cfg_clothing_lock,
+        )
+
+        chars = list(analysis.get("characters") or [])
+        costume = ensure_cfg_clothing_lock(cfg, characters=chars) or str(
+            cfg.get("costume_lock")
+            or ((cfg.get("identity_refs") or {}).get("costume_lock") if isinstance(cfg.get("identity_refs"), dict) else "")
+            or ""
+        ).strip()
+        if costume and "CLOTHING LOCK" not in text and "CLOTHING HOLD" not in text:
+            cloth = clothing_lock_clause(costume, for_clip=False)
+            if cloth:
+                head.append(cloth)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+            ensure_cfg_staging_locks,
+        )
+
+        staging = ensure_cfg_staging_locks(
+            cfg, characters=list(analysis.get("characters") or [])
+        )
+        if staging and "STAGING LOCK" not in text:
+            head.append(staging)
+    except Exception:  # noqa: BLE001
+        pass
+
     if not head:
         return text[:6000]
     return ("\n\n".join(head) + "\n\n" + text).strip()[:6000]
@@ -201,28 +233,78 @@ def apply_wan_call_locks(
             handoff_clause_for_prompt,
         )
 
-        if "CONTINUITY CARD" not in text and "prior clip" not in text.lower():
+        if (
+            "PREVIOUS CLIP HAD" not in text
+            and "PRIOR CLIP CONTINUITY" not in text
+            and "prior clip" not in text.lower()
+        ):
             prior = collect_prior_clip_prompts(graph, shot_index=int(shot_index) or 0)
             if not prior:
-                prev_card = (
-                    cfg.get("previous_clip_continuity_card")
-                    if isinstance(cfg.get("previous_clip_continuity_card"), dict)
-                    else None
-                )
-                if prev_card:
+                prev_act = str(cfg.get("previous_clip_action") or "").strip()
+                prev_one = str(cfg.get("previous_clip_wan_prompt") or "").strip()
+                if prev_act or prev_one:
                     prior = [
                         {
                             "node_id": str(cfg.get("previous_clip_node_id") or ""),
                             "shot_index": int(
                                 cfg.get("previous_clip_shot_index") or (int(shot_index) or 1) - 1
                             ),
-                            "shot_action": str(prev_card.get("prior_action_summary") or ""),
-                            "continuity_card": prev_card,
+                            "shot_action": prev_act or prev_one[:220],
+                            "speech_line": str(cfg.get("previous_clip_speech") or ""),
                         }
                     ]
-            handoff = handoff_clause_for_prompt(prior)
+            handoff = handoff_clause_for_prompt(
+                prior,
+                this_shot_index=int(shot_index) or 0,
+                this_action=str(cfg.get("shot_action") or cfg.get("character_action") or ""),
+                this_camera=str(cfg.get("camera") or ""),
+                this_speech=str(cfg.get("speech_line") or ""),
+                already_done=[
+                    str(x) for x in (cfg.get("already_done") or []) if str(x)
+                ],
+            )
             if handoff:
                 head.append(handoff)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Clothing must re-state at Wan call time (leaf agents often drop wardrobe tokens).
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            clothing_lock_clause,
+            ensure_cfg_clothing_lock,
+        )
+
+        costume = ensure_cfg_clothing_lock(cfg, characters=list(analysis.get("characters") or []))
+        if not costume:
+            identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+            costume = str(cfg.get("costume_lock") or identity.get("costume_lock") or "").strip()
+        if costume and "CLOTHING LOCK" not in text and "CLOTHING HOLD" not in text:
+            cloth = clothing_lock_clause(costume, for_clip=True)
+            if cloth:
+                head.append(cloth)
+        elif has_first_frame and "CLOTHING HOLD" not in text and "wardrobe" not in text.lower():
+            from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+                clothing_hold_rule,
+            )
+
+            head.append(
+                clothing_hold_rule()
+                + " Match Image 1 shirt/top, trousers/bottom, shoes, and accessories exactly."
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+            ensure_cfg_staging_locks,
+        )
+
+        staging = ensure_cfg_staging_locks(
+            cfg, characters=list(analysis.get("characters") or [])
+        )
+        if staging and "STAGING LOCK" not in text:
+            head.append(staging)
     except Exception:  # noqa: BLE001
         pass
 

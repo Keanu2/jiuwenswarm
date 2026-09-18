@@ -191,7 +191,6 @@ class GraphExecutor:
         if role in {NODE_ROLE_FRAME, "frame", "keyframe"} and shot_index >= 1:
             from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
                 architecture_clause_from_bible,
-                continuity_card_from_prior,
             )
 
             bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
@@ -202,14 +201,6 @@ class GraphExecutor:
                 if sid and isinstance(locks0.get(sid), dict):
                     bible = locks0[sid]
             arch = architecture_clause_from_bible(bible)
-            card = continuity_card_from_prior(
-                prior_action=str(cfg.get("shot_action") or ""),
-                prior_prompt=text,
-                shot_index=shot_index,
-                node_id=node_id,
-                bible=bible,
-                storyboard_hints=str(cfg.get("shot_action") or ""),
-            )
             next_ids = {f"n_frame_{shot_index + 1}", f"n_clip_{shot_index + 1}"}
             for n in live.get("nodes") or []:
                 if not isinstance(n, dict):
@@ -230,13 +221,19 @@ class GraphExecutor:
                     c["scene_architecture_clause"] = arch
                     changed = True
                 if node_id in needs and arch and not str(c.get("scene_master_prompt") or "").strip():
-                    # Architecture-only stand-in (never full prior action prompt).
                     c["scene_master_prompt"] = arch[:900]
                     changed = True
-                if not isinstance(c.get("previous_keyframe_continuity_card"), dict):
-                    c["previous_keyframe_continuity_card"] = card
+                # Consecutive prior stamp — always overwrite for N→N+1 (fixes parallel KF race).
+                if nid in next_ids or str(c.get("continuity_frame_node_id") or "") == node_id:
+                    action_snip = str(
+                        cfg.get("shot_action") or cfg.get("character_action") or ""
+                    ).strip()
+                    if not action_snip:
+                        action_snip = text[:220]
+                    c["previous_keyframe_action"] = action_snip[:300]
                     c["previous_keyframe_node_id"] = node_id
-                    c.pop("previous_keyframe_prompt", None)
+                    # Soft-dep readiness; keep short so handlers don't dump full prior.
+                    c["previous_keyframe_prompt"] = text[:800]
                     changed = True
                 if changed:
                     n["config"] = c
@@ -497,7 +494,11 @@ class GraphExecutor:
         return self._store.save_run(run)
 
     async def spawn_node_agent(self, run_id: str, node_id: str) -> str:
-        """Start one node's Agent. Allowed even if data-predecessors are incomplete."""
+        """Start one node's Agent.
+
+        Compose/ffmpeg is never allowed early — all clips (+ separate audio) must
+        have completed first. Other nodes may still be spawned by agents.
+        """
         target = str(node_id or "").strip()
         if not target:
             return "node_id is required"
@@ -508,9 +509,20 @@ class GraphExecutor:
             return f"run is {run.get('status')}"
         graph = self._require_graph(str(run.get("graph_id") or ""))
         try:
-            _node_by_id(graph, target)
+            target_node = _node_by_id(graph, target)
         except KeyError:
             return f"node not found: {target}"
+        from jiuwenswarm.common.schema.designer_graph import is_compose_sink_node
+
+        if is_compose_sink_node(target_node):
+            preds = execution_predecessors(graph)
+            groups = sync_groups(graph)
+            if not _is_ready(target, run, preds, groups, graph):
+                return (
+                    f"compose blocked: waiting for all clips"
+                    f"{' and audio nodes' if any(k.startswith('n_speech') or k.startswith('n_music') or 'speech' in k or 'music' in k for k in preds.get(target, [])) else ''}"
+                    " to finish before ffmpeg"
+                )
         workers = self._node_workers.setdefault(run_id, {})
         existing = workers.get(target)
         if existing is not None and not existing.done():
@@ -2114,6 +2126,33 @@ class GraphExecutor:
                 )
             if node_pipeline(node) == NODE_ROLE_STORYBOARD:
                 live_graph = self._require_graph(str(run.get("graph_id") or graph.get("graph_id") or ""))
+                try:
+                    from jiuwenswarm.server.runtime.designer.handlers.common import (
+                        role_output_text as _role_text,
+                    )
+                    from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
+                        sync_shot_nodes_from_storyboard_markdown,
+                    )
+                    from jiuwenswarm.server.runtime.designer.handlers.types import (
+                        NodeExecutionContext as _Ctx,
+                    )
+
+                    sb_ctx = _Ctx(
+                        graph=live_graph,
+                        run_id=str(run.get("run_id") or ""),
+                        node_id=node_id,
+                        run=run,
+                    )
+                    sb_text = _role_text(sb_ctx, NODE_ROLE_STORYBOARD)
+                    if sb_text:
+                        notes = sync_shot_nodes_from_storyboard_markdown(live_graph, sb_text)
+                        if notes:
+                            meta = dict(live_graph.get("metadata") or {})
+                            meta["storyboard_shot_sync"] = notes[:40]
+                            live_graph["metadata"] = meta
+                            self._store.save_graph(live_graph)
+                except Exception:  # noqa: BLE001
+                    logger.debug("storyboard→clip sync failed", exc_info=True)
                 self._expand_clips_if_needed(live_graph, run, set(), on_update=on_update)
             # Stamp prior-shot prompt handoff after frame/clip media completes.
             if node_pipeline(node) in {NODE_ROLE_FRAME, NODE_ROLE_CLIP}:
@@ -2141,12 +2180,19 @@ class GraphExecutor:
                     if node_pipeline(node) == NODE_ROLE_FRAME and shot_index >= 1:
                         next_frame = f"n_frame_{shot_index + 1}"
                         next_clip = f"n_clip_{shot_index + 1}"
+                        action_snip = str(
+                            cfg_done.get("shot_action")
+                            or cfg_done.get("character_action")
+                            or ""
+                        ).strip() or approved[:220]
                         for n in live_graph.get("nodes") or []:
                             nid = str(n.get("id") or "")
                             if nid not in {next_frame, next_clip}:
                                 continue
                             c = dict(n.get("config") or {})
-                            c["previous_keyframe_prompt"] = approved[:3500]
+                            # Always overwrite consecutive stamp (parallel KF race fix).
+                            c["previous_keyframe_action"] = action_snip[:300]
+                            c["previous_keyframe_prompt"] = approved[:800]
                             c["previous_keyframe_node_id"] = node_id
                             n["config"] = c
                     if node_pipeline(node) == NODE_ROLE_CLIP and shot_index >= 1:
@@ -2390,7 +2436,7 @@ def _node_execute_timeout_sec(node: DesignerGraphNode) -> float:
     """Hard cap so one leaf cannot hang the ready-queue forever.
 
     Agent + media materialization share this budget (DeepAgent turns then
-    image/video backends), so keep it generous for Wan / image_gen latency.
+    image/video backends). Default floor is 20 minutes for media nodes.
     """
     pipeline = node_pipeline(node)
     if pipeline in {NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}:
@@ -2398,8 +2444,8 @@ def _node_execute_timeout_sec(node: DesignerGraphNode) -> float:
     if pipeline in {NODE_ROLE_FRAME, "character", "character_design", "scene"}:
         return 1200.0
     if pipeline in {"speech", "music"}:
-        return 600.0
-    return 900.0
+        return 1200.0
+    return 1200.0
 
 
 def _is_ready(
@@ -2412,7 +2458,23 @@ def _is_ready(
     state = run.get("node_states", {}).get(node_id) or {}
     if state.get("status") != NODE_STATUS_PENDING:
         return False
-    preds = incoming.get(node_id, [])
+    preds = list(incoming.get(node_id, []))
+    # Compose/ffmpeg must wait for EVERY clip (+ separate speech/music), even if
+    # edges drifted or only the last clip was wired.
+    if graph is not None:
+        from jiuwenswarm.common.schema.designer_graph import (
+            compose_required_predecessor_ids,
+            is_compose_sink_node,
+        )
+
+        try:
+            node = _node_by_id(graph, node_id)
+        except KeyError:
+            node = None
+        if node is not None and is_compose_sink_node(node):
+            required = compose_required_predecessor_ids(graph)
+            if required:
+                preds = list(dict.fromkeys([*preds, *required]))
     for pred in preds:
         group = groups.get(pred, frozenset({pred}))
         for member in group:

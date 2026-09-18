@@ -46,7 +46,7 @@ export const designerGraphClient = {
         ...(params.selectedNodeId ? { selected_node_id: params.selectedNodeId } : {}),
         ...(params.runNewNodes ? { run_new_nodes: true } : {}),
       },
-      { timeoutMs: 300000 },
+      { timeoutMs: 20 * 60 * 1000 },
     ),
 
   bootstrap: (params: {
@@ -75,7 +75,7 @@ export const designerGraphClient = {
           ? { references: params.references }
           : {}),
       },
-      { timeoutMs: 300000 },
+      { timeoutMs: 20 * 60 * 1000 },
     ),
 
   startRun: (params: { graphId?: string; runId?: string; nodeId?: string }) =>

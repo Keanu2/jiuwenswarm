@@ -61,53 +61,108 @@ _DURATION_RE = re.compile(
     r"(?P<a>\d+)\s*-?\s*second|\b(?P<b>\d+)s\b",
     re.I,
 )
-_THREE_SHOT_RE = re.compile(r"\bthree[- ]shot\b|\b3[- ]shot\b|\bthree\s+shots?\b", re.I)
-_FOUR_SHOT_RE = re.compile(r"\bfour[- ]shot\b|\b4[- ]shot\b|\bfour\s+shots?\b", re.I)
+_THREE_SHOT_RE = re.compile(
+    r"\bthree[- ]shot\b|\b3[- ]shot\b|\bthree\s+shots?\b|"
+    r"三分镜|三个?(?:分镜|镜头)|3\s*个?(?:分镜|镜头)",
+    re.I,
+)
+_FOUR_SHOT_RE = re.compile(
+    r"\bfour[- ]shot\b|\b4[- ]shot\b|\bfour\s+shots?\b|"
+    r"四分镜|四个?(?:分镜|镜头)|4\s*个?(?:分镜|镜头)",
+    re.I,
+)
+_N_SHOT_CN_RE = re.compile(r"(?P<n>[二三四五六七八九十两\d]+)\s*个?(?:分镜|镜头)", re.I)
+_CN_NUM = {
+    "两": 2,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
 _TIMELINE_BEAT_RE = re.compile(
     r"(?:0:)?(\d{1,2}):(\d{2})\s*[-–—]\s*(?:0:)?(\d{1,2}):(\d{2})",
     re.M,
 )
 
 
-def _cid_list(raw: Any, valid: set[str]) -> list[str]:
+def _cid_list(raw: Any, valid: set[str], by_name: dict[str, str] | None = None) -> list[str]:
+    """Accept character ids or display names; map names → ids when by_name provided."""
     out: list[str] = []
     if not isinstance(raw, list):
         return out
+    name_map = by_name or {}
     for x in raw:
-        cid = str(x or "").strip()
+        tok = str(x or "").strip()
+        if not tok:
+            continue
+        cid = tok if tok in valid else name_map.get(tok.lower(), "")
+        if not cid:
+            # Loose: char_N embedded in a longer token
+            m = re.search(r"(char_\d+)", tok, flags=re.I)
+            if m and m.group(1) in valid:
+                cid = m.group(1)
         if cid and cid in valid and cid not in out:
             out.append(cid)
     return out
 
 
-def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
-    """Domain-agnostic shot budget from prompt + analysis."""
+def _explicit_shot_count_from_prompt(prompt: str) -> int:
+    """Honor explicit N-shot / N分镜 language only (language-agnostic count, not plot rules)."""
     text = prompt or ""
     if _THREE_SHOT_RE.search(text):
         return 3
     if _FOUR_SHOT_RE.search(text):
         return 4
-    beats = _TIMELINE_BEAT_RE.findall(text)
-    if beats:
-        return max(1, min(4, len(beats)))
+    m = _N_SHOT_CN_RE.search(text)
+    if m:
+        raw = m.group("n")
+        if raw.isdigit():
+            return max(1, min(_HARD_MAX_SHOTS, int(raw)))
+        if raw in _CN_NUM:
+            return max(1, min(_HARD_MAX_SHOTS, _CN_NUM[raw]))
+    m2 = re.search(r"\b(?P<n>\d+)\s*[- ]?(?:shot|shots|beat|beats)\b", text, re.I)
+    if m2:
+        return max(1, min(_HARD_MAX_SHOTS, int(m2.group("n"))))
+    return 0
+
+
+# Soft safety for LLM-owned budgets (hard ceiling lives in script_analysis._MAX_SHOTS).
+_SOFT_MAX_SHOTS = 8
+_HARD_MAX_SHOTS = 16
+
+
+def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
+    """Domain-agnostic shot budget. Explicit N wins; else trust LLM/analysis N (soft max 8)."""
+    explicit = _explicit_shot_count_from_prompt(prompt)
+    if explicit >= 1:
+        return max(1, min(_HARD_MAX_SHOTS, explicit))
     try:
         target = int(analysis.get("target_shot_count") or 0)
     except (TypeError, ValueError):
         target = 0
-    if target >= 1:
-        return max(1, min(4, target))
+    n_shots = len(analysis.get("shots") or [])
+    # LLM / prior analysis owns N — do not clamp back to 2–4.
+    if target >= 1 or n_shots >= 1:
+        return max(1, min(_SOFT_MAX_SHOTS, max(target, n_shots)))
+    beats = _TIMELINE_BEAT_RE.findall(prompt or "")
+    if beats:
+        return max(1, min(_SOFT_MAX_SHOTS, len(beats)))
     dur = None
-    m = _DURATION_RE.search(text)
+    m = _DURATION_RE.search(prompt or "")
     if m:
         if m.group("n") and m.group("m"):
             dur = (int(m.group("n")) + int(m.group("m"))) / 2.0
         else:
             dur = float(m.group("a") or m.group("b") or 0)
     if dur and dur > 0:
-        # ~7–8s per cinematic beat, clamp 2–4
-        return max(2, min(4, int(round(dur / 8.0)) or 2))
-    n_shots = len(analysis.get("shots") or []) or 3
-    return max(1, min(4, n_shots))
+        # ~7–8s per cinematic beat when no LLM plan yet.
+        return max(1, min(_SOFT_MAX_SHOTS, int(round(dur / 8.0)) or 1))
+    return 1
 
 
 def _char_blob(ch: dict[str, Any]) -> str:
@@ -499,15 +554,33 @@ def _expand_shots_to_budget(
 def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     """Deterministic director pass (works without LLM)."""
     out = deepcopy(analysis)
+    out["user_prompt"] = prompt or out.get("user_prompt") or ""
     characters = [c for c in (out.get("characters") or []) if isinstance(c, dict)]
     valid = {str(c.get("id")) for c in characters if c.get("id")}
+    by_name: dict[str, str] = {}
+    for ch in characters:
+        cid = str(ch.get("id") or "").strip()
+        if not cid:
+            continue
+        by_name[cid.lower()] = cid
+        name = str(ch.get("name") or "").strip()
+        if name:
+            by_name[name.lower()] = cid
+        for alias in ch.get("aliases") or []:
+            a = str(alias or "").strip()
+            if a:
+                by_name[a.lower()] = cid
     shots = [s for s in (out.get("shots") or []) if isinstance(s, dict)]
     budget = infer_shot_budget(prompt, out)
     # Explicit multi-shot language must win over short-clip single-shot analysis.
     shots = _expand_shots_to_budget(prompt, shots, characters, budget)
     for i, shot in enumerate(shots, start=1):
         shot["shot_index"] = i
-        on_screen = _cid_list(shot.get("character_ids") or shot.get("on_screen"), valid)
+        on_screen = _cid_list(
+            shot.get("on_screen") or shot.get("character_ids"),
+            valid,
+            by_name,
+        )
         if not on_screen and characters:
             # Score cast against action text
             ranked = sorted(
@@ -523,7 +596,11 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
             on_screen = [ranked[0][1]] if ranked else []
         shot["character_ids"] = on_screen
         shot["on_screen"] = list(on_screen)
-        exiting = _cid_list(shot.get("exiting_character_ids") or shot.get("exiting"), valid)
+        exiting = _cid_list(
+            shot.get("exiting_character_ids") or shot.get("exiting"),
+            valid,
+            by_name,
+        )
         if not exiting:
             exiting = _pick_exiting(shot, characters, on_screen)
         shot["exiting_character_ids"] = exiting
@@ -664,7 +741,7 @@ async def enrich_analysis_with_llm(
             prompt=json.dumps(user_payload, ensure_ascii=False),
             system=system,
             optimize_for="quality",
-            max_tokens=4000,
+            max_tokens=16384,
         )
         text = str((result or {}).get("text") or "").strip()
         if not text or not (result or {}).get("ok"):
@@ -687,6 +764,17 @@ async def enrich_analysis_with_llm(
         if not isinstance(parsed, dict):
             return base
         valid = {str(c.get("id")) for c in characters if isinstance(c, dict) and c.get("id")}
+        by_name: dict[str, str] = {}
+        for ch in characters:
+            if not isinstance(ch, dict):
+                continue
+            cid = str(ch.get("id") or "").strip()
+            if not cid:
+                continue
+            by_name[cid.lower()] = cid
+            name = str(ch.get("name") or "").strip()
+            if name:
+                by_name[name.lower()] = cid
         new_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else None
         if not new_shots:
             return base
@@ -696,8 +784,12 @@ async def enrich_analysis_with_llm(
         for i, sh in enumerate(new_shots[:budget], start=1):
             if not isinstance(sh, dict):
                 continue
-            on_screen = _cid_list(sh.get("on_screen") or sh.get("character_ids"), valid)
-            exiting = _cid_list(sh.get("exiting") or sh.get("exiting_character_ids"), valid)
+            on_screen = _cid_list(
+                sh.get("on_screen") or sh.get("character_ids"), valid, by_name
+            )
+            exiting = _cid_list(
+                sh.get("exiting") or sh.get("exiting_character_ids"), valid, by_name
+            )
             draft = deepcopy(shots[i - 1]) if i - 1 < len(shots) else {}
             merged = dict(draft)
             merged.update({k: v for k, v in sh.items() if v is not None})
@@ -727,7 +819,9 @@ async def enrich_analysis_with_llm(
             ):
                 if str(sh.get(craft_key) or "").strip():
                     merged[craft_key] = str(sh.get(craft_key))[:500]
-            off_cam = _cid_list(sh.get("off_camera") or sh.get("off_camera_cast_ids"), valid)
+            off_cam = _cid_list(
+                sh.get("off_camera") or sh.get("off_camera_cast_ids"), valid, by_name
+            )
             if off_cam:
                 merged["off_camera_cast_ids"] = off_cam
             blk = merged.get("blocking") if isinstance(merged.get("blocking"), dict) else {}

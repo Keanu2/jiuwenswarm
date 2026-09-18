@@ -5,16 +5,19 @@
 from __future__ import annotations
 
 import re
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CLIP,
+    NODE_ROLE_FRAME,
     NODE_ROLE_SCENE,
     NODE_TYPE_TABLE,
     NODE_TYPE_TEXT,
     DesignerGraphNode,
     node_config,
+    node_pipeline,
 )
 from jiuwenswarm.server.runtime.designer.handlers.common import (
     file_output_ref,
@@ -172,7 +175,14 @@ def _shot_from_cells(
 
 
 def parse_storyboard_shots(text: str) -> list[StoryboardShot]:
-    """Read shot rows from the storyboard markdown table."""
+    """Read shot rows from storyboard markdown (pipe table OR hierarchical ### Shot)."""
+    table = _parse_storyboard_table(text)
+    if table:
+        return table
+    return _parse_storyboard_hierarchical(text)
+
+
+def _parse_storyboard_table(text: str) -> list[StoryboardShot]:
     shots: list[StoryboardShot] = []
     header_seen = False
     field_map: dict[int, str] | None = None
@@ -204,6 +214,66 @@ def parse_storyboard_shots(text: str) -> list[StoryboardShot]:
     return shots
 
 
+_HIER_SHOT_RE = re.compile(
+    r"(?im)^###\s*Shot\s+(\d+)\s*[—\-–:]?\s*(.*)$"
+)
+_HIER_FIELD_RE = re.compile(
+    r"(?im)^-\s*(Timeline|Camera|Camera move|Move|Action|Character action|"
+    r"Comment|Keyframe|Doing|Speech)\s*:\s*(.*)$"
+)
+
+
+def _parse_storyboard_hierarchical(text: str) -> list[StoryboardShot]:
+    """Parse smart_graph hierarchical storyboard (### Shot N / - Action: …)."""
+    shots: list[StoryboardShot] = []
+    current: StoryboardShot | None = None
+    for line in (text or "").splitlines():
+        head = _HIER_SHOT_RE.match(line.strip())
+        if head:
+            if current is not None:
+                shots.append(current)
+                if len(shots) >= _MAX_STORYBOARD_SHOTS:
+                    return shots
+            idx = int(head.group(1))
+            title = str(head.group(2) or "").strip()
+            current = {
+                "shot_no": str(idx),
+                "timeline": "",
+                "camera": "",
+                "move": "",
+                "character_action": "",
+                "scene_change": "",
+                "comment": title,
+            }
+            continue
+        if current is None:
+            continue
+        field = _HIER_FIELD_RE.match(line.strip())
+        if not field:
+            continue
+        key = field.group(1).strip().casefold()
+        val = field.group(2).strip()
+        if key == "timeline":
+            current["timeline"] = val
+        elif key == "camera":
+            current["camera"] = val
+        elif key in {"camera move", "move"}:
+            current["move"] = val
+        elif key in {"action", "character action", "doing"}:
+            # Prefer Action over Doing if both appear; first non-empty wins unless Action.
+            if key == "action" or not current.get("character_action"):
+                current["character_action"] = val
+            if key == "action":
+                current["comment"] = val or current.get("comment") or ""
+        elif key in {"comment", "keyframe"}:
+            current["comment"] = val
+        elif key == "speech" and not current.get("character_action"):
+            current["character_action"] = val
+    if current is not None and len(shots) < _MAX_STORYBOARD_SHOTS:
+        shots.append(current)
+    return shots
+
+
 def storyboard_shots_or_default(text: str, prompt: str = "") -> list[StoryboardShot]:
     shots = parse_storyboard_shots(text)
     if shots:
@@ -230,6 +300,66 @@ def shot_generate_prompt(shot: StoryboardShot) -> str:
         if value:
             parts.append(f"{label} {value}")
     return "; ".join(parts)
+
+
+def sync_shot_nodes_from_storyboard_markdown(
+    graph: dict[str, Any],
+    markdown: str,
+) -> list[str]:
+    """Refresh frame/clip shot_action + camera from the authored storyboard table.
+
+    Only updates beat text — does not touch identity/occupancy wiring.
+    """
+    notes: list[str] = []
+    shots = parse_storyboard_shots(markdown or "")
+    if not shots:
+        return notes
+    by_index: dict[int, StoryboardShot] = {i: shot for i, shot in enumerate(shots, start=1)}
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        role = str(node_pipeline(node) or "").strip().lower()
+        if role not in {NODE_ROLE_FRAME, NODE_ROLE_CLIP, "keyframe"}:
+            continue
+        cfg = dict(node.get("config") or {})
+        idx = int(cfg.get("shot_index") or 0)
+        shot = by_index.get(idx)
+        if not isinstance(shot, dict):
+            continue
+        narrative = str(shot.get("comment") or shot.get("character_action") or "").strip()
+        camera = str(shot.get("camera") or "").strip()
+        timeline = str(shot.get("timeline") or "").strip()
+        changed = False
+        if narrative:
+            cfg["shot_action"] = narrative[:500]
+            changed = True
+        if camera:
+            cfg["camera"] = camera[:120]
+            changed = True
+        if timeline:
+            cfg["timeline"] = timeline[:40]
+            changed = True
+        if narrative:
+            gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
+            existing = str(gen.get("prompt") or "")
+            lead = (
+                f"Film shot {idx} only. Camera {cfg.get('camera') or 'medium / eye-level'}. "
+                f"Action: {narrative[:300]}."
+            )
+            if "Action:" not in existing or narrative[:80] not in existing:
+                if existing and any(
+                    m in existing.upper()
+                    for m in ("SCENE BIBLE", "STAGING LOCK", "OCCUPANCY", "COSTUME")
+                ):
+                    gen["prompt"] = f"{lead}\n{existing}"[:2000]
+                else:
+                    gen["prompt"] = lead[:1200]
+                cfg["generate"] = gen
+                changed = True
+        if changed:
+            node["config"] = cfg
+            notes.append(f"{node.get('id')}: synced from storyboard shot {idx}")
+    return notes
 
 
 _DURATION_FIELD_RE = re.compile(
@@ -428,6 +558,7 @@ class StoryboardNodeHandler:
                 text = fallback_storyboard(
                     role_output_text(ctx, NODE_ROLE_BRIEF) or graph_prompt(ctx.graph, node)
                 )
+            sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
             path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
             return NodeResult(
                 output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),
@@ -454,7 +585,7 @@ class StoryboardNodeHandler:
                 complete_designer_node_text(
                     prompt,
                     delegate=str(cfg.get("delegate") or ""),
-                    max_tokens=1600,
+                    max_tokens=16384,
                 ),
                 timeout=45.0,
             )
@@ -462,6 +593,7 @@ class StoryboardNodeHandler:
             text = ""
         if not text:
             text = str(cfg.get("draft_prewritten") or "").strip() or fallback_storyboard(source)
+        sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
         path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),

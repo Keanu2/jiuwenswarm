@@ -608,15 +608,9 @@ def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
         or analysis_audio.get("include_music")
         or policy in {"optional_music", "music", "speech_and_music"}
     )
-    # Narrative films with dialogue should always carry an audible music bed unless silenced.
-    prompt_l = str(graph.get("description") or "").lower()
-    if (
-        not explicit_no_music
-        and policy != "silent"
-        and (want_speech or any(k in prompt_l for k in ("speak", "preach", "saying", "bible", "crowd")))
-    ):
+    # Audible bed when speech is already requested — never scan prompt for topic nouns.
+    if not explicit_no_music and policy != "silent" and want_speech:
         want_music = True
-        want_speech = True
         policy = "speech_and_music"
     if policy in {"silent", "speech"} and explicit_no_music:
         want_music = False
@@ -764,7 +758,8 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
         routing["can_video_audio"] = bool(backends.get("can_video_audio", True))
         routing["video_audio_model"] = str(backends.get("video_audio_model") or "")
         meta["audio_routing"] = routing
-        meta["prefer_wan3_clip_audio"] = True
+        meta["prefer_clip_native_audio"] = True
+        meta["prefer_wan3_clip_audio"] = True  # legacy alias
         if isinstance(meta.get("script_analysis"), dict):
             from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
 
@@ -788,7 +783,8 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
             "ensured_nodes": [],
             "backends": backends,
             "clip_embedded": True,
-            "prefer_wan3_clip_audio": True,
+            "prefer_clip_native_audio": True,
+            "prefer_wan3_clip_audio": True,  # legacy alias
         }
         return meta["supervisor_audio_assignment"]
 
@@ -1274,14 +1270,18 @@ class SupervisorAgent:
             gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             lock = cfg.get("continuity_lock") if isinstance(cfg.get("continuity_lock"), dict) else {}
             clause = _continuity_prompt_clause(lock if isinstance(lock, dict) else None)
+            # Preserve storyboard/analysis beat — never wipe to "follow keyframe".
+            beat = action or "match storyboard beat for this shot"
             gen["prompt"] = (
                 f"Film shot {idx} only from its keyframe. Camera {camera}. "
-                f"Action: {action or 'follow keyframe'}. "
-                f"Keyframe note: {frame_msg[:180]}. "
-                "Do not repeat other shots."
+                f"Action: {beat}. "
+                + (f"Keyframe note: {frame_msg[:180]}. " if frame_msg else "")
+                + "Do not repeat other shots."
                 f"{clause}"
             )
             cfg["generate"] = gen
+            if action:
+                cfg["shot_action"] = action[:500]
             cfg["max_video_calls"] = 1
             if idx > 1:
                 cfg["continuity_frame_node_id"] = cfg.get("continuity_frame_node_id") or f"n_frame_{idx - 1}"
@@ -1371,7 +1371,7 @@ class SupervisorAgent:
             prompt=prompt,
             system=system,
             optimize_for=optimize_for,
-            max_tokens=1200,
+            max_tokens=32768,
         )
         parsed = _extract_json_object(str(result.get("text") or "")) or {}
         directives: dict[str, Any] = {}
@@ -1481,8 +1481,8 @@ class SupervisorAgent:
         payload: dict[str, Any] = {
             "user_prompt": prompt[:3000],
             "rule": (
-                "Occupancy is authoritative. Man alone in office → only man on_screen; "
-                "woman appears only in later meet beat on_screen."
+                "Occupancy is authoritative. Each shot's on_screen lists ONLY people "
+                "visible in that beat; later-meet cast stay offscreen until their beat."
             ),
         }
         if reference_images:
@@ -1502,7 +1502,7 @@ class SupervisorAgent:
                 prompt=json.dumps(body, ensure_ascii=False),
                 system=sys_msg,
                 optimize_for=optimize_for,
-                max_tokens=32768,
+                max_tokens=65536,
             )
             parsed = _extract_json_object(str(result.get("text") or "")) or {}
             if not isinstance(parsed, dict) or not parsed:
@@ -1591,7 +1591,7 @@ class SupervisorAgent:
                     ),
                     system=system,
                     optimize_for="quality",
-                    max_tokens=1600,
+                    max_tokens=32768,
                 )
                 text = str(result.get("text") or "").strip()
                 if text and len(text) > 80 and not text.startswith("[local-tool-fallback]"):
@@ -1704,7 +1704,7 @@ class SupervisorAgent:
                     ),
                     system=system,
                     optimize_for="quality",
-                    max_tokens=3200,
+                    max_tokens=65536,
                 )
                 parsed = _extract_json_object(str(result.get("text") or "")) or {}
                 llm_chars = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
@@ -1919,6 +1919,13 @@ class SupervisorAgent:
                     "MUST include characters[] — every named human gets one solo identity "
                     "card (id, name, description). NOT every character in every scene. "
                     "MUST include shots[] grouped by setting_id (distinct places). "
+                    "YOU own target_shot_count (prefer ≤8, hard max 16; typical 1–6). "
+                    "One clip = one continuous beat. Reuse one KF for local motion or ONE "
+                    "camera move (pan/dolly/push); Wan I2V prompt = motion+camera only "
+                    "(~3–5s preferred). New KF on hard cut, new setting, wardrobe/prop "
+                    "change, large pose/framing jump, or on-screen cast change. "
+                    "Qwen KF: lock identity+wardrobe; ≤2–3 people with refs; one variable "
+                    "per new KF. Honor explicit N-shot / N分镜 as a HARD ceiling. "
                     "First KF of each setting: compose_from_solo_refs with on_screen + "
                     "cast_actions (composer decides who appears and what they are doing). "
                     "Later same setting: edit_prior_keyframe (architecture locked). "
@@ -1931,6 +1938,11 @@ class SupervisorAgent:
                     '"shots":[...],"target_shot_count":N,"include_speech":bool,'
                     '"include_music":bool,"skip_scene_plate":true,"notes":"..."}'
                 )
+                from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+                    infer_shot_budget,
+                )
+
+                shot_ceiling = infer_shot_budget(user_prompt, analysis)
                 result = await call_model_tool(
                     prompt=json.dumps(
                         {
@@ -1939,18 +1951,22 @@ class SupervisorAgent:
                             "approved_storyboard": approved_sb,
                             "characters": characters,
                             "current_shots": shots,
+                            "target_shot_count": shot_ceiling or analysis.get("target_shot_count"),
                             "rule": (
-                                "Graph must be flexible and multi-shot when the story has "
-                                "multiple beats. Duration limits total time, not shot count. "
-                                "All solo cast cards before keyframes; compose first KF per "
-                                "setting_id; edit_prior only within the same setting_id."
+                                "Decide shot count wisely: prefer fewer; merge same-cast "
+                                "continuous motion into one beat. Explicit N-shot / "
+                                "target_shot_count from the user is a hard ceiling. Soft prefer "
+                                "≤8 shots. All solo cast cards before keyframes; compose "
+                                "first KF per setting_id; edit_prior only within the same "
+                                "setting_id. Per-shot on_screen is authoritative for who "
+                                "appears — not every solo in every frame."
                             ),
                         },
                         ensure_ascii=False,
                     ),
                     system=system,
                     optimize_for=optimize_for,
-                    max_tokens=3200,
+                    max_tokens=65536,
                 )
                 parsed = _extract_json_object(str(result.get("text") or "")) or {}
                 llm_chars = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
@@ -1988,6 +2004,26 @@ class SupervisorAgent:
                     source = "llm"
                     analysis["source"] = "llm"
                     notes = str(parsed.get("notes") or "")[:1000]
+                    from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+                        _HARD_MAX_SHOTS,
+                        _SOFT_MAX_SHOTS,
+                        _explicit_shot_count_from_prompt,
+                    )
+
+                    explicit_n = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
+                    try:
+                        llm_tsc = int(parsed.get("target_shot_count") or 0)
+                    except (TypeError, ValueError):
+                        llm_tsc = 0
+                    # LLM redesign owns N; explicit user language is the only hard ceiling.
+                    if explicit_n >= 1:
+                        shots = shots[: min(explicit_n, _HARD_MAX_SHOTS)]
+                    else:
+                        cap = min(_SOFT_MAX_SHOTS, _HARD_MAX_SHOTS)
+                        keep = min(cap, llm_tsc) if llm_tsc >= 1 else min(cap, len(shots))
+                        shots = shots[:keep]
+                    for i, sh in enumerate(shots, start=1):
+                        sh["shot_index"] = i
                     analysis["target_shot_count"] = len(shots)
                     audio = dict(analysis.get("audio") or {})
                     if "include_speech" in parsed:
@@ -2003,6 +2039,31 @@ class SupervisorAgent:
                 logger.info("Supervisor design_execution_graph LLM failed; using storyboard shots", exc_info=True)
                 notes = "LLM graph design failed; materializing from storyboard shots."
 
+        # Final clamp even on non-LLM path — soft max unless user asked for explicit N.
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+                _HARD_MAX_SHOTS,
+                _SOFT_MAX_SHOTS,
+                _explicit_shot_count_from_prompt,
+                infer_shot_budget,
+            )
+
+            explicit_n = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
+            if explicit_n >= 1:
+                final_ceiling = min(explicit_n, _HARD_MAX_SHOTS)
+            else:
+                # Prefer live shot list length; soft-cap only.
+                final_ceiling = min(
+                    _SOFT_MAX_SHOTS,
+                    max(len(shots), int(infer_shot_budget(user_prompt, analysis) or 0), 1),
+                )
+            if final_ceiling >= 1 and len(shots) > final_ceiling:
+                shots = shots[:final_ceiling]
+                for i, sh in enumerate(shots, start=1):
+                    if isinstance(sh, dict):
+                        sh["shot_index"] = i
+        except Exception:  # noqa: BLE001
+            pass
         if not shots:
             shots = [
                 {
@@ -2161,7 +2222,7 @@ class NodeAgent:
             system=system,
             optimize_for=optimize_for,
             preferred_model=preferred,
-            max_tokens=1000,
+            max_tokens=8192,
         )
         parsed = _extract_json_object(str(tool.get("text") or "")) or {}
         self_score = _clamp_score(parsed.get("self_score"), default=6)
@@ -2566,12 +2627,36 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             cfg["character_node_ids"] = solo_nodes
             notes.append(f"{node.get('id')}: identity_refs -> solo sheets {solo_nodes}")
         names = [id_to_name.get(cid, cid) for cid in cids]
+        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            costume_lock_for_ids,
+            enrich_character_clothing,
+        )
+
+        analysis_chars = list(
+            ((graph.get("metadata") or {}).get("script_analysis") or {}).get("characters")
+            or []
+        )
+        for ch in analysis_chars:
+            if isinstance(ch, dict):
+                enrich_character_clothing(ch)
         costume_lock = str(cfg.get("costume_lock") or "").strip()
-        if not costume_lock and cids:
+        detailed = costume_lock_for_ids(analysis_chars, cids) if cids else ""
+        if detailed and (
+            not costume_lock
+            or (
+                "top=" not in costume_lock
+                and "bottom=" not in costume_lock
+                and "outfit=" not in costume_lock
+            )
+        ):
+            costume_lock = detailed
+            cfg["costume_lock"] = costume_lock
+            notes.append(f"{node.get('id')}: clothing costume_lock stamped")
+        elif not costume_lock and cids:
             costume_lock = "; ".join(
                 f"{id_to_name.get(cid, cid)}: {costume_by_cid.get(cid, '')[:120]}".strip(": ")
                 for cid in cids
-            )[:480]
+            )[:720]
             cfg["costume_lock"] = costume_lock
             notes.append(f"{node.get('id')}: costume_lock stamped")
 
@@ -2658,17 +2743,52 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         cfg["skip_scene_plate"] = True
         if names:
             cfg["cast_names"] = identity_refs["cast_names"]
-        # Sensible LLM-style node names.
+        # Sensible LLM-style node names (Brief: … / Scene N: Shot M: …).
+        from jiuwenswarm.server.runtime.designer.node_labels import (
+            derive_shot_name,
+            derive_story_name,
+            label_character,
+            label_clip,
+            label_shot,
+        )
+
+        story_name = derive_story_name(
+            analysis=analysis,
+            prompt=str(graph.get("description") or ""),
+            graph_title=str(graph.get("title") or ""),
+        )
         scene_n = setting_num.get(setting_id, 1)
         shot_i = int(cfg.get("shot_index") or 0)
+        # Per-setting shot ordinal from film order.
+        shot_n = 0
+        for fn in frame_nodes:
+            fsid = str((fn.get("config") or {}).get("setting_id") or "set_1").strip() or "set_1"
+            fi = int((fn.get("config") or {}).get("shot_index") or 0)
+            if fsid != setting_id:
+                continue
+            if fi <= shot_i:
+                shot_n += 1
+        shot_n = max(1, shot_n or shot_i or 1)
+        shot_name = derive_shot_name(
+            {
+                "title": cfg.get("shot_title"),
+                "action": cfg.get("shot_action"),
+                "keyframe_prompt": (cfg.get("generate") or {}).get("prompt")
+                if isinstance(cfg.get("generate"), dict)
+                else "",
+            },
+            fallback_index=shot_n,
+        )
         if role in {"frame", "keyframe"} and shot_i:
-            label = f"scene {scene_n}: keyframe {shot_i}"
-            if names:
-                label += f" · {names[0]}"
+            label = label_shot(
+                scene_number=scene_n, shot_number=shot_n, shot_name=shot_name
+            )
             node["label"] = label
             cfg["agent_name"] = label
         elif role == "clip" and shot_i:
-            label = f"scene {scene_n}: clip {shot_i}"
+            label = label_clip(
+                scene_number=scene_n, clip_number=shot_n, clip_name=shot_name
+            )
             node["label"] = label
             cfg["agent_name"] = label
         cfg["supervisor_task"] = (
@@ -2681,9 +2801,10 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
         prompt = str(gen.get("prompt") or "")
         lock_bits = []
-        if costume_lock and "Costume lock" not in prompt and "IDENTITY" not in prompt:
+        if costume_lock and "Costume lock" not in prompt and "CLOTHING LOCK" not in prompt:
             lock_bits.append(
-                f"IDENTITY sheets={identity_refs['character_node_ids']}. Costume lock: {costume_lock}."
+                f"IDENTITY sheets={identity_refs['character_node_ids']}. "
+                f"CLOTHING LOCK: {costume_lock}."
             )
         if "STRATEGY=" not in prompt:
             lock_bits.append(f"STRATEGY=compose_from_solo_refs setting={setting_id}.")
@@ -2713,22 +2834,52 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             continue
         _stamp_media_node(node, assign_strategy=False)
         # Also rename character sheets if generic.
+    from jiuwenswarm.server.runtime.designer.node_labels import (
+        derive_story_name,
+        label_brief,
+        label_character,
+        label_compose,
+        label_storyboard,
+    )
+
+    story_name = derive_story_name(
+        analysis=analysis,
+        prompt=str(graph.get("description") or ""),
+        graph_title=str(graph.get("title") or ""),
+    )
+    char_i = 0
     for node in graph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
-        if _role_key(node) != "character_design":
-            continue
+        role = _role_key(node)
         cfg = dict(node.get("config") or {})
+        if role == "brief" or str(node.get("id") or "") == "n_brief":
+            node["label"] = label_brief(story_name)
+            cfg["agent_name"] = node["label"]
+            node["config"] = cfg
+            continue
+        if role == "storyboard" or str(node.get("id") or "") == "n_storyboard":
+            node["label"] = label_storyboard(story_name)
+            cfg["agent_name"] = node["label"]
+            node["config"] = cfg
+            continue
+        if role == "compose" or str(node.get("id") or "") in {"n_compose", "n_final"}:
+            node["label"] = label_compose(story_name)
+            cfg["agent_name"] = node["label"]
+            node["config"] = cfg
+            continue
+        if role != "character_design":
+            continue
+        char_i += 1
         name = str(
             cfg.get("character_name")
             or (cfg.get("character_names") or [None])[0]
             or ""
         ).strip()
-        if name:
-            label = f"character: {name}"
-            node["label"] = label
-            cfg["agent_name"] = label
-            node["config"] = cfg
+        label = label_character(char_i, name or f"Character {char_i}")
+        node["label"] = label
+        cfg["agent_name"] = label
+        node["config"] = cfg
 
     plan = dict(meta.get("consistency_plan") or {})
     plan.update(
@@ -2784,10 +2935,6 @@ class ManagerAgent:
         )
         from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
             architecture_clause_from_bible,
-            continuity_card_clause,
-            continuity_card_from_prior,
-            extract_already_done_beats,
-            merge_already_done,
             strip_prior_prompt_pastes,
         )
 
@@ -2905,6 +3052,28 @@ class ManagerAgent:
             prompt = prompt + f"\nCostume lock (must keep): {costume_lock}"
             notes.append("inject_costume_lock")
             changed = True
+        # Always reinforce garment-level clothing lock for frames + clips.
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+                clothing_lock_clause,
+                ensure_cfg_clothing_lock,
+            )
+
+            analysis_chars = list(
+                ((graph.get("metadata") or {}).get("script_analysis") or {}).get("characters")
+                or []
+            )
+            costume_lock = ensure_cfg_clothing_lock(cfg, characters=analysis_chars) or costume_lock
+            cloth = clothing_lock_clause(
+                costume_lock,
+                for_clip=(role == "clip"),
+            )
+            if cloth and "CLOTHING LOCK" not in prompt and "CLOTHING HOLD" not in prompt:
+                prompt = prompt + "\n" + cloth
+                notes.append("inject_clothing_lock")
+                changed = True
+        except Exception:  # noqa: BLE001
+            pass
 
         if spatial and "SPATIAL LOCK" not in prompt:
             prompt = (
@@ -2921,55 +3090,55 @@ class ManagerAgent:
             notes.append("inject_identity_solos")
             changed = True
 
-        # Prior keyframe → slim continuity card (never paste full prior prompt).
-        prior_card = (
-            cfg.get("previous_keyframe_continuity_card")
-            if isinstance(cfg.get("previous_keyframe_continuity_card"), dict)
-            else None
-        )
-        if prior_card is None and shot_index > 1:
+        # Prior keyframe: short continuity note only (never paste full prior generate.prompt).
+        prior_kf_action = str(cfg.get("previous_keyframe_action") or "").strip()
+        prior_kf_prompt = str(cfg.get("previous_keyframe_prompt") or "").strip()
+        if not prior_kf_action and shot_index > 1:
             prev_id = prior_kf_id or f"n_frame_{shot_index - 1}"
             for n in graph.get("nodes") or []:
                 if str(n.get("id") or "") != prev_id:
                     continue
                 pcfg = n.get("config") if isinstance(n.get("config"), dict) else {}
-                prior_action = str(pcfg.get("shot_action") or "").strip()
-                prior_seed = prior_action or str(
+                prior_kf_action = str(
+                    pcfg.get("shot_action")
+                    or pcfg.get("character_action")
+                    or ""
+                ).strip()
+                prior_kf_prompt = str(
                     pcfg.get("last_approved_prompt")
                     or (pcfg.get("generate") or {}).get("prompt")
                     or ""
                 ).strip()
-                if prior_seed or isinstance(pcfg.get("continuity_card"), dict):
-                    prior_card = pcfg.get("continuity_card") if isinstance(
-                        pcfg.get("continuity_card"), dict
-                    ) else continuity_card_from_prior(
-                        prior_action=prior_action,
-                        prior_prompt=prior_seed,
-                        shot_index=shot_index - 1,
-                        node_id=prev_id,
-                        bible=pcfg.get("scene_bible")
-                        if isinstance(pcfg.get("scene_bible"), dict)
-                        else None,
-                        storyboard_hints=prior_action,
-                    )
-                    cfg["previous_keyframe_continuity_card"] = prior_card
+                if prior_kf_action or prior_kf_prompt:
+                    if prior_kf_action:
+                        cfg["previous_keyframe_action"] = prior_kf_action[:300]
+                    # Soft-dep readiness marker — do not inject full text into prompt.
+                    if prior_kf_prompt and not str(cfg.get("previous_keyframe_prompt") or "").strip():
+                        cfg["previous_keyframe_prompt"] = prior_kf_prompt[:800]
                     cfg["previous_keyframe_node_id"] = prev_id
-                    cfg.pop("previous_keyframe_prompt", None)
-                    notes.append("build_prior_keyframe_continuity_card")
+                    notes.append("pull_prior_keyframe_action")
                     changed = True
                 break
-        if prior_card and "CONTINUITY CARD (Manager)" not in prompt:
-            clause = continuity_card_clause(prior_card)
-            if clause:
-                prompt = prompt + "\n\n" + clause
-                notes.append("inject_prior_keyframe_continuity_card")
-                changed = True
-            cfg["already_done"] = merge_already_done(
-                cfg.get("already_done") if isinstance(cfg.get("already_done"), list) else None,
-                prior_card.get("already_done")
-                if isinstance(prior_card.get("already_done"), list)
-                else None,
+        if (
+            (prior_kf_action or prior_kf_prompt)
+            and "PREVIOUS KEYFRAME HAD" not in prompt
+            and "PRIOR KEYFRAME PROMPT" not in prompt
+        ):
+            from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+                keyframe_continuity_note,
             )
+
+            kf_note = keyframe_continuity_note(
+                shot_index=shot_index,
+                this_action=str(cfg.get("shot_action") or cfg.get("character_action") or ""),
+                this_camera=str(cfg.get("camera") or ""),
+                prior_action=prior_kf_action or prior_kf_prompt[:220],
+                prior_shot_index=shot_index - 1 if shot_index > 1 else None,
+            )
+            if kf_note:
+                prompt = prompt + "\n\n" + kf_note
+                notes.append("inject_prior_keyframe_note")
+                changed = True
 
         already_done = [str(x) for x in (cfg.get("already_done") or []) if str(x)]
         if not already_done:
@@ -2979,31 +3148,6 @@ class ManagerAgent:
                     already_done = [str(x) for x in (s.get("already_done") or []) if str(x)]
                     cfg["already_done"] = already_done
                     break
-        # Derive from prior shot actions when storyboard left already_done empty.
-        if not already_done and shot_index > 1:
-            analysis = (graph.get("metadata") or {}).get("script_analysis") or {}
-            derived: list[str] = []
-            for s in analysis.get("shots") or []:
-                if not isinstance(s, dict):
-                    continue
-                si = int(s.get("shot_index") or 0)
-                if si <= 0 or si >= shot_index:
-                    continue
-                act = str(s.get("action") or s.get("character_action") or s.get("comment") or "")
-                derived.extend(
-                    extract_already_done_beats(
-                        act,
-                        shot_index=si,
-                        allow_repeat_hints=str(
-                            cfg.get("shot_action") or s.get("repeat_hint") or ""
-                        ),
-                    )
-                )
-            if derived:
-                already_done = merge_already_done(derived)
-                cfg["already_done"] = already_done
-                notes.append("derive_already_done_from_prior_actions")
-                changed = True
         if already_done and "ALREADY_DONE" not in prompt:
             prompt = (
                 prompt
@@ -3136,6 +3280,39 @@ class ManagerAgent:
             notes.append("inject_detail_lock")
             changed = True
 
+        # Per-shot staging locks (positioning / action / relationships) — equal to clothing.
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+                ensure_cfg_staging_locks,
+            )
+
+            analysis_chars = list(
+                ((graph.get("metadata") or {}).get("script_analysis") or {}).get("characters")
+                or []
+            )
+            shot_row = next(
+                (
+                    s
+                    for s in (
+                        ((graph.get("metadata") or {}).get("script_analysis") or {}).get("shots")
+                        or []
+                    )
+                    if isinstance(s, dict) and int(s.get("shot_index") or 0) == shot_index
+                ),
+                None,
+            )
+            staging_clause = ensure_cfg_staging_locks(
+                cfg,
+                shot=shot_row if isinstance(shot_row, dict) else None,
+                characters=analysis_chars,
+            )
+            if staging_clause and "STAGING LOCK" not in prompt:
+                prompt = prompt + "\n" + staging_clause
+                notes.append("inject_staging_lock")
+                changed = True
+        except Exception:  # noqa: BLE001
+            pass
+
         # Film-wide aspect + style locks (Manager enforces; leaves cannot drop).
         meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
         analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
@@ -3233,61 +3410,93 @@ class ManagerAgent:
                 )
                 notes.append("enforce_setting_lock_clip")
                 changed = True
-            # Pull prior clip continuity card from continuity node if not stamped yet.
+            # Pull prior clip beat (action) from continuity node — never paste full Wan text.
             cont_clip = str(cfg.get("continuity_clip_node_id") or cfg.get("previous_clip_node_id") or "").strip()
-            if cont_clip and not isinstance(cfg.get("previous_clip_continuity_card"), dict):
+            if cont_clip and not str(cfg.get("previous_clip_action") or "").strip():
                 for n in graph.get("nodes") or []:
                     if str(n.get("id") or "") != cont_clip:
                         continue
                     pcfg = n.get("config") if isinstance(n.get("config"), dict) else {}
-                    pcard = (
-                        pcfg.get("continuity_card")
-                        if isinstance(pcfg.get("continuity_card"), dict)
-                        else None
-                    )
-                    if pcard is None:
-                        pcard = continuity_card_from_prior(
-                            prior_action=str(pcfg.get("shot_action") or ""),
-                            prior_prompt=str(
-                                pcfg.get("last_wan_prompt")
-                                or pcfg.get("last_approved_prompt")
-                                or (pcfg.get("generate") or {}).get("prompt")
-                                or ""
-                            ),
-                            shot_index=int(pcfg.get("shot_index") or 0) or None,
-                            node_id=cont_clip,
-                            speech_line=str(pcfg.get("speech_line") or ""),
-                            bible=pcfg.get("scene_bible")
-                            if isinstance(pcfg.get("scene_bible"), dict)
-                            else None,
-                            storyboard_hints=str(pcfg.get("shot_action") or ""),
-                        )
-                    cfg["previous_clip_continuity_card"] = pcard
-                    cfg["previous_clip_node_id"] = cont_clip
-                    cfg["previous_clip_handoff_ready"] = True
-                    cfg.pop("previous_clip_wan_prompt", None)
-                    cfg["already_done"] = merge_already_done(
-                        cfg.get("already_done") if isinstance(cfg.get("already_done"), list) else None,
-                        pcard.get("already_done")
-                        if isinstance(pcard.get("already_done"), list)
-                        else None,
-                    )
-                    notes.append("pull_prior_clip_continuity_card")
-                    changed = True
+                    prior_act = str(
+                        pcfg.get("shot_action")
+                        or pcfg.get("character_action")
+                        or ""
+                    ).strip()
+                    prior_txt = str(
+                        pcfg.get("last_wan_prompt")
+                        or pcfg.get("last_approved_prompt")
+                        or (pcfg.get("generate") or {}).get("prompt")
+                        or ""
+                    ).strip()
+                    if prior_act or prior_txt:
+                        if prior_act:
+                            cfg["previous_clip_action"] = prior_act[:220]
+                        if prior_txt and not str(cfg.get("previous_clip_wan_prompt") or "").strip():
+                            cfg["previous_clip_wan_prompt"] = prior_txt[:800]
+                        cfg["previous_clip_node_id"] = cont_clip
+                        cfg["previous_clip_handoff_ready"] = True
+                        notes.append("pull_prior_clip_action_from_dep")
+                        changed = True
                     break
             prior_clips = collect_prior_clip_prompts(graph, shot_index=shot_index)
-            clause = handoff_clause_for_prompt(prior_clips)
-            if clause and "CONTINUITY CARD (Manager)" not in prompt:
+            if not prior_clips and str(cfg.get("previous_clip_action") or "").strip():
+                prior_clips = [
+                    {
+                        "node_id": str(cfg.get("previous_clip_node_id") or ""),
+                        "shot_index": int(
+                            cfg.get("previous_clip_shot_index") or max(1, shot_index - 1)
+                        ),
+                        "shot_action": str(cfg.get("previous_clip_action") or ""),
+                        "speech_line": str(cfg.get("previous_clip_speech") or ""),
+                    }
+                ]
+            clause = handoff_clause_for_prompt(
+                prior_clips,
+                this_shot_index=shot_index,
+                this_action=str(cfg.get("shot_action") or cfg.get("character_action") or ""),
+                this_camera=str(cfg.get("camera") or ""),
+                this_speech=str(cfg.get("speech_line") or ""),
+                already_done=already_done,
+            )
+            if clause and "PREVIOUS CLIP HAD" not in prompt and "PRIOR CLIP CONTINUITY" not in prompt:
                 prompt = prompt + "\n\n" + clause
-                notes.append("inject_prior_clip_continuity_card")
+                notes.append("inject_prior_clip_handoff")
                 changed = True
-            elif isinstance(cfg.get("previous_clip_continuity_card"), dict) and (
-                "CONTINUITY CARD (Manager)" not in prompt
-            ):
-                clause2 = continuity_card_clause(cfg["previous_clip_continuity_card"])
-                if clause2:
-                    prompt = prompt + "\n\n" + clause2
-                    notes.append("inject_stamped_clip_continuity_card")
+            # Character consistency on every clip call (Manager enforce).
+            cast_who = ", ".join(
+                str(x)
+                for x in (
+                    cfg.get("on_screen")
+                    or (cfg.get("occupancy") or {}).get("must_appear")
+                    or cfg.get("character_ids")
+                    or []
+                )
+                if str(x)
+            )
+            if "CHARACTER CONSISTENCY" not in prompt:
+                prompt = (
+                    prompt
+                    + "\nCHARACTER CONSISTENCY LOCK: animate ONLY people already in Image 1 "
+                    "(this shot's keyframe); keep the same faces, body types, ages, and "
+                    f"costumes{(' for ' + cast_who) if cast_who else ''}. "
+                    "Do not recast, redesign wardrobe, or invent a different hero. "
+                    "IDENTITY solo sheets remain the face authority."
+                )
+                notes.append("inject_clip_character_consistency")
+                changed = True
+            if costume_lock and "Costume lock" not in prompt and "costume lock" not in prompt.lower():
+                prompt = prompt + f"\nCostume lock (must keep on clip): {costume_lock}"
+                notes.append("inject_clip_costume_lock")
+                changed = True
+            if costume_lock and "CLOTHING LOCK" not in prompt:
+                from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+                    clothing_lock_clause,
+                )
+
+                cloth = clothing_lock_clause(costume_lock, for_clip=True)
+                if cloth:
+                    prompt = prompt + "\n" + cloth
+                    notes.append("inject_clip_clothing_lock")
                     changed = True
             # Storyboard beat for THIS shot only (avoid full-board mix).
             action = str(cfg.get("shot_action") or "").strip()
@@ -3694,7 +3903,7 @@ class ManagerAgent:
                 ),
                 system=system,
                 optimize_for=optimize_for,
-                max_tokens=16384,
+                max_tokens=32768,
             )
             parsed = _extract_json_object(str(result.get("text") or "")) or {}
         except Exception:  # noqa: BLE001
@@ -3828,7 +4037,7 @@ class ManagerAgent:
                     ),
                     system=system,
                     optimize_for="quality",
-                    max_tokens=1400,
+                    max_tokens=32768,
                 )
                 parsed = _extract_json_object(str(result.get("text") or "")) or {}
                 patched_md = str(parsed.get("patched_brief_markdown") or "").strip()
@@ -3957,7 +4166,7 @@ class ManagerAgent:
                     ),
                     system=system,
                     optimize_for="quality",
-                    max_tokens=1400,
+                    max_tokens=32768,
                 )
                 parsed = _extract_json_object(str(result.get("text") or "")) or {}
                 for fix in parsed.get("shot_fixes") or []:
@@ -4161,7 +4370,7 @@ class ManagerAgent:
                 prompt=prompt,
                 system=system,
                 optimize_for="quality",
-                max_tokens=1400,
+                max_tokens=32768,
             )
             parsed = _extract_json_object(str(result.get("text") or "")) or {}
         except Exception:  # noqa: BLE001
@@ -4496,7 +4705,7 @@ class ManagerAgent:
             prompt=prompt,
             system=system,
             optimize_for="quality",
-            max_tokens=1200,
+            max_tokens=32768,
         )
         parsed = _extract_json_object(str(result.get("text") or "")) or {}
         scores_raw = parsed.get("scores") if isinstance(parsed.get("scores"), dict) else {}
@@ -4560,7 +4769,7 @@ class ManagerAgent:
                         prompt=json.dumps({**base_payload, "rater_id": label}, ensure_ascii=False),
                         system=system,
                         optimize_for="quality",
-                        max_tokens=900,
+                        max_tokens=8192,
                     )
                     parsed = _extract_json_object(str(result.get("text") or "")) or {}
                     raters.append(
@@ -4808,7 +5017,7 @@ class SupervisorReviewer:
             prompt=prompt,
             system=system,
             optimize_for="quality",
-            max_tokens=1200,
+            max_tokens=32768,
         )
         parsed = _extract_json_object(str(result.get("text") or "")) or {}
         scores_raw = parsed.get("scores") if isinstance(parsed.get("scores"), dict) else {}

@@ -84,6 +84,43 @@ def _output_ok(dest: Path) -> bool:
     return dest.is_file() and dest.stat().st_size > 0
 
 
+_MIN_CLIP_BYTES = 512
+_MIN_CLIP_DURATION_SEC = 0.4
+
+
+def _clip_video_usable(path: Path, *, ffmpeg: str | None = None) -> bool:
+    """True when path is a real playable clip (not an empty/0:00 stub)."""
+    try:
+        if not path.is_file() or path.suffix.lower() not in _VIDEO_SUFFIXES:
+            return False
+        if path.stat().st_size < _MIN_CLIP_BYTES:
+            return False
+        # Still→mp4 freezes are never acceptable film inputs on the quality path.
+        if "designer_clip_still_" in path.name.lower():
+            return False
+    except OSError:
+        return False
+    probe_bin = ffmpeg
+    if not probe_bin:
+        try:
+            probe_bin = _find_ffmpeg()
+        except RuntimeError:
+            # No ffmpeg: accept by size only (tests / broken env).
+            return True
+    duration = _media_duration_seconds(probe_bin, path)
+    # Explicit 0:00 / near-empty → reject. Unreadable probe (None) kept if size ok
+    # so tiny unit-test stubs and exotic containers still work.
+    if duration is not None and duration < _MIN_CLIP_DURATION_SEC:
+        return False
+    return True
+
+
+def _probe_has_audio(ffmpeg: str, path: Path) -> bool:
+    probed = _run_ffmpeg(ffmpeg, ["-i", str(path.resolve())])
+    text = f"{probed.stderr or ''}\n{probed.stdout or ''}"
+    return "Audio:" in text
+
+
 def _try_concat_copy(ffmpeg: str, paths: list[Path], dest: Path) -> bool:
     handle, list_name = tempfile.mkstemp(prefix="designer_concat_", suffix=".txt")
     os.close(handle)
@@ -93,8 +130,20 @@ def _try_concat_copy(ffmpeg: str, paths: list[Path], dest: Path) -> bool:
             "\n".join(_concat_file_line(path) for path in paths) + "\n",
             encoding="utf-8",
         )
-        copied = _run_ffmpeg(
-            ffmpeg,
+        # Prefer keeping in-clip audio (stream copy). Fall back to re-encode audio.
+        attempts: list[list[str]] = [
+            [
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-c",
+                "copy",
+                str(dest),
+            ],
             [
                 "-y",
                 "-f",
@@ -105,17 +154,22 @@ def _try_concat_copy(ffmpeg: str, paths: list[Path], dest: Path) -> bool:
                 str(list_path),
                 "-c:v",
                 "copy",
-                "-an",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
                 str(dest),
             ],
-        )
-        if copied.returncode == 0 and _output_ok(dest):
-            return True
-        logger.warning(
-            "ffmpeg concat copy failed: %s",
-            (copied.stderr or copied.stdout or "")[:800],
-        )
-        dest.unlink(missing_ok=True)
+        ]
+        for args in attempts:
+            copied = _run_ffmpeg(ffmpeg, args)
+            if copied.returncode == 0 and _output_ok(dest):
+                return True
+            logger.warning(
+                "ffmpeg concat copy failed: %s",
+                (copied.stderr or copied.stdout or "")[:800],
+            )
+            dest.unlink(missing_ok=True)
         return False
     finally:
         list_path.unlink(missing_ok=True)
@@ -125,23 +179,44 @@ def _concat_filter(ffmpeg: str, paths: list[Path], dest: Path) -> None:
     width, height = _video_size(ffmpeg, paths[0]) or (1280, 720)
     inputs: list[str] = ["-y"]
     filters: list[str] = []
+    has_audio = [_probe_has_audio(ffmpeg, path) for path in paths]
+    any_audio = any(has_audio)
     for index, path in enumerate(paths):
         inputs.extend(["-i", str(path.resolve())])
         filters.append(
             f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,fps=24[v{index}]"
         )
-    joined = "".join(f"[v{index}]" for index in range(len(paths)))
-    filters.append(f"{joined}concat=n={len(paths)}:v=1:a=0[v]")
+        if any_audio:
+            if has_audio[index]:
+                filters.append(
+                    f"[{index}:a]aformat=sample_fmts=fltp:sample_rates=44100:"
+                    f"channel_layouts=stereo[a{index}]"
+                )
+            else:
+                dur = _media_duration_seconds(ffmpeg, path) or 1.0
+                filters.append(
+                    f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={dur:.3f},"
+                    f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+                    f"[a{index}]"
+                )
+    joined_v = "".join(f"[v{index}]" for index in range(len(paths)))
+    if any_audio:
+        joined_a = "".join(f"[a{index}]" for index in range(len(paths)))
+        filters.append(
+            f"{joined_v}{joined_a}concat=n={len(paths)}:v=1:a=1[v][a]"
+        )
+        map_args = ["-map", "[v]", "-map", "[a]", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        filters.append(f"{joined_v}concat=n={len(paths)}:v=1:a=0[v]")
+        map_args = ["-map", "[v]", "-an"]
     encoded = _run_ffmpeg(
         ffmpeg,
         [
             *inputs,
             "-filter_complex",
             ";".join(filters),
-            "-map",
-            "[v]",
-            "-an",
+            *map_args,
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -173,7 +248,7 @@ def concatenate_clip_videos(paths: list[Path], dest: Path) -> Path:
     return dest.resolve()
 
 
-def _video_path_from_ref(ref: object) -> Path | None:
+def _video_path_from_ref(ref: object, *, ffmpeg: str | None = None) -> Path | None:
     if not isinstance(ref, dict):
         return None
     uri = str(ref.get("uri") or "")
@@ -185,23 +260,23 @@ def _video_path_from_ref(ref: object) -> Path | None:
     if mime.startswith("text/") or "markdown" in mime:
         return None
     path = handler_io.path_from_uri(uri)
-    if (
-        path is not None
-        and path.is_file()
-        and path.suffix.lower() in _VIDEO_SUFFIXES
-        and path.stat().st_size > 0
-    ):
+    if path is not None and _clip_video_usable(path, ffmpeg=ffmpeg):
         return path.resolve()
     return None
 
 
-def _video_from_state(state: dict) -> Path | None:
+def _video_from_state(state: dict, *, require_completed: bool = True) -> Path | None:
+    if require_completed:
+        status = str(state.get("status") or "").strip().lower()
+        if status not in {"completed", "complete", "done", "success"}:
+            return None
     candidates: list[object] = []
-    for key in ("output_ref", "candidate_output_ref"):
+    # Prefer committed outputs — never assemble film from in-flight candidates.
+    for key in ("output_ref",):
         primary = state.get(key)
         if primary is not None:
             candidates.append(primary)
-    for key in ("output_refs", "candidate_output_refs"):
+    for key in ("output_refs",):
         for ref in state.get(key) or []:
             if ref is not None:
                 candidates.append(ref)
@@ -222,38 +297,19 @@ def _workspace_clip_videos(run_id: str) -> list[Path]:
     patterns = (
         f"designer_clip_{rid}*.mp4",
         f"*{rid}*clip*.mp4",
-        f"designer_compose_{rid}*.mp4",
     )
-    # Never treat still→mp4 freezes as real clip fallbacks in the quality path.
+    # Never treat still→mp4 freezes or unrelated generated_*.mp4 as film inputs.
     for pattern in patterns:
         for path in sorted(root.glob(pattern)):
             if (
                 path.is_file()
-                and path.stat().st_size > 0
+                and _clip_video_usable(path)
                 and "compose" not in path.name.lower()
-                and "designer_clip_still_" not in path.name.lower()
             ):
                 resolved = path.resolve()
                 if resolved not in found:
                     found.append(resolved)
-    if found:
-        return found
-    # I2V backends often write generated_<timestamp>.mp4 without embedding run_id.
-    import time
-
-    now = time.time()
-    generated = [
-        p.resolve()
-        for p in sorted(
-            root.glob("generated_*.mp4"),
-            key=lambda item: item.stat().st_mtime if item.is_file() else 0,
-            reverse=True,
-        )
-        if p.is_file()
-        and p.stat().st_size > 0
-        and (now - p.stat().st_mtime) < 45 * 60
-    ]
-    return generated[:3]
+    return found
 
 
 def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
@@ -282,23 +338,23 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
         state = states.get(node_id) or {}
         if not isinstance(state, dict):
             state = {}
-        path = _video_from_state(state)
+        path = _video_from_state(state, require_completed=True)
         if path is None:
             missing.append(node_id or f"shot {node_shot_index(node)}")
             continue
         paths.append(path)
 
     if missing:
-        # Disk fallback when clip agents finished I2V but state still shows .md,
-        # or compose was spawned before node_states were published.
+        # Disk fallback only when EVERY expected clip is already on disk (state lag).
+        # Never assemble a partial film from a subset of workspace mp4s.
         disk = _workspace_clip_videos(str(ctx.run_id or ""))
-        if disk and not paths:
+        if disk and len(disk) >= len(clips) and not paths:
             logger.warning(
                 "compose using workspace clip mp4 fallback for run=%s missing=%s",
                 ctx.run_id,
                 missing,
             )
-            return disk
+            return disk[: len(clips)]
         raise RuntimeError(
             "以下视频片段尚未生成，无法成片（全部镜头必须进入成片）："
             + "、".join(missing)
@@ -414,7 +470,13 @@ def mix_compose_soundtrack(
     ctx: NodeExecutionContext | None = None,
     brief: str = "",
 ) -> Path:
-    """Mux audible soundtrack: prefer upstream speech/music nodes, else cinematic bed."""
+    """Mux soundtrack without destroying in-clip audio.
+
+    Policy:
+    - Prefer upstream speech/music nodes (overlay / replace).
+    - If the concatenated video already has audio and no separate tracks → keep it.
+    - Synthetic bed only when the film is still silent.
+    """
     _ = brief
     video = Path(video)
     dest = Path(dest)
@@ -428,10 +490,8 @@ def mix_compose_soundtrack(
 
     upstream: list[Path] = []
     if ctx is not None:
-        # Prefer music then speech so speech sits on top when mixed (order in _mix).
         speech = _collect_role_audio_paths(ctx, {"speech"})
         music = _collect_role_audio_paths(ctx, {"music"})
-        # Put speech first for slightly higher volume in mixer.
         upstream = [*speech, *music]
         if not upstream:
             from jiuwenswarm.server.runtime.designer.user_references import (
@@ -442,13 +502,16 @@ def mix_compose_soundtrack(
             if user_audio is not None and user_audio.is_file():
                 upstream = [user_audio]
 
+    has_embedded = _probe_has_audio(ffmpeg, video)
+    if not upstream and has_embedded:
+        return video
+
     score: Path | None = None
     if upstream:
         score = _mix_audio_tracks(
             ffmpeg, upstream, dest.parent / f"{dest.stem}_mix", duration
         )
-    if score is None:
-        # Always add audible bed — silent films are not acceptable for quality path.
+    if score is None and not has_embedded:
         score = _render_cinematic_bgm(
             ffmpeg, dest.parent / f"{dest.stem}_score", duration
         )
@@ -457,13 +520,17 @@ def mix_compose_soundtrack(
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.resolve() == video.resolve():
         dest = video.with_name(f"{video.stem}_bgm{video.suffix}")
+    if has_embedded and upstream:
+        if _mux_overlay_audio(ffmpeg, video, score, dest):
+            return dest.resolve()
+        return video
     if _mux_bgm(ffmpeg, video, score, dest):
         return dest.resolve()
     return video
 
 
 def mix_compose_bgm(video: Path, dest: Path, brief: str = "") -> Path:
-    """Backward-compatible wrapper — always produce audible score."""
+    """Backward-compatible wrapper — add bed only when film is silent."""
     return mix_compose_soundtrack(video, dest, ctx=None, brief=brief)
 
 
@@ -559,47 +626,108 @@ def _mux_bgm(ffmpeg: str, video: Path, audio: Path, dest: Path) -> bool:
     return True
 
 
-def mix_compose_bgm(video: Path, dest: Path, brief: str = "") -> Path:
-    """Add a film-length score after silent clip concat. Skip if probe/mix fails."""
-    _ = brief
-    video = Path(video)
-    dest = Path(dest)
-    try:
-        ffmpeg = _find_ffmpeg()
-    except RuntimeError:
-        return video
-    duration = _media_duration_seconds(ffmpeg, video)
-    if duration is None or duration < 0.4:
-        return video
-    score = _render_cinematic_bgm(
-        ffmpeg, dest.parent / f"{dest.stem}_score", duration
+def _mux_overlay_audio(ffmpeg: str, video: Path, audio: Path, dest: Path) -> bool:
+    """Keep in-clip audio and mix an extra speech/music bed on top."""
+    muxed = _run_ffmpeg(
+        ffmpeg,
+        [
+            "-y",
+            "-i",
+            str(video.resolve()),
+            "-i",
+            str(audio.resolve()),
+            "-filter_complex",
+            (
+                "[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+                "volume=1.0[va];"
+                "[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+                "volume=0.7[oa];"
+                "[va][oa]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+            ),
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(dest),
+        ],
     )
-    if score is None:
-        return video
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.resolve() == video.resolve():
-        dest = video.with_name(f"{video.stem}_bgm{video.suffix}")
-    if _mux_bgm(ffmpeg, video, score, dest):
-        return dest.resolve()
-    return video
+    if muxed.returncode != 0 or not _output_ok(dest):
+        logger.warning(
+            "compose overlay audio failed: %s",
+            (muxed.stderr or muxed.stdout or "")[:800],
+        )
+        dest.unlink(missing_ok=True)
+        return False
+    return True
 
 
 class ComposeNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         paths: list[Path] = []
         last_exc: Exception | None = None
-        # Brief retries: compose is often spawned before clip node_states publish.
-        for attempt in range(4):
+        # Wait for every shot clip (scheduler should already gate this; poll in case
+        # state lags after the last clip completes, or ffmpeg was spawned early).
+        expected_clips = [
+            n
+            for n in (ctx.graph.get("nodes") or [])
+            if node_pipeline(n) == NODE_ROLE_CLIP
+        ]
+        # Longer wait: I2V can finish after the compose agent already woke up.
+        max_attempts = max(40, len(expected_clips) * 12)
+        for attempt in range(max_attempts):
             try:
+                # Refuse while any clip is still running / pending / failed.
+                states = (ctx.run or {}).get("node_states") or {}
+                not_ready: list[str] = []
+                for n in expected_clips:
+                    nid = str(n.get("id") or "")
+                    st = states.get(nid) if isinstance(states.get(nid), dict) else {}
+                    status = str((st or {}).get("status") or "").strip().lower()
+                    if status in {"failed", "error", "cancelled", "canceled"}:
+                        raise RuntimeError(
+                            f"compose blocked: clip {nid} status={status} — refuse empty film"
+                        )
+                    if status not in {"completed", "complete", "done", "success"}:
+                        not_ready.append(f"{nid}:{status or 'missing'}")
+                if not_ready:
+                    raise RuntimeError(
+                        "compose waiting for all clips to complete: "
+                        + ", ".join(not_ready[:8])
+                    )
                 paths = collect_clip_video_paths(ctx)
+                if expected_clips and len(paths) < len(expected_clips):
+                    raise RuntimeError(
+                        f"compose waiting for all clips: have {len(paths)}/{len(expected_clips)}"
+                    )
+                # Re-validate duration so we never concat 0:00 stubs.
+                bad = [str(p) for p in paths if not _clip_video_usable(p)]
+                if bad:
+                    raise RuntimeError(
+                        "compose waiting for usable clip media (empty/0:00 rejected): "
+                        + ", ".join(bad[:4])
+                    )
                 break
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if attempt >= 3:
+                if attempt >= max_attempts - 1:
                     break
-                await asyncio.sleep(0.4 * (attempt + 1))
+                await asyncio.sleep(min(3.0, 0.4 * (attempt + 1)))
         if not paths:
             raise RuntimeError(str(last_exc or "没有可合并的视频片段"))
+        if expected_clips and len(paths) < len(expected_clips):
+            raise RuntimeError(
+                f"Compose refused partial film: {len(paths)}/{len(expected_clips)} clips ready "
+                f"({last_exc})"
+            )
         logger.info(
             "Designer compose concatenating %s clip(s) in shot order for run=%s",
             len(paths),
@@ -622,6 +750,17 @@ class ComposeNodeHandler:
             raise RuntimeError(
                 f"Compose failed to produce a real mp4 film (got {scored})"
             )
+        try:
+            ffmpeg = _find_ffmpeg()
+            film_dur = _media_duration_seconds(ffmpeg, scored)
+            if film_dur is not None and film_dur < _MIN_CLIP_DURATION_SEC:
+                raise RuntimeError(
+                    f"Compose produced empty/0:00 film ({film_dur:.3f}s) — clips not ready"
+                )
+        except RuntimeError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.debug("compose duration probe skipped", exc_info=True)
         output_ref: AssetRef = {
             "kind": NODE_TYPE_VIDEO,
             "uri": scored.resolve().as_uri(),

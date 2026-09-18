@@ -171,6 +171,15 @@ def stamp_director_shot_sheets(
                     str(shot.get("action") or "") + f" POSITION: {pos_txt}"
                 )[:900]
 
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+                enrich_shot_staging,
+            )
+
+            enrich_shot_staging(shot, characters)
+        except Exception:  # noqa: BLE001
+            pass
+
     out["shots"] = shots
     out.setdefault("director_contract", {})
     if isinstance(out["director_contract"], dict):

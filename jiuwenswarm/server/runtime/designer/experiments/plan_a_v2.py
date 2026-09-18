@@ -374,10 +374,22 @@ def infer_identity_attrs(ch: dict[str, Any]) -> dict[str, str]:
         attrs["facial_hair"] = "none"
     attrs["glasses"] = "yes" if _GLASSES_RE.search(blob) else "no"
     desc = str(ch.get("description") or "").strip()
-    if desc and not re.match(r"^(?:the\s+)?(?:father|mother|child|son|shot)\b", desc, re.I):
-        attrs["wardrobe"] = desc[:220]
-    else:
-        attrs["wardrobe"] = str(ch.get("name") or "character")[:80]
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            extract_clothing_parts,
+            format_clothing_slots,
+        )
+
+        parts = extract_clothing_parts(f"{desc} {ch.get('costume_lock') or ''}")
+        slots = format_clothing_slots(parts, fallback=desc or str(ch.get("name") or ""))
+        attrs["wardrobe"] = slots[:280] if slots else (desc[:220] if desc else str(ch.get("name") or "character")[:80])
+        if parts:
+            attrs["clothing_parts"] = "; ".join(f"{k}={v}" for k, v in parts.items())[:280]
+    except Exception:  # noqa: BLE001
+        if desc and not re.match(r"^(?:the\s+)?(?:father|mother|child|son|shot)\b", desc, re.I):
+            attrs["wardrobe"] = desc[:220]
+        else:
+            attrs["wardrobe"] = str(ch.get("name") or "character")[:80]
     return attrs
 
 
@@ -389,7 +401,17 @@ def identity_lock_clause(ch: dict[str, Any]) -> str:
     else:
         hair_bit = f"facial_hair={hair} (keep exactly; do not change)"
     glasses = str(attrs.get("glasses") or "no")
-    wardrobe = str(attrs.get("wardrobe") or ch.get("description") or "")[:160]
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            detailed_costume_lock_for_character,
+        )
+
+        wardrobe = detailed_costume_lock_for_character(ch)
+        # Drop leading "Name: " — clause already prefixes name.
+        if wardrobe.lower().startswith(str(ch.get("name") or "").lower() + ":"):
+            wardrobe = wardrobe.split(":", 1)[1].strip()
+    except Exception:  # noqa: BLE001
+        wardrobe = str(attrs.get("wardrobe") or ch.get("description") or "")[:200]
     sex = str(attrs.get("sex") or "")
     age = str(attrs.get("age_band") or "")
     occ = str(attrs.get("occlusion_rule") or "")
@@ -397,13 +419,16 @@ def identity_lock_clause(ch: dict[str, Any]) -> str:
     if sex or age:
         demo = f"; identity={sex or 'unspecified'}/{age or 'adult'} — keep under occlusion"
     return (
-        f"{ch.get('name')}: {hair_bit}; glasses={glasses}; wardrobe lock: {wardrobe}{demo}"
+        f"{ch.get('name')}: {hair_bit}; glasses={glasses}; clothing lock: {wardrobe}{demo}"
         + (f"; {occ}" if occ else "")
     )
 
 
 def stamp_identity_attrs(characters: list[dict[str, Any]]) -> None:
     from jiuwenswarm.server.runtime.designer.experiments.axis_locks import infer_demographics
+    from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+        enrich_character_clothing,
+    )
 
     for ch in characters:
         if not isinstance(ch, dict):
@@ -411,7 +436,9 @@ def stamp_identity_attrs(characters: list[dict[str, Any]]) -> None:
         attrs = infer_identity_attrs(ch)
         attrs.update(infer_demographics(ch))
         ch["identity_attrs"] = attrs
-        ch["costume_lock"] = str(attrs.get("wardrobe") or ch.get("name") or "")[:240]
+        enrich_character_clothing(ch)
+        if not str(ch.get("costume_lock") or "").strip():
+            ch["costume_lock"] = str(attrs.get("wardrobe") or ch.get("name") or "")[:240]
         desc = str(ch.get("description") or "")
         if re.match(
             r"^(?:the\s+)?(?:father|mother|child|son|daughter|man|woman).{0,40}:"
@@ -419,7 +446,7 @@ def stamp_identity_attrs(characters: list[dict[str, Any]]) -> None:
             desc,
             re.I,
         ):
-            ch["description"] = str(attrs.get("wardrobe") or desc)[:300]
+            ch["description"] = str(ch.get("costume_lock") or attrs.get("wardrobe") or desc)[:300]
 
 
 def align_blocking_to_on_screen(

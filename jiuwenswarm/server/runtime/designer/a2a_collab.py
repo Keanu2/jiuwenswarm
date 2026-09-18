@@ -147,7 +147,7 @@ def _write_text(path: Path, content: str) -> Path:
     return path.resolve()
 
 
-async def _complete(prompt: str, *, max_tokens: int = 800) -> str:
+async def _complete(prompt: str, *, max_tokens: int = 8192) -> str:
     from jiuwenswarm.server.runtime.designer.handlers.common import complete_designer_text
 
     try:
@@ -158,7 +158,7 @@ async def _complete(prompt: str, *, max_tokens: int = 800) -> str:
     return str(text or "").strip()
 
 
-async def ask_specialist(role: str, task: str, *, max_tokens: int = 800) -> str:
+async def ask_specialist(role: str, task: str, *, max_tokens: int = 8192) -> str:
     name, system = _SPECIALISTS.get(role, (role, "You are a Designer specialist."))
     return await _complete(
         f"{system}\n\nYour identity: {name} (role={role}).\n\n{task}\n",
@@ -239,7 +239,7 @@ async def align_specialists(
                 "A colleague sent this design over A2A. List conflicts with your card and 3-6 constraints you must keep. "
                 "Do not rewrite the whole Brief.\n\n"
                 f"Colleague ({src}) card:\n{peer}\n\nYour card:\n{mine}\n",
-                max_tokens=600,
+                max_tokens=8192,
             )
             bus.send(sender=src, recipient=dst, text=peer, task_id=task_id)
             bus.send(sender=dst, recipient=src, text=reply or "no conflict", task_id=task_id)
@@ -297,7 +297,7 @@ async def review_storyboard_with_peers(
             "Review the Character action column of this storyboard. Flag costume changes, swapped people, or look mismatches. "
             "Reply OK if none.\n\n"
             f"Your character card:\n{character}\n\nStoryboard:\n{table}\n",
-            max_tokens=400,
+            max_tokens=4096,
         )
         if reply and reply.strip().upper() != "OK":
             notes.append("character designer:\n" + reply)
@@ -307,7 +307,7 @@ async def review_storyboard_with_peers(
             "Review the Scene change column of this storyboard. Flag location changes, weather swaps, or broken lighting. "
             "Reply OK if none.\n\n"
             f"Your scene card:\n{scene}\n\nStoryboard:\n{table}\n",
-            max_tokens=400,
+            max_tokens=4096,
         )
         if reply and reply.strip().upper() != "OK":
             notes.append("production designer:\n" + reply)
@@ -322,6 +322,6 @@ async def review_storyboard_with_peers(
         "Every row must still match the Brief. Output the Markdown table only, no explanation.\n\n"
         f"{brief_section}"
         f"Original:\n{table}\n\nNotes:\n" + "\n\n".join(notes),
-        max_tokens=1600,
+        max_tokens=16384,
     )
     return revised or table

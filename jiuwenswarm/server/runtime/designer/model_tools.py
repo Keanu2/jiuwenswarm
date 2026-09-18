@@ -14,10 +14,11 @@ from jiuwenswarm.common.config import get_config, get_model_names, resolve_env_v
 
 logger = logging.getLogger(__name__)
 
-# DeepSeek allows up to 393216; keep a high practical ceiling for designer plans.
+# DeepSeek/Ark allow very large completions; keep a high practical ceiling so
+# storyboard/plan JSON is not truncated mid-object (truncation → parse retry → slow).
 # Thinking mode shares this budget with final content — we disable thinking below.
-_DESIGNER_MAX_TOKENS_CAP = 32768
-_DESIGNER_DEFAULT_MAX_TOKENS = 8192
+_DESIGNER_MAX_TOKENS_CAP = 65536
+_DESIGNER_DEFAULT_MAX_TOKENS = 16384
 
 
 def _clamp_max_tokens(value: int | None) -> int:
@@ -297,7 +298,7 @@ async def call_model_tool(
 
         async def _once(*, temperature: float) -> dict[str, Any]:
             # Large plans need more wall time than the old 90s default.
-            client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=180.0)
+            client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=1200.0)
             try:
                 user_content = vision_user_content(prompt, images)
                 resp = await client.chat.completions.create(

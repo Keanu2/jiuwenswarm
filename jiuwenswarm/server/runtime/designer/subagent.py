@@ -41,7 +41,7 @@ async def complete_designer_node_text(
     prompt: str,
     *,
     delegate: str = "handler",
-    max_tokens: int = 1200,
+    max_tokens: int = 8192,
 ) -> str:
     """Run text via a registered subagent, otherwise the default chat model."""
     from jiuwenswarm.server.runtime.designer.handlers.common import complete_designer_text

@@ -188,6 +188,30 @@ def collect_clip_reference_images(
     return paths
 
 
+def _storyboard_narrative_action(shot: dict[str, Any] | None) -> str:
+    """Prefer Comment (keyframe/clip description), then Character action."""
+    if not isinstance(shot, dict):
+        return ""
+    return str(shot.get("comment") or shot.get("character_action") or "").strip()
+
+
+def _extract_action_from_generate_prompt(text: str) -> str:
+    """Pull a clean Action: … beat from a lock-stuffed generate.prompt when present."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    match = re.search(
+        r"(?i)(?:^|\n)\s*(?:Primary action for shot\s+\d+\s*:|Action)\s*:\s*(.+?)(?:\n|$)",
+        raw,
+    )
+    if match:
+        return match.group(1).strip()[:500]
+    # Fallback: first non-lock sentence if prompt is short and narrative-only.
+    if not _looks_like_contaminated_prompt(raw) and len(raw) <= 500:
+        return raw[:500]
+    return ""
+
+
 def _shot_for_node(
     graph: DesignerExecutionGraph,
     node: DesignerGraphNode,
@@ -198,37 +222,32 @@ def _shot_for_node(
     shots = parse_storyboard_shots(text)
     if shots and 1 <= index <= len(shots):
         shot = dict(shots[index - 1])
-        # Prefer storyboard action — never dump a Manager-contaminated generate.prompt into comment.
-        action = str(
-            (node.get("config") or {}).get("shot_action")
-            or shot.get("character_action")
-            or shot.get("comment")
-            or ""
-        ).strip()
-        override = node_generate_prompt(node)
-        if override and not _looks_like_contaminated_prompt(override):
-            shot["comment"] = override
-        elif action:
-            shot["comment"] = action
+        # Keep live storyboard comment/character_action intact.
+        # Do NOT overwrite comment with generate.prompt (often lock-stuffed / stale).
+        sb_action = _storyboard_narrative_action(shot)
+        if not str(shot.get("character_action") or "").strip() and sb_action:
+            shot["character_action"] = sb_action
+        if not str(shot.get("comment") or "").strip() and sb_action:
+            shot["comment"] = sb_action
         return index, shot
     return index, None
 
 
 def _looks_like_contaminated_prompt(text: str) -> bool:
+    """True only for pasted handoff/assignment dumps — not normal SCENE BIBLE / staging."""
     raw = (text or "").upper()
     needles = (
         "PRIOR KEYFRAME PROMPT",
+        "PREVIOUS KEYFRAME HAD",
         "PRIOR CLIP CONTINUITY",
+        "PREVIOUS CLIP HAD",
+        "YOUR ASSIGNMENT",
         "MASTER SCENE PROMPT",
         "CONTINUITY CARD (MANAGER)",
-        "LANGUAGE LOCK",
-        "ASPECT LOCK",
-        "STYLE LOCK",
-        "SCENE BIBLE",
+        "PRIOR CLIP WAN",
+        "PREVIOUS WAN PROMPT",
     )
-    if any(n in raw for n in needles):
-        return True
-    return len(text or "") > 500
+    return any(n in raw for n in needles)
 
 
 def _format_shot_block(shot: StoryboardShot, shot_index: int) -> str:
@@ -304,13 +323,17 @@ def build_clip_prompt(
         has_scene = False
     has_frame = collect_clip_first_frame(ctx, shot_index) is not None
     continuity = bool(str(cfg.get("continuity_frame_node_id") or "").strip())
+    sb_action = _storyboard_narrative_action(shot if isinstance(shot, dict) else None)
     action = str(
-        cfg.get("shot_action")
+        sb_action
+        or cfg.get("shot_action")
         or (shot or {}).get("character_action")
         or (shot or {}).get("comment")
         or ""
     ).strip()
-    camera = str(cfg.get("camera") or (shot or {}).get("camera") or "").strip()
+    camera = str(
+        (shot or {}).get("camera") or cfg.get("camera") or ""
+    ).strip()
     parts: list[str] = [
         _clip_prompt_lead(
             shot_index,
@@ -352,8 +375,48 @@ def build_clip_prompt(
     if view_key:
         parts.append(f"Active view_key: {view_key}")
     costume_lock = str(identity.get("costume_lock") or cfg.get("costume_lock") or "").strip()
+    if not costume_lock:
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+                ensure_cfg_clothing_lock,
+            )
+
+            analysis_chars = list(
+                ((graph.get("metadata") or {}).get("script_analysis") or {}).get("characters")
+                or []
+            )
+            costume_lock = ensure_cfg_clothing_lock(cfg, characters=analysis_chars)
+        except Exception:  # noqa: BLE001
+            costume_lock = ""
     if costume_lock:
-        parts.append(f"Costume / identity lock (do not redesign): {costume_lock}")
+        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            clothing_lock_clause,
+        )
+
+        cloth = clothing_lock_clause(costume_lock, for_clip=True)
+        parts.append(cloth if cloth else f"Costume / identity lock (do not redesign): {costume_lock}")
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+            ensure_cfg_staging_locks,
+            staging_locks_from_cfg,
+        )
+
+        analysis_chars = list(
+            ((graph.get("metadata") or {}).get("script_analysis") or {}).get("characters")
+            or []
+        )
+        shot_row = shot if isinstance(shot, dict) else None
+        # Staging must use the preferred narrative (storyboard), not stale cfg.shot_action.
+        staging_cfg = dict(cfg)
+        if action:
+            staging_cfg["shot_action"] = action
+        staging = ensure_cfg_staging_locks(
+            staging_cfg, shot=shot_row, characters=analysis_chars
+        ) or staging_locks_from_cfg(staging_cfg, for_clip=True)
+        if staging and not any("STAGING LOCK" in p for p in parts):
+            parts.append(staging)
+    except Exception:  # noqa: BLE001
+        pass
     char_nodes = [
         str(x)
         for x in (identity.get("character_node_ids") or cfg.get("character_node_ids") or [])
@@ -389,28 +452,22 @@ def build_clip_prompt(
             f"(action={action or 'see keyframe'}; camera={camera or 'match keyframe'})."
         )
     override = str((cfg.get("generate") or {}).get("prompt") or "").strip() if isinstance(cfg.get("generate"), dict) else ""
-    if override and not _looks_like_contaminated_prompt(override):
-        parts.append(f"Supervisor shot brief: {override[:400]}")
-    # Slim continuity card / already_done — never paste full prior Wan prompt.
-    prior_card = (
-        cfg.get("previous_clip_continuity_card")
-        if isinstance(cfg.get("previous_clip_continuity_card"), dict)
-        else None
-    )
-    if prior_card:
-        from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
-            continuity_card_clause,
-        )
-
-        clause_card = continuity_card_clause(prior_card)
-        if clause_card:
-            parts.append(clause_card)
+    # When live storyboard already provided the beat, skip stale generate.prompt narratives.
+    if override and not sb_action:
+        extracted = _extract_action_from_generate_prompt(override)
+        if extracted and extracted.casefold() not in (action or "").casefold():
+            if not action:
+                action = extracted
+                parts.append(f"Primary action for shot {shot_index}: {action}")
+            elif not _looks_like_contaminated_prompt(override):
+                parts.append(f"Supervisor shot brief: {extracted[:400]}")
+        elif (
+            not extracted
+            and not _looks_like_contaminated_prompt(override)
+            and override.casefold() not in (action or "").casefold()
+        ):
+            parts.append(f"Supervisor shot brief: {override[:400]}")
     already_done = [str(x) for x in (cfg.get("already_done") or []) if str(x)]
-    if already_done and not any("ALREADY_DONE" in p for p in parts):
-        parts.append(
-            "ALREADY_DONE (do not restage unless storyboard explicitly repeats): "
-            + "; ".join(already_done[:12])
-        )
     occupancy = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
     if occupancy:
         parts.append(
@@ -423,11 +480,28 @@ def build_clip_prompt(
         handoff_clause_for_prompt,
     )
 
+    prior = collect_prior_clip_prompts(graph, shot_index=shot_index)
+    if not prior and str(cfg.get("previous_clip_action") or "").strip():
+        prior = [
+            {
+                "node_id": str(cfg.get("previous_clip_node_id") or ""),
+                "shot_index": int(
+                    cfg.get("previous_clip_shot_index") or max(1, shot_index - 1)
+                ),
+                "shot_action": str(cfg.get("previous_clip_action") or ""),
+                "speech_line": str(cfg.get("previous_clip_speech") or ""),
+            }
+        ]
     clause = handoff_clause_for_prompt(
-        collect_prior_clip_prompts(graph, shot_index=shot_index)
+        prior,
+        this_shot_index=shot_index,
+        this_action=action,
+        this_camera=camera,
+        this_speech=str(cfg.get("speech_line") or ""),
+        already_done=already_done,
     )
     joined = "\n".join(parts)
-    if clause and "CONTINUITY CARD (Manager)" not in joined:
+    if clause and "PREVIOUS CLIP HAD" not in joined and "PRIOR CLIP CONTINUITY" not in joined:
         parts.append(clause)
     from jiuwenswarm.server.runtime.designer.user_references import (
         graph_user_references,
@@ -593,7 +667,7 @@ class ClipNodeHandler:
         video_res = str(
             cfg.get("video_resolution") or (aspect or {}).get("video_resolution") or "480P"
         ).strip()
-        # Do not re-send the keyframe as a second identity sheet (causes pastor clones).
+        # Do not re-send the keyframe as a second identity sheet (avoids face clones).
         ff_key = str(first_frame.resolve()) if first_frame is not None else ""
         extra_refs = [
             str(path)
@@ -614,7 +688,7 @@ class ClipNodeHandler:
         from jiuwenswarm.server.runtime.designer.audio_locks import resolve_video_audio_request
 
         meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
-        want_audio, model_override = resolve_video_audio_request(cfg, meta)
+        want_audio, _model_override = resolve_video_audio_request(cfg, meta)
         try:
             result = await generate_clip_video(
                 prompt,
@@ -625,7 +699,7 @@ class ClipNodeHandler:
                 size=video_size,
                 resolution=video_res,
                 audio=True if want_audio else False,
-                model=model_override,
+                model=None,
             )
             path = Path(str(result["video_path"]))
             message = f"clip {shot_index} generated" + (" (with audio)" if want_audio else "")

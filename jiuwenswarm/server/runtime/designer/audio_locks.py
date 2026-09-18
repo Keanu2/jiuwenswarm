@@ -8,7 +8,38 @@ import re
 from typing import Any
 
 
-_WAN3_AUDIO_MODEL = "wan3.0-video"
+def configured_video_gen_model() -> str:
+    """User-configured video model only — never invent a fallback model id."""
+    try:
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
+            _get_model_config,
+        )
+
+        mc = _get_model_config(get_config() or {}, "video_gen")
+        name = str(mc.get("model_name") or mc.get("model") or "").strip()
+        if name:
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    return (os.environ.get("VIDEO_GEN_MODEL_NAME") or "").strip()
+
+
+def configured_image_gen_model() -> str:
+    """User-configured image model only — never invent a fallback model id."""
+    try:
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
+            _get_model_config,
+        )
+
+        mc = _get_model_config(get_config() or {}, "image_gen")
+        name = str(mc.get("model_name") or mc.get("model") or "").strip()
+        if name:
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    return (os.environ.get("IMAGE_GEN_MODEL_NAME") or "").strip()
 
 
 def infer_language_lock(prompt: str, *, hint: str | None = None) -> str:
@@ -327,6 +358,9 @@ def resolve_audio_intent_flags(meta: dict[str, Any] | None, cfg: dict[str, Any] 
     clip_embedded = bool(
         cfg.get("clip_embedded_audio")
         or routing.get("clip_embedded")
+        or meta.get("prefer_clip_native_audio")
+        or cfg.get("prefer_clip_native_audio")
+        # Legacy keys from older graphs.
         or meta.get("prefer_wan3_clip_audio")
         or cfg.get("prefer_wan3_clip_audio")
     )
@@ -355,22 +389,34 @@ def should_request_video_audio(cfg: dict[str, Any] | None, meta: dict[str, Any] 
     if flags["clip_embedded"]:
         return True
     cfg = cfg if isinstance(cfg, dict) else {}
-    if cfg.get("prefer_wan3_clip_audio") or cfg.get("video_audio"):
+    if cfg.get("prefer_clip_native_audio") or cfg.get("prefer_wan3_clip_audio") or cfg.get("video_audio"):
         return True
     meta = meta if isinstance(meta, dict) else {}
-    return bool(meta.get("prefer_wan3_clip_audio") or meta.get("video_audio"))
+    return bool(
+        meta.get("prefer_clip_native_audio")
+        or meta.get("prefer_wan3_clip_audio")
+        or meta.get("video_audio")
+    )
 
 
-def video_model_supports_native_audio(model: str) -> bool:
-    return "wan3" in (model or "").strip().lower()
+def video_model_supports_native_audio(model: str | None = None) -> bool:
+    """Whether the *configured* video model can synthesize native audio.
 
-
-def wan3_audio_model_name() -> str:
-    return (
-        os.environ.get("WAN3_AUDIO_MODEL")
-        or os.environ.get("VIDEO_GEN_WAN3_MODEL")
-        or _WAN3_AUDIO_MODEL
-    ).strip() or _WAN3_AUDIO_MODEL
+    Capability gate only — never switches models. Known native-audio families
+    (e.g. wan3.*) return True; others require VIDEO_GEN_NATIVE_AUDIO=1.
+    """
+    chosen = (model or configured_video_gen_model() or "").strip().lower()
+    if not chosen:
+        return False
+    explicit = (os.environ.get("VIDEO_GEN_NATIVE_AUDIO") or "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    # DashScope Wan 3.x video endpoints support an ``audio`` flag.
+    if "wan3" in chosen:
+        return True
+    return False
 
 
 def resolve_video_audio_request(
@@ -379,14 +425,21 @@ def resolve_video_audio_request(
     *,
     current_model: str | None = None,
 ) -> tuple[bool, str | None]:
-    """Return (audio_flag, model_override). Override to wan3 when audio needed but model lacks it."""
+    """Return (audio_flag, model_override).
+
+    Uses the user-configured video model only. Never overrides to another model.
+    If speech/BGM is wanted but the configured model cannot do native audio,
+    returns (False, None) so the clip stays silent rather than swapping models.
+    """
     want = should_request_video_audio(cfg, meta)
     if not want:
         return False, None
-    model = (current_model or os.environ.get("VIDEO_GEN_MODEL_NAME") or "wan2.6-t2v").strip()
+    model = (current_model or configured_video_gen_model() or "").strip()
+    if not model:
+        return False, None
     if video_model_supports_native_audio(model):
         return True, None
-    return True, wan3_audio_model_name()
+    return False, None
 
 
 def stamp_audio_fields_on_clip_config(
@@ -445,8 +498,9 @@ def stamp_audio_fields_on_clip_config(
         and not bool((meta.get("audio_routing") or {}).get("can_music"))
     ):
         cfg["clip_embedded_audio"] = True
-        cfg["prefer_wan3_clip_audio"] = True
-        cfg["video_audio"] = True
+        cfg["prefer_clip_native_audio"] = True
+        # Request native audio only when the configured video model supports it.
+        cfg["video_audio"] = bool(video_model_supports_native_audio())
     block = audio_lock_prompt_block(
         language_lock=cfg["language_lock"],
         speech_by_character=by_char,

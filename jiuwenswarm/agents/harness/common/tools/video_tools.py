@@ -848,7 +848,9 @@ def _build_dashscope_video_call(
     img_url = _as_dashscope_media_url(first_frame)
     extra_refs = [item for item in refs if item != img_url]
     file_url = _as_dashscope_file_url(reference_file)
-    chosen = model.strip() or "wan2.6-t2v"
+    chosen = model.strip() or ""
+    if not chosen:
+        raise ValueError("video model is required (configure models.video_gen)")
     params: dict[str, Any] = {"duration": duration}
     wan3 = _is_wan3_video(chosen)
     # User video/audio is a generic file reference, not a first frame.
@@ -939,8 +941,13 @@ async def _invoke_model_video_generation(
         or mc.get("model_name")
         or mc.get("model")
         or os.getenv("VIDEO_GEN_MODEL_NAME")
-        or "wan2.6-t2v"
+        or ""
     ).strip()
+    if not model:
+        return {
+            "error": "[ERROR]: VIDEO_GEN_MODEL_NAME is not configured. "
+            "Set models.video_gen in Settings — no hard-coded video model fallback."
+        }
     provider = str(
         mc.get("client_provider")
         or mc.get("model_provider")
@@ -1039,7 +1046,12 @@ async def generate_video(
     except Exception:
         logger.debug("Failed to apply video_gen model config from yaml", exc_info=True)
 
-    model = (os.environ.get("VIDEO_GEN_MODEL_NAME") or "wan2.6-t2v").strip()
+    model = (os.environ.get("VIDEO_GEN_MODEL_NAME") or "").strip()
+    if not model:
+        return (
+            "[ERROR]: VIDEO_GEN_MODEL_NAME is not configured. "
+            "Set models.video_gen in Settings — no hard-coded video model fallback."
+        )
     provider = (os.environ.get("VIDEO_GEN_PROVIDER") or "DashScope").strip()
     logger.info(
         "[generate_video] using model: %s, provider: %s, size: %s, duration: %s",

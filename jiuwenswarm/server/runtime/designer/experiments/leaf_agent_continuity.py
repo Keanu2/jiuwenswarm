@@ -75,7 +75,7 @@ def hollywood_leaf_instructions(role: str) -> str:
             shared
             + "ROLE=I2V clip: Image 1 = this shot's keyframe. Motion/camera creativity OK — "
             "but you are LOCKED to Image 1's cast, sex/identity, wardrobe, set, and props. "
-            "If previous_clip_wan_prompt / occupancy.must_appear exist: people who did NOT "
+            "If previous_clip_action / occupancy.must_appear exist: people who did NOT "
             "leave must still be present; do not erase them. "
             "Brand logos/mascots stay on phone/app UI if that is how the keyframe shows them — "
             "FORBIDDEN: invent a free-flying mascot or swap the human hero for another sex. "

@@ -30,6 +30,7 @@ export function isDesignerPreviewGraph(
 export function buildDesignerBootstrapPreviewGraph(prompt = ''): DesignerExecutionGraph {
   const now = Date.now();
   const promptText = prompt.trim();
+  const storyName = promptText.slice(0, 48) || 'Untitled';
   return {
     schema_version: DESIGNER_GRAPH_SCHEMA_VERSION,
     graph_id: DESIGNER_PREVIEW_GRAPH_ID,
@@ -41,7 +42,7 @@ export function buildDesignerBootstrapPreviewGraph(prompt = ''): DesignerExecuti
       {
         id: 'n_brief',
         type: DESIGNER_NODE_TYPE_TEXT,
-        label: 'Text 1',
+        label: `Brief: ${storyName}`,
         config: {
           role: DESIGNER_NODE_TYPE_TEXT,
           pipeline: DESIGNER_NODE_ROLE_BRIEF,
@@ -52,7 +53,7 @@ export function buildDesignerBootstrapPreviewGraph(prompt = ''): DesignerExecuti
       {
         id: 'n_character',
         type: DESIGNER_NODE_TYPE_IMAGE,
-        label: 'Image 1',
+        label: 'Character 1: …',
         config: {
           role: DESIGNER_NODE_TYPE_IMAGE,
           pipeline: DESIGNER_NODE_ROLE_CHARACTER_DESIGN,
@@ -63,7 +64,7 @@ export function buildDesignerBootstrapPreviewGraph(prompt = ''): DesignerExecuti
       {
         id: 'n_scene',
         type: DESIGNER_NODE_TYPE_IMAGE,
-        label: 'Image 2',
+        label: 'Scene 1: Shot 1: …',
         config: {
           role: DESIGNER_NODE_TYPE_IMAGE,
           pipeline: DESIGNER_NODE_ROLE_SCENE,
@@ -74,7 +75,7 @@ export function buildDesignerBootstrapPreviewGraph(prompt = ''): DesignerExecuti
       {
         id: 'n_storyboard',
         type: DESIGNER_NODE_TYPE_TABLE,
-        label: 'Table 1',
+        label: `Story Board: ${storyName}`,
         config: {
           role: DESIGNER_NODE_TYPE_TABLE,
           pipeline: DESIGNER_NODE_ROLE_STORYBOARD,
@@ -85,7 +86,7 @@ export function buildDesignerBootstrapPreviewGraph(prompt = ''): DesignerExecuti
       {
         id: 'n_frame_1',
         type: DESIGNER_NODE_TYPE_IMAGE,
-        label: 'Image 3',
+        label: 'Scene 1: Shot 1: …',
         config: {
           role: DESIGNER_NODE_TYPE_IMAGE,
           pipeline: DESIGNER_NODE_ROLE_FRAME,
@@ -97,7 +98,7 @@ export function buildDesignerBootstrapPreviewGraph(prompt = ''): DesignerExecuti
       {
         id: 'n_clip_1',
         type: DESIGNER_NODE_TYPE_VIDEO,
-        label: 'Video 1',
+        label: 'Scene 1: Clip 1: …',
         config: {
           role: DESIGNER_NODE_TYPE_VIDEO,
           pipeline: DESIGNER_NODE_ROLE_CLIP,
@@ -109,7 +110,7 @@ export function buildDesignerBootstrapPreviewGraph(prompt = ''): DesignerExecuti
       {
         id: 'n_compose',
         type: DESIGNER_NODE_TYPE_VIDEO,
-        label: 'Video 2',
+        label: `Final Composed: ${storyName}`,
         config: {
           role: DESIGNER_NODE_TYPE_VIDEO,
           pipeline: DESIGNER_NODE_ROLE_COMPOSE,

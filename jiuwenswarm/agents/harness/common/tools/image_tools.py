@@ -189,7 +189,7 @@ def _get_image_gen_api_credentials():
         or os.environ.get("API_BASE", "")
         or "https://dashscope.aliyuncs.com/api/v1"
     )
-    m = os.environ.get("IMAGE_GEN_MODEL_NAME") or "wanx-v1"
+    m = os.environ.get("IMAGE_GEN_MODEL_NAME") or ""
     p = os.environ.get("IMAGE_GEN_PROVIDER") or "DashScope"
     return k, b, m, p
 
@@ -441,7 +441,12 @@ async def _invoke_model_image_generation(
     if not api_key or api_key.lower() in {"sk-xxxxxxxxx", "your-api-key"}:
         return {"error": "[ERROR]: IMAGE_GEN_API_KEY or API_KEY is not configured for image generation."}
 
-    model = str(mc.get("model_name") or mc.get("model") or os.getenv("IMAGE_GEN_MODEL_NAME") or "wanx-v1").strip()
+    model = str(mc.get("model_name") or mc.get("model") or os.getenv("IMAGE_GEN_MODEL_NAME") or "").strip()
+    if not model:
+        return {
+            "error": "[ERROR]: IMAGE_GEN_MODEL_NAME is not configured. "
+            "Set models.image_gen in Settings — no hard-coded image model fallback."
+        }
     provider = str(mc.get("client_provider") or mc.get("model_provider")
                    or os.getenv("IMAGE_GEN_PROVIDER") or "DashScope").strip()
     endpoint_profile = str(
