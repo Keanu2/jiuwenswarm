@@ -129,6 +129,8 @@ type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
   shot_index?: number;
   /** Canvas-added by the user (Supervisor onboards as LLM agent when available). */
   user_added?: boolean;
+  /** User dragged the node resize handle; skip content auto-fit. */
+  user_resized?: boolean;
   kind?: string;
 };
 
@@ -160,6 +162,7 @@ export type DesignerNodeConfig =
       materials?: DesignerMediaMaterialSlot[];
       shot_index?: number;
       user_added?: boolean;
+      user_resized?: boolean;
       kind?: string;
     };
 

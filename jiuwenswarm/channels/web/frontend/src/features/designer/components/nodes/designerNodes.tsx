@@ -10,13 +10,12 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Handle, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react';
+import { Handle, NodeResizeControl, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react';
 import { designerAssetPreviewUrl, designerAssetTextUrl } from '../../designerAssetUrl';
 import {
   DESIGNER_MATERIAL_SAVED_EVENT,
   preferredDesignerPreviewRef,
 } from '../../designerMaterials';
-import { parseMarkdownTable, EMPTY_STORYBOARD_TABLE } from '../../designerNodePreview';
 import {
   DESIGNER_NODE_STATUS_COMPLETED,
   DESIGNER_NODE_STATUS_FAILED,
@@ -32,10 +31,15 @@ import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
 import {
+  DESIGNER_DOC_FIT_MIN_BODY,
+  DESIGNER_DOC_FIT_MIN_WIDTH,
+  DESIGNER_NODE_HEADER_HEIGHT,
   contentAspectFromNodeConfig,
+  isDesignerNodeUserResized,
   sizeNodeForContentAspect,
   sizeNodeForDocumentContent,
 } from '../../designerCanvasNodes';
+import { isDesignerPreviewGraph } from '../../designerBootstrapGraph';
 import { isMediaNodeType, supportsNodeToolbar } from '../../mediaNodeConfig';
 import { DesignerActivityPeek } from '../DesignerActivityPeek';
 import { DesignerNodeToolbar } from '../controls/DesignerNodeToolbar';
@@ -93,6 +97,39 @@ function NodeOutputFrame({
         </span>
       ) : null}
     </span>
+  );
+}
+
+function DesignerNodeResizeHandle({ nodeId }: { nodeId: string }) {
+  const { t } = useTranslation();
+  const updateNodeLayoutSize = useDesignerStore((state) => state.updateNodeLayoutSize);
+  const locked = useDesignerStore(
+    (state) => state.bootstrapInProgress || isDesignerPreviewGraph(state.domainGraph),
+  );
+  const handMode = useDesignerUiStore((state) => state.canvasTool === 'hand');
+  const onResizeEnd = useCallback(
+    (_event: unknown, params: { width: number; height: number }) => {
+      updateNodeLayoutSize(nodeId, { width: params.width, height: params.height }, { userResized: true });
+    },
+    [nodeId, updateNodeLayoutSize],
+  );
+  if (locked || handMode) return null;
+  return (
+    <NodeResizeControl
+      position="bottom-right"
+      minWidth={DESIGNER_DOC_FIT_MIN_WIDTH}
+      minHeight={DESIGNER_NODE_HEADER_HEIGHT + DESIGNER_DOC_FIT_MIN_BODY}
+      autoScale={false}
+      className="designer-node__resize nodrag nopan"
+      onResizeEnd={onResizeEnd}
+    >
+      <span
+        className="designer-node__resize-grip"
+        aria-label={t('designer.nodeActions.resize')}
+        title={t('designer.nodeActions.resizeHint')}
+        data-testid="designer-node-resize"
+      />
+    </NodeResizeControl>
   );
 }
 
@@ -170,6 +207,7 @@ function DesignerNodeShell({
       <div className="designer-node__body">{body}</div>
       <Handle type="source" position={Position.Right} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
       <DesignerNodeSuccessorControl nodeId={nodeId} />
+      <DesignerNodeResizeHandle nodeId={nodeId} />
       {toolbar}
     </div>
   );
@@ -234,12 +272,10 @@ function useNodePreviewUri(nodeId: string): string | null {
 
 function DocumentFitBody({
   nodeId,
-  kind,
   contentKey,
   children,
 }: {
   nodeId: string;
-  kind: 'text' | 'table';
   contentKey: string;
   children: ReactNode;
 }) {
@@ -250,22 +286,24 @@ function DocumentFitBody({
     const el = measureRef.current;
     if (!el) return;
     const apply = () => {
+      const node = useDesignerStore.getState().domainGraph?.nodes.find((item) => item.id === nodeId);
+      if (isDesignerNodeUserResized(node?.config as Record<string, unknown> | undefined)) return;
       const width = Math.max(el.scrollWidth, el.offsetWidth);
       const height = Math.max(el.scrollHeight, el.offsetHeight);
       if (width < 8 || height < 8) return;
-      updateNodeLayoutSize(nodeId, sizeNodeForDocumentContent({ width, height }, kind));
+      updateNodeLayoutSize(nodeId, sizeNodeForDocumentContent({ width, height }, 'text'));
     };
     apply();
     if (typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver(apply);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [contentKey, kind, nodeId, updateNodeLayoutSize]);
+  }, [contentKey, nodeId, updateNodeLayoutSize]);
 
   return (
     <div
       ref={measureRef}
-      className={`designer-node__fit-content designer-node__fit-content--${kind}`}
+      className="designer-node__fit-content designer-node__fit-content--text"
       data-testid="designer-node-fit-content"
     >
       {children}
@@ -278,70 +316,12 @@ function TextPreviewBody({ nodeId, nodeType }: { nodeId: string; nodeType: strin
   const text = useDesignerAssetText(uri);
   if (!text) return <PlaceholderBody nodeType={nodeType} />;
   return (
-    <DocumentFitBody nodeId={nodeId} kind="text" contentKey={text}>
+    <DocumentFitBody nodeId={nodeId} contentKey={text}>
       <p className="designer-node__text-preview" data-testid="designer-node-text-preview">
         {text}
       </p>
     </DocumentFitBody>
   );
-}
-
-function TableFrame({
-  table,
-  empty = false,
-}: {
-  table: { headers: string[]; rows: string[][] };
-  empty?: boolean;
-}) {
-  return (
-    <div className="designer-node__table-wrap">
-      <table
-        className="designer-node__table"
-        data-testid="designer-node-table-preview"
-        data-empty={empty ? 'true' : 'false'}
-      >
-        <thead>
-          <tr>
-            {table.headers.map((header, index) => (
-              <th key={`${header}-${index}`}>{header || '\u00a0'}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {table.rows.map((row, rowIndex) => (
-            <tr key={row.join('|') || String(rowIndex)}>
-              {row.map((cell, cellIndex) => (
-                <td key={`${rowIndex}-${cellIndex}`}>{cell || '\u00a0'}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function TablePreviewBody({ nodeId }: { nodeId: string }) {
-  const uri = useNodePreviewUri(nodeId);
-  const text = useDesignerAssetText(uri);
-  const table = text ? parseMarkdownTable(text) : null;
-  if (table && text) {
-    return (
-      <DocumentFitBody nodeId={nodeId} kind="table" contentKey={text}>
-        <TableFrame table={table} />
-      </DocumentFitBody>
-    );
-  }
-  if (text) {
-    return (
-      <DocumentFitBody nodeId={nodeId} kind="text" contentKey={text}>
-        <p className="designer-node__text-preview" data-testid="designer-node-text-preview">
-          {text}
-        </p>
-      </DocumentFitBody>
-    );
-  }
-  return <TableFrame table={EMPTY_STORYBOARD_TABLE} empty />;
 }
 
 export function DesignerTextNode({ id, data, selected }: NodeProps<DesignerFlowNode>) {
@@ -398,7 +378,7 @@ export function DesignerTableNode({ id, data, selected }: NodeProps<DesignerFlow
       selected={selected}
       body={
         <NodeOutputFrame nodeId={id} running={status === DESIGNER_NODE_STATUS_RUNNING}>
-          <TablePreviewBody nodeId={id} />
+          <TextPreviewBody nodeId={id} nodeType={DESIGNER_NODE_TYPE_TABLE} />
         </NodeOutputFrame>
       }
       toolbar={toolbar}
@@ -413,10 +393,11 @@ function useFitMediaNodeSize(nodeId: string, nodeType: string, config: Record<st
       if (nodeType !== DESIGNER_NODE_TYPE_IMAGE && nodeType !== DESIGNER_NODE_TYPE_VIDEO) {
         return;
       }
+      if (isDesignerNodeUserResized(config)) return;
       if (!ratio || !Number.isFinite(ratio) || ratio <= 0) return;
       updateNodeLayoutSize(nodeId, sizeNodeForContentAspect(ratio));
     },
-    [nodeId, nodeType, updateNodeLayoutSize],
+    [config, nodeId, nodeType, updateNodeLayoutSize],
   );
   const hinted = contentAspectFromNodeConfig(config);
   useEffect(() => {

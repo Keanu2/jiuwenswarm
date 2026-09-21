@@ -322,10 +322,115 @@ test('autoLayoutDesignerNodes layers successors to the right and stacks without 
   assert.equal(brief.layout?.x, DESIGNER_LAYOUT_ORIGIN_X);
   assert.equal(brief.layout?.y, DESIGNER_LAYOUT_ORIGIN_Y);
   assert.equal(character.layout?.x, (brief.layout?.x ?? 0) + (brief.layout?.width ?? 0) + DESIGNER_SUCCESSOR_GAP_X);
-  assert.equal(scene.layout?.x, character.layout?.x);
-  assert.equal(scene.layout?.y, (character.layout?.y ?? 0) + (character.layout?.height ?? 0) + DESIGNER_SUCCESSOR_GAP_Y);
-  assert.equal(frame1.layout?.x, (scene.layout?.x ?? 0) + (scene.layout?.width ?? 0) + DESIGNER_SUCCESSOR_GAP_X);
+  assert.equal(scene.layout?.x, (character.layout?.x ?? 0) + (character.layout?.width ?? 0) + DESIGNER_SUCCESSOR_GAP_X);
+  assert.equal(frame1.layout?.x, scene.layout?.x);
+  assert.equal(frame2.layout?.x, scene.layout?.x);
   assert.equal(frame2.layout?.y, (frame1.layout?.y ?? 0) + (frame1.layout?.height ?? 0) + DESIGNER_SUCCESSOR_GAP_Y);
+});
+
+test('autoLayoutDesignerNodes stacks every scene in one column and every clip in one column', () => {
+  const laid = autoLayoutDesignerNodes(
+    [
+      {
+        id: 'n_brief',
+        type: 'text',
+        label: 'Brief',
+        layout: { x: 0, y: 0, width: 280, height: 160 },
+      },
+      {
+        id: 'n_scene_1',
+        type: 'image',
+        label: 'Scene 1',
+        config: { pipeline: 'scene', shot_index: 1, inputs: ['n_brief'] },
+        layout: { x: 400, y: 0, width: 280, height: 160 },
+      },
+      {
+        id: 'n_scene_2',
+        type: 'image',
+        label: 'Scene 2',
+        config: { pipeline: 'scene', shot_index: 2, inputs: ['n_scene_1'] },
+        layout: { x: 800, y: 0, width: 280, height: 160 },
+      },
+      {
+        id: 'n_clip_1',
+        type: 'video',
+        label: 'Clip 1',
+        config: { pipeline: 'clip', shot_index: 1, inputs: ['n_scene_1'] },
+        layout: { x: 1200, y: 0, width: 280, height: 160 },
+      },
+      {
+        id: 'n_clip_2',
+        type: 'video',
+        label: 'Clip 2',
+        config: { pipeline: 'clip', shot_index: 2, inputs: ['n_scene_2'] },
+        layout: { x: 1600, y: 200, width: 280, height: 160 },
+      },
+    ],
+    [
+      { id: 'e_b_s1', source: 'n_brief', target: 'n_scene_1' },
+      { id: 'e_s1_s2', source: 'n_scene_1', target: 'n_scene_2' },
+      { id: 'e_s1_c1', source: 'n_scene_1', target: 'n_clip_1' },
+      { id: 'e_s2_c2', source: 'n_scene_2', target: 'n_clip_2' },
+    ],
+  );
+  const scene1 = laid.find((node) => node.id === 'n_scene_1');
+  const scene2 = laid.find((node) => node.id === 'n_scene_2');
+  const clip1 = laid.find((node) => node.id === 'n_clip_1');
+  const clip2 = laid.find((node) => node.id === 'n_clip_2');
+  assert.ok(scene1 && scene2 && clip1 && clip2);
+  assert.equal(scene1.layout?.x, scene2.layout?.x);
+  assert.equal(clip1.layout?.x, clip2.layout?.x);
+  assert.ok((clip1.layout?.x ?? 0) > (scene1.layout?.x ?? 0));
+  assert.equal(scene2.layout?.y, (scene1.layout?.y ?? 0) + (scene1.layout?.height ?? 0) + DESIGNER_SUCCESSOR_GAP_Y);
+  assert.equal(clip2.layout?.y, (clip1.layout?.y ?? 0) + (clip1.layout?.height ?? 0) + DESIGNER_SUCCESSOR_GAP_Y);
+});
+
+test('autoLayoutDesignerNodes does not put scene frames in the clip column', () => {
+  const laid = autoLayoutDesignerNodes(
+    [
+      {
+        id: 'n_frame_1',
+        type: 'image',
+        label: 'Scene 1: Shot 1: office',
+        config: { role: 'frame', pipeline: 'frame', shot_index: 1 },
+        layout: { x: 0, y: 0, width: 180, height: 320 },
+      },
+      {
+        id: 'n_frame_2',
+        type: 'image',
+        label: 'Scene 2: Shot 1: restaurant',
+        config: { role: 'frame', pipeline: 'frame', shot_index: 2, inputs: ['n_frame_1'] },
+        layout: { x: 400, y: 0, width: 180, height: 320 },
+      },
+      {
+        id: 'n_clip_1',
+        type: 'video',
+        label: 'Scene 1: Clip 1: office',
+        config: { role: 'clip', pipeline: 'clip', shot_index: 1, inputs: ['n_frame_1'] },
+        layout: { x: 800, y: 0, width: 280, height: 160 },
+      },
+      {
+        id: 'n_clip_2',
+        type: 'video',
+        label: 'Scene 2: Clip 1: restaurant',
+        config: { role: 'clip', pipeline: 'clip', shot_index: 2, inputs: ['n_frame_2'] },
+        layout: { x: 1200, y: 200, width: 280, height: 160 },
+      },
+    ],
+    [
+      { id: 'e_f1_f2', source: 'n_frame_1', target: 'n_frame_2' },
+      { id: 'e_f1_c1', source: 'n_frame_1', target: 'n_clip_1' },
+      { id: 'e_f2_c2', source: 'n_frame_2', target: 'n_clip_2' },
+    ],
+  );
+  const frame1 = laid.find((node) => node.id === 'n_frame_1');
+  const frame2 = laid.find((node) => node.id === 'n_frame_2');
+  const clip1 = laid.find((node) => node.id === 'n_clip_1');
+  const clip2 = laid.find((node) => node.id === 'n_clip_2');
+  assert.ok(frame1 && frame2 && clip1 && clip2);
+  assert.equal(frame1.layout?.x, frame2.layout?.x);
+  assert.equal(clip1.layout?.x, clip2.layout?.x);
+  assert.ok((clip1.layout?.x ?? 0) > (frame1.layout?.x ?? 0));
   const boxes = laid.map((node) => ({
     id: node.id,
     x: node.layout?.x ?? 0,

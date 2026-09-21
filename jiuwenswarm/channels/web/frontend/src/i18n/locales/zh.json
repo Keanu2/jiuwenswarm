@@ -177,7 +177,9 @@
       "add": "添加后续节点",
       "addTitle": "连接到此节点",
       "delete": "删除节点",
-      "deleteHint": "删除此节点及其连线。也可选中后按 Delete / Backspace。"
+      "deleteHint": "删除此节点及其连线。也可选中后按 Delete / Backspace。",
+      "resize": "调整大小",
+      "resizeHint": "拖动右下角调整节点大小"
     },
     "edge": {
       "delete": "删除连线",

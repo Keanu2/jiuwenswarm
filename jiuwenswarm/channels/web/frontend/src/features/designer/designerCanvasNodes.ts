@@ -184,6 +184,10 @@ export function sizeNodeForDocumentContent(
   };
 }
 
+export function isDesignerNodeUserResized(config?: Record<string, unknown> | null): boolean {
+  return config?.user_resized === true;
+}
+
 export function isDefaultLandscapeNodeSize(width?: number, height?: number): boolean {
   if (typeof width !== 'number' || typeof height !== 'number' || width <= 0 || height <= 0) {
     return true;
@@ -200,7 +204,12 @@ export function resolvedNodeCanvasSize(node: DesignerGraphNode): { width: number
   const aspect = isMedia
     ? contentAspectFromNodeConfig((node.config ?? {}) as Record<string, unknown>)
     : null;
-  if (isMedia && aspect && isDefaultLandscapeNodeSize(storedWidth, storedHeight)) {
+  if (
+    isMedia &&
+    aspect &&
+    isDefaultLandscapeNodeSize(storedWidth, storedHeight) &&
+    !isDesignerNodeUserResized((node.config ?? {}) as Record<string, unknown>)
+  ) {
     return sizeNodeForContentAspect(aspect);
   }
   return {
@@ -311,16 +320,125 @@ const AUTO_LAYOUT_RANK: Record<string, number> = {
   audio: 13,
 };
 
-function nodeAutoLayoutRank(node: DesignerGraphNode): number {
+function nodeLayoutKey(node: DesignerGraphNode): string {
   const config = (node.config ?? {}) as Record<string, unknown>;
-  const key = String(config.pipeline || config.role || node.type || '');
-  return AUTO_LAYOUT_RANK[key] ?? 50;
+  return String(config.pipeline || config.role || node.type || '');
+}
+
+function nodeAutoLayoutRank(node: DesignerGraphNode): number {
+  return AUTO_LAYOUT_RANK[nodeLayoutKey(node)] ?? 50;
+}
+
+function nodeColumnKind(node: DesignerGraphNode): 'scene' | 'clip' | null {
+  const config = (node.config ?? {}) as Record<string, unknown>;
+  const pipeline = String(config.pipeline ?? '');
+  const role = String(config.role ?? '');
+  const label = String(node.label ?? '');
+  if (pipeline === 'clip' || role === 'clip' || (node.type === 'video' && /clip/i.test(label) && pipeline !== 'compose' && role !== 'compose')) {
+    return 'clip';
+  }
+  if (
+    pipeline === 'scene' ||
+    pipeline === 'frame' ||
+    role === 'scene' ||
+    role === 'frame' ||
+    (node.type === 'image' && /scene/i.test(label) && !/clip/i.test(label))
+  ) {
+    return 'scene';
+  }
+  return null;
+}
+
+function sortAutoLayoutColumn(members: DesignerGraphNode[]): DesignerGraphNode[] {
+  return [...members].sort((left, right) => {
+    const rank = nodeAutoLayoutRank(left) - nodeAutoLayoutRank(right);
+    if (rank !== 0) return rank;
+    const shot = nodeShotIndex(left) - nodeShotIndex(right);
+    if (shot !== 0) return shot;
+    const y = (left.layout?.y ?? 0) - (right.layout?.y ?? 0);
+    if (y !== 0) return y;
+    return left.id.localeCompare(right.id);
+  });
+}
+
+function autoLayoutColumnPlan(
+  nodes: DesignerGraphNode[],
+  layerById: Map<string, number>,
+): DesignerGraphNode[][] {
+  const sceneNodes: DesignerGraphNode[] = [];
+  const clipNodes: DesignerGraphNode[] = [];
+  const mix = new Map<number, DesignerGraphNode[]>();
+  for (const node of nodes) {
+    const kind = nodeColumnKind(node);
+    if (kind === 'scene') {
+      sceneNodes.push(node);
+      continue;
+    }
+    if (kind === 'clip') {
+      clipNodes.push(node);
+      continue;
+    }
+    const layer = layerById.get(node.id) ?? 0;
+    const members = mix.get(layer);
+    if (members) members.push(node);
+    else mix.set(layer, [node]);
+  }
+
+  const sceneAnchor =
+    sceneNodes.length > 0 ? Math.min(...sceneNodes.map((node) => layerById.get(node.id) ?? 0)) : Number.POSITIVE_INFINITY;
+  const clipAnchor =
+    clipNodes.length > 0
+      ? Math.max(
+          sceneNodes.length > 0 ? sceneAnchor + 1 : 0,
+          Math.min(...clipNodes.map((node) => layerById.get(node.id) ?? 0)),
+        )
+      : Number.POSITIVE_INFINITY;
+
+  const columns: DesignerGraphNode[][] = [];
+  let insertedScene = false;
+  let insertedClip = false;
+  const insertScene = () => {
+    if (insertedScene || sceneNodes.length === 0) return;
+    columns.push(sortAutoLayoutColumn(sceneNodes));
+    insertedScene = true;
+  };
+  const insertClip = () => {
+    if (insertedClip || clipNodes.length === 0) return;
+    columns.push(sortAutoLayoutColumn(clipNodes));
+    insertedClip = true;
+  };
+
+  const sceneRank = AUTO_LAYOUT_RANK.scene;
+  const clipRank = AUTO_LAYOUT_RANK.clip;
+  for (const layer of [...mix.keys()].sort((left, right) => left - right)) {
+    let leftover = mix.get(layer) ?? [];
+    if (!insertedScene && sceneAnchor <= layer) {
+      const before = leftover.filter((node) => nodeAutoLayoutRank(node) < sceneRank);
+      leftover = leftover.filter((node) => nodeAutoLayoutRank(node) >= sceneRank);
+      if (before.length > 0) columns.push(sortAutoLayoutColumn(before));
+      insertScene();
+    }
+    if (!insertedClip && clipAnchor <= layer) {
+      const before = leftover.filter((node) => nodeAutoLayoutRank(node) < clipRank);
+      leftover = leftover.filter((node) => nodeAutoLayoutRank(node) >= clipRank);
+      if (before.length > 0) columns.push(sortAutoLayoutColumn(before));
+      insertClip();
+    }
+    if (leftover.length > 0) columns.push(sortAutoLayoutColumn(leftover));
+  }
+  insertScene();
+  insertClip();
+  return columns;
 }
 
 function nodeShotIndex(node: DesignerGraphNode): number {
   const raw = (node.config as Record<string, unknown> | undefined)?.shot_index;
   const value = typeof raw === 'number' ? raw : Number(raw);
-  return Number.isFinite(value) && value > 0 ? value : 0;
+  if (Number.isFinite(value) && value > 0) return value;
+  const fromLabel = String(node.label ?? '').match(/(\d+)\s*$/);
+  if (!fromLabel) return 0;
+  const parsed = Number(fromLabel[1]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function incomingByNode(
@@ -368,7 +486,7 @@ function assignAutoLayoutLayers(
   return layer;
 }
 
-/** Layer nodes left-to-right by connections, stacking each layer tightly without overlap. */
+/** Layer nodes left-to-right by connections; Scene/Frame share one column, Clips the next. */
 export function autoLayoutDesignerNodes(
   nodes: DesignerGraphNode[],
   edges: DesignerGraphEdge[] = [],
@@ -376,25 +494,10 @@ export function autoLayoutDesignerNodes(
   if (nodes.length === 0) return nodes;
   const incoming = incomingByNode(nodes, edges);
   const layerById = assignAutoLayoutLayers(nodes, incoming);
-  const columns = new Map<number, DesignerGraphNode[]>();
-  for (const node of nodes) {
-    const layer = layerById.get(node.id) ?? 0;
-    const members = columns.get(layer);
-    if (members) members.push(node);
-    else columns.set(layer, [node]);
-  }
+  const columns = autoLayoutColumnPlan(nodes, layerById);
   const placed = new Map<string, { x: number; y: number; width: number; height: number }>();
   let cursorX = DESIGNER_LAYOUT_ORIGIN_X;
-  for (const layer of [...columns.keys()].sort((left, right) => left - right)) {
-    const members = [...(columns.get(layer) ?? [])].sort((left, right) => {
-      const rank = nodeAutoLayoutRank(left) - nodeAutoLayoutRank(right);
-      if (rank !== 0) return rank;
-      const shot = nodeShotIndex(left) - nodeShotIndex(right);
-      if (shot !== 0) return shot;
-      const y = (left.layout?.y ?? 0) - (right.layout?.y ?? 0);
-      if (y !== 0) return y;
-      return left.id.localeCompare(right.id);
-    });
+  for (const members of columns) {
     let cursorY = DESIGNER_LAYOUT_ORIGIN_Y;
     let colWidth = 0;
     for (const node of members) {

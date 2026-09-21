@@ -94,7 +94,11 @@ type DesignerStore = {
   removeNodes: (nodeIds: string[]) => void;
   persistReactFlowLayout: (reactFlow: DesignerReactFlowGraph) => void;
   autoLayout: () => void;
-  updateNodeLayoutSize: (nodeId: string, size: { width: number; height: number }) => void;
+  updateNodeLayoutSize: (
+    nodeId: string,
+    size: { width: number; height: number },
+    options?: { userResized?: boolean },
+  ) => void;
   scheduleSave: () => void;
   flushSave: () => Promise<void>;
   reset: () => void;
@@ -468,23 +472,25 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     get().scheduleSave();
   },
 
-  updateNodeLayoutSize: (nodeId, size) => {
+  updateNodeLayoutSize: (nodeId, size, options) => {
     const graph = get().domainGraph;
     if (!graph) return;
     const width = Math.round(size.width);
     const height = Math.round(size.height);
     if (width < 80 || height < 80) return;
+    const lockSize = Boolean(options?.userResized);
     let changed = false;
     const nodes = graph.nodes.map((node) => {
       if (node.id !== nodeId) return node;
       const currentWidth = node.layout?.width;
       const currentHeight = node.layout?.height;
-      if (
+      const alreadyLocked = node.config?.user_resized === true;
+      const sameSize =
         typeof currentWidth === 'number' &&
         typeof currentHeight === 'number' &&
         Math.abs(currentWidth - width) < 4 &&
-        Math.abs(currentHeight - height) < 4
-      ) {
+        Math.abs(currentHeight - height) < 4;
+      if (sameSize && (!lockSize || alreadyLocked)) {
         return node;
       }
       changed = true;
@@ -496,6 +502,7 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
           width,
           height,
         },
+        config: lockSize ? { ...(node.config ?? {}), user_resized: true } : node.config,
       };
     });
     if (!changed) return;
