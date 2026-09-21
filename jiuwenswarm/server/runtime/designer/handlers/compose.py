@@ -21,6 +21,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphNode,
     node_pipeline,
     node_shot_index,
+    video_concat_source_ids,
 )
 from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
 from jiuwenswarm.server.runtime.designer.handlers.common import role_output_text
@@ -121,7 +122,16 @@ def _probe_has_audio(ffmpeg: str, path: Path) -> bool:
     return "Audio:" in text
 
 
+def _has_audio_stream(ffmpeg: str, path: Path) -> bool:
+    return _probe_has_audio(ffmpeg, path)
+
+
 def _try_concat_copy(ffmpeg: str, paths: list[Path], dest: Path) -> bool:
+    audio_flags = [_probe_has_audio(ffmpeg, path) for path in paths]
+    # Mixed audio presence cannot stream-copy; re-encode instead.
+    if any(audio_flags) and not all(audio_flags):
+        return False
+    keep_audio = all(audio_flags)
     handle, list_name = tempfile.mkstemp(prefix="designer_concat_", suffix=".txt")
     os.close(handle)
     list_path = Path(list_name)
@@ -130,37 +140,53 @@ def _try_concat_copy(ffmpeg: str, paths: list[Path], dest: Path) -> bool:
             "\n".join(_concat_file_line(path) for path in paths) + "\n",
             encoding="utf-8",
         )
-        # Prefer keeping in-clip audio (stream copy). Fall back to re-encode audio.
-        attempts: list[list[str]] = [
-            [
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(list_path),
-                "-c",
-                "copy",
-                str(dest),
-            ],
-            [
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(list_path),
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                str(dest),
-            ],
-        ]
+        if keep_audio:
+            attempts: list[list[str]] = [
+                [
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(list_path),
+                    "-c",
+                    "copy",
+                    str(dest),
+                ],
+                [
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(list_path),
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    str(dest),
+                ],
+            ]
+        else:
+            attempts = [
+                [
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(list_path),
+                    "-c:v",
+                    "copy",
+                    "-an",
+                    str(dest),
+                ]
+            ]
         for args in attempts:
             copied = _run_ffmpeg(ffmpeg, args)
             if copied.returncode == 0 and _output_ok(dest):
@@ -312,33 +338,62 @@ def _workspace_clip_videos(run_id: str) -> list[Path]:
     return found
 
 
+def node_has_concat_video(
+    graph: dict,
+    states: dict,
+    node_id: str,
+) -> bool:
+    """True when run state or the canvas node already has a real mp4."""
+    return concat_video_path(graph, states, node_id) is not None
+
+
+def concat_video_path(graph: dict, states: dict, node_id: str) -> Path | None:
+    state = states.get(node_id) if isinstance(states, dict) else None
+    if isinstance(state, dict):
+        path = _video_from_state(state)
+        if path is not None:
+            return path
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id") or "") != node_id:
+            continue
+        path = _video_path_from_ref(node.get("output_ref"))
+        if path is not None:
+            return path
+        for ref in node.get("output_refs") or []:
+            path = _video_path_from_ref(ref)
+            if path is not None:
+                return path
+    return None
+
+
 def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
-    """Collect every shot clip mp4 in storyboard order — all must feed the final film."""
+    """Collect connected clip/video mp4s in wire order for ffmpeg concat."""
     states = (ctx.run or {}).get("node_states") or {}
-    clips = sorted(
-        [node for node in (ctx.graph.get("nodes") or []) if node_pipeline(node) == NODE_ROLE_CLIP],
-        key=node_shot_index,
-    )
-    # Prefer edged clips when present, but never drop other completed clips.
-    pred_ids = {
-        str(e.get("source") or "")
-        for e in (ctx.graph.get("edges") or [])
-        if str(e.get("target") or "") == str(ctx.node_id or "")
+    graph = ctx.graph if isinstance(ctx.graph, dict) else {}
+    by_id = {
+        str(node.get("id") or ""): node
+        for node in (graph.get("nodes") or [])
+        if isinstance(node, dict) and node.get("id")
     }
-    if pred_ids:
-        edged = [n for n in clips if str(n.get("id") or "") in pred_ids]
-        extras = [n for n in clips if str(n.get("id") or "") not in pred_ids]
-        clips = [*edged, *extras] if edged else clips
+    source_ids = video_concat_source_ids(graph, str(ctx.node_id or ""))
+    if source_ids:
+        clips = [by_id[nid] for nid in source_ids if nid in by_id]
+    else:
+        clips = sorted(
+            [
+                node
+                for node in (graph.get("nodes") or [])
+                if node_pipeline(node) == NODE_ROLE_CLIP
+            ],
+            key=node_shot_index,
+        )
 
     paths: list[Path] = []
     missing: list[str] = []
 
     for node in clips:
         node_id = str(node.get("id") or "")
-        state = states.get(node_id) or {}
-        if not isinstance(state, dict):
-            state = {}
-        path = _video_from_state(state, require_completed=True)
+        path = concat_video_path(graph, states if isinstance(states, dict) else {}, node_id)
         if path is None:
             missing.append(node_id or f"shot {node_shot_index(node)}")
             continue
@@ -356,7 +411,7 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
             )
             return disk[: len(clips)]
         raise RuntimeError(
-            "以下视频片段尚未生成，无法成片（全部镜头必须进入成片）："
+            "以下已连接的视频片段还没有文件，无法合并："
             + "、".join(missing)
         )
     return paths
@@ -488,30 +543,44 @@ def mix_compose_soundtrack(
     if duration is None or duration < 0.4:
         return video
 
+    include_music = True
+    include_speech = False
+    if ctx is not None and isinstance(ctx.graph, dict):
+        meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
+        analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+        audio = analysis.get("audio") if isinstance(analysis.get("audio"), dict) else {}
+        routing = meta.get("audio") if isinstance(meta.get("audio"), dict) else {}
+        include_music = bool(
+            audio.get("include_music", routing.get("include_music", True))
+        )
+        include_speech = bool(
+            audio.get("include_speech") or routing.get("include_speech")
+        )
+
     upstream: list[Path] = []
     if ctx is not None:
-        speech = _collect_role_audio_paths(ctx, {"speech"})
-        music = _collect_role_audio_paths(ctx, {"music"})
+        speech = _collect_role_audio_paths(ctx, {"speech"}) if include_speech else []
+        music = _collect_role_audio_paths(ctx, {"music"}) if include_music else []
         upstream = [*speech, *music]
-        if not upstream:
+        if include_music and not music:
             from jiuwenswarm.server.runtime.designer.user_references import (
                 user_reference_audio_path,
             )
 
             user_audio = user_reference_audio_path(ctx.graph)
             if user_audio is not None and user_audio.is_file():
-                upstream = [user_audio]
+                upstream.append(user_audio)
 
     has_embedded = _probe_has_audio(ffmpeg, video)
     if not upstream and has_embedded:
         return video
-
     score: Path | None = None
     if upstream:
         score = _mix_audio_tracks(
             ffmpeg, upstream, dest.parent / f"{dest.stem}_mix", duration
         )
-    if score is None and not has_embedded:
+    if score is None and include_music and not has_embedded:
+        # Only synthesize a bed when the film is silent and music was requested.
         score = _render_cinematic_bgm(
             ffmpeg, dest.parent / f"{dest.stem}_score", duration
         )
@@ -521,7 +590,7 @@ def mix_compose_soundtrack(
     if dest.resolve() == video.resolve():
         dest = video.with_name(f"{video.stem}_bgm{video.suffix}")
     if has_embedded and upstream:
-        if _mux_overlay_audio(ffmpeg, video, score, dest):
+        if _overlay_audio_on_video(ffmpeg, video, score, dest, mix_with_video=True):
             return dest.resolve()
         return video
     if _mux_bgm(ffmpeg, video, score, dest):
@@ -594,6 +663,54 @@ def _render_cinematic_bgm(ffmpeg: str, dest: Path, duration: float) -> Path | No
 
 
 def _mux_bgm(ffmpeg: str, video: Path, audio: Path, dest: Path) -> bool:
+    return _overlay_audio_on_video(ffmpeg, video, audio, dest, mix_with_video=False)
+
+
+def _overlay_audio_on_video(
+    ffmpeg: str,
+    video: Path,
+    audio: Path,
+    dest: Path,
+    *,
+    mix_with_video: bool,
+) -> bool:
+    if mix_with_video:
+        args = [
+            "-y",
+            "-i",
+            str(video.resolve()),
+            "-i",
+            str(audio.resolve()),
+            "-filter_complex",
+            (
+                "[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[va];"
+                "[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.42[ba];"
+                "[va][ba]amix=inputs=2:duration=first:dropout_transition=0,"
+                "loudnorm=I=-16:TP=-1.5:LRA=11[a]"
+            ),
+            "-map",
+            "0:v:0",
+            "-map",
+            "[a]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(dest),
+        ]
+        mixed = _run_ffmpeg(ffmpeg, args)
+        if mixed.returncode == 0 and _output_ok(dest):
+            return True
+        logger.warning(
+            "compose audio overlay mix failed, falling back to replace: %s",
+            (mixed.stderr or mixed.stdout or "")[:800],
+        )
+        dest.unlink(missing_ok=True)
     muxed = _run_ffmpeg(
         ffmpeg,
         [
@@ -626,47 +743,6 @@ def _mux_bgm(ffmpeg: str, video: Path, audio: Path, dest: Path) -> bool:
     return True
 
 
-def _mux_overlay_audio(ffmpeg: str, video: Path, audio: Path, dest: Path) -> bool:
-    """Keep in-clip audio and mix an extra speech/music bed on top."""
-    muxed = _run_ffmpeg(
-        ffmpeg,
-        [
-            "-y",
-            "-i",
-            str(video.resolve()),
-            "-i",
-            str(audio.resolve()),
-            "-filter_complex",
-            (
-                "[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-                "volume=1.0[va];"
-                "[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-                "volume=0.7[oa];"
-                "[va][oa]amix=inputs=2:duration=first:dropout_transition=0[aout]"
-            ),
-            "-map",
-            "0:v:0",
-            "-map",
-            "[aout]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            str(dest),
-        ],
-    )
-    if muxed.returncode != 0 or not _output_ok(dest):
-        logger.warning(
-            "compose overlay audio failed: %s",
-            (muxed.stderr or muxed.stdout or "")[:800],
-        )
-        dest.unlink(missing_ok=True)
-        return False
     return True
 
 
@@ -674,13 +750,21 @@ class ComposeNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         paths: list[Path] = []
         last_exc: Exception | None = None
-        # Wait for every shot clip (scheduler should already gate this; poll in case
-        # state lags after the last clip completes, or ffmpeg was spawned early).
-        expected_clips = [
-            n
+        # Wait for connected concat sources (scheduler should already gate this).
+        source_ids = video_concat_source_ids(ctx.graph, str(ctx.node_id or ""))
+        by_id = {
+            str(n.get("id") or ""): n
             for n in (ctx.graph.get("nodes") or [])
-            if node_pipeline(n) == NODE_ROLE_CLIP
-        ]
+            if isinstance(n, dict) and n.get("id")
+        }
+        if source_ids:
+            expected_clips = [by_id[nid] for nid in source_ids if nid in by_id]
+        else:
+            expected_clips = [
+                n
+                for n in (ctx.graph.get("nodes") or [])
+                if node_pipeline(n) == NODE_ROLE_CLIP
+            ]
         # Longer wait: I2V can finish after the compose agent already woke up.
         max_attempts = max(40, len(expected_clips) * 12)
         for attempt in range(max_attempts):

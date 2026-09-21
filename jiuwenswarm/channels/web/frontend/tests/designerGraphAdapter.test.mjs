@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   fromReactFlowGraph,
+  resolvedNodeCanvasSize,
   toReactFlowGraph,
 } from '../node_modules/.cache/designer-graph-adapter/designerGraphAdapter.mjs';
 
@@ -52,4 +53,36 @@ test('fromReactFlowGraph preserves domain semantics while updating layout', () =
     merged.edges.find((edge) => edge.id === 'e_character_storyboard'),
     undefined,
   );
+});
+
+test('resolvedNodeCanvasSize turns default landscape media nodes portrait', () => {
+  const portrait = resolvedNodeCanvasSize({
+    id: 'n_clip_1',
+    type: 'video',
+    label: 'Clip 1',
+    config: { aspect_lock: { ratio: '9:16', video_size: '1080*1920' } },
+    layout: { x: 0, y: 0, width: 280, height: 160 },
+    output_ref: null,
+  });
+  assert.ok(portrait.height > portrait.width);
+
+  const landscape = resolvedNodeCanvasSize({
+    id: 'n_clip_2',
+    type: 'video',
+    label: 'Clip 2',
+    config: { aspect_lock: { ratio: '16:9' } },
+    layout: { x: 0, y: 0, width: 280, height: 160 },
+    output_ref: null,
+  });
+  assert.ok(landscape.width > landscape.height);
+
+  const text = resolvedNodeCanvasSize({
+    id: 'n_brief',
+    type: 'text',
+    label: 'Brief',
+    config: { aspect_lock: { ratio: '9:16' } },
+    layout: { x: 0, y: 0, width: 280, height: 160 },
+    output_ref: null,
+  });
+  assert.deepEqual(text, { width: 280, height: 160 });
 });

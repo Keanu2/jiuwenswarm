@@ -69,6 +69,12 @@ def _tools_for_node(node: DesignerGraphNode) -> list[str]:
     if ntype == "image":
         return ["call_model", "read_upstream", "call_image_model"]
     if ntype == "video":
+        inputs = [str(x) for x in (cfg.get("inputs") or []) if str(x)]
+        if any(
+            item.startswith("n_clip") or item.startswith("n_video") or item in {"n_compose", "n_final"}
+            for item in inputs
+        ):
+            return list(_ROLE_TOOLS["compose"])
         return ["call_model", "read_upstream", "call_video_model"]
     if "speech" in role or "tts" in role:
         return list(_ROLE_TOOLS["speech"])
@@ -256,6 +262,7 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
     from jiuwenswarm.server.runtime.designer.smart_graph import (
         ensure_combined_cast_reach_compose,
         prune_non_contributing_nodes,
+        prune_shot_nodes_beyond_analysis,
     )
 
     notes: list[str] = []
@@ -358,6 +365,8 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
                     notes.append(f"cohere_inputs:{nid}")
                 n["config"] = cfg
 
+    extra_shots = prune_shot_nodes_beyond_analysis(graph)
+    notes.extend([f"pruned_extra_shot:{x}" for x in extra_shots])
     pruned = prune_non_contributing_nodes(graph)
     notes.extend([f"pruned:{x}" for x in pruned])
     notes.extend(ensure_combined_cast_reach_compose(graph))
@@ -949,8 +958,10 @@ class SupervisorAgent:
 
     def onboard_user_added_nodes(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
         """When the user adds canvas nodes: promote to LLM agents (if available),
-        decide tools, try to wire contribution into the final clip/compose path,
-        and let Manager lock-check media prompts. Never deletes user_added orphans.
+        decide tools, and let Manager lock-check media prompts.
+
+        Never auto-wires into clip/compose — the user's successor ``+`` / drawn
+        edge is the only topology. Never deletes user_added orphans.
         """
         from jiuwenswarm.server.runtime.designer.model_tools import llm_available
         from jiuwenswarm.server.runtime.designer.smart_graph import (
@@ -960,26 +971,6 @@ class SupervisorAgent:
         use_agents = bool(llm_available())
         notes: list[str] = []
         onboarded: list[str] = []
-        ids = {
-            str(n.get("id") or "")
-            for n in (graph.get("nodes") or [])
-            if isinstance(n, dict) and n.get("id")
-        }
-        compose_id = next(
-            (i for i in ("n_compose", "n_final") if i in ids),
-            next(
-                (
-                    str(n.get("id") or "")
-                    for n in (graph.get("nodes") or [])
-                    if isinstance(n, dict) and _role_key(n) == "compose"
-                ),
-                "",
-            ),
-        )
-        edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
-        edge_pairs = {
-            (str(e.get("source") or ""), str(e.get("target") or "")) for e in edges
-        }
 
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
@@ -1006,74 +997,14 @@ class SupervisorAgent:
                     cfg["supervisor_task"] = (
                         f"User-added {role or node.get('type') or 'node'} agent. "
                         f"Use tools {', '.join(tools)}. "
-                        "Respect film-wide aspect_lock, style_lock, spatial_lock, and "
-                        "costume/identity locks. Contribute usable media toward the "
-                        "final compose/clip pipeline."
+                        "Produce only this node's output. Do not add extra image or "
+                        "video nodes, and do not rewire into clip/compose."
                     )[:800]
                 notes.append(f"agent:{nid}")
             else:
                 cfg["delegate"] = "handler"
                 notes.append(f"handler_no_llm:{nid}")
-
-            # Soft contribution wiring for media that can feed compose directly.
-            if compose_id and role in {
-                "clip",
-                "speech",
-                "music",
-                "audio",
-                "video",
-                "compose",
-            }:
-                key = (nid, compose_id)
-                if key not in edge_pairs and nid != compose_id:
-                    edges.append(
-                        {
-                            "id": f"e_{nid}_{compose_id}",
-                            "source": nid,
-                            "target": compose_id,
-                            "kind": "data",
-                        }
-                    )
-                    edge_pairs.add(key)
-                    notes.append(f"wire_compose:{nid}")
-            elif compose_id and role in {
-                "frame",
-                "keyframe",
-                "image",
-                "character",
-                "character_design",
-                "scene",
-            }:
-                # Prefer wire into an existing clip that lacks this upstream.
-                clip_targets = [
-                    str(n.get("id") or "")
-                    for n in (graph.get("nodes") or [])
-                    if isinstance(n, dict)
-                    and _role_key(n) in {"clip", "video"}
-                    and str(n.get("id") or "")
-                ]
-                wired = False
-                for clip_id in clip_targets:
-                    key = (nid, clip_id)
-                    if key not in edge_pairs:
-                        edges.append(
-                            {
-                                "id": f"e_{nid}_{clip_id}",
-                                "source": nid,
-                                "target": clip_id,
-                                "kind": "data",
-                            }
-                        )
-                        edge_pairs.add(key)
-                        notes.append(f"wire_clip:{nid}->{clip_id}")
-                        wired = True
-                        break
-                if not wired:
-                    notes.append(f"needs_edge:{nid}")
-
             node["config"] = cfg
-
-        graph["edges"] = edges
 
         # Manager lock-gates every user-added media leaf.
         manager = ManagerAgent()
@@ -1698,7 +1629,7 @@ class SupervisorAgent:
                             "characters": characters,
                             "shots": shots,
                             "spatial_lock": meta.get("spatial_lock"),
-                            "rule": "Multi-shot storyboard required when multiple beats exist.",
+                            "rule": "Keep shot count EQUAL to the provided shots list. Duration is timeline, not a license to add rows.",
                         },
                         ensure_ascii=False,
                     ),
@@ -1756,6 +1687,11 @@ class SupervisorAgent:
                             shot["speech_line"] = str(shot.get("speech_line"))[:500]
                         cleaned.append(shot)
                     if cleaned:
+                        locked = len(shots) or int(analysis.get("target_shot_count") or 0)
+                        if locked >= 1 and len(cleaned) > locked:
+                            cleaned = cleaned[:locked]
+                            for i, shot in enumerate(cleaned, start=1):
+                                shot["shot_index"] = i
                         shots = cleaned
                         source = "llm"
                         analysis["source"] = "llm"
@@ -1956,10 +1892,11 @@ class SupervisorAgent:
                                 "Decide shot count wisely: prefer fewer; merge same-cast "
                                 "continuous motion into one beat. Explicit N-shot / "
                                 "target_shot_count from the user is a hard ceiling. Soft prefer "
-                                "≤8 shots. All solo cast cards before keyframes; compose "
-                                "first KF per setting_id; edit_prior only within the same "
-                                "setting_id. Per-shot on_screen is authoritative for who "
-                                "appears — not every solo in every frame."
+                                "≤8 shots. Do not invent extra keyframes or coverage views as "
+                                "new nodes after the canvas is frozen. All solo cast cards "
+                                "before keyframes; compose first KF per setting_id; edit_prior "
+                                "only within the same setting_id. Per-shot on_screen is "
+                                "authoritative for who appears — not every solo in every frame."
                             ),
                         },
                         ensure_ascii=False,
@@ -2000,6 +1937,11 @@ class SupervisorAgent:
                         shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
                     cleaned.append(shot)
                 if cleaned:
+                    locked = len(shots)
+                    if locked >= 1 and len(cleaned) > locked:
+                        cleaned = cleaned[:locked]
+                        for i, shot in enumerate(cleaned, start=1):
+                            shot["shot_index"] = i
                     shots = cleaned
                     source = "llm"
                     analysis["source"] = "llm"
@@ -2148,7 +2090,7 @@ class SupervisorAgent:
                 rmeta[key] = meta.get(key)
         rmeta["script_analysis"] = analysis
         rmeta["supervisor_owns_graph"] = True
-        rmeta["freeze_shot_topology"] = False
+        rmeta["freeze_shot_topology"] = True
         rmeta["lean_pipeline"] = False
         rmeta["graph_designed_by_supervisor"] = True
         rmeta["supervisor_graph_ack"] = {
@@ -3347,12 +3289,12 @@ class ManagerAgent:
                     notes.append("stamp_image_size_aspect")
                     changed = True
             if role == "clip":
-                vsize = str(aspect.get("video_size") or cfg.get("video_size") or "854*480").strip()
-                vres = str(aspect.get("video_resolution") or cfg.get("video_resolution") or "480P").strip()
-                if str(cfg.get("video_size") or "") != vsize or str(cfg.get("video_resolution") or "") != vres:
+                vsize = str(aspect.get("video_size") or cfg.get("video_size") or "").strip()
+                vres = str(aspect.get("video_resolution") or cfg.get("video_resolution") or "").strip()
+                if vsize and (str(cfg.get("video_size") or "") != vsize or str(cfg.get("video_resolution") or "") != vres):
                     cfg["video_size"] = vsize
                     cfg["video_resolution"] = vres
-                    notes.append("stamp_video_aspect_480p")
+                    notes.append("stamp_video_aspect")
                     changed = True
             ratio = str(aspect.get("ratio") or "").strip()
             rule = str(aspect.get("rule") or "").strip()
@@ -3707,7 +3649,10 @@ class ManagerAgent:
     def ensure_agents_and_prune(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
         """For every node: kind=agent, tools via _tools_for_node, delegate=agent when LLM up."""
         from jiuwenswarm.server.runtime.designer.model_tools import llm_available
-        from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
+        from jiuwenswarm.server.runtime.designer.smart_graph import (
+            prune_non_contributing_nodes,
+            prune_shot_nodes_beyond_analysis,
+        )
 
         use_agents = bool(llm_available())
         notes: list[str] = []
@@ -3735,6 +3680,8 @@ class ManagerAgent:
                 cfg["delegate"] = "handler"
             node["config"] = cfg
 
+        extra_shots = prune_shot_nodes_beyond_analysis(graph)
+        notes.extend([f"pruned_extra_shot:{x}" for x in extra_shots])
         pruned = prune_non_contributing_nodes(graph)
         notes.extend([f"pruned:{x}" for x in pruned])
 
@@ -3750,6 +3697,9 @@ class ManagerAgent:
                     continue
                 nid = str(node.get("id") or "")
                 role = _role_key(node)
+                cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+                if cfg.get("user_added"):
+                    continue
                 if role in {"clip", "speech", "music"} or nid.startswith("n_clip"):
                     key = (nid, "n_compose")
                     if key not in existing and nid != "n_compose":
@@ -3795,7 +3745,7 @@ class ManagerAgent:
             find_non_contributing_node_ids,
         )
 
-        # Re-onboard + soft-wire before auditing so Run sees latest Supervisor decisions.
+        # Re-onboard (tools/agents only; no auto-wire) before auditing.
         try:
             SupervisorAgent().onboard_user_added_nodes(graph)
         except Exception:  # noqa: BLE001

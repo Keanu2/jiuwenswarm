@@ -59,7 +59,7 @@ function isSeparator(cells: string[]): boolean {
 
 export function parseMarkdownTable(
   text: string,
-  maxRows = 8,
+  maxRows = Number.POSITIVE_INFINITY,
 ): MarkdownTablePreview | null {
   const rows: string[][] = [];
   for (const line of (text || '').split(/\r?\n/)) {
@@ -68,7 +68,7 @@ export function parseMarkdownTable(
     if (!cells.some(Boolean)) continue;
     if (isSeparator(cells)) continue;
     rows.push(cells);
-    if (rows.length >= maxRows + 1) break;
+    if (Number.isFinite(maxRows) && rows.length >= maxRows + 1) break;
   }
   if (rows.length < 2) return null;
   const width = Math.max(...rows.map((row) => row.length));

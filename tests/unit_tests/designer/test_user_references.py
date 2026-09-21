@@ -300,6 +300,7 @@ async def test_clip_passes_user_video_as_file_not_first_frame(
         reference_file: str | None = None,
         duration: int = 5,
         audio: bool | None = None,
+        **kwargs,
     ) -> dict[str, str]:
         seen["first_frame"] = first_frame
         seen["reference_file"] = reference_file
@@ -365,4 +366,27 @@ async def test_music_handler_copies_user_audio(
     produced = next(path for path in workspace.iterdir() if path.suffix.lower() == ".mp3")
     assert produced.read_bytes() == b"user-audio-bytes"
     assert "user audio" in result.message
+
+
+def test_analysis_prompt_reference_roster_is_not_a_shot() -> None:
+    from jiuwenswarm.server.runtime.designer.script_analysis import heuristic_analysis
+    from jiuwenswarm.server.runtime.designer.smart_graph import default_spatial_lock
+
+    prompt = analysis_prompt_with_references(
+        "Generate a 10-second video: a troop charges the Demon King's castle.",
+        [{"filename": "castle-1.png", "kind": "image"}],
+    )
+    analysis = heuristic_analysis(prompt)
+    actions = " ".join(str(shot.get("action") or "") for shot in analysis["shots"])
+    assert "User attached" not in actions
+    assert "REFERENCE_MEDIA" not in actions
+    names = " ".join(str(item.get("name") or "") for item in analysis["characters"]).lower()
+    assert "troop" in names
+    scenes = " ".join(str(item.get("name") or "") for item in analysis["scenes"]).lower()
+    assert "castle" in scenes
+    lock = default_spatial_lock({"name": "Mountain pass", "description": "dusk ridges"})
+    blob = " ".join(lock.values()).lower()
+    assert "pulpit" not in blob
+    assert "pew" not in blob
+    assert "mountain pass" in blob
 

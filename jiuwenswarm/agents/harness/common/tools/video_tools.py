@@ -832,6 +832,14 @@ def _switch_wan_task(model: str, task: str) -> str:
     return text
 
 
+def _video_frame_fields(size: str | None) -> tuple[str | None, str | None]:
+    """Return DashScope ``size`` + matching ``ratio`` from the requested frame."""
+    normalized = _normalize_video_size(size)
+    if not normalized:
+        return None, None
+    return normalized, _size_to_ratio(normalized)
+
+
 def _build_dashscope_video_call(
     model: str,
     *,
@@ -853,6 +861,9 @@ def _build_dashscope_video_call(
         raise ValueError("video model is required (configure models.video_gen)")
     params: dict[str, Any] = {"duration": duration}
     wan3 = _is_wan3_video(chosen)
+    frame_size, frame_ratio = _video_frame_fields(size)
+    default_size = frame_size or "1280*720"
+    default_ratio = frame_ratio or _size_to_ratio(default_size)
     # User video/audio is a generic file reference, not a first frame.
     # wan2.6 r2v only accepts image URLs, so a file must not kick I2V off.
     use_reference_mode = bool(
@@ -872,18 +883,21 @@ def _build_dashscope_video_call(
             params["model"] = chosen
             params["media"] = media
             # openjiuwen rejects resolution unless img_url is set; wan3 media is not I2V.
-            params["size"] = _normalize_video_size(size) or "1280*720"
-            params["ratio"] = "16:9"
+            params["size"] = default_size
+            params["ratio"] = default_ratio
             params["audio"] = want_audio
             return params
         if img_url:
             params["model"] = chosen
             params["img_url"] = img_url
+            params["size"] = default_size
+            params["ratio"] = default_ratio
             params["resolution"] = (resolution or "720P").strip() or "720P"
             params["audio"] = want_audio
             return params
         params["model"] = chosen
-        params["size"] = _normalize_video_size(size) or "1280*720"
+        params["size"] = default_size
+        params["ratio"] = default_ratio
         params["audio"] = want_audio
         return params
 
@@ -894,7 +908,8 @@ def _build_dashscope_video_call(
         chosen = _switch_wan_task(chosen, "r2v")
         params["model"] = chosen
         params["reference_urls"] = all_refs[:5]
-        params["size"] = _normalize_video_size(size) or "1280*720"
+        params["size"] = default_size
+        params["ratio"] = default_ratio
         if any(token in chosen for token in ("2.2", "2.5", "2.6", "2.7")):
             params["shot_type"] = "multi"
         return params
@@ -902,19 +917,22 @@ def _build_dashscope_video_call(
         chosen = _switch_wan_task(chosen, "i2v")
         params["model"] = chosen
         params["img_url"] = img_url
+        params["size"] = default_size
+        params["ratio"] = default_ratio
         params["resolution"] = (resolution or "720P").strip() or "720P"
         if any(token in chosen for token in ("2.2", "2.5", "2.6", "2.7")):
             params["shot_type"] = "single"
         return params
     params["model"] = chosen
-    params["size"] = _normalize_video_size(size) or "1280*720"
+    params["size"] = default_size
+    params["ratio"] = default_ratio
     return params
 
 
 async def _invoke_model_video_generation(
     prompt: str,
     *,
-    size: str = "1280*720",
+    size: str | None = None,
     duration: int = 5,
     resolution: str | None = None,
     first_frame: str | None = None,
@@ -935,6 +953,9 @@ async def _invoke_model_video_generation(
     ).strip().strip("'\"")
     if not api_key:
         return {"error": "[ERROR]: VIDEO_GEN_API_KEY is not configured for video generation."}
+
+    size = str(size).strip() if size else None
+    resolution = str(resolution).strip() if resolution else None
 
     model = str(
         model

@@ -51,7 +51,7 @@ export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorCo
   if (canvasTool === 'hand') return null;
 
   return (
-    <>
+    <div className="designer-node__successor-wrap nodrag nopan">
       <button
         type="button"
         className={`designer-node__successor nodrag nopan${menuOpen ? ' is-open' : ''}`}
@@ -61,6 +61,7 @@ export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorCo
         data-testid="designer-node-add"
         onClick={onToggle}
         onMouseDown={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
       >
         <Plus size={14} strokeWidth={2.25} aria-hidden />
       </button>
@@ -70,6 +71,7 @@ export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorCo
           data-testid="designer-node-add-menu"
           onClick={(event) => event.stopPropagation()}
           onMouseDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
         >
           <DesignerAddNodeMenu
             title={t('designer.nodeActions.addTitle')}
@@ -78,6 +80,6 @@ export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorCo
           />
         </div>
       ) : null}
-    </>
+    </div>
   );
 }

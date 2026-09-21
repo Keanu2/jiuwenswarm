@@ -2,7 +2,7 @@
 """Film-wide production lock bible — stamped into brief/storyboard and leaf prompts.
 
 Domain-agnostic: style, landmarks, lighting, crowd, speech, axis, aspect.
-Leaves MUST read this before calling Qwen/Wan. Manager/Supervisor may rewrite
+Leaves MUST read this before calling image/video models. Manager/Supervisor may rewrite
 generate.prompt to stay faithful to brief + storyboard + user prompt.
 """
 

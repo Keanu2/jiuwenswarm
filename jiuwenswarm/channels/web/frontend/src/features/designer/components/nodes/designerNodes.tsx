@@ -8,7 +8,7 @@ import {
   Video,
   type LucideIcon,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, type MouseEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Handle, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react';
 import { designerAssetPreviewUrl, designerAssetTextUrl } from '../../designerAssetUrl';
@@ -31,6 +31,11 @@ import type { DesignerReactFlowNode } from '../../designerGraphAdapter';
 import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
+import {
+  contentAspectFromNodeConfig,
+  sizeNodeForContentAspect,
+  sizeNodeForDocumentContent,
+} from '../../designerCanvasNodes';
 import { isMediaNodeType, supportsNodeToolbar } from '../../mediaNodeConfig';
 import { DesignerActivityPeek } from '../DesignerActivityPeek';
 import { DesignerNodeToolbar } from '../controls/DesignerNodeToolbar';
@@ -227,14 +232,57 @@ function useNodePreviewUri(nodeId: string): string | null {
   return outputUri || domainOutputUri;
 }
 
+function DocumentFitBody({
+  nodeId,
+  kind,
+  contentKey,
+  children,
+}: {
+  nodeId: string;
+  kind: 'text' | 'table';
+  contentKey: string;
+  children: ReactNode;
+}) {
+  const measureRef = useRef<HTMLDivElement>(null);
+  const updateNodeLayoutSize = useDesignerStore((state) => state.updateNodeLayoutSize);
+
+  useLayoutEffect(() => {
+    const el = measureRef.current;
+    if (!el) return;
+    const apply = () => {
+      const width = Math.max(el.scrollWidth, el.offsetWidth);
+      const height = Math.max(el.scrollHeight, el.offsetHeight);
+      if (width < 8 || height < 8) return;
+      updateNodeLayoutSize(nodeId, sizeNodeForDocumentContent({ width, height }, kind));
+    };
+    apply();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(apply);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [contentKey, kind, nodeId, updateNodeLayoutSize]);
+
+  return (
+    <div
+      ref={measureRef}
+      className={`designer-node__fit-content designer-node__fit-content--${kind}`}
+      data-testid="designer-node-fit-content"
+    >
+      {children}
+    </div>
+  );
+}
+
 function TextPreviewBody({ nodeId, nodeType }: { nodeId: string; nodeType: string }) {
   const uri = useNodePreviewUri(nodeId);
   const text = useDesignerAssetText(uri);
   if (!text) return <PlaceholderBody nodeType={nodeType} />;
   return (
-    <p className="designer-node__text-preview" data-testid="designer-node-text-preview">
-      {text}
-    </p>
+    <DocumentFitBody nodeId={nodeId} kind="text" contentKey={text}>
+      <p className="designer-node__text-preview" data-testid="designer-node-text-preview">
+        {text}
+      </p>
+    </DocumentFitBody>
   );
 }
 
@@ -277,14 +325,20 @@ function TablePreviewBody({ nodeId }: { nodeId: string }) {
   const uri = useNodePreviewUri(nodeId);
   const text = useDesignerAssetText(uri);
   const table = text ? parseMarkdownTable(text) : null;
-  if (table) {
-    return <TableFrame table={table} />;
+  if (table && text) {
+    return (
+      <DocumentFitBody nodeId={nodeId} kind="table" contentKey={text}>
+        <TableFrame table={table} />
+      </DocumentFitBody>
+    );
   }
   if (text) {
     return (
-      <p className="designer-node__text-preview" data-testid="designer-node-text-preview">
-        {text}
-      </p>
+      <DocumentFitBody nodeId={nodeId} kind="text" contentKey={text}>
+        <p className="designer-node__text-preview" data-testid="designer-node-text-preview">
+          {text}
+        </p>
+      </DocumentFitBody>
     );
   }
   return <TableFrame table={EMPTY_STORYBOARD_TABLE} empty />;
@@ -352,6 +406,25 @@ export function DesignerTableNode({ id, data, selected }: NodeProps<DesignerFlow
   );
 }
 
+function useFitMediaNodeSize(nodeId: string, nodeType: string, config: Record<string, unknown>) {
+  const updateNodeLayoutSize = useDesignerStore((state) => state.updateNodeLayoutSize);
+  const applyRatio = useCallback(
+    (ratio: number | null | undefined) => {
+      if (nodeType !== DESIGNER_NODE_TYPE_IMAGE && nodeType !== DESIGNER_NODE_TYPE_VIDEO) {
+        return;
+      }
+      if (!ratio || !Number.isFinite(ratio) || ratio <= 0) return;
+      updateNodeLayoutSize(nodeId, sizeNodeForContentAspect(ratio));
+    },
+    [nodeId, nodeType, updateNodeLayoutSize],
+  );
+  const hinted = contentAspectFromNodeConfig(config);
+  useEffect(() => {
+    applyRatio(hinted);
+  }, [applyRatio, hinted]);
+  return applyRatio;
+}
+
 export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlowNode>) {
   const nodeData = data as DesignerNodeData;
   const nodeType = nodeData.nodeType;
@@ -359,6 +432,7 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
   const previewUri = useNodePreviewUri(id);
   const previewSrc = designerAssetPreviewUrl(previewUri) || previewUri;
   const hasPreview = Boolean(previewSrc);
+  const applyRatio = useFitMediaNodeSize(id, nodeType, nodeData.config || {});
 
   let inner: ReactNode = <PlaceholderBody nodeType={nodeType} />;
   if (hasPreview && nodeType === DESIGNER_NODE_TYPE_IMAGE) {
@@ -368,6 +442,12 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
         src={previewSrc || ''}
         alt={nodeData.label}
         data-testid="designer-node-image-preview"
+        onLoad={(event) => {
+          const image = event.currentTarget;
+          if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+            applyRatio(image.naturalWidth / image.naturalHeight);
+          }
+        }}
       />
     );
   } else if (hasPreview && nodeType === DESIGNER_NODE_TYPE_VIDEO) {
@@ -379,6 +459,12 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
         controls={true}
         autoPlay={false}
         data-testid="designer-node-video-preview"
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            applyRatio(video.videoWidth / video.videoHeight);
+          }
+        }}
       />
     );
   } else if (hasPreview && nodeType === DESIGNER_NODE_TYPE_AUDIO) {

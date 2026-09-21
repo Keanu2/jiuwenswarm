@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  buildDesignerBootstrapPreviewGraph,
+  graphForBootstrapThinking,
   isDesignerPreviewGraph,
 } from '../node_modules/.cache/designer-canvas-preview/designerBootstrapGraph.js';
 import {
@@ -15,16 +15,25 @@ import {
   summariesFromGraphList,
 } from '../node_modules/.cache/designer-canvas-preview/designerGraphLoad.js';
 
-test('preview graph keeps the default canvas skeleton', () => {
-  const graph = buildDesignerBootstrapPreviewGraph('火车进站');
+test('bootstrap thinking canvas stays empty so it is not mistaken for a real graph', () => {
+  const graph = graphForBootstrapThinking('火车进站');
   assert.equal(isDesignerPreviewGraph(graph), true);
-  assert.deepEqual(
-    graph.nodes.map((node) => node.id),
-    ['n_brief', 'n_character', 'n_scene', 'n_storyboard', 'n_frame_1', 'n_clip_1', 'n_compose'],
-  );
-  assert.equal(graph.nodes.find((node) => node.id === 'n_character')?.layout?.y, 40);
-  assert.equal(graph.nodes.find((node) => node.id === 'n_scene')?.type, 'image');
-  assert.equal(graph.nodes.find((node) => node.id === 'n_storyboard')?.layout?.y, 440);
+  assert.deepEqual(graph.nodes, []);
+  assert.deepEqual(graph.edges, []);
+  assert.equal(graph.description, '火车进站');
+});
+
+test('bootstrap thinking canvas never reuses another project graph', () => {
+  const previous = {
+    ...graphForBootstrapThinking('旧项目'),
+    graph_id: 'graph_previous_project',
+    nodes: [{ id: 'n_brief' }],
+  };
+  const next = graphForBootstrapThinking('新的情人节短片');
+  assert.equal(isDesignerPreviewGraph(next), true);
+  assert.notEqual(next.graph_id, previous.graph_id);
+  assert.equal(next.nodes.length, 0);
+  assert.equal(next.description, '新的情人节短片');
 });
 
 test('storyboardShotPreviews shows action and picture from the Brief columns', () => {
@@ -92,6 +101,18 @@ test('parseMarkdownTable keeps a table frame from generated markdown', () => {
   assert.equal(table.rows.length, 2);
   assert.equal(table.rows[0][6], 'Wide shot of a young man leaving the train');
   assert.equal(table.rows[1][4], 'walks toward the exit');
+});
+
+test('parseMarkdownTable keeps every storyboard row', () => {
+  const lines = [
+    '| Shot | Timeline | Action |',
+    '| --- | --- | --- |',
+    ...Array.from({ length: 24 }, (_, index) => `| ${index + 1} | ${index}.0s | beat ${index + 1} |`),
+  ];
+  const table = parseMarkdownTable(lines.join('\n'));
+  assert.ok(table);
+  assert.equal(table.rows.length, 24);
+  assert.equal(table.rows[23][2], 'beat 24');
 });
 
 test('resolveDesignerGraphToLoad keeps the selected graph instead of the first listed one', () => {

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { webClient } from '../../services/webClient';
+import { isDesignerPreviewGraph } from './designerBootstrapGraph';
 import { designerGraphClient } from './designerGraphClient';
 import { useDesignerStore } from './designerStore';
 import {
@@ -183,9 +184,10 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
 
   resetForGraph: (graph) => {
     clearPoll();
-    if (!graph || graph.nodes.length === 0) {
+    if (!graph || graph.nodes.length === 0 || isDesignerPreviewGraph(graph)) {
       set({
         ...applySnapshot(null, graph),
+        boundGraphId: graph?.graph_id ?? null,
         runError: null,
         runWarning: null,
         leaderActivity: null,
@@ -202,6 +204,8 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       boundGraphId: graph.graph_id,
       runError: null,
       runWarning: null,
+      leaderActivity: null,
+      leaderActivityTail: [],
     });
     void designerGraphClient
       .getRun({ graphId: graph.graph_id })

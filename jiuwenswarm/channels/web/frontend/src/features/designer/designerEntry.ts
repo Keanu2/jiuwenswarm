@@ -81,6 +81,7 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
 
   chatStore.reset();
   designerStore.beginBootstrapEntry(prompt);
+  useDesignerRunStore.getState().resetForGraph(useDesignerStore.getState().domainGraph);
   const chatReferences: DesignerStoredReference[] = references.map((item, index) => ({
     kind: item.kind,
     filename: item.filename,

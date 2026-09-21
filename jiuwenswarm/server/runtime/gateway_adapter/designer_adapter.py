@@ -571,8 +571,11 @@ def _rerun_error_message(graph: dict[str, Any] | None, node_id: str, exc: Except
             if str(node.get("id") or "") == node_id:
                 role = node_pipeline(node) or node_role(node)
                 break
-    if role == NODE_ROLE_COMPOSE or node_id == "n_compose":
-        return "请先让所有视频片段生成完成，再重新生成成片。"
+    if role == NODE_ROLE_COMPOSE or node_id in {"n_compose", "n_final"}:
+        detail = message.split("upstream not ready:", 1)[-1].strip()
+        if detail and detail != message:
+            return f"已连接的视频「{detail}」还没有文件，无法合并。请先生成该片段。"
+        return "已连接的视频片段还没有文件，无法合并。请先生成这些片段。"
     return message
 
 

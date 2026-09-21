@@ -50,8 +50,10 @@ from jiuwenswarm.common.schema.designer_graph import (
     new_run_id,
     node_pipeline,
     node_uses_agent_runtime,
+    shot_topology_ids_added_by_patch,
     sync_groups,
     utc_now_ms,
+    video_concat_source_ids,
 )
 from jiuwenswarm.common.schema.message import EventType
 from jiuwenswarm.server.runtime.designer.activity import (
@@ -85,6 +87,46 @@ _TERMINAL_NODE_STATUSES = {
     NODE_STATUS_FAILED,
     NODE_STATUS_CANCELLED,
 }
+
+
+def locked_storyboard_shot_count(graph: DesignerExecutionGraph) -> int | None:
+    """Approved storyboard / analysis shot count. Extra parsed rows must not expand past this."""
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    planned: list[Any] = []
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("id") or "")
+        if node_pipeline(node) != NODE_ROLE_STORYBOARD and nid != "n_storyboard":
+            continue
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        raw = cfg.get("planned_shots")
+        if isinstance(raw, list) and raw:
+            planned = raw
+        break
+    if planned:
+        return max(1, min(len(planned), MAX_SHOT_CLIP_NODES))
+    target = int(analysis.get("target_shot_count") or 0) if analysis else 0
+    if 1 <= target <= MAX_SHOT_CLIP_NODES:
+        return target
+    shots = analysis.get("shots") if isinstance(analysis.get("shots"), list) else []
+    if shots:
+        return max(1, min(len(shots), MAX_SHOT_CLIP_NODES))
+    return None
+
+
+def should_expand_shot_topology_after_nodes(
+    finished_ids: list[str],
+    node_states: dict[str, Any] | None,
+) -> bool:
+    """Do not grow the canvas after a failed video/keyframe — retry the same nodes."""
+    states = node_states or {}
+    for node_id in finished_ids:
+        status = str((states.get(node_id) or {}).get("status") or "")
+        if status == NODE_STATUS_FAILED:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -278,11 +320,33 @@ class GraphExecutor:
         incoming = execution_predecessors(graph)
         groups = sync_groups(graph)
         source_states = source_run.get("node_states") or {}
-        for pred in incoming.get(node_id, []):
-            members = groups.get(pred, frozenset({pred}))
-            for member in members:
-                if (source_states.get(member) or {}).get("status") != NODE_STATUS_COMPLETED:
+        target_node = _node_by_id(graph, node_id)
+        concat_sources = video_concat_source_ids(graph, node_id)
+        concat_target = node_pipeline(target_node) == NODE_ROLE_COMPOSE or node_id in {
+            "n_compose",
+            "n_final",
+        }
+        if (
+            not concat_target
+            and str(target_node.get("type") or "") == NODE_TYPE_VIDEO
+            and node_pipeline(target_node) != NODE_ROLE_CLIP
+            and concat_sources
+        ):
+            concat_target = True
+        if concat_target:
+            from jiuwenswarm.server.runtime.designer.handlers.compose import (
+                node_has_concat_video,
+            )
+
+            for member in concat_sources:
+                if not node_has_concat_video(graph, source_states, member):
                     raise ValueError(f"upstream not ready: {member}")
+        else:
+            for pred in incoming.get(node_id, []):
+                members = groups.get(pred, frozenset({pred}))
+                for member in members:
+                    if (source_states.get(member) or {}).get("status") != NODE_STATUS_COMPLETED:
+                        raise ValueError(f"upstream not ready: {member}")
         now = utc_now_ms()
         states = deepcopy(source_states)
         for node in graph.get("nodes", []):
@@ -294,7 +358,6 @@ class GraphExecutor:
         ]
         if kept_ref is not None and not kept_refs:
             kept_refs = [kept_ref]
-        target_node = _node_by_id(graph, node_id)
         target_type = str(target_node.get("type") or "")
         if (
             target_type in {NODE_TYPE_IMAGE, NODE_TYPE_VIDEO}
@@ -562,6 +625,13 @@ class GraphExecutor:
         patch: dict[str, Any],
     ) -> DesignerExecutionGraph:
         graph = self._require_graph(graph_id)
+        extra = shot_topology_ids_added_by_patch(graph, patch)
+        if extra:
+            logger.info(
+                "Rejected shot-topology expansion via agent patch: %s",
+                extra,
+            )
+            return graph
         saved = self._store.save_graph(apply_graph_patch(graph, patch))
         node_ids = {node["id"] for node in saved.get("nodes") or []}
         for run_id, run in list(self._live_runs.items()):
@@ -1323,19 +1393,22 @@ class GraphExecutor:
                         self._handoff_scene_prompt_after_frame(graph, node_id)
 
                 run["current_node_ids"] = list(in_flight.keys())
-                await _maybe_review_storyboard()
-                _maybe_adjust_clips()
-                graph, remaining, incoming, groups = self._expand_clips_if_needed(
-                    graph, run, remaining, on_update=on_update
-                )
-                # Re-queue any newly expanded clip ids that are not in-flight.
-                for node in graph.get("nodes") or []:
-                    nid = str(node.get("id") or "")
-                    if not nid or nid in in_flight:
-                        continue
-                    st = (run.get("node_states") or {}).get(nid) or {}
-                    if st.get("status") not in _TERMINAL_NODE_STATUSES:
-                        remaining.add(nid)
+                if should_expand_shot_topology_after_nodes(
+                    finished_ids, run.get("node_states")
+                ):
+                    await _maybe_review_storyboard()
+                    _maybe_adjust_clips()
+                    graph, remaining, incoming, groups = self._expand_clips_if_needed(
+                        graph, run, remaining, on_update=on_update
+                    )
+                    # Re-queue any newly expanded clip ids that are not in-flight.
+                    for node in graph.get("nodes") or []:
+                        nid = str(node.get("id") or "")
+                        if not nid or nid in in_flight:
+                            continue
+                        st = (run.get("node_states") or {}).get(nid) or {}
+                        if st.get("status") not in _TERMINAL_NODE_STATUSES:
+                            remaining.add(nid)
                 if run.get("status") == RUN_STATUS_FAILED or self._is_cancelled(run_id):
                     break
             if self._is_cancelled(run_id):
@@ -1506,6 +1579,9 @@ class GraphExecutor:
         shot_rows = self._completed_storyboard_shots(graph, run)
         if shot_rows is None:
             return graph, remaining, execution_predecessors(graph), sync_groups(graph)
+        lock = locked_storyboard_shot_count(graph)
+        if lock is not None and len(shot_rows) > lock:
+            shot_rows = shot_rows[:lock]
         shot_count = max(1, min(len(shot_rows) or 1, MAX_SHOT_CLIP_NODES))
         from jiuwenswarm.server.runtime.designer.handlers.text_nodes import shot_generate_prompt
 
@@ -1582,7 +1658,7 @@ class GraphExecutor:
             ):
                 if key in meta and meta.get(key) is not None:
                     rmeta[key] = meta.get(key)
-            rmeta["freeze_shot_topology"] = False
+            rmeta["freeze_shot_topology"] = True
             rmeta["script_analysis"] = analysis
             rebuilt["metadata"] = rmeta
             saved = self._store.save_graph(apply_runtime_delegate(rebuilt))
@@ -1638,6 +1714,12 @@ class GraphExecutor:
             for node_id in (current_frame_ids | {"n_frame"})
         )
         if topology_matches and not bundled_frames:
+            if not bool(meta.get("freeze_shot_topology")):
+                frozen = dict(graph)
+                frozen_meta = dict(meta)
+                frozen_meta["freeze_shot_topology"] = True
+                frozen["metadata"] = frozen_meta
+                graph = self._store.save_graph(frozen)
             synced = apply_shot_generate_prompts(graph, prompts)
             if synced is graph:
                 return graph, remaining, execution_predecessors(graph), sync_groups(graph)
@@ -1675,7 +1757,7 @@ class GraphExecutor:
         ):
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)
-        rmeta["freeze_shot_topology"] = False
+        rmeta["freeze_shot_topology"] = True
         rebuilt["metadata"] = rmeta
         saved = self._store.save_graph(
             apply_shot_generate_prompts(apply_runtime_delegate(rebuilt), prompts)

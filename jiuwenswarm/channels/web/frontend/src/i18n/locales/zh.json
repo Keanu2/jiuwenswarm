@@ -156,6 +156,8 @@
       "selectHint": "选择并移动节点。快捷键 V；按住空格可临时平移。",
       "hand": "平移画布",
       "handHint": "拖动画布。快捷键 H。",
+      "layout": "自动布局",
+      "layoutHint": "按连线重新排列节点，避免重叠并靠近摆放。",
       "assets": "素材包",
       "assetsTitle": "素材包",
       "assetsHint": "打开素材包，可拖到画布上生成节点。",

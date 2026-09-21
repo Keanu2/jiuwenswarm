@@ -582,9 +582,9 @@ async def generate_clip_video(
     except Exception:
         logger.debug("Failed to apply video_gen model config from yaml", exc_info=True)
 
-    # Cost-save default: 480P; honor film aspect_lock size when stamped by Manager.
-    video_size = str(size or "854*480").strip() or "854*480"
-    video_res = str(resolution or "480P").strip() or "480P"
+    # Honor film aspect_lock size when stamped; otherwise let the model default.
+    video_size = str(size or "").strip() or None
+    video_res = str(resolution or "").strip() or None
 
     result = await _invoke_model_video_generation(
         prompt,
@@ -662,11 +662,11 @@ class ClipNodeHandler:
             meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
             aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
         video_size = str(
-            cfg.get("video_size") or (aspect or {}).get("video_size") or "854*480"
-        ).strip()
+            cfg.get("video_size") or (aspect or {}).get("video_size") or ""
+        ).strip() or None
         video_res = str(
-            cfg.get("video_resolution") or (aspect or {}).get("video_resolution") or "480P"
-        ).strip()
+            cfg.get("video_resolution") or (aspect or {}).get("video_resolution") or ""
+        ).strip() or None
         # Do not re-send the keyframe as a second identity sheet (avoids face clones).
         ff_key = str(first_frame.resolve()) if first_frame is not None else ""
         extra_refs = [

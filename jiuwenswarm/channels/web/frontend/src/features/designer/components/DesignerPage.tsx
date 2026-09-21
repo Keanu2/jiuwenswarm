@@ -36,6 +36,7 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const graphId = useDesignerStore((state) => state.graphId);
   const bootstrapInProgress = useDesignerStore((state) => state.bootstrapInProgress);
+  const bootstrapPhase = useDesignerChatStore((state) => state.bootstrapPhase);
   const loadForProject = useDesignerStore((state) => state.loadForProject);
   const loadGraph = useDesignerStore((state) => state.loadGraph);
   const resetForGraph = useDesignerRunStore((state) => state.resetForGraph);
@@ -59,14 +60,14 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
   useEffect(() => bindDesignerRuntime(), []);
 
   useEffect(() => {
+    if (bootstrapInProgress) {
+      skipLoadAfterBootstrapRef.current = true;
+      return;
+    }
     if (pendingDesignerGraphId) {
       const nextId = pendingDesignerGraphId;
       setPendingDesignerGraphId(null);
       void loadGraph(nextId);
-      return;
-    }
-    if (bootstrapInProgress) {
-      skipLoadAfterBootstrapRef.current = true;
       return;
     }
     if (skipLoadAfterBootstrapRef.current) {
@@ -85,6 +86,13 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
 
   useEffect(() => {
     if (bootstrapInProgress || pendingDesignerGraphId) return;
+    if (
+      bootstrapPhase === 'thinking' ||
+      bootstrapPhase === 'bootstrapping' ||
+      bootstrapPhase === 'error'
+    ) {
+      return;
+    }
     if (domainGraph || loadStatus === 'loading' || loadStatus === 'bootstrapping') return;
     const fallbackId = designerGraphs[0]?.graph_id;
     if (!fallbackId) return;
@@ -93,6 +101,7 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
     }
   }, [
     bootstrapInProgress,
+    bootstrapPhase,
     designerGraphs,
     domainGraph,
     loadGraph,

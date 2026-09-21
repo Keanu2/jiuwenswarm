@@ -719,7 +719,9 @@ def normalize_execution_graph(raw: Any) -> DesignerExecutionGraph:
         "created_at": int(created_at) if isinstance(created_at, int) else now,
         "updated_at": int(updated_at) if isinstance(updated_at, int) else now,
     }
-    return drop_keyframe_to_keyframe_deps(ensure_bootstrap_pipeline(graph))
+    return stamp_concat_video_nodes(
+        drop_keyframe_to_keyframe_deps(ensure_bootstrap_pipeline(graph))
+    )
 
 
 def _append_unique_edge(
@@ -1134,18 +1136,41 @@ def drop_keyframe_to_keyframe_deps(graph: DesignerExecutionGraph) -> DesignerExe
     return graph
 
 
-def shot_pipeline_count(graph: DesignerExecutionGraph) -> int:
-    """How many per-shot frame/clip slots the graph currently has."""
-    frames = 0
-    clips = 0
+_BOOTSTRAP_FRAME_IDS = frozenset({"n_frame", "n_frame_1"})
+_BOOTSTRAP_CLIP_IDS = frozenset({"n_clip", "n_clip_1"})
+
+
+def _shot_pipeline_ids(graph: DesignerExecutionGraph) -> tuple[set[str], set[str]]:
+    frames: set[str] = set()
+    clips: set[str] = set()
     for node in graph.get("nodes") or []:
         node_id = str(node.get("id") or "")
+        if not node_id:
+            continue
         pipeline = node_pipeline(node)
         if pipeline == PIPELINE_FRAME or node_id == "n_frame" or node_id.startswith("n_frame_"):
-            frames += 1
+            frames.add(node_id)
         elif pipeline == PIPELINE_CLIP or node_id == "n_clip" or node_id.startswith("n_clip_"):
-            clips += 1
-    return max(frames, clips, 0)
+            clips.add(node_id)
+    return frames, clips
+
+
+def shot_pipeline_count(graph: DesignerExecutionGraph) -> int:
+    """How many per-shot frame/clip slots the graph currently has."""
+    frames, clips = _shot_pipeline_ids(graph)
+    return max(len(frames), len(clips), 0)
+
+
+def is_one_shot_bootstrap_skeleton(graph: DesignerExecutionGraph) -> bool:
+    """True when the graph still looks like the 1-shot bootstrap, not a user edit."""
+    frames, clips = _shot_pipeline_ids(graph)
+    if not frames and not clips:
+        return False
+    if any(node_id not in _BOOTSTRAP_FRAME_IDS for node_id in frames):
+        return False
+    if any(node_id not in _BOOTSTRAP_CLIP_IDS for node_id in clips):
+        return False
+    return len(frames) <= 1 and len(clips) <= 1
 
 
 def _asset_ref_uri(ref: object) -> str:
@@ -1187,12 +1212,24 @@ def preserve_expanded_shot_nodes(
     incoming: DesignerExecutionGraph,
     existing: DesignerExecutionGraph | None,
 ) -> DesignerExecutionGraph:
-    """Keep already-expanded keyframe/clip nodes when a stale save sends the bootstrap shape."""
+    """Keep already-expanded keyframe/clip nodes when a stale save sends the bootstrap shape.
+
+    User edits that drop extra shots (Image 6 / Video 4) must persist. Only a
+    1-shot bootstrap skeleton is grafted back onto an expanded graph.
+    """
     if existing is None:
+        return incoming
+    incoming_meta = incoming.get("metadata") if isinstance(incoming.get("metadata"), dict) else {}
+    if incoming_meta.get("user_topology_edit"):
         return incoming
     existing_count = shot_pipeline_count(existing)
     incoming_count = shot_pipeline_count(incoming)
-    if existing_count <= incoming_count or existing_count <= 1:
+    if (
+        not is_one_shot_bootstrap_skeleton(incoming)
+        or incoming_count > 1
+        or existing_count <= incoming_count
+        or existing_count <= 1
+    ):
         return incoming
     incoming_ids = {str(node.get("id") or "") for node in incoming.get("nodes") or []}
     grafted = dict(incoming)
@@ -1821,6 +1858,71 @@ def graph_uses_agent_scheduler(graph: DesignerExecutionGraph) -> bool:
     return any(node_uses_agent_runtime(node) for node in nodes)
 
 
+def is_shot_topology_node_id(node_id: str) -> bool:
+    nid = str(node_id or "").strip()
+    return nid.startswith("n_frame_") or nid.startswith("n_clip_") or nid in {"n_frame", "n_clip"}
+
+
+def is_shot_topology_node(node: Any) -> bool:
+    if isinstance(node, dict):
+        nid = str(node.get("id") or "").strip()
+        if is_shot_topology_node_id(nid):
+            return True
+        return node_pipeline(node) in {PIPELINE_FRAME, PIPELINE_CLIP}
+    return is_shot_topology_node_id(str(node or ""))
+
+
+def shot_topology_ids_added_by_patch(graph: DesignerExecutionGraph, patch: Any) -> list[str]:
+    """New keyframe/clip ids a leaf agent would insert — retry must not expand topology."""
+    if not isinstance(patch, dict):
+        return []
+    existing = {
+        str(node.get("id") or "").strip()
+        for node in graph.get("nodes") or []
+        if str(node.get("id") or "").strip()
+    }
+    added: list[str] = []
+    for item in patch.get("upsert_nodes") or []:
+        if not isinstance(item, dict):
+            continue
+        nid = str(item.get("id") or "").strip()
+        if not nid or nid in existing:
+            continue
+        if is_shot_topology_node(item):
+            added.append(nid)
+    return added
+
+
+def extra_media_ids_added_by_patch(graph: DesignerExecutionGraph, patch: Any) -> list[str]:
+    """New image/video canvas nodes a leaf agent must not insert."""
+    if not isinstance(patch, dict):
+        return []
+    existing = {
+        str(node.get("id") or "").strip()
+        for node in graph.get("nodes") or []
+        if str(node.get("id") or "").strip()
+    }
+    added: list[str] = []
+    for item in patch.get("upsert_nodes") or []:
+        if not isinstance(item, dict):
+            continue
+        nid = str(item.get("id") or "").strip()
+        if not nid or nid in existing:
+            continue
+        ntype = str(item.get("type") or "").strip().lower()
+        cfg = item.get("config") if isinstance(item.get("config"), dict) else {}
+        pipeline = str(cfg.get("pipeline") or "").strip().lower()
+        if (
+            ntype in {NODE_TYPE_IMAGE, NODE_TYPE_VIDEO}
+            or pipeline in {PIPELINE_FRAME, PIPELINE_CLIP, PIPELINE_COMPOSE, PIPELINE_SCENE}
+            or nid.startswith("n_image_")
+            or nid.startswith("n_video_")
+            or is_shot_topology_node(item)
+        ):
+            added.append(nid)
+    return added
+
+
 def apply_graph_patch(graph: DesignerExecutionGraph, patch: Any) -> DesignerExecutionGraph:
     """Merge upserts/removals into a domain graph, then re-normalize."""
     if patch is None:
@@ -1878,6 +1980,91 @@ def apply_graph_patch(graph: DesignerExecutionGraph, patch: Any) -> DesignerExec
 def edge_kind(edge: DesignerGraphEdge) -> str:
     kind = str(edge.get("kind") or EDGE_KIND_DATA).strip()
     return kind if kind in EDGE_KINDS else EDGE_KIND_DATA
+
+
+def is_concat_video_source(node: DesignerGraphNode | dict[str, Any] | None) -> bool:
+    """True when this node can feed ffmpeg concat (clip / generic video / film)."""
+    if not isinstance(node, dict):
+        return False
+    nid = str(node.get("id") or "").strip()
+    if not nid:
+        return False
+    pipeline = node_pipeline(node)
+    ntype = str(node.get("type") or "").strip().lower()
+    if pipeline == PIPELINE_CLIP or nid.startswith("n_clip"):
+        return True
+    if pipeline == PIPELINE_COMPOSE or nid in {"n_compose", "n_final"}:
+        return True
+    return ntype == NODE_TYPE_VIDEO
+
+
+def video_concat_source_ids(graph: DesignerExecutionGraph, target_id: str) -> list[str]:
+    """Direct video predecessors of ``target_id`` in input / edge order."""
+    target = str(target_id or "").strip()
+    if not target:
+        return []
+    by_id = {
+        str(node.get("id") or ""): node
+        for node in (graph.get("nodes") or [])
+        if isinstance(node, dict) and node.get("id")
+    }
+    target_node = by_id.get(target)
+    declared: list[str] = []
+    if isinstance(target_node, dict):
+        cfg = target_node.get("config") if isinstance(target_node.get("config"), dict) else {}
+        declared = [str(item).strip() for item in (cfg.get("inputs") or []) if str(item).strip()]
+    edged: list[str] = []
+    for edge in graph.get("edges") or []:
+        if not isinstance(edge, dict) or edge_kind(edge) != EDGE_KIND_DATA:
+            continue
+        if str(edge.get("target") or "") != target:
+            continue
+        source = str(edge.get("source") or "").strip()
+        if source:
+            edged.append(source)
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for source in [*declared, *edged]:
+        if not source or source == target or source in seen:
+            continue
+        seen.add(source)
+        ordered.append(source)
+    return [
+        source
+        for source in ordered
+        if is_concat_video_source(by_id.get(source))
+    ]
+
+
+def stamp_concat_video_nodes(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
+    """User-added video nodes that already have video inputs assemble via compose."""
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("id") or "").strip()
+        if not nid or str(node.get("type") or "") != NODE_TYPE_VIDEO:
+            continue
+        pipeline = node_pipeline(node)
+        if pipeline == PIPELINE_CLIP or nid.startswith("n_clip"):
+            continue
+        if pipeline == PIPELINE_COMPOSE:
+            continue
+        sources = video_concat_source_ids(graph, nid)
+        if not sources:
+            continue
+        cfg = dict(node.get("config") or {}) if isinstance(node.get("config"), dict) else {}
+        cfg["pipeline"] = PIPELINE_COMPOSE
+        cfg.setdefault("role", NODE_TYPE_VIDEO)
+        tools = [str(item) for item in (cfg.get("tools") or []) if str(item).strip()]
+        if "ffmpeg_compose" not in tools:
+            cfg["tools"] = [
+                "call_model",
+                "read_upstream",
+                "ffmpeg_compose",
+                "mix_audio",
+            ]
+        node["config"] = cfg
+    return graph
 
 
 def data_predecessors(graph: DesignerExecutionGraph) -> dict[str, list[str]]:

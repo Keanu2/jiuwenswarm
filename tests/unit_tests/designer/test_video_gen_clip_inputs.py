@@ -69,6 +69,22 @@ def test_wan3_keeps_unified_model_without_shot_type(tmp_path: Path) -> None:
     assert "shot_type" not in params
     assert params["resolution"] == "720P"
     assert params["audio"] is False
+    assert params["size"] == "1280*720"
+    assert params["ratio"] == "16:9"
+
+
+def test_wan3_i2v_uses_requested_portrait_frame(tmp_path: Path) -> None:
+    frame = tmp_path / "shot1.png"
+    frame.write_bytes(b"png")
+    params = _build_dashscope_video_call(
+        "wan3.0-video",
+        size="480*854",
+        resolution="1080P",
+        first_frame=str(frame),
+    )
+    assert params["size"] == "480*854"
+    assert params["ratio"] == "9:16"
+    assert params["resolution"] == "1080P"
 
 
 def test_wan3_uses_media_for_character_scene_and_storyboard(tmp_path: Path) -> None:

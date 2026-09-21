@@ -183,6 +183,53 @@ def find_non_contributing_node_ids(graph: DesignerExecutionGraph) -> list[str]:
     return sorted(ids - contributing)
 
 
+def prune_shot_nodes_beyond_analysis(graph: DesignerExecutionGraph) -> list[str]:
+    """Drop extra n_frame_N / n_clip_N whose shot_index is not in script_analysis."""
+    meta = dict(graph.get("metadata") or {})
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    keep_idx = {
+        int(s.get("shot_index") or 0)
+        for s in (analysis.get("shots") or [])
+        if isinstance(s, dict) and int(s.get("shot_index") or 0) >= 1
+    }
+    if not keep_idx:
+        return []
+    nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
+    pruned: list[str] = []
+    kept: list[dict[str, Any]] = []
+    for node in nodes:
+        nid = str(node.get("id") or "")
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        role = str(node_pipeline(node) or "").strip().lower()
+        is_shot_leaf = (
+            role in {NODE_ROLE_FRAME, NODE_ROLE_CLIP, "frame", "keyframe", "clip"}
+            or nid.startswith("n_frame_")
+            or nid.startswith("n_clip_")
+        )
+        if is_shot_leaf:
+            idx = int(cfg.get("shot_index") or 0)
+            if idx >= 1 and idx not in keep_idx:
+                pruned.append(nid)
+                continue
+        kept.append(node)
+    if not pruned:
+        return []
+    drop = set(pruned)
+    graph["nodes"] = kept
+    graph["edges"] = [
+        e
+        for e in (graph.get("edges") or [])
+        if isinstance(e, dict)
+        and str(e.get("source") or "") not in drop
+        and str(e.get("target") or "") not in drop
+    ]
+    notes = list(meta.get("prune_notes") or [])
+    notes.extend([f"pruned_extra_shot:{nid}" for nid in pruned])
+    meta["prune_notes"] = notes[-40:]
+    graph["metadata"] = meta
+    return pruned
+
+
 def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
     """Remove nodes/edges that cannot reach the final compose (or any sink).
 
@@ -1892,7 +1939,8 @@ def build_smart_video_graph(
             "scene_masters": dict(scene_master_by_setting),
             "scene_locks": dict(scene_locks_meta),
             "lean_pipeline": False,
-            # Flexible: Supervisor may expand frame/clip nodes from storyboard.
+            # Initial graphs stay unfrozen so the first storyboard-complete expand
+            # can align frame count. Supervisor design_execution_graph then freezes.
             "freeze_shot_topology": False,
             "supervisor_owns_graph": True,
             "ai_agent_pipeline": bool(ai_mode),
@@ -1945,5 +1993,6 @@ def build_smart_video_graph(
         "updated_at": now,
     }
     graph = normalize_execution_graph(graph)
+    prune_shot_nodes_beyond_analysis(graph)
     prune_non_contributing_nodes(graph)
     return attach_skills_metadata(graph, prompt_text)

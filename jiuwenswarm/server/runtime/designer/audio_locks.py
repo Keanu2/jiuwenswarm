@@ -400,10 +400,10 @@ def should_request_video_audio(cfg: dict[str, Any] | None, meta: dict[str, Any] 
 
 
 def video_model_supports_native_audio(model: str | None = None) -> bool:
-    """Whether the *configured* video model can synthesize native audio.
+    """Whether the configured/requested video model can synthesize native audio.
 
     Capability gate only — never switches models. Known native-audio families
-    (e.g. wan3.*) return True; others require VIDEO_GEN_NATIVE_AUDIO=1.
+    (wan3, Seedance/Doubao) return True; others require VIDEO_GEN_NATIVE_AUDIO=1.
     """
     chosen = (model or configured_video_gen_model() or "").strip().lower()
     if not chosen:
@@ -413,10 +413,41 @@ def video_model_supports_native_audio(model: str | None = None) -> bool:
         return True
     if explicit in {"0", "false", "no", "off"}:
         return False
-    # DashScope Wan 3.x video endpoints support an ``audio`` flag.
-    if "wan3" in chosen:
-        return True
-    return False
+    return any(token in chosen for token in ("wan3", "seedance", "doubao"))
+
+
+def is_wan_video_model(model: str) -> bool:
+    return "wan" in (model or "").strip().lower()
+
+
+def video_gen_family_label(model: str | None = None) -> str:
+    """Short family name for agent-facing copy (Seedance / Wan / MiniMax)."""
+    name = (model if model is not None else configured_video_gen_model()).strip()
+    lower = name.lower()
+    if "seedance" in lower or lower.startswith("doubao-seedance"):
+        return "Seedance"
+    if "minimax" in lower:
+        return "MiniMax"
+    if "wan" in lower:
+        return "Wan"
+    return name or "video model"
+
+
+def image_gen_family_label(model: str | None = None) -> str:
+    """Short family name for agent-facing copy (Qwen / Seedream / Wan / Flux)."""
+    name = (model if model is not None else configured_image_gen_model()).strip()
+    lower = name.lower()
+    if "seedream" in lower:
+        return "Seedream"
+    if "qwen" in lower:
+        return "Qwen"
+    if "minimax" in lower or lower.startswith("image-01"):
+        return "MiniMax"
+    if "flux" in lower:
+        return "Flux"
+    if "wanx" in lower or "wan2.7-image" in lower or "wan-image" in lower:
+        return "Wan"
+    return name or "image model"
 
 
 def resolve_video_audio_request(

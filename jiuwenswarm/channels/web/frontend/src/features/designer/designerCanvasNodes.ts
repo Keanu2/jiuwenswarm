@@ -18,8 +18,22 @@ import {
 
 export const DESIGNER_CANVAS_NODE_WIDTH = 280;
 export const DESIGNER_CANVAS_NODE_HEIGHT = 160;
-export const DESIGNER_SUCCESSOR_GAP_X = 88;
-export const DESIGNER_SUCCESSOR_GAP_Y = 36;
+export const DESIGNER_NODE_HEADER_HEIGHT = 36;
+export const DESIGNER_MEDIA_FIT_MAX_WIDTH = 280;
+export const DESIGNER_MEDIA_FIT_MAX_BODY = 320;
+export const DESIGNER_MEDIA_FIT_MIN_WIDTH = 140;
+export const DESIGNER_DOC_FIT_MIN_WIDTH = 180;
+export const DESIGNER_DOC_FIT_MIN_BODY = 64;
+export const DESIGNER_DOC_TEXT_MAX_WIDTH = 280;
+export const DESIGNER_DOC_TEXT_MAX_BODY = 360;
+export const DESIGNER_DOC_TABLE_MAX_WIDTH = 280;
+export const DESIGNER_DOC_TABLE_MAX_BODY = DESIGNER_DOC_TABLE_MAX_WIDTH - DESIGNER_NODE_HEADER_HEIGHT;
+export const DESIGNER_DOC_TEXT_PAD_X = 24;
+export const DESIGNER_DOC_TEXT_PAD_Y = 24;
+export const DESIGNER_SUCCESSOR_GAP_X = 48;
+export const DESIGNER_SUCCESSOR_GAP_Y = 24;
+export const DESIGNER_LAYOUT_ORIGIN_X = 40;
+export const DESIGNER_LAYOUT_ORIGIN_Y = 40;
 export const DESIGNER_ASSET_DRAG_MIME = 'application/x-designer-asset-id';
 export const DESIGNER_ADD_GROUP_ORDER: DesignerAddGroup[] = ['image', 'video', 'audio'];
 
@@ -86,6 +100,333 @@ export function uniqueDesignerNodeId(existingIds: Iterable<string>, role: string
   return `n_${slug}_${Date.now().toString(36)}`;
 }
 
+export function parseContentAspect(value: unknown): number | null {
+  if (typeof value === 'number' && value > 0 && Number.isFinite(value)) return value;
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const ratio = text.match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/);
+  if (ratio) {
+    const width = Number(ratio[1]);
+    const height = Number(ratio[2]);
+    if (width > 0 && height > 0) return width / height;
+  }
+  const pixels = text.match(/^(\d+)\s*[*xX]\s*(\d+)$/);
+  if (pixels) {
+    const width = Number(pixels[1]);
+    const height = Number(pixels[2]);
+    if (width > 0 && height > 0) return width / height;
+  }
+  return null;
+}
+
+export function contentAspectFromNodeConfig(
+  config: Record<string, unknown> | undefined | null,
+): number | null {
+  const lock = config?.aspect_lock;
+  if (lock && typeof lock === 'object') {
+    const rec = lock as Record<string, unknown>;
+    return (
+      parseContentAspect(rec.ratio) ||
+      parseContentAspect(rec.video_size) ||
+      parseContentAspect(rec.image_size)
+    );
+  }
+  return parseContentAspect(config?.video_size) || parseContentAspect(config?.image_size);
+}
+
+export function sizeNodeForContentAspect(ratio: number): { width: number; height: number } {
+  const r = ratio > 0 && Number.isFinite(ratio) ? ratio : 16 / 9;
+  let width = DESIGNER_MEDIA_FIT_MAX_WIDTH;
+  let body = width / r;
+  if (body > DESIGNER_MEDIA_FIT_MAX_BODY) {
+    body = DESIGNER_MEDIA_FIT_MAX_BODY;
+    width = body * r;
+  }
+  if (width < DESIGNER_MEDIA_FIT_MIN_WIDTH) {
+    width = DESIGNER_MEDIA_FIT_MIN_WIDTH;
+    body = width / r;
+  }
+  return {
+    width: Math.round(width),
+    height: Math.round(body + DESIGNER_NODE_HEADER_HEIGHT),
+  };
+}
+
+export function sizeNodeForDocumentContent(
+  content: { width: number; height: number },
+  kind: 'text' | 'table' = 'text',
+): { width: number; height: number } {
+  const padX = kind === 'table' ? 0 : DESIGNER_DOC_TEXT_PAD_X;
+  const padY = kind === 'table' ? 0 : DESIGNER_DOC_TEXT_PAD_Y;
+  const rawWidth = Math.max(0, content.width) + padX;
+  const rawBody = Math.max(0, content.height) + padY;
+  if (kind === 'table') {
+    const minHeight = DESIGNER_NODE_HEADER_HEIGHT + DESIGNER_DOC_FIT_MIN_BODY;
+    const maxHeight = DESIGNER_DOC_TABLE_MAX_BODY + DESIGNER_NODE_HEADER_HEIGHT;
+    let width = Math.max(DESIGNER_DOC_FIT_MIN_WIDTH, Math.min(DESIGNER_DOC_TABLE_MAX_WIDTH, rawWidth));
+    let height = Math.max(minHeight, Math.min(maxHeight, rawBody + DESIGNER_NODE_HEADER_HEIGHT));
+    if (width > height) {
+      width = Math.max(DESIGNER_DOC_FIT_MIN_WIDTH, height);
+    } else if (height > width) {
+      height = Math.min(maxHeight, Math.max(width, minHeight));
+    }
+    return { width: Math.round(width), height: Math.round(height) };
+  }
+  const width = Math.round(
+    Math.max(DESIGNER_DOC_FIT_MIN_WIDTH, Math.min(DESIGNER_DOC_TEXT_MAX_WIDTH, rawWidth)),
+  );
+  const body = Math.round(
+    Math.max(DESIGNER_DOC_FIT_MIN_BODY, Math.min(DESIGNER_DOC_TEXT_MAX_BODY, rawBody)),
+  );
+  return {
+    width,
+    height: body + DESIGNER_NODE_HEADER_HEIGHT,
+  };
+}
+
+export function isDefaultLandscapeNodeSize(width?: number, height?: number): boolean {
+  if (typeof width !== 'number' || typeof height !== 'number' || width <= 0 || height <= 0) {
+    return true;
+  }
+  const ratio = width / height;
+  return ratio > 1.35 && width <= 300 && height <= 180;
+}
+
+export function resolvedNodeCanvasSize(node: DesignerGraphNode): { width: number; height: number } {
+  const layout = node.layout;
+  const storedWidth = typeof layout?.width === 'number' ? layout.width : undefined;
+  const storedHeight = typeof layout?.height === 'number' ? layout.height : undefined;
+  const isMedia = node.type === DESIGNER_NODE_TYPE_IMAGE || node.type === DESIGNER_NODE_TYPE_VIDEO;
+  const aspect = isMedia
+    ? contentAspectFromNodeConfig((node.config ?? {}) as Record<string, unknown>)
+    : null;
+  if (isMedia && aspect && isDefaultLandscapeNodeSize(storedWidth, storedHeight)) {
+    return sizeNodeForContentAspect(aspect);
+  }
+  return {
+    width: storedWidth ?? DESIGNER_CANVAS_NODE_WIDTH,
+    height: storedHeight ?? DESIGNER_CANVAS_NODE_HEIGHT,
+  };
+}
+
+function applyNodeLayouts(
+  nodes: DesignerGraphNode[],
+  placed: Map<string, { x: number; y: number; width: number; height: number }>,
+): DesignerGraphNode[] {
+  let changed = false;
+  const next = nodes.map((node) => {
+    const nextBox = placed.get(node.id);
+    if (!nextBox) return node;
+    const layout = node.layout ?? {};
+    if (
+      layout.x === nextBox.x &&
+      layout.y === nextBox.y &&
+      layout.width === nextBox.width &&
+      layout.height === nextBox.height
+    ) {
+      return node;
+    }
+    changed = true;
+    return {
+      ...node,
+      layout: {
+        x: nextBox.x,
+        y: nextBox.y,
+        width: nextBox.width,
+        height: nextBox.height,
+      },
+    };
+  });
+  return changed ? next : nodes;
+}
+
+function nodesShareColumn(left: { x: number }, right: { x: number }): boolean {
+  return Math.abs(left.x - right.x) < 80;
+}
+
+/** Compact helper kept for tests. The canvas does not auto-apply this; click Auto layout to rearrange. */
+export function packDesignerNodeLayouts(nodes: DesignerGraphNode[]): DesignerGraphNode[] {
+  if (nodes.length === 0) return nodes;
+  const boxes = nodes.map((node, index) => {
+    const size = resolvedNodeCanvasSize(node);
+    return {
+      index,
+      id: node.id,
+      x: typeof node.layout?.x === 'number' ? node.layout.x : 0,
+      y: typeof node.layout?.y === 'number' ? node.layout.y : 0,
+      width: size.width,
+      height: size.height,
+    };
+  });
+  const ordered = [...boxes].sort(
+    (left, right) => left.x - right.x || left.y - right.y || left.index - right.index,
+  );
+  const columns: Array<typeof boxes> = [];
+  for (const box of ordered) {
+    const column = columns.find((members) => members.some((member) => nodesShareColumn(member, box)));
+    if (column) column.push(box);
+    else columns.push([box]);
+  }
+  columns.sort((left, right) => {
+    const leftX = Math.min(...left.map((box) => box.x));
+    const rightX = Math.min(...right.map((box) => box.x));
+    return leftX - rightX;
+  });
+  const placed = new Map<string, { x: number; y: number; width: number; height: number }>();
+  let cursorX = Number.NEGATIVE_INFINITY;
+  for (const members of columns) {
+    members.sort((left, right) => left.y - right.y || left.index - right.index);
+    const colWidth = Math.max(...members.map((box) => box.width));
+    const originX = Number.isFinite(cursorX) ? cursorX : Math.min(...members.map((box) => box.x));
+    let cursorY = members[0]?.y ?? 0;
+    for (const box of members) {
+      placed.set(box.id, {
+        x: Math.round(originX),
+        y: Math.round(cursorY),
+        width: box.width,
+        height: box.height,
+      });
+      cursorY += box.height + DESIGNER_SUCCESSOR_GAP_Y;
+    }
+    cursorX = originX + colWidth + DESIGNER_SUCCESSOR_GAP_X;
+  }
+  return applyNodeLayouts(nodes, placed);
+}
+
+const AUTO_LAYOUT_RANK: Record<string, number> = {
+  brief: 0,
+  text: 1,
+  character: 2,
+  character_design: 2,
+  scene: 3,
+  storyboard: 4,
+  table: 5,
+  frame: 6,
+  image: 7,
+  clip: 8,
+  video: 9,
+  compose: 10,
+  music: 11,
+  speech: 12,
+  audio: 13,
+};
+
+function nodeAutoLayoutRank(node: DesignerGraphNode): number {
+  const config = (node.config ?? {}) as Record<string, unknown>;
+  const key = String(config.pipeline || config.role || node.type || '');
+  return AUTO_LAYOUT_RANK[key] ?? 50;
+}
+
+function nodeShotIndex(node: DesignerGraphNode): number {
+  const raw = (node.config as Record<string, unknown> | undefined)?.shot_index;
+  const value = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function incomingByNode(
+  nodes: DesignerGraphNode[],
+  edges: DesignerGraphEdge[],
+): Map<string, string[]> {
+  const ids = new Set(nodes.map((node) => node.id));
+  const incoming = new Map<string, string[]>();
+  for (const node of nodes) incoming.set(node.id, []);
+  const add = (source: string, target: string) => {
+    if (!ids.has(source) || !ids.has(target) || source === target) return;
+    const list = incoming.get(target);
+    if (list && !list.includes(source)) list.push(source);
+  };
+  for (const edge of edges) add(String(edge.source || ''), String(edge.target || ''));
+  for (const node of nodes) {
+    const inputs = Array.isArray(node.config?.inputs) ? node.config.inputs.map(String) : [];
+    for (const source of inputs) add(source, node.id);
+  }
+  return incoming;
+}
+
+function assignAutoLayoutLayers(
+  nodes: DesignerGraphNode[],
+  incoming: Map<string, string[]>,
+): Map<string, number> {
+  const remaining = new Set(nodes.map((node) => node.id));
+  const layer = new Map<string, number>();
+  let guard = 0;
+  while (remaining.size > 0 && guard < nodes.length + 2) {
+    guard += 1;
+    const ready = [...remaining].filter((id) =>
+      (incoming.get(id) ?? []).every((pred) => !remaining.has(pred)),
+    );
+    const nextId = [...remaining][0];
+    const batch = ready.length > 0 ? ready : nextId ? [nextId] : [];
+    for (const id of batch) {
+      const predLayers = (incoming.get(id) ?? [])
+        .map((pred) => layer.get(pred))
+        .filter((value): value is number => typeof value === 'number');
+      layer.set(id, predLayers.length > 0 ? Math.max(...predLayers) + 1 : 0);
+      remaining.delete(id);
+    }
+  }
+  return layer;
+}
+
+/** Layer nodes left-to-right by connections, stacking each layer tightly without overlap. */
+export function autoLayoutDesignerNodes(
+  nodes: DesignerGraphNode[],
+  edges: DesignerGraphEdge[] = [],
+): DesignerGraphNode[] {
+  if (nodes.length === 0) return nodes;
+  const incoming = incomingByNode(nodes, edges);
+  const layerById = assignAutoLayoutLayers(nodes, incoming);
+  const columns = new Map<number, DesignerGraphNode[]>();
+  for (const node of nodes) {
+    const layer = layerById.get(node.id) ?? 0;
+    const members = columns.get(layer);
+    if (members) members.push(node);
+    else columns.set(layer, [node]);
+  }
+  const placed = new Map<string, { x: number; y: number; width: number; height: number }>();
+  let cursorX = DESIGNER_LAYOUT_ORIGIN_X;
+  for (const layer of [...columns.keys()].sort((left, right) => left - right)) {
+    const members = [...(columns.get(layer) ?? [])].sort((left, right) => {
+      const rank = nodeAutoLayoutRank(left) - nodeAutoLayoutRank(right);
+      if (rank !== 0) return rank;
+      const shot = nodeShotIndex(left) - nodeShotIndex(right);
+      if (shot !== 0) return shot;
+      const y = (left.layout?.y ?? 0) - (right.layout?.y ?? 0);
+      if (y !== 0) return y;
+      return left.id.localeCompare(right.id);
+    });
+    let cursorY = DESIGNER_LAYOUT_ORIGIN_Y;
+    let colWidth = 0;
+    for (const node of members) {
+      const size = resolvedNodeCanvasSize(node);
+      placed.set(node.id, {
+        x: Math.round(cursorX),
+        y: Math.round(cursorY),
+        width: size.width,
+        height: size.height,
+      });
+      cursorY += size.height + DESIGNER_SUCCESSOR_GAP_Y;
+      colWidth = Math.max(colWidth, size.width);
+    }
+    cursorX += colWidth + DESIGNER_SUCCESSOR_GAP_X;
+  }
+  return applyNodeLayouts(nodes, placed);
+}
+
+export function autoLayoutDesignerGraph<T extends { nodes: DesignerGraphNode[]; edges: DesignerGraphEdge[] }>(
+  graph: T,
+): T {
+  const nodes = autoLayoutDesignerNodes(graph.nodes, graph.edges);
+  if (nodes === graph.nodes) return graph;
+  return { ...graph, nodes };
+}
+
+export function packDesignerGraphLayout<T extends { nodes: DesignerGraphNode[] }>(graph: T): T {
+  const nodes = packDesignerNodeLayouts(graph.nodes);
+  if (nodes === graph.nodes) return graph;
+  return { ...graph, nodes };
+}
+
 export function offsetCanvasPosition(
   origin: { x: number; y: number },
   existingCount: number,
@@ -99,20 +440,24 @@ export function offsetCanvasPosition(
 
 export function positionRightOfNode(
   source: { id?: string; layout?: { x?: number; y?: number; width?: number; height?: number } },
-  existing: Array<{ id: string; layout?: { x?: number; y?: number } }>,
+  existing: Array<{ id: string; layout?: { x?: number; y?: number; width?: number; height?: number } }>,
 ): { x: number; y: number } {
   const width = source.layout?.width ?? DESIGNER_CANVAS_NODE_WIDTH;
+  const height = source.layout?.height ?? DESIGNER_CANVAS_NODE_HEIGHT;
   const x = (source.layout?.x ?? 0) + width + DESIGNER_SUCCESSOR_GAP_X;
   const baseY = source.layout?.y ?? 0;
-  const occupiedYs = existing
+  const occupied = existing
     .filter((node) => node.id !== source.id)
-    .filter((node) => Math.abs((node.layout?.x ?? 0) - x) < DESIGNER_CANVAS_NODE_WIDTH * 0.6)
-    .map((node) => node.layout?.y ?? 0)
-    .sort((left, right) => left - right);
+    .filter((node) => Math.abs((node.layout?.x ?? 0) - x) < Math.max(width, DESIGNER_CANVAS_NODE_WIDTH) * 0.6)
+    .map((node) => ({
+      y: node.layout?.y ?? 0,
+      height: node.layout?.height ?? DESIGNER_CANVAS_NODE_HEIGHT,
+    }))
+    .sort((left, right) => left.y - right.y);
   let y = baseY;
-  for (const used of occupiedYs) {
-    if (Math.abs(used - y) < DESIGNER_CANVAS_NODE_HEIGHT * 0.8) {
-      y = used + DESIGNER_CANVAS_NODE_HEIGHT + DESIGNER_SUCCESSOR_GAP_Y;
+  for (const used of occupied) {
+    if (y < used.y + used.height && y + height > used.y) {
+      y = used.y + used.height + DESIGNER_SUCCESSOR_GAP_Y;
     }
   }
   return { x, y };

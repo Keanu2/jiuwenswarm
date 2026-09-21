@@ -39,6 +39,7 @@ _ADD_HINT = re.compile(
     r"(加|添加|新增|add |new |删|去掉|remove|delete|connect|接到|连到)",
     re.I,
 )
+_CONNECT_HINT = re.compile(r"(接到|连到|connect(?:\s+to)?)", re.I)
 _AUDIO_HINT = re.compile(r"(配乐|音乐|music|bgm|旁白|配音|speech|voice)", re.I)
 _VIDEO_HINT = re.compile(r"(视频|镜头|clip|video)", re.I)
 
@@ -46,6 +47,7 @@ _LEADER_SYSTEM = """You are the invisible Designer Leader. Reply with a JSON obj
 Canvas node type and config.role must be one of: text, table, image, video, audio.
 Character/Scene/Keyframe/Clip/Film are pipelines, never node kinds.
 Do not rebuild the whole graph. Patch only what the user asked.
+Do not wire a new node into clip/compose unless the user asked to connect it.
 
 Schema:
 {
@@ -219,7 +221,7 @@ def heuristic_leader_plan(
             "layout": _place_right(graph),
         }
         patch: dict[str, Any] = {"upsert_nodes": [node]}
-        if sink:
+        if sink and _CONNECT_HINT.search(text):
             patch["upsert_edges"] = [
                 {
                     "id": f"e_{node_id}_{sink}",

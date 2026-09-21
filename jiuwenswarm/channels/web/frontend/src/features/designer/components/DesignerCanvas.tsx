@@ -21,11 +21,8 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import type { DesignerExecutionGraph } from '../executionGraphTypes';
-import {
-  toReactFlowGraph,
-  type DesignerReactFlowEdge,
-  type DesignerReactFlowNode,
-} from '../designerGraphAdapter';
+import { resolvedNodeCanvasSize, toReactFlowGraph, type DesignerReactFlowEdge, type DesignerReactFlowNode } from '../designerGraphAdapter';
+import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
 import { useDesignerStore } from '../designerStore';
 import { designerEdgeTypes } from './edges/DesignerEdge';
 import { designerNodeTypes } from './nodes/designerNodes';
@@ -64,8 +61,9 @@ function toPersistableGraph(
 function buildLayoutSyncKey(graph: DesignerExecutionGraph): string {
   const nodesKey = graph.nodes
     .map((node) => {
+      const size = resolvedNodeCanvasSize(node);
       const layout = node.layout ?? {};
-      return `${node.id}:${node.type}:${layout.x ?? 0}:${layout.y ?? 0}:${layout.width ?? 0}:${layout.height ?? 0}`;
+      return `${node.id}:${node.type}:${layout.x ?? 0}:${layout.y ?? 0}:${size.width}:${size.height}`;
     })
     .join(';');
   const edgesKey = graph.edges.map((edge) => `${edge.id}:${edge.source}->${edge.target}`).join(';');
@@ -116,6 +114,8 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
   const removeNodes = useDesignerStore((state) => state.removeNodes);
   const setSelectedNodeId = useDesignerStore((state) => state.setSelectedNodeId);
   const selectedNodeId = useDesignerStore((state) => state.selectedNodeId);
+  const bootstrapInProgress = useDesignerStore((state) => state.bootstrapInProgress);
+  const canvasLocked = bootstrapInProgress || isDesignerPreviewGraph(graph);
   const canvasTool = useDesignerUiStore((state) => state.canvasTool);
   const setCanvasTool = useDesignerUiStore((state) => state.setCanvasTool);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
@@ -195,6 +195,10 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
 
   const onConnect: OnConnect = useCallback(
     (connection: Connection) => {
+      if (canvasLocked) return;
+      // "+" menu sits on the source handle; ignore accidental RF connections
+      // while the user is picking a successor type.
+      if (useDesignerUiStore.getState().successorMenuNodeId) return;
       if (!connection.source || !connection.target) return;
       const source = connection.source;
       const target = connection.target;
@@ -214,7 +218,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
       );
       addDomainEdge({ id, source, target });
     },
-    [addDomainEdge, edges, setEdges],
+    [addDomainEdge, canvasLocked, edges, setEdges],
   );
 
   const onEdgesChange: OnEdgesChange = useCallback(
@@ -246,6 +250,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
 
   const onDrop = useCallback(
     (event: DragEvent) => {
+      if (canvasLocked) return;
       const assetId = event.dataTransfer.getData(DESIGNER_ASSET_DRAG_MIME).trim();
       if (!assetId) return;
       event.preventDefault();
@@ -263,7 +268,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         }),
       );
     },
-    [addDomainNode, getAsset, screenToFlowPosition],
+    [addDomainNode, canvasLocked, getAsset, screenToFlowPosition],
   );
 
   return (
@@ -283,12 +288,12 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         onDragOver={onDragOver}
         onDrop={onDrop}
         onPaneClick={closeDock}
-        panOnDrag={handMode ? true : [1]}
-        selectionOnDrag={!handMode}
-        nodesDraggable={!handMode}
-        nodesConnectable={!handMode}
-        deleteKeyCode={['Backspace', 'Delete']}
-        elementsSelectable
+        panOnDrag={handMode || canvasLocked ? true : [1]}
+        selectionOnDrag={!handMode && !canvasLocked}
+        nodesDraggable={!handMode && !canvasLocked}
+        nodesConnectable={!handMode && !canvasLocked}
+        deleteKeyCode={canvasLocked ? null : ['Backspace', 'Delete']}
+        elementsSelectable={!canvasLocked}
         fitView
         minZoom={0.2}
         maxZoom={1.5}
@@ -297,9 +302,9 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
       >
         <Background gap={20} size={1} />
         <Controls position="bottom-right" className="designer-canvas__controls" />
-        <MiniMap position="bottom-right" pannable zoomable />
+        {canvasLocked ? null : <MiniMap position="bottom-right" pannable zoomable />}
       </ReactFlow>
-      <DesignerCanvasDock />
+      {canvasLocked ? null : <DesignerCanvasDock />}
     </div>
   );
 }

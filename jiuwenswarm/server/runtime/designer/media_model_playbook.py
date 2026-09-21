@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Wan 3.0 + Qwen-Image multi-angle playbooks for Supervisor / Manager / leaf agents.
+"""Image + video multi-angle playbooks for Supervisor / Manager / leaf agents.
 
 Encode prompt and tool guidance so storyboards specify objects + camera facing,
 and media tools keep identity / style / positioning consistent.
@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Camera diversity (Qwen-Image-Edit Multiple-Angles style controls)
+# Camera diversity (image-edit multiple-angles style controls)
 # ---------------------------------------------------------------------------
 
 # azimuth: 0=front, 90=right, 180=back, 270=left
@@ -75,9 +75,9 @@ STYLE_LOCK_DEFAULT = {
 }
 
 QWEN_IMAGE_PLAYBOOK = """
-## Qwen-Image 3.0 (call_image_model when available)
+## Image generation (call_image_model)
 Use for solo character sheets and setting-compose keyframes (NO empty scene-plate nodes).
-- COST: Prefer ~1K resolution (size 1K / 1024x1024 or aspect-matched ~1K). Do not request 2K/4K.
+- COST: Prefer ~1K resolution (size 1K / 1024x1024 or aspect-matched ~1K from aspect_lock). Do not request 2K/4K unless aspect_lock says so.
 - EVERY named character gets a solo identity sheet before any keyframe.
 - First KF of a setting_id: compose_from_solo_refs — GENERATE the setting AND place ONLY
   storyboard on_screen cast with cast_actions. Author a detailed SCENE BIBLE (objects,
@@ -86,14 +86,16 @@ Use for solo character sheets and setting-compose keyframes (NO empty scene-plat
   SCENE PROMPT HANDOFF / scene bible so architecture stays deterministic. Change only view +
   on_screen/doing. Never edit a prior keyframe image as the primary ref.
 - Multi-ref prompting: name each slot ("Image 1 is Pastor… Image 2 is Young Man…").
+  call_image_model auto-attaches on-screen solo sheets as those uploaded slots.
   State placements (screen-left/right), gaze targets, and what must NOT change.
 - CROWD LOCK: if the first KF shows a congregation/extras, keep them in every later KF
   unless storyboard exits them — never pop a new crowd mid-scene.
 """.strip()
 
 WAN3_VIDEO_PLAYBOOK = """
-## Wan Video 3.0 (call_video_model when available) — PRIMARY film path
-Clips are I2V from the keyframe (Image 1 = first frame). Prefer 480P.
+## Video generation (call_video_model) — PRIMARY film path
+Clips are I2V from the keyframe (Image 1 = first frame).
+Use aspect_lock.video_size / video_resolution — do not invent 480P or 16:9 if the film is locked otherwise.
 Prompt structure (lead with subject/motion; be concrete):
   [Subject] who is on screen (names + wardrobe locks)
   [Motion] HOW they move — direction, speed, body mechanics (not vague "acts")
@@ -101,7 +103,7 @@ Prompt structure (lead with subject/motion; be concrete):
   [Camera] explicit move or "static camera, locked shot" (default drift otherwise)
   [Environment] lighting/atmosphere that continues from Image 1 + scene bible
   [Locks] style_lock + spatial_lock + costume + occupancy + crowd_lock + already_done
-  [Handoff] PRIOR CLIP CONTINUITY — do not redo exits/lines; keep L/R from prior Wan prompt
+  [Handoff] PRIOR CLIP CONTINUITY — do not redo exits/lines; keep L/R from prior clip prompt
 Negative intent: morphing, face warp, teleport, disappearing crowd, identity swap.
 Keep clips short (~5s); one primary camera move per clip.
 """.strip()
@@ -112,7 +114,7 @@ Group shots by setting_id / place. For EACH scene block author a SCENE BIBLE:
 objects + locations, lighting, crowd size/positions, and hierarchical views
 (front/left/right/side/top/bottom) so coverage is coherent and things do not appear
 from nowhere. For EACH scene:
-1. First keyframe = compose_from_solo_refs: Qwen generates the setting AND places cast
+1. First keyframe = compose_from_solo_refs: the image model generates the setting AND places cast
    from solo identity sheets (NO empty scene-plate node). Include scene bible in the brief.
 2. Later keyframes in the SAME scene = compose_from_solo_refs again with SCENE PROMPT
    HANDOFF from the master (reuse architecture; change view/cast only).
@@ -128,9 +130,9 @@ When correcting leaf agents / drafting node prompts:
 - Character solos = identity only. Every KF composes cast INTO the locked scene bible
   (style_lock + setting text + hierarchical views). Same-setting later KFs: reuse master
   scene prompt handoff — do not edit prior keyframe images as the primary ref.
-- Clip: DETAILED Wan prompt with STYLE HOLD + set/orientation + cast/prop locks.
+- Clip: DETAILED I2V prompt with STYLE HOLD + set/orientation + cast/prop locks.
 - NON-NEGOTIABLE film-wide locks on EVERY keyframe AND clip: aspect_lock (same ratio /
-  ~1K stills / 480P video), style_lock, spatial_lock, costume/identity, occupancy, screen axis.
+  image_size + video_size/video_resolution from that lock), style_lock, spatial_lock, costume/identity, occupancy, screen axis.
 - If agents ignore storyboard facing/objects/speech OR drop any lock, rewrite
   supervisor_task / generate.prompt once (no loops).
 """.strip()
@@ -141,8 +143,8 @@ Manager one-pass corrections (locks bind ALL agents — leaf rewrites cannot dro
 - Require camera_rig + screen_positions + speech_line; stamp setting_id + keyframe_strategy.
 - BEFORE media calls: gate every frame/keyframe/clip prompt for aspect_lock, style_lock,
   spatial_lock, costume/identity, occupancy, and prior continuity; re-inject missing locks.
-- Stamp image_size from aspect_lock on stills and video_size/video_resolution=480P on clips.
-- Graph = brief→storyboard→solo cast→compose KF per setting→edit KFs→Wan I2V→compose.
+- Stamp image_size / video_size / video_resolution from aspect_lock on stills and clips.
+- Graph = brief→storyboard→solo cast→compose KF per setting→edit KFs→I2V clips→compose.
   NO empty multi scene-plate chain.
 - Prune only true orphans; every kept node must reach compose.
 """.strip()
@@ -150,13 +152,28 @@ Manager one-pass corrections (locks bind ALL agents — leaf rewrites cannot dro
 
 def playbook_for_role(role: str) -> str:
     role_l = str(role or "").lower()
+    from jiuwenswarm.server.runtime.designer.audio_locks import (
+        image_gen_family_label,
+        video_gen_family_label,
+    )
+
+    image_pb = QWEN_IMAGE_PLAYBOOK.replace(
+        "## Image generation (call_image_model)",
+        f"## {image_gen_family_label()} (call_image_model)",
+        1,
+    )
+    video_pb = WAN3_VIDEO_PLAYBOOK.replace(
+        "## Video generation (call_video_model)",
+        f"## {video_gen_family_label()} (call_video_model)",
+        1,
+    )
     chunks = [STORYBOARD_DETAIL_RULES]
     if role_l in {"storyboard", "brief", "supervisor", "manager"}:
-        chunks.extend([QWEN_IMAGE_PLAYBOOK, WAN3_VIDEO_PLAYBOOK])
+        chunks.extend([image_pb, video_pb])
     if role_l in {"frame", "keyframe", "scene", "character", "character_design", "image"}:
-        chunks.append(QWEN_IMAGE_PLAYBOOK)
+        chunks.append(image_pb)
     if role_l in {"clip", "video"}:
-        chunks.append(WAN3_VIDEO_PLAYBOOK)
+        chunks.append(video_pb)
     if role_l in {"supervisor", "brief", "storyboard"}:
         chunks.append(SUPERVISOR_CORRECTION_HINTS)
     if role_l in {"manager"}:
@@ -278,7 +295,7 @@ def qwen_angle_clause(shot: dict[str, Any] | None) -> str:
     if not rig:
         return ""
     return (
-        f" QWEN CAMERA RIG: azimuth={rig.get('azimuth')}° "
+        f" CAMERA RIG: azimuth={rig.get('azimuth')}° "
         f"(0=front,90=right,180=back,270=left), elevation={rig.get('elevation')}°, "
         f"distance={rig.get('distance')} (0.6=CU,1.0=MS,1.4=wide); "
         f"facing={rig.get('facing') or shot.get('facing') or ''}."

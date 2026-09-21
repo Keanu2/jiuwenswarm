@@ -34,38 +34,102 @@ _CROSS_RE = re.compile(
     re.I,
 )
 _VERTICAL_RE = re.compile(
-    r"\b(?:vertical|9\s*[:x]\s*16|tiktok|reels|shorts|portrait\s+video)\b", re.I
+    r"(?:vertical|portrait(?:\s+video)?|9\s*[:x/]\s*16|tiktok|reels|shorts|"
+    r"竖屏|竖版|竖构图|竖拍)",
+    re.I,
 )
-_SQUARE_RE = re.compile(r"\b(?:1\s*[:x]\s*1|square\s+(?:frame|video))\b", re.I)
+_SQUARE_RE = re.compile(r"(?:1\s*[:x/]\s*1|square(?:\s+(?:frame|video))?|方形|正方形)", re.I)
+_FOUR_THREE_RE = re.compile(r"(?:4\s*[:x/]\s*3|4比3)", re.I)
+_THREE_FOUR_RE = re.compile(r"(?:3\s*[:x/]\s*4|3比4)", re.I)
+_ULTRAWIDE_RE = re.compile(
+    r"(?:21\s*[:x/]\s*9|2[\.:](?:35|39)\s*[:x/]\s*1|ultrawide|cinemascope|"
+    r"宽屏|电影画幅)",
+    re.I,
+)
+_LANDSCAPE_RE = re.compile(r"(?:16\s*[:x/]\s*9|landscape|横屏|横版|横构图|横拍)", re.I)
+_RES_1080_RE = re.compile(r"(?:1080\s*p|1920\s*[x*]\s*1080|full\s*hd|2k|全高清|1080p)", re.I)
+_RES_720_RE = re.compile(r"(?:720\s*p|1280\s*[x*]\s*720|高清(?!度))", re.I)
+_RES_4K_RE = re.compile(r"(?:4k|2160\s*p|3840\s*[x*]\s*2160|超高清)", re.I)
+_RES_480_RE = re.compile(r"(?:480\s*p|854\s*[x*]\s*480)", re.I)
+
+_ASPECT_PIXELS: dict[str, dict[str, tuple[str, str]]] = {
+    "16:9": {
+        "480P": ("854*480", "1024x576"),
+        "720P": ("1280*720", "1280x720"),
+        "1080P": ("1920*1080", "1920x1080"),
+    },
+    "9:16": {
+        "480P": ("480*854", "576x1024"),
+        "720P": ("720*1280", "720x1280"),
+        "1080P": ("1080*1920", "1080x1920"),
+    },
+    "1:1": {
+        "480P": ("480*480", "1K"),
+        "720P": ("720*720", "720x720"),
+        "1080P": ("1080*1080", "1080x1080"),
+    },
+    "4:3": {
+        "480P": ("640*480", "1024x768"),
+        "720P": ("960*720", "960x720"),
+        "1080P": ("1440*1080", "1440x1080"),
+    },
+    "3:4": {
+        "480P": ("480*640", "768x1024"),
+        "720P": ("720*960", "720x960"),
+        "1080P": ("1080*1440", "1080x1440"),
+    },
+    "21:9": {
+        "480P": ("1128*480", "1280x548"),
+        "720P": ("1680*720", "1680x720"),
+        "1080P": ("2560*1080", "2560x1080"),
+    },
+}
+
+
+def _aspect_resolution_from_prompt(prompt: str) -> str:
+    text = prompt or ""
+    if _RES_4K_RE.search(text) or _RES_1080_RE.search(text):
+        return "1080P"
+    if _RES_720_RE.search(text):
+        return "720P"
+    if _RES_480_RE.search(text):
+        return "480P"
+    return "480P"
+
+
+def _aspect_ratio_from_prompt(prompt: str) -> str:
+    text = prompt or ""
+    if _VERTICAL_RE.search(text):
+        return "9:16"
+    if _SQUARE_RE.search(text):
+        return "1:1"
+    if _THREE_FOUR_RE.search(text):
+        return "3:4"
+    if _FOUR_THREE_RE.search(text):
+        return "4:3"
+    if _ULTRAWIDE_RE.search(text):
+        return "21:9"
+    if _LANDSCAPE_RE.search(text):
+        return "16:9"
+    return "16:9"
 
 
 def infer_aspect_lock(prompt: str) -> dict[str, str]:
     """One aspect for every sheet, keyframe, and clip in the film."""
-    text = prompt or ""
-    if _VERTICAL_RE.search(text):
-        return {
-            "ratio": "9:16",
-            # ~1K budget (portrait): keep short side near 480–576, not 2K.
-            "image_size": "576x1024",
-            "video_size": "480*854",
-            "video_resolution": "480P",
-            "rule": "EVERY still and clip MUST be 9:16 portrait at ~1K/480P. Do not letterbox, crop to 16:9, or square-crop.",
-        }
-    if _SQUARE_RE.search(text):
-        return {
-            "ratio": "1:1",
-            "image_size": "1K",
-            "video_size": "480*480",
-            "video_resolution": "480P",
-            "rule": "EVERY still and clip MUST be 1:1 at 1K/480P. Do not change aspect mid-film.",
-        }
+    ratio = _aspect_ratio_from_prompt(prompt)
+    resolution = _aspect_resolution_from_prompt(prompt)
+    video_size, image_size = _ASPECT_PIXELS.get(ratio, _ASPECT_PIXELS["16:9"]).get(
+        resolution, _ASPECT_PIXELS["16:9"]["480P"]
+    )
     return {
-        "ratio": "16:9",
-        # ~1K budget (landscape): prefer 1024-wide over 1280/2K.
-        "image_size": "1024x576",
-        "video_size": "854*480",
-        "video_resolution": "480P",
-        "rule": "EVERY still and clip MUST be 16:9 landscape at ~1K/480P. Do not square-crop or switch to 9:16.",
+        "ratio": ratio,
+        "image_size": image_size,
+        "video_size": video_size,
+        "video_resolution": resolution,
+        "rule": (
+            f"EVERY still and clip MUST be {ratio} at {resolution} ({video_size}). "
+            "Do not letterbox, crop, or change aspect mid-film."
+        ),
     }
 
 
@@ -239,7 +303,7 @@ def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | N
         bits.append(
             f"ASPECT LOCK: {aspect.get('ratio')} — {aspect.get('rule')} "
             f"(image_size={aspect.get('image_size') or ''}; "
-            f"video={aspect.get('video_size') or ''} @ {aspect.get('video_resolution') or '480P'})."
+            f"video={aspect.get('video_size') or ''} @ {aspect.get('video_resolution') or ''})."
         )
     if axis:
         named = []

@@ -42,7 +42,8 @@ def hollywood_leaf_instructions(role: str) -> str:
         "9) ASPECT: obey film aspect_lock on every still/clip.\n"
         "10) IMAGE-N: if references exist, name Image 1, Image 2… in attach order in your prompt.\n"
         "11) Finish with designer_node_complete(text=<FINAL visual-model prompt only>). "
-        "The pipeline materializes Qwen/Wan from that text — make it shot-ready, not a memo.\n"
+        "The pipeline materializes that text via call_image_model / call_video_model — "
+        "make it shot-ready, not a memo.\n"
     )
     if r in {"character", "character_design"}:
         return (

@@ -61,7 +61,7 @@ Use a Markdown table whose columns MUST be:
 Shot | Timeline | Camera | Move | Character action | Continuity | Comment
 
 Rules:
-- Cover every major beat from the user prompt (typically 3-5 shots; duration ~12-24s total unless brief says shorter)
+- Cover every major beat from the user prompt, but keep the table row count EQUAL to planned shots / target_shot_count when those are given (do not invent extra shots to fill duration)
 - Timeline as start-end seconds, e.g. 0.0-4.0s — durations must sum coherently
 - Camera is shot size + angle, e.g. wide/establishing, medium/eye-level, close-up/eye-level, medium/slow pan
 - Move is push/pull/pan/dolly/static and speed
@@ -572,7 +572,9 @@ class StoryboardNodeHandler:
             import json as _json
 
             planned_block = (
-                "\n\nPlanned shots from supervisor casting (honor these beats; expand camera detail):\n"
+                "\n\nPlanned shots from supervisor casting "
+                f"(exactly {len(planned)} table rows — honor these beats; "
+                "expand camera/action DETAIL inside each row, do not add extra shots):\n"
                 + _json.dumps(planned, ensure_ascii=False, indent=2)
                 + "\n"
             )

@@ -383,6 +383,65 @@ def test_graph_store_does_not_shrink_expanded_shot_nodes(designer_store: Designe
     ]
 
 
+def test_preserve_expanded_shot_nodes_keeps_user_deleted_extra_shots() -> None:
+    graph = build_bootstrap_graph(project_id="proj_del01", prompt="delete extra shots")
+    expanded = expand_clip_nodes_for_shots(graph, 4)
+    drop = {"n_frame_4", "n_clip_4"}
+    incoming = dict(expanded)
+    incoming["nodes"] = [node for node in expanded["nodes"] if node["id"] not in drop]
+    incoming["edges"] = [
+        edge
+        for edge in expanded["edges"]
+        if edge.get("source") not in drop and edge.get("target") not in drop
+    ]
+    kept = preserve_expanded_shot_nodes(incoming, expanded)
+    ids = {node["id"] for node in kept["nodes"]}
+    assert "n_frame_4" not in ids
+    assert "n_clip_4" not in ids
+    assert {"n_frame_1", "n_frame_2", "n_frame_3", "n_clip_1", "n_clip_2", "n_clip_3"} <= ids
+
+
+def test_graph_store_keeps_user_deleted_extra_shots(designer_store: DesignerGraphStore) -> None:
+    graph = designer_store.save_graph(
+        expand_clip_nodes_for_shots(
+            build_bootstrap_graph(project_id="proj_del02", prompt="delete extra shots"),
+            4,
+        )
+    )
+    drop = {"n_frame_4", "n_clip_4"}
+    incoming = dict(graph)
+    incoming["nodes"] = [node for node in graph["nodes"] if node["id"] not in drop]
+    incoming["edges"] = [
+        edge
+        for edge in graph["edges"]
+        if edge.get("source") not in drop and edge.get("target") not in drop
+    ]
+    saved = designer_store.save_graph(incoming)
+    ids = {node["id"] for node in saved["nodes"]}
+    assert "n_frame_4" not in ids
+    assert "n_clip_4" not in ids
+    assert "n_frame_3" in ids
+    assert "n_clip_3" in ids
+
+
+def test_preserve_skips_graft_when_user_marks_topology_edit() -> None:
+    graph = build_bootstrap_graph(project_id="proj_del03", prompt="delete extra shots")
+    expanded = expand_clip_nodes_for_shots(graph, 4)
+    drop = {"n_frame_4", "n_clip_4"}
+    incoming = dict(expanded)
+    incoming["nodes"] = [node for node in expanded["nodes"] if node["id"] not in drop]
+    incoming["edges"] = [
+        edge
+        for edge in expanded["edges"]
+        if edge.get("source") not in drop and edge.get("target") not in drop
+    ]
+    incoming["metadata"] = {**(expanded.get("metadata") or {}), "user_topology_edit": True}
+    kept = preserve_expanded_shot_nodes(incoming, expanded)
+    ids = {node["id"] for node in kept["nodes"]}
+    assert "n_frame_4" not in ids
+    assert "n_clip_4" not in ids
+
+
 def test_expand_splits_bundled_keyframe_images(
     designer_store: DesignerGraphStore, tmp_path: Path
 ) -> None:

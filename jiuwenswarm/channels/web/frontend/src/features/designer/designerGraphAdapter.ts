@@ -4,6 +4,13 @@ import type {
   DesignerGraphNode,
   NodeLayout,
 } from './executionGraphTypes';
+import {
+  DESIGNER_CANVAS_NODE_HEIGHT,
+  DESIGNER_CANVAS_NODE_WIDTH,
+  resolvedNodeCanvasSize,
+} from './designerCanvasNodes';
+
+export { resolvedNodeCanvasSize };
 
 /** Minimal React Flow node shape used by the adapter (no @xyflow/react dependency). */
 export type DesignerReactFlowNode = {
@@ -37,8 +44,8 @@ export type DesignerReactFlowGraph = {
   edges: DesignerReactFlowEdge[];
 };
 
-const DEFAULT_NODE_WIDTH = 280;
-const DEFAULT_NODE_HEIGHT = 160;
+const DEFAULT_NODE_WIDTH = DESIGNER_CANVAS_NODE_WIDTH;
+const DEFAULT_NODE_HEIGHT = DESIGNER_CANVAS_NODE_HEIGHT;
 
 function layoutPosition(layout: NodeLayout | undefined): { x: number; y: number } {
   return {
@@ -47,10 +54,8 @@ function layoutPosition(layout: NodeLayout | undefined): { x: number; y: number 
   };
 }
 
-function nodeStyle(layout: NodeLayout | undefined): DesignerReactFlowNode['style'] | undefined {
-  const width = typeof layout?.width === 'number' ? layout.width : DEFAULT_NODE_WIDTH;
-  const height = typeof layout?.height === 'number' ? layout.height : DEFAULT_NODE_HEIGHT;
-  return { width, height };
+function nodeStyle(node: DesignerGraphNode): DesignerReactFlowNode['style'] {
+  return resolvedNodeCanvasSize(node);
 }
 
 export function toReactFlowGraph(graph: DesignerExecutionGraph): DesignerReactFlowGraph {
@@ -58,7 +63,7 @@ export function toReactFlowGraph(graph: DesignerExecutionGraph): DesignerReactFl
     id: node.id,
     type: node.type,
     position: layoutPosition(node.layout),
-    style: nodeStyle(node.layout),
+    style: nodeStyle(node),
     data: {
       label: node.label,
       nodeType: node.type,

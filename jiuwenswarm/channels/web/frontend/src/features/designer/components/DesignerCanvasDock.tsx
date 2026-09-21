@@ -1,6 +1,7 @@
 import {
   FolderOpen,
   Hand,
+  LayoutGrid,
   MousePointer2,
   Plus,
 } from 'lucide-react';
@@ -19,8 +20,9 @@ import { useDesignerUiStore } from '../designerUiStore';
 
 export function DesignerCanvasDock() {
   const { t } = useTranslation();
-  const { screenToFlowPosition } = useReactFlow();
+  const { fitView, screenToFlowPosition } = useReactFlow();
   const addNode = useDesignerStore((state) => state.addNode);
+  const autoLayout = useDesignerStore((state) => state.autoLayout);
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const canvasTool = useDesignerUiStore((state) => state.canvasTool);
   const dockPanel = useDesignerUiStore((state) => state.dockPanel);
@@ -48,6 +50,16 @@ export function DesignerCanvasDock() {
     },
     [addNode, closeDock, domainGraph?.nodes, screenToFlowPosition],
   );
+
+  const runAutoLayout = useCallback(() => {
+    autoLayout();
+    closeDock();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        void fitView({ padding: 0.18, duration: 220 });
+      });
+    });
+  }, [autoLayout, closeDock, fitView]);
 
   return (
     <div className="designer-canvas-dock" data-testid="designer-canvas-dock">
@@ -105,6 +117,17 @@ export function DesignerCanvasDock() {
           onClick={() => setCanvasTool('hand')}
         >
           <Hand size={18} aria-hidden />
+        </button>
+        <button
+          type="button"
+          className="designer-canvas-dock__btn"
+          aria-label={t('designer.dock.layout')}
+          title={t('designer.dock.layoutHint')}
+          data-testid="designer-canvas-dock-layout"
+          disabled={!domainGraph?.nodes.length}
+          onClick={runAutoLayout}
+        >
+          <LayoutGrid size={18} aria-hidden />
         </button>
         <span className="designer-canvas-dock__split" aria-hidden />
         <button

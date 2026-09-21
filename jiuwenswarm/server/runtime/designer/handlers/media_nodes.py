@@ -15,6 +15,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_VIDEO,
     DesignerGraphNode,
     data_predecessors,
+    video_concat_source_ids,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import MusicNodeHandler
@@ -26,6 +27,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
     node_output_image_paths,
     path_from_uri,
 )
+from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.image_nodes import _image_or_notes
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 from jiuwenswarm.server.runtime.designer.user_references import user_reference_image_paths
@@ -86,6 +88,17 @@ def _upstream_images(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list
     return paths[:3]
 
 
+def _image_size_from_ctx(ctx: NodeExecutionContext, node: DesignerGraphNode) -> str:
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
+    if not aspect:
+        meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
+        aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
+    return str(
+        (aspect or {}).get("image_size") or cfg.get("image_size") or "1024x1024"
+    ).strip() or "1024x1024"
+
+
 class ImageNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         prompt = node_generate_prompt(node) or graph_prompt(ctx.graph, node)
@@ -95,7 +108,7 @@ class ImageNodeHandler:
             notes=prompt,
             stem=f"designer_image_{ctx.run_id}_{ctx.node_id}",
             kind_if_text=NODE_TYPE_IMAGE,
-            size="1280*720",
+            size=_image_size_from_ctx(ctx, node),
             max_tries=4,
             require_image=True,
             reference_images=[str(path) for path in refs] or None,
@@ -104,6 +117,9 @@ class ImageNodeHandler:
 
 class VideoNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
+        sources = video_concat_source_ids(ctx.graph, str(node.get("id") or ctx.node_id))
+        if sources:
+            return await ComposeNodeHandler().execute(node, ctx)
         prompt = node_generate_prompt(node) or graph_prompt(ctx.graph, node)
         refs = _upstream_images(ctx, node)
         first_frame = str(refs[0]) if refs else None

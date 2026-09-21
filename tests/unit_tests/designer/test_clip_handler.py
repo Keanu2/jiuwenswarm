@@ -184,6 +184,7 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
         reference_images: list[str] | None = None,
         reference_file: str | None = None,
         duration: int = 5,
+        **kwargs,
     ) -> dict[str, str]:
         seen["first_frame"] = first_frame
         seen["reference_images"] = reference_images
@@ -657,10 +658,10 @@ def test_concatenate_clip_videos_concats_shot1_then_shot2(
     assert merged == dest.resolve()
     assert dest.read_bytes() == b"concatenated"
     assert calls
-    copy_cmd = calls[0]
+    copy_cmd = next(cmd for cmd in calls if "-f" in cmd and "concat" in cmd)
     assert copy_cmd[0] == "ffmpeg"
     assert "-f" in copy_cmd and "concat" in copy_cmd
-    assert "-c:v" in copy_cmd
+    assert "-c:v" in copy_cmd or "-c" in copy_cmd
     assert "-an" in copy_cmd
     listing = listings[0]
     assert clip1.resolve().as_posix() in listing
@@ -707,4 +708,178 @@ def test_concatenate_clip_videos_falls_back_to_filter_concat(
     assert "concat=n=2:v=1:a=0" in spec
     assert "-an" in filter_cmd
     assert "aac" not in filter_cmd
+
+
+def test_concatenate_clip_videos_keeps_audio_when_clips_have_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from jiuwenswarm.server.runtime.designer.handlers import compose as compose_mod
+
+    clip1 = tmp_path / "shot1.mp4"
+    clip2 = tmp_path / "shot2.mp4"
+    dest = tmp_path / "film.mp4"
+    clip1.write_bytes(b"clip-1")
+    clip2.write_bytes(b"clip-2")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(cmd))
+        joined = " ".join(cmd)
+        if "-f" in cmd and "concat" in cmd:
+            dest.write_bytes(b"concat-audio")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "-i" in cmd and "-filter_complex" not in joined:
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout="",
+                stderr="Stream #0:0: Video: h264, yuv420p, 1280x720\nStream #0:1: Audio: aac, 44100 Hz, stereo",
+            )
+        dest.write_bytes(b"reencoded-audio")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(compose_mod, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(compose_mod.subprocess, "run", fake_run)
+    merged = compose_mod.concatenate_clip_videos([clip1, clip2], dest)
+    assert merged == dest.resolve()
+    copy_cmd = next(cmd for cmd in calls if "-f" in cmd and "concat" in cmd)
+    assert "-an" not in copy_cmd
+    assert "-c" in copy_cmd and "copy" in copy_cmd
+
+
+def test_collect_clip_paths_uses_connected_videos_only(tmp_path: Path) -> None:
+    from jiuwenswarm.common.schema.designer_graph import NODE_ROLE_COMPOSE, node_pipeline
+    from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
+    from jiuwenswarm.server.runtime.designer.handlers.compose import collect_clip_video_paths
+
+    keep = tmp_path / "keep.mp4"
+    extra = tmp_path / "extra.mp4"
+    keep.write_bytes(b"keep-mp4")
+    extra.write_bytes(b"extra-mp4")
+    graph = normalize_execution_graph(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "graph_id": "graph_concat_connected",
+            "project_id": "proj_concat",
+            "title": "concat",
+            "nodes": [
+                {
+                    "id": "n_clip_1",
+                    "type": NODE_TYPE_VIDEO,
+                    "label": "clip 1",
+                    "config": {"role": NODE_ROLE_CLIP, "shot_index": 1},
+                    "output_ref": file_output_ref(
+                        keep, kind=NODE_TYPE_VIDEO, mime_type="video/mp4"
+                    ),
+                },
+                {
+                    "id": "n_clip_2",
+                    "type": NODE_TYPE_VIDEO,
+                    "label": "clip 2",
+                    "config": {"role": NODE_ROLE_CLIP, "shot_index": 2},
+                    "output_ref": file_output_ref(
+                        extra, kind=NODE_TYPE_VIDEO, mime_type="video/mp4"
+                    ),
+                },
+                {
+                    "id": "n_video_user",
+                    "type": NODE_TYPE_VIDEO,
+                    "label": "Video 3",
+                    "config": {
+                        "role": "video",
+                        "user_added": True,
+                        "inputs": ["n_clip_1"],
+                    },
+                },
+            ],
+            "edges": [
+                {"id": "e_user", "source": "n_clip_1", "target": "n_video_user"},
+            ],
+        }
+    )
+    assert node_pipeline(graph["nodes"][-1]) == NODE_ROLE_COMPOSE
+    paths = collect_clip_video_paths(
+        NodeExecutionContext(
+            graph=graph,
+            run_id="run_concat",
+            node_id="n_video_user",
+            run={"node_states": {}},
+        )
+    )
+    assert paths == [keep.resolve()]
+
+
+def test_create_rerun_compose_does_not_wait_on_unconnected_clip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiuwenswarm.common.schema.designer_graph import NODE_ROLE_COMPOSE
+    from jiuwenswarm.server.runtime.designer.executor import GraphExecutor
+    from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
+    from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.graph_store.get_agent_root_dir",
+        lambda: tmp_path,
+    )
+    clip = tmp_path / "ready.mp4"
+    clip.write_bytes(b"ready-mp4")
+    graph = normalize_execution_graph(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "graph_id": "graph_rerun_concat",
+            "project_id": "proj_rerun_concat",
+            "title": "concat",
+            "nodes": [
+                {
+                    "id": "n_clip_1",
+                    "type": NODE_TYPE_VIDEO,
+                    "config": {"role": NODE_ROLE_CLIP, "shot_index": 1},
+                    "output_ref": file_output_ref(
+                        clip, kind=NODE_TYPE_VIDEO, mime_type="video/mp4"
+                    ),
+                },
+                {
+                    "id": "n_clip_2",
+                    "type": NODE_TYPE_VIDEO,
+                    "config": {"role": NODE_ROLE_CLIP, "shot_index": 2},
+                },
+                {
+                    "id": "n_speech",
+                    "type": "audio",
+                    "config": {"pipeline": "speech"},
+                },
+                {
+                    "id": "n_compose",
+                    "type": NODE_TYPE_VIDEO,
+                    "config": {
+                        "role": NODE_ROLE_COMPOSE,
+                        "pipeline": NODE_ROLE_COMPOSE,
+                        "inputs": ["n_clip_1"],
+                    },
+                },
+            ],
+            "edges": [
+                {"id": "e_c1", "source": "n_clip_1", "target": "n_compose"},
+            ],
+        }
+    )
+    executor = GraphExecutor(DesignerGraphStore())
+    rerun = executor.create_rerun(
+        graph,
+        source_run={
+            "run_id": "run_src",
+            "graph_id": graph["graph_id"],
+            "node_states": {
+                "n_clip_1": {"status": "pending"},
+                "n_clip_2": {"status": "pending"},
+                "n_speech": {"status": "pending"},
+                "n_compose": {"status": "failed"},
+            },
+        },
+        node_id="n_compose",
+    )
+    assert rerun["node_states"]["n_compose"]["status"] == "pending"
+
 

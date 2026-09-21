@@ -3,13 +3,25 @@ import test from 'node:test';
 
 import {
   DESIGNER_ADD_TEMPLATES,
+  DESIGNER_LAYOUT_ORIGIN_X,
+  DESIGNER_LAYOUT_ORIGIN_Y,
+  DESIGNER_SUCCESSOR_GAP_X,
+  DESIGNER_SUCCESSOR_GAP_Y,
+  autoLayoutDesignerNodes,
   buildManualDesignerNode,
   buildNodeFromLibraryAsset,
   connectNodeToGraph,
+  contentAspectFromNodeConfig,
+  isDefaultLandscapeNodeSize,
   nextTypeIndex,
   offsetCanvasPosition,
+  packDesignerNodeLayouts,
+  parseContentAspect,
   positionRightOfNode,
   removeNodesFromGraph,
+  resolvedNodeCanvasSize,
+  sizeNodeForContentAspect,
+  sizeNodeForDocumentContent,
   templateForAssetKind,
 } from '../node_modules/.cache/designer-canvas-nodes/designerCanvasNodes.js';
 
@@ -77,13 +89,13 @@ test('library asset becomes an upload node of matching modality', () => {
 test('positionRightOfNode stacks below an occupied successor slot', () => {
   const source = { id: 'n_brief', layout: { x: 40, y: 100, width: 280, height: 160 } };
   const first = positionRightOfNode(source, []);
-  assert.equal(first.x, 40 + 280 + 88);
+  assert.equal(first.x, 40 + 280 + DESIGNER_SUCCESSOR_GAP_X);
   assert.equal(first.y, 100);
   const second = positionRightOfNode(source, [
     { id: 'n_other', layout: { x: first.x, y: first.y } },
   ]);
   assert.equal(second.x, first.x);
-  assert.equal(second.y, first.y + 160 + 36);
+  assert.equal(second.y, first.y + 160 + DESIGNER_SUCCESSOR_GAP_Y);
 });
 
 test('connectNodeToGraph adds a data edge and predecessor input', () => {
@@ -127,3 +139,211 @@ test('removeNodesFromGraph drops edges and strips inputs', () => {
   assert.equal(next.edges.length, 0);
   assert.deepEqual(next.nodes[1].config.inputs, ['n_a']);
 });
+
+test('parseContentAspect reads ratio and pixel sizes', () => {
+  assert.equal(parseContentAspect('9:16'), 9 / 16);
+  assert.equal(parseContentAspect('1080*1920'), 1080 / 1920);
+  assert.equal(parseContentAspect('1K'), null);
+});
+
+test('contentAspectFromNodeConfig prefers aspect_lock', () => {
+  assert.equal(
+    contentAspectFromNodeConfig({
+      aspect_lock: { ratio: '9:16', video_size: '1080*1920' },
+    }),
+    9 / 16,
+  );
+});
+
+test('sizeNodeForContentAspect makes portrait nodes taller than wide', () => {
+  const portrait = sizeNodeForContentAspect(9 / 16);
+  assert.ok(portrait.height > portrait.width);
+  const landscape = sizeNodeForContentAspect(16 / 9);
+  assert.ok(landscape.width > landscape.height);
+  assert.equal(isDefaultLandscapeNodeSize(280, 160), true);
+  assert.equal(isDefaultLandscapeNodeSize(portrait.width, portrait.height), false);
+});
+
+test('packDesignerNodeLayouts separates stacked portrait media nodes', () => {
+  const portrait = sizeNodeForContentAspect(9 / 16);
+  const packed = packDesignerNodeLayouts([
+    {
+      id: 'n_frame_1',
+      type: 'image',
+      label: 'Frame 1',
+      config: { aspect_lock: { ratio: '9:16' } },
+      layout: { x: 1020, y: 40, width: 240, height: 140 },
+    },
+    {
+      id: 'n_frame_2',
+      type: 'image',
+      label: 'Frame 2',
+      config: { aspect_lock: { ratio: '9:16' } },
+      layout: { x: 1020, y: 200, width: 240, height: 140 },
+    },
+    {
+      id: 'n_clip_1',
+      type: 'video',
+      label: 'Clip 1',
+      config: { aspect_lock: { ratio: '9:16' } },
+      layout: { x: 1320, y: 40, width: 240, height: 140 },
+    },
+  ]);
+  const frame1 = packed.find((node) => node.id === 'n_frame_1');
+  const frame2 = packed.find((node) => node.id === 'n_frame_2');
+  const clip1 = packed.find((node) => node.id === 'n_clip_1');
+  assert.ok(frame1 && frame2 && clip1);
+  const top = frame1.layout?.y ?? 0;
+  const bottom = frame2.layout?.y ?? 0;
+  const height = frame1.layout?.height ?? 0;
+  assert.ok(height >= portrait.height - 1);
+  assert.equal(bottom, top + height + DESIGNER_SUCCESSOR_GAP_Y);
+  assert.equal(clip1.layout?.y, frame1.layout?.y);
+  assert.equal(
+    clip1.layout?.x,
+    (frame1.layout?.x ?? 0) + (frame1.layout?.width ?? 0) + DESIGNER_SUCCESSOR_GAP_X,
+  );
+});
+
+test('packDesignerNodeLayouts keeps a wide table from covering the next column', () => {
+  const packed = packDesignerNodeLayouts([
+    {
+      id: 'n_scene',
+      type: 'image',
+      label: 'Scene',
+      layout: { x: 400, y: 240, width: 280, height: 160 },
+    },
+    {
+      id: 'n_storyboard',
+      type: 'table',
+      label: 'Table',
+      layout: { x: 400, y: 440, width: 280, height: 280 },
+    },
+    {
+      id: 'n_frame_1',
+      type: 'image',
+      label: 'Frame',
+      layout: { x: 760, y: 240, width: 280, height: 160 },
+    },
+  ]);
+  const scene = packed.find((node) => node.id === 'n_scene');
+  const table = packed.find((node) => node.id === 'n_storyboard');
+  const frame = packed.find((node) => node.id === 'n_frame_1');
+  assert.ok(scene && table && frame);
+  assert.equal(scene.layout?.x, table.layout?.x);
+  assert.equal(table.layout?.y, (scene.layout?.y ?? 0) + (scene.layout?.height ?? 0) + DESIGNER_SUCCESSOR_GAP_Y);
+  assert.equal(
+    frame.layout?.x,
+    (table.layout?.x ?? 0) + (table.layout?.width ?? 0) + DESIGNER_SUCCESSOR_GAP_X,
+  );
+  assert.ok((frame.layout?.x ?? 0) >= (table.layout?.x ?? 0) + (table.layout?.width ?? 0));
+});
+
+test('resolvedNodeCanvasSize uses aspect lock on default landscape cards', () => {
+  const size = resolvedNodeCanvasSize({
+    id: 'n_clip_1',
+    type: 'video',
+    label: 'Clip 1',
+    config: { aspect_lock: { ratio: '9:16' } },
+    layout: { x: 0, y: 0, width: 280, height: 160 },
+  });
+  assert.ok(size.height > size.width);
+});
+
+test('sizeNodeForDocumentContent hugs short text and keeps tables near square', () => {
+  const short = sizeNodeForDocumentContent({ width: 72, height: 16 }, 'text');
+  assert.ok(short.width >= 180);
+  assert.ok(short.height >= 36 + 64);
+  assert.ok(short.height < 160);
+
+  const compact = sizeNodeForDocumentContent({ width: 320, height: 120 }, 'table');
+  assert.equal(compact.width, 180);
+  assert.equal(compact.height, 120 + 36);
+
+  const square = sizeNodeForDocumentContent({ width: 240, height: 200 }, 'table');
+  assert.equal(square.width, square.height);
+
+  const wide = sizeNodeForDocumentContent({ width: 900, height: 800 }, 'table');
+  assert.equal(wide.width, 280);
+  assert.equal(wide.height, 280);
+});
+
+test('autoLayoutDesignerNodes layers successors to the right and stacks without overlap', () => {
+  const laid = autoLayoutDesignerNodes(
+    [
+      {
+        id: 'n_brief',
+        type: 'text',
+        label: 'Brief',
+        layout: { x: 900, y: 20, width: 280, height: 160 },
+      },
+      {
+        id: 'n_character',
+        type: 'image',
+        label: 'Character',
+        config: { pipeline: 'character_design', inputs: ['n_brief'] },
+        layout: { x: 10, y: 400, width: 280, height: 160 },
+      },
+      {
+        id: 'n_scene',
+        type: 'image',
+        label: 'Scene',
+        config: { pipeline: 'scene', inputs: ['n_brief'] },
+        layout: { x: 40, y: 10, width: 280, height: 160 },
+      },
+      {
+        id: 'n_frame_2',
+        type: 'image',
+        label: 'Frame 2',
+        config: { pipeline: 'frame', shot_index: 2, inputs: ['n_scene'] },
+        layout: { x: 40, y: 40, width: 180, height: 320 },
+      },
+      {
+        id: 'n_frame_1',
+        type: 'image',
+        label: 'Frame 1',
+        config: { pipeline: 'frame', shot_index: 1, inputs: ['n_scene'] },
+        layout: { x: 80, y: 80, width: 180, height: 320 },
+      },
+    ],
+    [
+      { id: 'e_brief_char', source: 'n_brief', target: 'n_character' },
+      { id: 'e_brief_scene', source: 'n_brief', target: 'n_scene' },
+      { id: 'e_scene_f1', source: 'n_scene', target: 'n_frame_1' },
+      { id: 'e_scene_f2', source: 'n_scene', target: 'n_frame_2' },
+    ],
+  );
+  const brief = laid.find((node) => node.id === 'n_brief');
+  const character = laid.find((node) => node.id === 'n_character');
+  const scene = laid.find((node) => node.id === 'n_scene');
+  const frame1 = laid.find((node) => node.id === 'n_frame_1');
+  const frame2 = laid.find((node) => node.id === 'n_frame_2');
+  assert.ok(brief && character && scene && frame1 && frame2);
+  assert.equal(brief.layout?.x, DESIGNER_LAYOUT_ORIGIN_X);
+  assert.equal(brief.layout?.y, DESIGNER_LAYOUT_ORIGIN_Y);
+  assert.equal(character.layout?.x, (brief.layout?.x ?? 0) + (brief.layout?.width ?? 0) + DESIGNER_SUCCESSOR_GAP_X);
+  assert.equal(scene.layout?.x, character.layout?.x);
+  assert.equal(scene.layout?.y, (character.layout?.y ?? 0) + (character.layout?.height ?? 0) + DESIGNER_SUCCESSOR_GAP_Y);
+  assert.equal(frame1.layout?.x, (scene.layout?.x ?? 0) + (scene.layout?.width ?? 0) + DESIGNER_SUCCESSOR_GAP_X);
+  assert.equal(frame2.layout?.y, (frame1.layout?.y ?? 0) + (frame1.layout?.height ?? 0) + DESIGNER_SUCCESSOR_GAP_Y);
+  const boxes = laid.map((node) => ({
+    id: node.id,
+    x: node.layout?.x ?? 0,
+    y: node.layout?.y ?? 0,
+    w: node.layout?.width ?? 0,
+    h: node.layout?.height ?? 0,
+  }));
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      const left = boxes[i];
+      const right = boxes[j];
+      const overlap =
+        left.x < right.x + right.w &&
+        right.x < left.x + left.w &&
+        left.y < right.y + right.h &&
+        right.y < left.y + left.h;
+      assert.equal(overlap, false, `${left.id} overlaps ${right.id}`);
+    }
+  }
+});
+

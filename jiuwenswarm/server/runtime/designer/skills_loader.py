@@ -236,6 +236,14 @@ def load_tool_skill(tool_key: str) -> str:
     return load_skill(f"tools/{tool_key}", tool_key)
 
 
+def _first_tool_skill(*keys: str) -> str:
+    for key in keys:
+        text = load_tool_skill(key)
+        if text:
+            return text
+    return ""
+
+
 def _tool_skills_for_role(role: str) -> str:
     """Append media-tool playbooks used by this leaf."""
     role_l = str(role or "").strip().lower()
@@ -248,11 +256,11 @@ def _tool_skills_for_role(role: str) -> str:
         "scene",
         "image",
     }:
-        text = load_tool_skill("qwen_image")
+        text = _first_tool_skill("image_gen", "qwen_image")
         if text:
             chunks.append(text)
     if role_l in {"clip", "video"}:
-        text = load_tool_skill("wan_video")
+        text = _first_tool_skill("video_gen", "wan_video")
         if text:
             chunks.append(text)
     if role_l in {"compose", "final", "film"}:
@@ -277,7 +285,7 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
         cfg = dict(node.get("config") or {})
         role = str(node_pipeline(node) or cfg.get("role") or cfg.get("agent_role") or node.get("id") or "")
         roles.append(role)
-        # Leaf agents: role skill + matching tool playbook (Qwen / Wan / ffmpeg).
+        # Leaf agents: role skill + matching tool playbook (image / video / ffmpeg).
         skill_text = load_agent_skill(role) or load_agent_skill(str(node.get("id") or ""))
         tool_text = _tool_skills_for_role(role)
         merged = "\n\n".join(x for x in (skill_text, tool_text) if x).strip()
@@ -295,7 +303,8 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
             )
 
             pb = playbook_for_role(role)
-            if pb and "QWEN" not in str(cfg.get("skill_excerpt") or ""):
+            excerpt = str(cfg.get("skill_excerpt") or "")
+            if pb and "call_image_model" not in excerpt and "call_video_model" not in excerpt:
                 cfg["skill_excerpt"] = (
                     str(cfg.get("skill_excerpt") or "") + "\n\n" + pb
                 ).strip()[:2400]
@@ -312,7 +321,7 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
     meta["audio_intent"] = bundle.get("audio") or {}
     meta["skill_guided"] = True
     meta["skill_policy"] = (
-        "Leaf nodes: agents/<role>.md + tools/(qwen_image|wan_video|ffmpeg).md. "
+        "Leaf nodes: agents/<role>.md + tools/(image_gen|video_gen|ffmpeg).md. "
         "Supervisor/manager: orchestration skills in metadata."
     )
     graph["metadata"] = meta

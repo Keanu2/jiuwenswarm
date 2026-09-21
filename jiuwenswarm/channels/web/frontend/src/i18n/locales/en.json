@@ -156,6 +156,8 @@
       "selectHint": "Select and move nodes. Shortcut V; hold Space to pan.",
       "hand": "Pan canvas",
       "handHint": "Drag to pan. Shortcut H.",
+      "layout": "Auto layout",
+      "layoutHint": "Rearrange nodes by connections so they sit close without overlapping.",
       "assets": "Asset pack",
       "assetsTitle": "Asset pack",
       "assetsHint": "Open the asset pack. Drag an item onto the canvas to create a node.",
