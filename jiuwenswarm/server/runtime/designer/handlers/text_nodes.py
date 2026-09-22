@@ -487,7 +487,7 @@ class BriefNodeHandler:
         prewritten = str(cfg.get("prewritten") or "").strip()
         if prewritten or cfg.get("skip_llm"):
             text = prewritten or fallback_brief(graph_prompt(ctx.graph, node))
-            path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
+            path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text, graph=ctx.graph)
             return NodeResult(
                 output_ref=file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown"),
                 message="brief written (supervisor prewrite)",
@@ -512,7 +512,7 @@ class BriefNodeHandler:
                 str(cfg.get("draft_prewritten") or "").strip()
                 or fallback_brief(source)
             )
-        path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
+        path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text, graph=ctx.graph)
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown"),
             message="brief written",
@@ -576,7 +576,7 @@ class StoryboardNodeHandler:
                     role_output_text(ctx, NODE_ROLE_BRIEF) or graph_prompt(ctx.graph, node)
                 )
             sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
-            path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
+            path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text, graph=ctx.graph)
             return NodeResult(
                 output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),
                 message="storyboard written (supervisor prewrite)",
@@ -613,7 +613,7 @@ class StoryboardNodeHandler:
         if not text:
             text = str(cfg.get("draft_prewritten") or "").strip() or fallback_storyboard(source)
         sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
-        path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
+        path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text, graph=ctx.graph)
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),
             message="storyboard table written",

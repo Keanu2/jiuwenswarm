@@ -22,6 +22,7 @@ from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
 from jiuwenswarm.server.runtime.designer.handlers.common import (
     collect_frame_reference_images,
     file_output_ref,
+    graph_workspace_dir,
     graph_prompt,
     role_output_image_path,
     role_output_image_paths,
@@ -303,8 +304,13 @@ def fallback_keyframe_script(source: str, shot_index: int = 1) -> str:
     return "".join(lines)
 
 
-def _publish_shot_image(src: Path, *, stem: str) -> Path:
-    dest = handler_io.get_agent_workspace_dir() / f"{stem}{src.suffix or '.png'}"
+def _publish_shot_image(
+    src: Path,
+    *,
+    stem: str,
+    ctx: NodeExecutionContext | None = None,
+) -> Path:
+    dest = graph_workspace_dir(ctx.graph if ctx else None) / f"{stem}{src.suffix or '.png'}"
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.resolve() != src.resolve():
         copy2(src, dest)
@@ -358,6 +364,8 @@ async def _image_or_notes(
         )
     if generated and generated.get("image_path"):
         path = Path(generated["image_path"])
+        if ctx is not None:
+            path = _publish_shot_image(path, stem=stem, ctx=ctx)
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
             message="image generated",
@@ -367,7 +375,7 @@ async def _image_or_notes(
         raise RuntimeError(
             f"image_gen required but failed for {stem}: {error or 'no image_path'}"
         )
-    path = write_workspace_text(stem, notes)
+    path = write_workspace_text(stem, notes, graph=ctx.graph if ctx else None)
     message = (
         f"image_gen failed: {error}; wrote notes"
         if error
@@ -391,7 +399,7 @@ def _with_card_ref(result: NodeResult, ctx: NodeExecutionContext, role: str) -> 
     card = collaboration_card(ctx.run_id, role)
     if not card:
         return result
-    path = write_workspace_text(f"designer_a2a_{ctx.run_id}_{role}", card)
+    path = write_workspace_text(f"designer_a2a_{ctx.run_id}_{role}", card, graph=ctx.graph)
     card_ref = file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown")
     refs = [ref for ref in (result.output_refs or []) if ref]
     primary = result.output_ref
@@ -678,6 +686,7 @@ class FrameNodeHandler:
             path = _publish_shot_image(
                 Path(generated["image_path"]),
                 stem=f"designer_frame_{ctx.run_id}_{ctx.node_id}_shot{shot_index}",
+                ctx=ctx,
             )
             ref = file_output_ref(path, kind=NODE_TYPE_IMAGE, mime_type="image/png")
             return NodeResult(

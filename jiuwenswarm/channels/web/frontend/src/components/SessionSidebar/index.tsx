@@ -39,14 +39,6 @@ interface NavItem {
   icon: React.ReactNode;
 }
 
-const designNavIcon = (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
-    <rect x="3" y="4" width="8" height="6" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-    <rect x="13" y="4" width="8" height="6" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-    <rect x="3" y="14" width="18" height="6" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
 // "扩展"（连接器市场：插件+MCP）导航图标——和 plugin.svg（Harness 插件管理，纯命名撞车、
 // 业务无关）故意区分开，用网格/市场的视觉隐喻而不是拼图块。
 const connectorMarketNavIcon = (
@@ -93,7 +85,6 @@ const mainNavItems: NavItem[] = [
   { key: 'connectorMarket', labelKey: 'nav.connectorMarket', icon: connectorMarketNavIcon },
   { key: 'experiments', labelKey: 'nav.experiments', icon: experimentsNavIcon },
   { key: 'personalContext', labelKey: 'nav.personalContext', icon: personalContextNavIcon },
-  { key: 'design', labelKey: 'nav.design', icon: designNavIcon },
   { key: 'settings', labelKey: 'nav.settings', icon: <SettingsIcon aria-hidden /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
 ];

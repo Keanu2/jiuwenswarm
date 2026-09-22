@@ -31,6 +31,7 @@ from jiuwenswarm.server.runtime.designer.audio_locks import (
 from jiuwenswarm.server.runtime.designer.handlers.common import (
     file_output_ref,
     graph_prompt,
+    graph_workspace_dir,
     write_workspace_text,
 )
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
@@ -602,6 +603,7 @@ class DesignerGraphToolkit:
             path = write_workspace_text(
                 f"designer_agent_{self.ctx.run_id}_{self.ctx.node_id}",
                 text,
+                graph=self.ctx.graph,
             )
             ref = file_output_ref(
                 path,
@@ -704,7 +706,7 @@ class DesignerGraphToolkit:
         return json.dumps(_upstream_outputs(self.ctx, preds), ensure_ascii=False)
 
     def _media_save_dir(self) -> Path:
-        root = get_agent_workspace_dir() / "designer_media" / self.ctx.run_id
+        root = graph_workspace_dir(self.ctx.graph) / "designer_media" / self.ctx.run_id
         root.mkdir(parents=True, exist_ok=True)
         return root
 
@@ -1649,7 +1651,7 @@ class NodeAgentHost:
                 model_client_config=ModelClientConfig(**kwargs),
                 model_config=request,
             )
-            workspace_dir = get_agent_workspace_dir()
+            workspace_dir = graph_workspace_dir(ctx.graph)
             workspace_dir.mkdir(parents=True, exist_ok=True)
             card_name = str(
                 getattr(getattr(template, "agent_card", None), "name", "")
@@ -1740,7 +1742,11 @@ class NodeAgentHost:
 
                 return await get_node_handler(node).execute(node, ctx)
             raise RuntimeError("node agent returned empty output")
-        path = write_workspace_text(f"designer_agent_{ctx.run_id}_{ctx.node_id}", text)
+        path = write_workspace_text(
+            f"designer_agent_{ctx.run_id}_{ctx.node_id}",
+            text,
+            graph=ctx.graph,
+        )
         agent_result = NodeResult(
             output_ref=file_output_ref(
                 path,

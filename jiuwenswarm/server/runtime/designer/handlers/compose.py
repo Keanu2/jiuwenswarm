@@ -324,9 +324,9 @@ def _video_from_state(state: dict, *, require_completed: bool = True) -> Path | 
     return None
 
 
-def _workspace_clip_videos(run_id: str) -> list[Path]:
+def _workspace_clip_videos(run_id: str, graph: dict | None = None) -> list[Path]:
     """Fallback: clip mp4s already on disk for this run (state lag / early compose)."""
-    root = handler_io.get_agent_workspace_dir()
+    root = handler_io.graph_workspace_dir(graph)
     if not root.is_dir():
         return []
     rid = str(run_id or "").strip()
@@ -413,7 +413,7 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
     if missing:
         # Disk fallback only when EVERY expected clip is already on disk (state lag).
         # Never assemble a partial film from a subset of workspace mp4s.
-        disk = _workspace_clip_videos(str(ctx.run_id or ""))
+        disk = _workspace_clip_videos(str(ctx.run_id or ""), ctx.graph)
         if disk and len(disk) >= len(clips) and not paths:
             logger.warning(
                 "compose using workspace clip mp4 fallback for run=%s missing=%s",
@@ -782,7 +782,7 @@ class ComposeNodeHandler:
             len(paths),
             ctx.run_id,
         )
-        dest = handler_io.get_agent_workspace_dir() / f"designer_compose_{ctx.run_id}.mp4"
+        dest = handler_io.graph_workspace_dir(ctx.graph) / f"designer_compose_{ctx.run_id}.mp4"
         merged = concatenate_clip_videos(paths, dest)
         scored = mix_compose_soundtrack(
             merged,

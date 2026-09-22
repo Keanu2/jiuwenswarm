@@ -17,12 +17,12 @@ from jiuwenswarm.common.schema.designer_graph import (
     data_predecessors,
     video_concat_source_ids,
 )
-from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import MusicNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.clip import generate_clip_video
 from jiuwenswarm.server.runtime.designer.handlers.common import (
     file_output_ref,
     graph_prompt,
+    graph_workspace_dir,
     node_generate_prompt,
     node_output_image_paths,
     path_from_uri,
@@ -115,6 +115,7 @@ class ImageNodeHandler:
             max_tries=4,
             require_image=True,
             reference_images=[str(path) for path in refs] or None,
+            ctx=ctx,
         )
 
 
@@ -129,7 +130,7 @@ class VideoNodeHandler:
         extra = [str(path) for path in refs[1:]]
         generated = await generate_clip_video(
             prompt,
-            save_dir=str(get_agent_workspace_dir()),
+            save_dir=str(graph_workspace_dir(ctx.graph)),
             first_frame=first_frame,
             reference_images=extra or None,
         )

@@ -18,9 +18,11 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphNode,
     node_pipeline,
 )
-from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.utils import get_agent_root_dir, get_agent_workspace_dir
+from jiuwenswarm.common.work_mode import DESIGN_WORK_MODE
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 from jiuwenswarm.server.runtime.designer.user_references import user_reference_image_paths
+from jiuwenswarm.server.runtime.session import project_store
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +80,34 @@ def path_from_uri(uri: str) -> Path | None:
     return candidate if candidate.exists() else None
 
 
-def write_workspace_text(stem: str, content: str) -> Path:
-    directory = get_agent_workspace_dir()
+def graph_workspace_dir(graph: DesignerExecutionGraph | None = None) -> Path:
+    """Return the asset directory owned by a Design project graph."""
+    project_id = str(graph.get("project_id") or "").strip() if isinstance(graph, dict) else ""
+    if not project_id:
+        directory = get_agent_workspace_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    project = project_store.get_project_by_id(project_id, cache_bust=True)
+    if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
+        raise ValueError(f"Design project not found for graph: {project_id!r}")
+
+    design_root = (get_agent_root_dir() / "workspace" / DESIGN_WORK_MODE).resolve()
+    project_dir = Path(project.project_dir).expanduser().resolve()
+    if project_dir.parent != design_root:
+        raise ValueError(f"Design project directory is outside the managed root: {project_id!r}")
+    directory = project_dir / "assets"
     directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def write_workspace_text(
+    stem: str,
+    content: str,
+    *,
+    graph: DesignerExecutionGraph | None = None,
+) -> Path:
+    directory = graph_workspace_dir(graph)
     path = directory / f"{stem}.md"
     path.write_text(content.strip() + "\n", encoding="utf-8")
     return path.resolve()

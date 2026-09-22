@@ -6,6 +6,46 @@ import type {
   DesignerGraphPatch,
   DesignerGraphSummary,
 } from './executionGraphTypes';
+import type { DesignerChatMessage } from './designerChatStore';
+
+export type DesignerWorkspace = {
+  project: {
+    project_id: string;
+    name: string;
+    project_dir: string;
+    work_mode: 'design';
+  };
+  session: {
+    session_id: string;
+    title: string;
+    project_id: string;
+    project_dir: string;
+    work_mode: 'design';
+  };
+  graph: DesignerExecutionGraph;
+  messages: DesignerChatMessage[];
+};
+
+export const designerWorkspaceClient = {
+  create: (params: {
+    prompt: string;
+    createToken: string;
+    modelName?: string;
+    references?: Array<Record<string, unknown>>;
+  }) =>
+    webRequest<DesignerWorkspace>(
+      'designer.workspace.create',
+      {
+        prompt: params.prompt,
+        create_token: params.createToken,
+        ...(params.modelName ? { model_name: params.modelName } : {}),
+        ...(params.references?.length ? { references: params.references } : {}),
+      },
+      { timeoutMs: 20 * 60 * 1000 },
+    ),
+  get: (projectId: string) =>
+    webRequest<DesignerWorkspace>('designer.workspace.get', { project_id: projectId }),
+};
 
 export const designerGraphClient = {
   get: (graphId: string) =>

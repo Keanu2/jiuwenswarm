@@ -233,8 +233,8 @@ async def test_music_handler_writes_silent_placeholder(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.handlers.audio_nodes.get_agent_workspace_dir",
-        lambda: workspace,
+        "jiuwenswarm.server.runtime.designer.handlers.audio_nodes.graph_workspace_dir",
+        lambda _graph: workspace,
     )
 
     async def _noop_async(*_a, **_k):

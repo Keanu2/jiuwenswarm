@@ -67,7 +67,7 @@
   "designer": {
     "loading": "正在加载设计工作流…",
     "emptyTitle": "还没有设计工作流",
-    "emptyDescription": "在任务页输入描述并选择「设计」，或稍后再来查看此项目下的工作流。",
+    "emptyDescription": "描述你的项目，创建独立的设计工作区与工作流。",
     "loadErrorTitle": "加载失败",
     "loadErrorFallback": "无法读取设计工作流，请稍后重试。",
     "toggleLabel": "设计",
@@ -76,7 +76,7 @@
     "attachmentsBlocked": "设计模式暂不支持附件，请先移除附件后再发送。",
     "chat": {
       "title": "设计助手",
-      "emptyHint": "描述创作意图，并可附上图片、视频或音频作为参考。",
+      "emptyHint": "需要帮你设计些什么？",
       "inputPlaceholder": "描述你想创作的内容，可附上参考素材…",
       "collapse": "收起聊天",
       "expand": "展开聊天",

@@ -5,10 +5,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
+import shutil
+import time
+import uuid
+from contextlib import asynccontextmanager
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
+
+import portalocker
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 
@@ -24,7 +33,12 @@ from jiuwenswarm.common.schema.designer_graph import (
     utc_now_ms,
 )
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
-from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE, is_default_project_id
+from jiuwenswarm.common.utils import get_agent_root_dir, get_agent_sessions_dir
+from jiuwenswarm.common.work_mode import (
+    DEFAULT_WEB_WORK_MODE,
+    DESIGN_WORK_MODE,
+    is_default_project_id,
+)
 from jiuwenswarm.server.runtime.designer.executor import GraphExecutor
 from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
 from jiuwenswarm.server.runtime.gateway_adapter.base import (
@@ -38,6 +52,88 @@ logger = logging.getLogger(__name__)
 
 _store = DesignerGraphStore()
 _executor = GraphExecutor(_store)
+
+
+def _workspace_receipt_path(token: str) -> Path:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return get_agent_root_dir() / "designer" / "workspace_receipts" / f"{digest}.json"
+
+
+@asynccontextmanager
+async def _workspace_create_lock(token: str):
+    """Serialize one creation token across coroutines and AgentServer processes."""
+    receipt_path = _workspace_receipt_path(token)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = receipt_path.with_suffix(".lock")
+    handle = lock_path.open("a+", encoding="utf-8")
+    acquired = False
+    try:
+        while not acquired:
+            try:
+                portalocker.lock(
+                    handle,
+                    portalocker.LOCK_EX | portalocker.LOCK_NB,
+                )
+                acquired = True
+            except portalocker.exceptions.LockException:
+                await asyncio.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            portalocker.unlock(handle)
+        handle.close()
+
+
+def _read_workspace_receipt(
+    token: str,
+    signature: str,
+) -> tuple[dict[str, Any] | None, str | None, str | None] | None:
+    path = _workspace_receipt_path(token)
+    if not path.is_file():
+        return None
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    if str(receipt.get("signature") or "") != signature:
+        return None, "create_token was already used with different parameters", "CONFLICT"
+    project_id = str(receipt.get("project_id") or "")
+    if not project_id:
+        # Compatibility for receipts written by the initial implementation.
+        payload = receipt.get("payload")
+        project = payload.get("project") if isinstance(payload, dict) else None
+        project_id = str(project.get("project_id") or "") if isinstance(project, dict) else ""
+    current, error, _ = _get_design_workspace({"project_id": project_id})
+    if error is not None or current is None:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+    return current, None, None
+
+
+def _write_workspace_receipt(
+    token: str,
+    signature: str,
+    payload: dict[str, Any],
+) -> None:
+    path = _workspace_receipt_path(token)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    project = payload.get("project")
+    project_id = str(project.get("project_id") or "") if isinstance(project, dict) else ""
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {"signature": signature, "project_id": project_id},
+            handle,
+            ensure_ascii=False,
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def _prefer_runtime_pipeline(graph: dict[str, Any]) -> dict[str, Any]:
@@ -152,6 +248,335 @@ def _summarize_graph(graph: dict[str, Any], run: dict[str, Any] | None = None) -
         "has_video": has_video,
         "clip_label": clip_label,
     }
+
+
+def _design_title(prompt: str) -> str:
+    from jiuwenswarm.server.runtime.session.project_store import sanitize_project_dir_name
+
+    return sanitize_project_dir_name(prompt, max_len=80)
+
+
+def _design_workspace_messages(session_id: str) -> list[dict[str, Any]]:
+    from jiuwenswarm.server.runtime.session.session_history import load_history_records
+
+    messages: list[dict[str, Any]] = []
+    for record in load_history_records(session_id):
+        event_type = str(record.get("event_type") or "")
+        if not event_type.startswith("design."):
+            continue
+        role = str(record.get("role") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(record.get("content") or "")
+        if not content and event_type != "design.graph_updated":
+            continue
+        messages.append(
+            {
+                "id": str(record.get("id") or uuid.uuid4()),
+                "role": role,
+                "content": content,
+                "kind": str(record.get("design_kind") or (
+                    "user" if role == "user" else "chat_ack"
+                )),
+                "createdAt": int(float(record.get("timestamp") or 0) * 1000),
+                **(
+                    {"references": record["references"]}
+                    if isinstance(record.get("references"), list)
+                    else {}
+                ),
+            }
+        )
+    return messages
+
+
+def _get_design_workspace(
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        collect_all_sessions_metadata,
+    )
+
+    project_id = str(params.get("project_id") or "").strip()
+    if not project_id:
+        return None, "project_id is required", "BAD_REQUEST"
+    project = project_store.get_project_by_id(project_id, cache_bust=True)
+    if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
+        return None, "design project not found", "NOT_FOUND"
+    sessions = [
+        item
+        for item in collect_all_sessions_metadata()
+        if str(item.get("project_id") or "") == project_id
+        and str(item.get("work_mode") or "") == DESIGN_WORK_MODE
+    ]
+    sessions.sort(key=lambda item: float(item.get("created_at") or 0))
+    graphs = _store.list_graphs_for_project(project_id)
+    if len(sessions) != 1 or len(graphs) != 1:
+        return None, "design workspace invariant is not satisfied", "CONFLICT"
+    session = sessions[0]
+    graph = graphs[0]
+    run = _store.get_latest_run_for_graph(str(graph.get("graph_id") or ""))
+    return {
+        "project": {
+            "project_id": project.project_id,
+            "name": project.name,
+            "project_dir": project.project_dir,
+            "work_mode": project.work_mode,
+        },
+        "session": {
+            "session_id": session.get("session_id"),
+            "title": session.get("title"),
+            "project_id": project_id,
+            "project_dir": project.project_dir,
+            "work_mode": DESIGN_WORK_MODE,
+        },
+        "graph": dict(hydrate_graph_node_outputs(graph, run)),
+        "messages": _design_workspace_messages(str(session.get("session_id") or "")),
+    }, None, None
+
+
+def _rollback_design_workspace(
+    *,
+    project_id: str,
+    project_dir: str,
+    session_id: str,
+    graph_id: str,
+) -> None:
+    if graph_id:
+        _store.delete_graph(graph_id)
+    if session_id:
+        shutil.rmtree(get_agent_sessions_dir() / session_id, ignore_errors=True)
+    if project_id:
+        try:
+            project_store.purge_project(project_id)
+        except Exception:
+            logger.warning("Failed to roll back design project %s", project_id, exc_info=True)
+    if project_dir:
+        shutil.rmtree(project_dir, ignore_errors=True)
+
+
+async def _create_design_workspace_once(
+    request: AgentRequest,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    from jiuwenswarm.server.runtime.session.session_history import write_history_records
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        init_session_metadata,
+        update_session_metadata,
+    )
+
+    prompt = str(params.get("prompt") or "").strip()
+    if not prompt:
+        return None, "prompt is required", "BAD_REQUEST"
+    model_name = str(params.get("model_name") or "").strip()
+    short_id = uuid.uuid4().hex[:8]
+    title = _design_title(prompt)
+    directory_name = f"{_design_title(prompt)}-{short_id}"
+    project_dir = str(get_agent_root_dir() / "workspace" / DESIGN_WORK_MODE / directory_name)
+    project_id = ""
+    session_id = f"design_{uuid.uuid4().hex}"
+    graph_id = ""
+    committed = False
+    try:
+        Path(project_dir).mkdir(parents=True, exist_ok=False)
+        try:
+            project, _ = project_store.create_or_restore_project(
+                title,
+                project_dir,
+                DESIGN_WORK_MODE,
+            )
+        except project_store.ProjectNameConflict:
+            project, _ = project_store.create_or_restore_project(
+                f"{title}-{short_id}",
+                project_dir,
+                DESIGN_WORK_MODE,
+            )
+        project_id = project.project_id
+        init_session_metadata(
+            session_id=session_id,
+            channel_id=request.channel_id or "web",
+            user_id=str(request.user_id or ""),
+            title=title,
+            mode="designer",
+            project_dir=project_dir,
+            project_id=project_id,
+            persist_session=True,
+            model=model_name,
+            work_mode=DESIGN_WORK_MODE,
+        )
+        bootstrap_params = {
+            "prompt": prompt,
+            "project_id": project_id,
+            "work_mode": DESIGN_WORK_MODE,
+            "optimize_for": "quality",
+            "session_id": session_id,
+            **({"model_name": model_name} if model_name else {}),
+            **(
+                {"references": params["references"]}
+                if isinstance(params.get("references"), list)
+                else {}
+            ),
+        }
+        bootstrap, error, code = await _bootstrap_graph_with_supervisor(
+            bootstrap_params,
+            request.channel_id,
+            _leader_progress_callback(request),
+        )
+        if error is not None or not isinstance(bootstrap, dict):
+            return None, error or "failed to create graph", code or "INTERNAL_ERROR"
+        graph = bootstrap.get("graph")
+        if not isinstance(graph, dict) or not graph.get("graph_id"):
+            return None, "bootstrap response missing graph", "INTERNAL_ERROR"
+        graph_id = str(graph["graph_id"])
+        graph = dict(graph)
+        metadata = dict(graph.get("metadata") or {})
+        metadata["session_id"] = session_id
+        metadata["work_mode"] = DESIGN_WORK_MODE
+        if model_name:
+            metadata["model_name"] = model_name
+        graph["metadata"] = metadata
+        graph = dict(_store.save_graph(graph))
+
+        generated_title = _design_title(str(graph.get("title") or title))
+        if generated_title and generated_title != project.name:
+            try:
+                renamed = project_store.rename_project(project_id, generated_title)
+                if renamed is not None:
+                    project = renamed
+                    title = generated_title
+            except (project_store.ProjectNameConflict, ValueError):
+                pass
+
+        now = time.time()
+        records = [
+            {
+                "id": f"{uuid.uuid4()}:user",
+                "role": "user",
+                "request_id": request.request_id,
+                "channel_id": request.channel_id or "web",
+                "timestamp": now,
+                "content": prompt,
+                "event_type": "design.user",
+                "design_kind": "user",
+                **(
+                    {"references": params["references"]}
+                    if isinstance(params.get("references"), list)
+                    else {}
+                ),
+            },
+            {
+                "id": f"{uuid.uuid4()}:assistant",
+                "role": "assistant",
+                "request_id": request.request_id,
+                "channel_id": request.channel_id or "web",
+                "timestamp": now + 0.001,
+                "content": "Supervisor composed the workflow.",
+                "event_type": "design.bootstrap_completed",
+                "design_kind": "bootstrap_done",
+                "graph_id": graph_id,
+            },
+        ]
+        write_history_records(session_id, records, preserve_existing_format=False)
+        update_session_metadata(
+            session_id=session_id,
+            title=title,
+            set_message_count=2,
+            last_user_message_at=now,
+            touch_last_message_at=True,
+            sync_write=True,
+        )
+        committed = True
+        return {
+            "project": {
+                "project_id": project_id,
+                "name": title,
+                "project_dir": project_dir,
+                "work_mode": DESIGN_WORK_MODE,
+            },
+            "session": {
+                "session_id": session_id,
+                "title": title,
+                "project_id": project_id,
+                "project_dir": project_dir,
+                "work_mode": DESIGN_WORK_MODE,
+            },
+            "graph": graph,
+            "messages": _design_workspace_messages(session_id),
+        }, None, None
+    except FileExistsError:
+        return None, "design workspace directory already exists", "CONFLICT"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to create design workspace")
+        return None, str(exc), "INTERNAL_ERROR"
+    finally:
+        # A workspace is committed only when all four durable resources exist.
+        if not committed:
+            _rollback_design_workspace(
+                project_id=project_id,
+                project_dir=project_dir,
+                session_id=session_id,
+                graph_id=graph_id,
+            )
+
+
+async def _create_design_workspace(
+    request: AgentRequest,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    token = str(params.get("create_token") or "").strip()
+    prompt = str(params.get("prompt") or "").strip()
+    if not token:
+        return None, "create_token is required", "BAD_REQUEST"
+    signature = hashlib.sha256(
+        json.dumps(
+            {
+                "prompt": prompt,
+                "references": params.get("references") or [],
+                "model_name": str(params.get("model_name") or "").strip(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    async with _workspace_create_lock(token):
+        receipt = _read_workspace_receipt(token, signature)
+        if receipt is not None:
+            return receipt
+        result = await _create_design_workspace_once(request, params)
+        payload, error, _ = result
+        if payload is None or error is not None:
+            return result
+        try:
+            _write_workspace_receipt(token, signature, payload)
+        except OSError as exc:
+            project = payload.get("project")
+            session = payload.get("session")
+            graph = payload.get("graph")
+            _rollback_design_workspace(
+                project_id=(
+                    str(project.get("project_id") or "")
+                    if isinstance(project, dict)
+                    else ""
+                ),
+                project_dir=(
+                    str(project.get("project_dir") or "")
+                    if isinstance(project, dict)
+                    else ""
+                ),
+                session_id=(
+                    str(session.get("session_id") or "")
+                    if isinstance(session, dict)
+                    else ""
+                ),
+                graph_id=(
+                    str(graph.get("graph_id") or "")
+                    if isinstance(graph, dict)
+                    else ""
+                ),
+            )
+            logger.exception("Failed to persist Design idempotency receipt")
+            return None, f"failed to persist workspace receipt: {exc}", "INTERNAL_ERROR"
+        return result
 
 
 def _list_graphs(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -372,7 +797,12 @@ def _bootstrap_graph(
         project = project_store.get_project_by_id(project_id, cache_bust=True)
         if project is None or project.hidden:
             return None, "project not found", "NOT_FOUND"
-        resolved_project_dir = str(getattr(project, "project_dir", "") or "")
+        if (
+            project.work_mode == DESIGN_WORK_MODE
+            and _store.list_graphs_for_project(project_id)
+        ):
+            return None, "design workspace already has a graph", "CONFLICT"
+        resolved_project_dir = str(project.project_dir or "")
     else:
         name = str(params.get("name") or "").strip()
         if not name:
@@ -519,6 +949,15 @@ def _bootstrap_graph(
         )
     if user_refs:
         graph = attach_user_references_to_graph(graph, user_refs)
+    if resolved_project_dir:
+        metadata = dict(graph.get("metadata") or {})
+        metadata["project_dir"] = resolved_project_dir
+        graph["metadata"] = metadata
+    session_id = str(params.get("session_id") or "").strip()
+    if session_id:
+        metadata = dict(graph.get("metadata") or {})
+        metadata["session_id"] = session_id
+        graph["metadata"] = metadata
     if callable(on_progress):
         on_progress("stage", "Manager · Saving graph")
     saved = _store.save_graph(graph)
@@ -676,6 +1115,9 @@ def _choose_output(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str |
 
 async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
     from jiuwenswarm.server.runtime.designer.leader_chat import run_leader_chat
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        use_preferred_designer_model,
+    )
 
     graph_id = str(params.get("graph_id") or "").strip()
     message = str(params.get("message") or params.get("prompt") or "").strip()
@@ -691,13 +1133,15 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
     run_new_nodes = bool(params.get("run_new_nodes") or params.get("runNewNodes"))
     progress = _leader_progress_callback(request)
     try:
-        result = await run_leader_chat(
-            graph,
-            message,
-            selected_node_id=selected_node_id,
-            run_new_nodes=run_new_nodes,
-            progress=progress,
-        )
+        preferred_model = str((graph.get("metadata") or {}).get("model_name") or "")
+        with use_preferred_designer_model(preferred_model):
+            result = await run_leader_chat(
+                graph,
+                message,
+                selected_node_id=selected_node_id,
+                run_new_nodes=run_new_nodes,
+                progress=progress,
+            )
     except DesignerGraphValidationError as exc:
         return None, str(exc), "BAD_REQUEST"
     except Exception as exc:  # noqa: BLE001
@@ -706,6 +1150,35 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
 
     next_graph = result.get("graph") or graph
     saved = _store.save_graph(next_graph) if result.get("changed") else graph
+    summary = str(result.get("summary") or "")
+    session_id = str((saved.get("metadata") or {}).get("session_id") or "").strip()
+    if session_id:
+        from jiuwenswarm.server.runtime.session.session_history import append_history_record
+
+        now = time.time()
+        history_request_id = request.request_id or str(uuid.uuid4())
+        append_history_record(
+            session_id=session_id,
+            request_id=history_request_id,
+            channel_id=request.channel_id or "web",
+            role="user",
+            content=message,
+            timestamp=now,
+            event_type="design.user",
+            extra={"design_kind": "user", "graph_id": graph_id},
+            mode="designer",
+        )
+        append_history_record(
+            session_id=session_id,
+            request_id=history_request_id,
+            channel_id=request.channel_id or "web",
+            role="assistant",
+            content=summary or "Updated the workflow.",
+            timestamp=now + 0.001,
+            event_type="design.graph_updated",
+            extra={"design_kind": "chat_ack", "graph_id": graph_id},
+            mode="designer",
+        )
     run_payload = None
     run_ids = list(result.get("run_node_ids") or [])
     if run_ids:
@@ -728,9 +1201,10 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
             )
         elif error:
             result["summary"] = f"{result.get('summary') or ''} ({error})".strip()
+            summary = str(result["summary"])
     return {
         "graph": dict(saved),
-        "summary": result.get("summary") or "",
+        "summary": summary,
         "intent": result.get("intent") or "answer",
         "run_node_ids": run_ids,
         "run": run_payload,
@@ -738,6 +1212,23 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
 
 
 async def _bootstrap_graph_with_supervisor(
+    params: dict[str, Any],
+    channel_id: str,
+    on_progress: Any | None = None,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        use_preferred_designer_model,
+    )
+
+    with use_preferred_designer_model(str(params.get("model_name") or "").strip()):
+        return await _bootstrap_graph_with_supervisor_impl(
+            params,
+            channel_id,
+            on_progress,
+        )
+
+
+async def _bootstrap_graph_with_supervisor_impl(
     params: dict[str, Any],
     channel_id: str,
     on_progress: Any | None = None,
@@ -928,6 +1419,8 @@ class DesignerAdapter(GatewayAdapter):
 
     methods: frozenset[str] = frozenset(
         {
+            ReqMethod.DESIGNER_WORKSPACE_CREATE.value,
+            ReqMethod.DESIGNER_WORKSPACE_GET.value,
             ReqMethod.DESIGNER_GRAPH_GET.value,
             ReqMethod.DESIGNER_GRAPH_LIST.value,
             ReqMethod.DESIGNER_GRAPH_SAVE.value,
@@ -946,7 +1439,13 @@ class DesignerAdapter(GatewayAdapter):
         method = request.req_method
         params = _request_params(request)
         try:
-            if method == ReqMethod.DESIGNER_GRAPH_GET:
+            if method == ReqMethod.DESIGNER_WORKSPACE_CREATE:
+                payload, error, code = await _create_design_workspace(request, params)
+            elif method == ReqMethod.DESIGNER_WORKSPACE_GET:
+                payload, error, code = await asyncio.to_thread(
+                    _get_design_workspace, params
+                )
+            elif method == ReqMethod.DESIGNER_GRAPH_GET:
                 payload, error, code = await asyncio.to_thread(_get_graph, params)
             elif method == ReqMethod.DESIGNER_GRAPH_LIST:
                 payload, error, code = await asyncio.to_thread(_list_graphs, params)

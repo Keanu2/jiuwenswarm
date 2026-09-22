@@ -136,6 +136,19 @@ class DesignerGraphStore:
             return []
         return self.list_graphs(project_id)
 
+    def delete_graph(self, graph_id: str) -> bool:
+        """Delete a graph created by an uncommitted workspace transaction."""
+        graph_id = str(graph_id or "").strip()
+        if not graph_id:
+            return False
+        path = _graphs_dir() / f"{graph_id}.json"
+        with _STORE_LOCK:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return False
+        return True
+
     def save_run(self, run: DesignerExecutionRun) -> DesignerExecutionRun:
         normalized = normalize_execution_run(run)
         normalized["updated_at"] = utc_now_ms()

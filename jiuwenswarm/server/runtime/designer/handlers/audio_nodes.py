@@ -9,8 +9,10 @@ import subprocess
 from pathlib import Path
 
 from jiuwenswarm.common.schema.designer_graph import NODE_TYPE_AUDIO, DesignerGraphNode
-from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
+from jiuwenswarm.server.runtime.designer.handlers.common import (
+    file_output_ref,
+    graph_workspace_dir,
+)
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
 logger = logging.getLogger(__name__)
@@ -110,7 +112,7 @@ class MusicNodeHandler:
 
         user_audio = user_reference_audio_path(ctx.graph)
         if user_audio is not None and user_audio.is_file():
-            dest = Path(get_agent_workspace_dir()) / f"{stem}{user_audio.suffix.lower() or '.mp3'}"
+            dest = graph_workspace_dir(ctx.graph) / f"{stem}{user_audio.suffix.lower() or '.mp3'}"
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(user_audio, dest)
             suffix = dest.suffix.lower()
@@ -132,7 +134,10 @@ class MusicNodeHandler:
         if generated is not None:
             return generated
 
-        dest = Path(get_agent_workspace_dir()) / f"{stem}_{SILENT_MUSIC_PLACEHOLDER_TOKEN}.m4a"
+        dest = (
+            graph_workspace_dir(ctx.graph)
+            / f"{stem}_{SILENT_MUSIC_PLACEHOLDER_TOKEN}.m4a"
+        )
         if _synthesize_bed(dest, duration=duration, kind="music"):
             return NodeResult(
                 output_ref=file_output_ref(dest, kind=NODE_TYPE_AUDIO, mime_type="audio/mp4"),
@@ -166,5 +171,3 @@ async def _try_music_api(
         return None
     # Backend advertised but no generator is plugged into this handler yet.
     return None
-
-

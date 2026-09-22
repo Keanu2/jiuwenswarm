@@ -4,8 +4,6 @@ import type { DesignerExecutionGraph } from './executionGraphTypes';
 import {
   extractDesignerGraphPrompt,
   hasDesignerUserPrompt,
-  persistDesignerChat,
-  readPersistedDesignerChat,
   resolveBoundDesignerMessages,
 } from './designerChatHistory';
 import { extractDesignerGraphReferences, type DesignerStoredReference } from './designerReferences';
@@ -38,6 +36,7 @@ type DesignerChatStore = {
   messagesByGraphId: Record<string, DesignerChatMessage[]>;
   bootstrapPhase: DesignerBootstrapPhase;
   reset: () => void;
+  replaceMessages: (graphId: string, messages: DesignerChatMessage[]) => void;
   bindGraph: (graphId: string | null) => void;
   appendMessage: (message: Omit<DesignerChatMessage, 'id' | 'createdAt'> & {
     id?: string;
@@ -59,26 +58,33 @@ function archiveCurrent(
   return { ...messagesByGraphId, [activeGraphId]: messages };
 }
 
-function commitArchive(messagesByGraphId: Record<string, DesignerChatMessage[]>) {
-  persistDesignerChat(messagesByGraphId);
-  return messagesByGraphId;
-}
-
 export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
   activeGraphId: null,
   messages: [],
-  messagesByGraphId: readPersistedDesignerChat(),
+  messagesByGraphId: {},
   bootstrapPhase: 'idle',
 
   reset: () => {
     const { activeGraphId, messages, messagesByGraphId } = get();
-    const archived = commitArchive(archiveCurrent(activeGraphId, messages, messagesByGraphId));
+    const archived = archiveCurrent(activeGraphId, messages, messagesByGraphId);
     set({
       messages: [],
       bootstrapPhase: 'idle',
       activeGraphId: null,
       messagesByGraphId: archived,
     });
+  },
+
+  replaceMessages: (graphId, messages) => {
+    const id = String(graphId || '').trim();
+    if (!id) return;
+    const next = messages.map((message) => ({ ...message }));
+    set((state) => ({
+      activeGraphId: id,
+      messages: next,
+      messagesByGraphId: { ...state.messagesByGraphId, [id]: next },
+      bootstrapPhase: 'done',
+    }));
   },
 
   bindGraph: (graphId) => {
@@ -97,7 +103,7 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
     set({
       activeGraphId: id,
       messages: nextMessages,
-      messagesByGraphId: commitArchive(nextArchive),
+      messagesByGraphId: nextArchive,
     });
   },
 
@@ -119,7 +125,7 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
         },
       ];
       const messagesByGraphId = state.activeGraphId
-        ? commitArchive({ ...state.messagesByGraphId, [state.activeGraphId]: next })
+        ? { ...state.messagesByGraphId, [state.activeGraphId]: next }
         : state.messagesByGraphId;
       return { messages: next, messagesByGraphId };
     });
@@ -130,7 +136,7 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
     set((state) => {
       const next = state.messages.filter((item) => item.id !== id);
       const messagesByGraphId = state.activeGraphId
-        ? commitArchive({ ...state.messagesByGraphId, [state.activeGraphId]: next })
+        ? { ...state.messagesByGraphId, [state.activeGraphId]: next }
         : state.messagesByGraphId;
       return { messages: next, messagesByGraphId };
     }),

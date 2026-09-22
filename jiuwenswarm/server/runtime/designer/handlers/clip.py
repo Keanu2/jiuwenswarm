@@ -26,6 +26,7 @@ from jiuwenswarm.common.schema.designer_graph import (
 )
 from jiuwenswarm.server.runtime.designer.handlers.common import (
     graph_prompt,
+    graph_workspace_dir,
     node_generate_prompt,
     node_output_image_paths,
     role_output_image_path,
@@ -757,10 +758,8 @@ class ClipNodeHandler:
                 exc,
                 still,
             )
-            from jiuwenswarm.common.utils import get_agent_workspace_dir
-
             dest = (
-                Path(get_agent_workspace_dir())
+                graph_workspace_dir(ctx.graph)
                 / f"designer_clip_still_{ctx.run_id}_shot{shot_index}.mp4"
             )
             path = still_image_to_mp4(Path(still), duration=duration, dest=dest)

@@ -39,9 +39,7 @@ import {
 import { ConnectorMarketPanel } from './components/ConnectorMarket';
 import { LoginDialog } from './components/LoginDialog';
 import { DesignerPage } from './features/designer/components/DesignerPage';
-import { useDesignArmedStore } from './features/designer/designArmedStore';
-import { launchDesignerFromTask } from './features/designer/designerEntry';
-import { mediaItemsToBootstrapReferences } from './features/designer/designerReferences';
+import { DesignerLanding } from './features/designer/components/DesignerLanding';
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI, FEATURE_PERSONAL_CONTEXT_UI } from './featureFlags';
@@ -79,6 +77,7 @@ import { useBrowserAgentActivity } from './features/browserAgentActivity';
 import {
   AgentMode,
   MediaItem,
+  type ProjectInfo,
   type ChatSendOptions,
   UserAnswer,
   ModelEntry,
@@ -543,6 +542,7 @@ function AppContent({
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
+  const workspaceWorkMode = useWorkspaceStore((state) => state.workMode);
 
   const setHistoryRetryAvailable = useCallback((sid: string, available: boolean) => {
     setHistoryRetrySessions((current) => {
@@ -623,6 +623,19 @@ function AppContent({
       sessionIdRef.current = route.sessionId;
       setSessionId(route.sessionId);
       setActiveNav('chat');
+    } else if (route.kind === 'design-project') {
+      sessionIdRef.current = NEW_CONVERSATION_ID;
+      setSessionId(NEW_CONVERSATION_ID);
+      setActiveNav('chat');
+      void useWorkspaceStore.getState().setWorkMode('design').then(() => {
+        const project = useWorkspaceStore.getState().projects.find(
+          (item) => item.project_id === route.projectId,
+        );
+        useWorkspaceStore.getState().setSelectedProject(project ?? null);
+      });
+      setTeamAreaExpanded(false);
+      setSingleAgentPanelExpanded(false);
+      setToolPanelHidden(true);
     } else if (route.kind === 'chat-new') {
       if (window.location.pathname !== '/chat/new') {
         navigate({ kind: 'chat-new' }, { replace: true });
@@ -639,7 +652,7 @@ function AppContent({
       setTeamAreaExpanded(false);
       setSingleAgentPanelExpanded(false);
     }
-  }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
+  }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden]);
 
   useEffect(() => {
     ensureSessionRuntimes(sessionId);
@@ -2874,50 +2887,8 @@ function AppContent({
     useSessionStore.getState().setAgentGroupSelectionIntent(NEW_CONVERSATION_ID, { kind: 'select', id: groupId });
   }, [enterNewConversation]);
 
-  const handleLaunchDesign = useCallback(
-    (prompt: string, mediaItems?: MediaItem[]) => {
-      const workspace = useWorkspaceStore.getState();
-      const workContext = getWorkContextForSession(sessionIdRef.current || NEW_CONVERSATION_ID);
-      const converted = mediaItemsToBootstrapReferences(mediaItems);
-      if (converted.error) {
-        const map: Record<string, string> = {
-          image_limit: t('designer.chat.limitImages'),
-          video_limit: t('designer.chat.limitVideo'),
-          audio_limit: t('designer.chat.limitAudio'),
-          too_large: t('designer.chat.tooLarge'),
-          unsupported: t('designer.chat.unsupported'),
-        };
-        window.alert(map[converted.error] || t('designer.chat.unsupported'));
-        return;
-      }
-      void launchDesignerFromTask({
-        prompt,
-        references: converted.refs,
-        projectId: workContext.project_id || sessionProject?.project_id,
-        projectDir: workContext.project_dir || sessionProject?.project_dir,
-        workMode: workspace.workMode === 'code' ? 'code' : 'work',
-        onNavigateToDesign: () => {
-          setActiveNav('design');
-          setTeamAreaExpanded(false);
-          setToolPanelHidden(true);
-        },
-        thinkingText: t('designer.chat.thinking'),
-        doneText: t('designer.chat.bootstrapDone'),
-        errorText: t('designer.chat.bootstrapError'),
-      });
-    },
-    [sessionProject?.project_dir, sessionProject?.project_id, setTeamAreaExpanded, setToolPanelHidden, t],
-  );
-
   const handleSendMessage = useCallback(async (content: string, mediaItems?: MediaItem[], options?: ChatSendOptions) => {
     const currentSessionId = sessionIdRef.current;
-    const designSid = currentSessionId || NEW_CONVERSATION_ID;
-    const trimmedPrompt = content.trim();
-    if ((trimmedPrompt || (mediaItems && mediaItems.length > 0)) && useDesignArmedStore.getState().isArmed(designSid)) {
-      useDesignArmedStore.getState().consumeArmed(designSid);
-      handleLaunchDesign(trimmedPrompt, mediaItems);
-      return;
-    }
     if (!currentSessionId) return;
     if (options?.queuedTaskId) {
       await sendMessage(content, currentSessionId, mediaItems, options);
@@ -3101,7 +3072,7 @@ function AppContent({
     } else {
       useChatStore.getState().setInputValue(currentSessionId, content);
     }
-  }, [disposeInFlightHistoryHandles, handleLaunchDesign, mode, navigate, request, sendMessage, setGoalObjective, t]);
+  }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, setGoalObjective, t]);
 
   const handlePersistMedia = useCallback((content: string, mediaItems: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
@@ -3459,6 +3430,17 @@ function AppContent({
     void handleRestoreSession(target.session_id, target.mode, target);
   }, [enterNewConversation, handleRestoreSession, isToolPanelAutoHideViewport, mode, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden]);
 
+  const handleSelectDesignProject = useCallback((project: ProjectInfo) => {
+    setSelectedProject(project);
+    navigate({ kind: 'design-project', projectId: project.project_id });
+  }, [navigate, setSelectedProject]);
+
+  const handleDesignWorkspaceCreated = useCallback((projectId: string, createdSessionId: string) => {
+    sessionIdRef.current = createdSessionId;
+    setSessionId(createdSessionId);
+    navigate({ kind: 'design-project', projectId });
+  }, [navigate]);
+
   const handleNavigate = useCallback(
     (nav: MainNavKey) => {
       if (
@@ -3709,12 +3691,20 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
+                onSelectDesignProject={handleSelectDesignProject}
                 onOpenCron={() => handleNavigate('cron')}
                 isCronActive={false}
                 collapsed={conversationSidebarCollapsed}
                 floating={conversationSidebarFloating}
                 onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
               />
+              {workspaceWorkMode === 'design' ? (
+                route.kind === 'design-project' ? (
+                  <DesignerPage projectId={route.projectId} />
+                ) : (
+                  <DesignerLanding onCreated={handleDesignWorkspaceCreated} />
+                )
+              ) : (
               <div
                 className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
               >
@@ -3795,7 +3785,6 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                         onToggleComposerCollapsed={toggleTrajectoryComposer}
                         onComposerHeightChange={setTrajectoryComposerHeight}
                         onContinueQueuedSessionMessages={handleContinueQueuedSessionMessages}
-                        onLaunchDesign={handleLaunchDesign}
                       />
                     )}
                     chatLabel={t('nav.chat')}
@@ -3877,6 +3866,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                   <HeartbeatPanel sessionId={sessionId} onClose={() => setHeartbeatPanelOpen(false)} />
                 )}
               </div>
+              )}
             </div>
           </>
         )}
@@ -3905,14 +3895,6 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               navigationRequest={agentManagementNavigationRequest}
             />
           </div>
-        )}
-        {activeNav === 'design' && (
-          <DesignerPage
-            projectId={
-              sessionProject?.project_id
-              || getWorkContextForSession(sessionId).project_id
-            }
-          />
         )}
         {activeNav === 'sessions' && (
           <div className="app-section">

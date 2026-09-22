@@ -1,7 +1,6 @@
 import { Loader2 } from 'lucide-react';
 import { useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useWorkspaceStore } from '../../../stores';
 import {
   collectDesignerMaterials,
   collectPendingRevisions,
@@ -15,8 +14,8 @@ import { DesignerMaterialViewer } from '../DesignerMaterialViewer';
 import { DesignerRevisionChooser } from '../DesignerRevisionChooser';
 import { DesignerCanvas } from './DesignerCanvas';
 import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
-import { DesignerRecentGraphs } from './DesignerRecentGraphs';
 import { DesignerRunControl } from './DesignerRunControl';
+import { designerWorkspaceClient } from '../designerGraphClient';
 import './DesignerPage.css';
 
 type DesignerPageProps = {
@@ -25,20 +24,13 @@ type DesignerPageProps = {
 
 export function DesignerPage({ projectId }: DesignerPageProps) {
   const { t } = useTranslation();
-  const selectedProject = useWorkspaceStore((state) => state.selectedProject);
-  const pendingDesignerGraphId = useWorkspaceStore((state) => state.pendingDesignerGraphId);
-  const setPendingDesignerGraphId = useWorkspaceStore((state) => state.setPendingDesignerGraphId);
-  const designerGraphs = useWorkspaceStore((state) => state.designerGraphs);
-  const effectiveProjectId = projectId || selectedProject?.project_id;
+  const effectiveProjectId = projectId;
 
   const loadStatus = useDesignerStore((state) => state.loadStatus);
   const loadError = useDesignerStore((state) => state.loadError);
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const graphId = useDesignerStore((state) => state.graphId);
   const bootstrapInProgress = useDesignerStore((state) => state.bootstrapInProgress);
-  const bootstrapPhase = useDesignerChatStore((state) => state.bootstrapPhase);
-  const loadForProject = useDesignerStore((state) => state.loadForProject);
-  const loadGraph = useDesignerStore((state) => state.loadGraph);
   const resetForGraph = useDesignerRunStore((state) => state.resetForGraph);
   const boundGraphId = useDesignerRunStore((state) => state.boundGraphId);
   const run = useDesignerRunStore((state) => state.run);
@@ -53,60 +45,35 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
   const closeViewer = useDesignerUiStore((state) => state.closeViewer);
   const closeRevision = useDesignerUiStore((state) => state.closeRevision);
   const resetUi = useDesignerUiStore((state) => state.reset);
-  // Tasks→Design bootstrap 结束后 bootstrapInProgress 会变 false，若立刻 list/get
-  //（尤其 projectId 为空或与新建 project 不一致），会把刚 apply 的图刷成 empty。
-  const skipLoadAfterBootstrapRef = useRef(false);
-
+  const workspaceLoadSeqRef = useRef(0);
   useEffect(() => bindDesignerRuntime(), []);
 
   useEffect(() => {
-    if (bootstrapInProgress) {
-      skipLoadAfterBootstrapRef.current = true;
-      return;
-    }
-    if (pendingDesignerGraphId) {
-      const nextId = pendingDesignerGraphId;
-      setPendingDesignerGraphId(null);
-      void loadGraph(nextId);
-      return;
-    }
-    if (skipLoadAfterBootstrapRef.current) {
-      skipLoadAfterBootstrapRef.current = false;
-      return;
-    }
-    void loadForProject(effectiveProjectId);
+    const loadSeq = ++workspaceLoadSeqRef.current;
+    if (!effectiveProjectId || bootstrapInProgress) return;
+    useDesignerStore.getState().reset();
+    void designerWorkspaceClient.get(effectiveProjectId)
+      .then((workspace) => {
+        if (workspaceLoadSeqRef.current !== loadSeq) return;
+        useDesignerStore.getState().applyGraph(workspace.graph);
+        useDesignerChatStore.getState().replaceMessages(
+          workspace.graph.graph_id,
+          workspace.messages,
+        );
+      })
+      .catch((reason) => {
+        if (workspaceLoadSeqRef.current !== loadSeq) return;
+        const message = reason instanceof Error ? reason.message : String(reason);
+        useDesignerStore.getState().failBootstrapEntry(message);
+      });
+    return () => {
+      if (workspaceLoadSeqRef.current === loadSeq) {
+        workspaceLoadSeqRef.current += 1;
+      }
+    };
   }, [
     bootstrapInProgress,
     effectiveProjectId,
-    loadForProject,
-    loadGraph,
-    pendingDesignerGraphId,
-    setPendingDesignerGraphId,
-  ]);
-
-  useEffect(() => {
-    if (bootstrapInProgress || pendingDesignerGraphId) return;
-    if (
-      bootstrapPhase === 'thinking' ||
-      bootstrapPhase === 'bootstrapping' ||
-      bootstrapPhase === 'error'
-    ) {
-      return;
-    }
-    if (domainGraph || loadStatus === 'loading' || loadStatus === 'bootstrapping') return;
-    const fallbackId = designerGraphs[0]?.graph_id;
-    if (!fallbackId) return;
-    if (loadStatus === 'empty' || loadStatus === 'error' || loadStatus === 'idle') {
-      void loadGraph(fallbackId);
-    }
-  }, [
-    bootstrapInProgress,
-    bootstrapPhase,
-    designerGraphs,
-    domainGraph,
-    loadGraph,
-    loadStatus,
-    pendingDesignerGraphId,
   ]);
 
   useEffect(() => {
@@ -156,11 +123,8 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
     !showCanvas &&
     (loadStatus === 'loading' || loadStatus === 'idle' || loadStatus === 'bootstrapping');
 
-  const selectedGraphTitle =
-    designerGraphs.find((item) => item.graph_id === graphId)?.title?.trim() || '';
   const projectTitle =
     domainGraph?.title?.trim() ||
-    selectedGraphTitle ||
     (showLoading || showEmpty || showError ? '' : t('designer.subtitle'));
 
   return (
@@ -174,12 +138,6 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
             {projectTitle || t('designer.subtitle')}
           </p>
         </div>
-        {designerGraphs.length > 0 ? (
-          <DesignerRecentGraphs
-            graphId={isDesignerPreviewGraph(domainGraph) ? null : graphId}
-            currentTitle={projectTitle}
-          />
-        ) : null}
         <div className="designer-page__toolbar-actions">
           <DesignerRunControl
             graph={showCanvas ? domainGraph : null}

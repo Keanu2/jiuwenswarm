@@ -7,8 +7,7 @@ import {
   type KeyboardEvent,
 } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useWorkspaceStore } from '../../../stores';
-import { bootstrapDesignerFromChat, chatDesignerGraph, isNewDesignerBrief } from '../designerEntry';
+import { chatDesignerGraph } from '../designerEntry';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
 import { useDesignerStore } from '../designerStore';
 import { designerActivityText } from '../designerActivity';
@@ -102,9 +101,6 @@ export function DesignerChatPanel() {
   const bootstrapPhase = useDesignerChatStore((state) => state.bootstrapPhase);
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const selectedNodeId = useDesignerStore((state) => state.selectedNodeId);
-  const selectedProject = useWorkspaceStore((state) => state.selectedProject);
-  const workMode = useWorkspaceStore((state) => state.workMode);
-  const loadProjects = useWorkspaceStore((state) => state.loadProjects);
   const optimizeFor = useDesignerOptimizeStore((state) => state.optimizeFor);
   const setOptimizeFor = useDesignerOptimizeStore((state) => state.setOptimizeFor);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -214,15 +210,9 @@ export function DesignerChatPanel() {
           if (item.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(item.previewUrl);
         });
         setAttachments([]);
-        const projectId = selectedProject?.project_id;
-        const useExistingProject = Boolean(
-          projectId && projectId !== 'default' && projectId !== 'default_code',
-        );
         const existingGraph =
           domainGraph && !isDesignerPreviewGraph(domainGraph) ? domainGraph : null;
-        // New film/design briefs always compose a fresh Supervisor graph on Enter.
-        // Small edit requests (add node / refine) keep Leader chat on the current graph.
-        if (existingGraph?.graph_id && !isNewDesignerBrief(content)) {
+        if (existingGraph?.graph_id) {
           return chatDesignerGraph({
             graphId: existingGraph.graph_id,
             prompt: content,
@@ -231,19 +221,8 @@ export function DesignerChatPanel() {
             errorText: t('designer.chat.updateError'),
           });
         }
-        return bootstrapDesignerFromChat({
-          prompt: content,
-          references: converted.refs,
-          ...(useExistingProject
-            ? { projectId, projectDir: selectedProject?.project_dir }
-            : { workMode }),
-          optimizeFor,
-          thinkingText: t('designer.chat.thinking'),
-          doneText: t('designer.chat.bootstrapDone'),
-          errorText: t('designer.chat.bootstrapError'),
-        }).then(() => {
-          void loadProjects();
-        });
+        setAttachError(t('designer.loadErrorFallback'));
+        return undefined;
       })
       .finally(() => {
         setSending(false);
@@ -253,13 +232,9 @@ export function DesignerChatPanel() {
     chatBusy,
     domainGraph,
     draft,
-    loadProjects,
     optimizeFor,
     selectedNodeId,
-    selectedProject?.project_dir,
-    selectedProject?.project_id,
     t,
-    workMode,
   ]);
 
   const onKeyDown = useCallback(

@@ -67,7 +67,7 @@
   "designer": {
     "loading": "Loading design workflow…",
     "emptyTitle": "No design workflow yet",
-    "emptyDescription": "Send a prompt with the Design option from Tasks, or come back once a workflow exists for this project.",
+    "emptyDescription": "Describe a project to create a dedicated Design workspace and workflow.",
     "loadErrorTitle": "Failed to load",
     "loadErrorFallback": "Could not load the design workflow. Please try again later.",
     "toggleLabel": "Design",
@@ -76,7 +76,7 @@
     "attachmentsBlocked": "Design mode does not support attachments yet. Remove attachments and try again.",
     "chat": {
       "title": "Design assistant",
-      "emptyHint": "Describe what you want to create. You can attach image, video, or audio references.",
+      "emptyHint": "What can I create for you?",
       "inputPlaceholder": "Describe what you want to create, and optionally attach references…",
       "collapse": "Collapse chat",
       "expand": "Expand chat",

@@ -19,7 +19,7 @@ const DEFAULT_CODE_PROJECT_ID = 'default_code';
 function normalizeProject(project: ProjectInfo, fallbackWorkMode: WorkMode): ProjectInfo {
   return {
     ...project,
-    work_mode: project.work_mode === 'code' || project.work_mode === 'work'
+    work_mode: project.work_mode === 'code' || project.work_mode === 'work' || project.work_mode === 'design'
       ? project.work_mode
       : fallbackWorkMode,
     git: project.git ?? {

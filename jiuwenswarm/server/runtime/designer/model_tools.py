@@ -7,8 +7,10 @@ from __future__ import annotations
 import base64
 import logging
 import mimetypes
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from jiuwenswarm.common.config import get_config, get_model_names, resolve_env_vars
 
@@ -19,6 +21,21 @@ logger = logging.getLogger(__name__)
 # Thinking mode shares this budget with final content — we disable thinking below.
 _DESIGNER_MAX_TOKENS_CAP = 65536
 _DESIGNER_DEFAULT_MAX_TOKENS = 16384
+_preferred_designer_model: ContextVar[str | None] = ContextVar(
+    "preferred_designer_model",
+    default=None,
+)
+
+
+@contextmanager
+def use_preferred_designer_model(model_name: str | None) -> Iterator[None]:
+    """Apply one UI-selected model to all Designer planning calls in this context."""
+    normalized = str(model_name or "").strip() or None
+    token = _preferred_designer_model.set(normalized)
+    try:
+        yield
+    finally:
+        _preferred_designer_model.reset(token)
 
 
 def _clamp_max_tokens(value: int | None) -> int:
@@ -234,6 +251,7 @@ async def call_model_tool(
         pass
 
     max_tokens = _clamp_max_tokens(max_tokens)
+    preferred_model = preferred_model or _preferred_designer_model.get()
 
     models = list_configured_models()
     chosen: dict[str, Any] | None = None

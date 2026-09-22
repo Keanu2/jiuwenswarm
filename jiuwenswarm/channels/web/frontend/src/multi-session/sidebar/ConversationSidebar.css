@@ -1,3 +1,27 @@
+.conversation-sidebar__design-project {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+  background: transparent;
+  text-align: left;
+}
+
+.conversation-sidebar__design-project:hover,
+.conversation-sidebar__design-project.is-active {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+
+.conversation-sidebar__design-project span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .conversation-sidebar {
   --conversation-sidebar-width: 240px;
 

@@ -31,6 +31,8 @@ from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_WORK,
     DEFAULT_TUI_WORK_MODE,
     DEFAULT_WEB_WORK_MODE,
+    EXECUTION_WORK_MODES,
+    SUPPORTED_WORK_MODES,
     is_default_project_id,
     normalize_work_mode,
 )
@@ -266,7 +268,7 @@ def _load_cache(cache_bust: bool = False) -> list[dict[str, Any]]:
             existing_wm = p.get("work_mode")
             if (
                 isinstance(existing_wm, str)
-                and existing_wm.strip().lower() in {"code", "work"}
+                and existing_wm.strip().lower() in SUPPORTED_WORK_MODES
             ):
                 continue
             # infer_legacy_project_work_mode 总是返回合法值(缺失/非法时回退 "work")
@@ -535,6 +537,13 @@ def resolve_cron_project_binding(
     """
     input_mode = str(work_mode or DEFAULT_WEB_WORK_MODE).strip() or DEFAULT_WEB_WORK_MODE
     match_mode = _normalize_work_mode_value(work_mode)
+    if input_mode not in EXECUTION_WORK_MODES:
+        return CronProjectBinding(
+            project_id="",
+            work_mode=input_mode,
+            error=f"cron is not supported for work_mode: {input_mode!r}",
+            code="BAD_REQUEST",
+        )
     raw_project_id = str(project_id or "").strip()
     if raw_project_id in (DEFAULT_PROJECT_ID_WORK, DEFAULT_PROJECT_ID_CODE):
         return CronProjectBinding(
@@ -563,6 +572,13 @@ def resolve_cron_project_binding(
                 code="NOT_FOUND",
                 hidden=True,
             )
+        if proj.work_mode not in EXECUTION_WORK_MODES:
+            return CronProjectBinding(
+                project_id="",
+                work_mode=proj.work_mode,
+                error=f"cron is not supported for work_mode: {proj.work_mode!r}",
+                code="BAD_REQUEST",
+            )
         return CronProjectBinding(
             project_id=raw_project_id,
             work_mode=proj.work_mode or DEFAULT_WEB_WORK_MODE,
@@ -575,6 +591,13 @@ def resolve_cron_project_binding(
         proj = get_project_by_id(resolved_project_id, cache_bust=True)
         if proj is not None:
             resolved_work_mode = proj.work_mode or DEFAULT_WEB_WORK_MODE
+            if resolved_work_mode not in EXECUTION_WORK_MODES:
+                return CronProjectBinding(
+                    project_id="",
+                    work_mode=resolved_work_mode,
+                    error=f"cron is not supported for work_mode: {resolved_work_mode!r}",
+                    code="BAD_REQUEST",
+                )
     elif resolved_project_id == DEFAULT_PROJECT_ID_CODE:
         resolved_work_mode = DEFAULT_TUI_WORK_MODE
     elif resolved_project_id == DEFAULT_PROJECT_ID_WORK:
@@ -1051,6 +1074,25 @@ def hide_project(project_id: str) -> Project | None:
             target["pin_order"] = 0
         target["updated_at"] = _now()
         return Project.from_dict(target)
+
+    return _mutate(_do)
+
+
+def purge_project(project_id: str) -> bool:
+    """Remove a project created by an uncommitted server transaction.
+
+    User-facing deletion remains soft deletion through :func:`hide_project`.
+    This primitive is intentionally reserved for rollback before a project has
+    ever been returned to a client.
+    """
+    def _do(projects: list[dict[str, Any]]) -> bool:
+        original_count = len(projects)
+        projects[:] = [
+            project
+            for project in projects
+            if str(project.get("project_id") or "") != project_id
+        ]
+        return len(projects) != original_count
 
     return _mutate(_do)
 
