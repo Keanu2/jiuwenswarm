@@ -35,6 +35,17 @@ _MEDIA_DURATION = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 
+def _is_silent_music_placeholder(path: Path | str | None) -> bool:
+    try:
+        from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import (
+            is_silent_music_placeholder,
+        )
+
+        return is_silent_music_placeholder(path)
+    except Exception:  # noqa: BLE001
+        return "placeholder_silent" in Path(path or "").name.lower()
+
+
 def _find_ffmpeg() -> str:
     env = str(os.environ.get("FFMPEG_BINARY") or os.environ.get("FFMPEG_PATH") or "").strip()
     if env and Path(env).is_file():
@@ -525,14 +536,7 @@ def mix_compose_soundtrack(
     ctx: NodeExecutionContext | None = None,
     brief: str = "",
 ) -> Path:
-    """Mux soundtrack without destroying in-clip audio.
-
-    Policy:
-    - Prefer upstream speech/music nodes (overlay / replace).
-    - If the concatenated video already has audio and no separate tracks → keep it.
-    - Synthetic bed only when the film is still silent.
-    """
-    _ = brief
+    """After concat: keep clip dialogue, mix ONE Brief-derived BGM on top."""
     video = Path(video)
     dest = Path(dest)
     try:
@@ -545,51 +549,57 @@ def mix_compose_soundtrack(
 
     include_music = True
     include_speech = False
+    silent = False
+    bgm_lock: dict = {}
     if ctx is not None and isinstance(ctx.graph, dict):
         meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
         analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
         audio = analysis.get("audio") if isinstance(analysis.get("audio"), dict) else {}
         routing = meta.get("audio") if isinstance(meta.get("audio"), dict) else {}
-        include_music = bool(
-            audio.get("include_music", routing.get("include_music", True))
+        include_music = bool(audio.get("include_music", routing.get("include_music", True)))
+        include_speech = bool(audio.get("include_speech") or routing.get("include_speech"))
+        silent = str(audio.get("policy") or "") == "silent"
+        if silent:
+            include_music = False
+        bgm_lock = (
+            (analysis.get("bgm_lock") if isinstance(analysis.get("bgm_lock"), dict) else None)
+            or (meta.get("bgm_lock") if isinstance(meta.get("bgm_lock"), dict) else None)
+            or (audio.get("bgm_lock") if isinstance(audio.get("bgm_lock"), dict) else {})
+            or {}
         )
-        include_speech = bool(
-            audio.get("include_speech") or routing.get("include_speech")
-        )
-
-    upstream: list[Path] = []
-    if ctx is not None:
-        speech = _collect_role_audio_paths(ctx, {"speech"}) if include_speech else []
-        music = _collect_role_audio_paths(ctx, {"music"}) if include_music else []
-        upstream = [*speech, *music]
-        if include_music and not music:
-            from jiuwenswarm.server.runtime.designer.user_references import (
-                user_reference_audio_path,
-            )
-
-            user_audio = user_reference_audio_path(ctx.graph)
-            if user_audio is not None and user_audio.is_file():
-                upstream.append(user_audio)
 
     has_embedded = _probe_has_audio(ffmpeg, video)
-    if not upstream and has_embedded:
-        return video
+    speech_tracks: list[Path] = []
+    music_tracks: list[Path] = []
+    if ctx is not None:
+        if include_speech and not has_embedded:
+            speech_tracks = _collect_role_audio_paths(ctx, {"speech"})
+        if include_music:
+            music_tracks = _collect_role_audio_paths(ctx, {"music"})
+            if not music_tracks:
+                from jiuwenswarm.server.runtime.designer.user_references import (
+                    user_reference_audio_path,
+                )
+
+                user_audio = user_reference_audio_path(ctx.graph)
+                if user_audio is not None and user_audio.is_file():
+                    music_tracks = [user_audio]
+
+    extra: list[Path] = [*speech_tracks, *music_tracks]
+    extra = [p for p in extra if not _is_silent_music_placeholder(p)]
     score: Path | None = None
-    if upstream:
+    if extra:
         score = _mix_audio_tracks(
-            ffmpeg, upstream, dest.parent / f"{dest.stem}_mix", duration
+            ffmpeg, extra, dest.parent / f"{dest.stem}_mix", duration
         )
-    if score is None and include_music and not has_embedded:
-        # Only synthesize a bed when the film is silent and music was requested.
-        score = _render_cinematic_bgm(
-            ffmpeg, dest.parent / f"{dest.stem}_score", duration
-        )
+    # No fake sine/noise bed. Empty music placeholder must not tint the film.
     if score is None:
         return video
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.resolve() == video.resolve():
         dest = video.with_name(f"{video.stem}_bgm{video.suffix}")
-    if has_embedded and upstream:
+    if has_embedded:
         if _overlay_audio_on_video(ffmpeg, video, score, dest, mix_with_video=True):
             return dest.resolve()
         return video
@@ -615,51 +625,6 @@ def _media_duration_seconds(ffmpeg: str, path: Path) -> float | None:
         float(match.group(3)),
     )
     return hours * 3600 + minutes * 60 + seconds
-
-
-def _render_cinematic_bgm(ffmpeg: str, dest: Path, duration: float) -> Path | None:
-    seconds = max(1.0, float(duration))
-    fade_out = max(0.0, seconds - 1.8)
-    dest = Path(dest).with_suffix(".m4a")
-    rendered = _run_ffmpeg(
-        ffmpeg,
-        [
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency=110:sample_rate=44100:duration={seconds}",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency=164.81:sample_rate=44100:duration={seconds}",
-            "-f",
-            "lavfi",
-            "-i",
-            f"anoisesrc=color=brown:sample_rate=44100:duration={seconds}",
-            "-filter_complex",
-            (
-                # Audible cinematic bed (previous 0.07 levels were effectively silent).
-                "[0]volume=0.28[a];[1]volume=0.18[b];[2]lowpass=f=280,volume=0.12[c];"
-                "[a][b][c]amix=inputs=3:duration=longest:dropout_transition=0,"
-                f"loudnorm=I=-16:TP=-1.5:LRA=11,"
-                f"afade=t=in:st=0:d=1.0,afade=t=out:st={fade_out}:d=1.4"
-            ),
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            str(dest),
-        ],
-    )
-    if rendered.returncode != 0 or not _output_ok(dest):
-        logger.warning(
-            "compose BGM render failed: %s",
-            (rendered.stderr or rendered.stdout or "")[:800],
-        )
-        dest.unlink(missing_ok=True)
-        return None
-    return dest.resolve()
 
 
 def _mux_bgm(ffmpeg: str, video: Path, audio: Path, dest: Path) -> bool:

@@ -886,6 +886,9 @@ def test_list_graphs_includes_video_summary(
     summary = next(item for item in payload["summaries"] if item["graph_id"] == graph["graph_id"])
     assert summary["has_video"] is True
     assert summary["clip_label"] == "generated_clip.mp4"
+    listed = next(item for item in payload["graphs"] if item["graph_id"] == graph["graph_id"])
+    assert "nodes" not in listed
+    assert "edges" not in listed
 
 
 def test_get_graph_hydrates_node_outputs_from_latest_run(

@@ -25,6 +25,7 @@ Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard
 3. Storyboard must emit timed shots with camera, action, and keyframe prompts.
 4. Each shot needs a Keyframe (first frame) then a Clip that **consumes that first frame** for image-to-video when the model supports it.
 5. Compose/final stitches clips; honor audio policy from the brief.
+6. Named director styles live in `metadata.video_style` (e.g. `final_frame_reverse` = reference still is the LAST 1s endpoint; reverse-form the action; see `skills/styles/`).
 
 ## Audio policy
 - If user says **no sound / silent / mute / 无声**: set `audio_intent.policy=silent`; do not add speech or music nodes; tell clip/compose agents to avoid implied dialogue.
@@ -143,6 +144,7 @@ Generate the still that will seed I2V. Match storyboard comment + character/scen
 """,
     "clip": """# Clip Agent Skill
 Generate shot video. Prefer **first-frame I2V** when a keyframe exists; otherwise R2V/T2V. Keep duration short. Honor silent policy (no implied dialogue) or leave room for later speech mix.
+When `metadata.video_style=final_frame_reverse`: this beat sits on an arc that ENDS on the user reference / classic still — decisive motion early, settle late, motif-motivated continuity; never turntable a finished pose.
 """,
     "compose": """# Compose / Final Agent Skill
 Stitch clips, normalize resolution, apply audio mix policy: silent → no tracks; speech → voiceover; music → bed; both → duck music under speech.
@@ -158,6 +160,49 @@ Compose motif/BGM for the requested mood and duration. Respect silent policy.
 """,
     "mesh": """# Mesh / 3D Agent Skill
 Block real-world scale assets; apply subject aspect conventions; prepare preview-friendly outputs.
+""",
+}
+
+STYLES = {
+    "final_frame_reverse": """# 终帧倒推 · 定格前最后几秒
+
+DesignSwarm 视频生成风格之一（`video_style=final_frame_reverse`）。
+
+## 目标
+
+把经典名画、电影级定格图或角色定格图，改造成约 10–15 秒短视频。
+核心不是讲完整故事，而是拍出「最终定格画面形成之前的最后几秒」。
+
+## 公式
+
+最终定格图作为终点 → 倒推出形成这张图之前的动作链 → 伪一镜到底建立空间和推进 → 关键特写强调神态、动作、物件 → 视觉母题完成转场 → 最后一秒收束为参考图构图。
+
+## 硬规则
+
+1. 参考图 / 名画构图 = 视频最后约 1 秒的终帧，不是开场。
+2. 不要纯一镜到底：长镜头负责空间/气势/推进；特写负责神态、关键动作、关键物件与情绪落点。
+3. 不要围绕已完成的静态画面旋转展示（禁止 turntable / 模型展示感）。
+4. 每次切镜必须有视觉母题转场：烟尘、雨丝、旗布、羽毛、圣光、布料、枪火、人物擦镜、栏杆线条、倒影、云雾等。
+5. 节奏：前段推进冲击与空间穿越；中段关键特写打点；后段减速归位；最后 1 秒定格对齐参考图。
+6. 最后一枚 keyframe + 最后一镜 clip 必须收束到参考构图（姿态、取景、光线）。
+7. 管线仍是每镜 I2V：本镜 keyframe = 本拍起点；整片弧线的终点才是用户参考定格。
+
+## Brief / Storyboard 写法
+
+- 总体指令 → 核心动作链（倒推）→ 逐镜头时间轴（合计约 10–15 秒）
+- 每镜写清：画面内容、镜头运动、角色动作、转场动机、情绪作用
+- 负面提示 + 一句核心执行原则
+
+## Clip（I2V）写法
+
+- 明确本拍在整段弧线中的位置（前冲 / 中特写 / 后归位 / 终帧）
+- 动作具体，禁止空泛「电影感」
+- 承接上一镜的视觉母题
+- 若为本片最后一拍：减速、归位、稳定，定格到参考图构图
+
+## 负面
+
+静态展示环绕、无动作链、无动机硬切、全程拖慢、结尾未对齐参考图、字幕水印。
 """,
 }
 
@@ -202,12 +247,14 @@ def main() -> None:
     write_map("orchestration", ORCH)
     write_map("agents", AGENTS)
     write_map("subjects", SUBJECTS)
+    write_map("styles", STYLES)
     index = {
         "schema_version": "designer-skills-index.v1",
         "scenarios": sorted(SCENARIOS),
         "agents": sorted(AGENTS),
         "subjects": sorted(SUBJECTS),
         "orchestration": sorted(ORCH),
+        "styles": sorted(STYLES),
     }
     (ROOT / "index.json").write_text(
         json.dumps(index, ensure_ascii=False, indent=2) + "\n",

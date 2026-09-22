@@ -1127,6 +1127,13 @@ def _with_reference_slot_prompt(
             f"Image {index + 1} is {label} ({Path(raw).name}) — keep this exact face, hair, body, and wardrobe."
         )
     header = "REFERENCE IMAGES (uploaded slots, visual authority):\n" + "\n".join(lines)
+    if str(cfg.get("pipeline") or cfg.get("role") or "") in {"character", "character_design"}:
+        header += (
+            "\nEDIT the subject in Image 1 — do not invent a new character. Identity "
+            "(face, head shape, species, hair, build, age, sex) must survive; only "
+            "wardrobe, accessories, props, pose, and lighting may change. When text "
+            "and image disagree about who this is, the image wins."
+        )
     if "REFERENCE IMAGES (uploaded slots" in prompt:
         return prompt
     return f"{header}\n\n{prompt}".strip()

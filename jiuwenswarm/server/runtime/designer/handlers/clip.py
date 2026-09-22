@@ -274,6 +274,7 @@ def _clip_prompt_lead(
     has_frame: bool,
     focus_names: str = "",
     continuity: bool = False,
+    video_style: str = "",
 ) -> str:
     attached: list[str] = []
     if has_character:
@@ -290,10 +291,20 @@ def _clip_prompt_lead(
         else ""
     )
     focus = f" Feature only: {focus_names}." if focus_names else ""
+    animate = (
+        "Animate ONLY the attached first-frame keyframe. "
+    )
+    if str(video_style or "").strip() == "final_frame_reverse":
+        animate = (
+            "Animate ONLY the attached first-frame keyframe (this beat's START). "
+            "The user reference / classic still is the FILM'S last-second ENDPOINT, "
+            "not a turntable subject — motion must push the arc toward that final "
+            "composition; if this is a late beat, decelerate and settle into it. "
+        )
     return (
         f"Create shot {shot_index} as a {duration}-second video — unique action for THIS shot only."
         f"{extras}{focus} "
-        "Animate ONLY the attached first-frame keyframe. "
+        f"{animate}"
         "ONE instance per person — never clone/duplicate a face in two places at once. "
         "Do not invent new people or a new crowd; keep the same extras layout as the keyframe. "
         "Keep identity and location consistent; camera/action must match this shot only. "
@@ -334,6 +345,20 @@ def build_clip_prompt(
     camera = str(
         (shot or {}).get("camera") or cfg.get("camera") or ""
     ).strip()
+    style_id = str(cfg.get("video_style") or "").strip()
+    style_clause = ""
+    try:
+        from jiuwenswarm.server.runtime.designer.video_styles import (
+            resolve_video_style,
+            video_style_clause as _video_style_clause,
+        )
+
+        if not style_id:
+            meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+            style_id = str(meta.get("video_style") or "").strip() or resolve_video_style(graph)
+        style_clause = _video_style_clause(style_id, for_clip=True) if style_id else ""
+    except Exception:  # noqa: BLE001
+        pass
     parts: list[str] = [
         _clip_prompt_lead(
             shot_index,
@@ -343,6 +368,7 @@ def build_clip_prompt(
             has_frame=has_frame,
             focus_names=focus_names,
             continuity=continuity,
+            video_style=style_id,
         )
     ]
     # One-line style from Brief only (not the full brief — that homogenizes all clips).
@@ -353,6 +379,8 @@ def build_clip_prompt(
                 if "visual style" in line.lower() or line.lower().startswith("**visual"):
                     parts.append(line.strip())
                     break
+    if style_clause:
+        parts.append(style_clause)
     if action:
         parts.append(f"Primary action for shot {shot_index}: {action}")
     if camera:

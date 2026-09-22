@@ -37,6 +37,17 @@ def _clamp_list(items: list[Any], limit: int) -> list[Any]:
     return items[: max(1, min(limit, len(items) or 1))]
 
 
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _is_cjk_heavy(text: str) -> bool:
+    """CJK prose needs different beat thresholds: one glyph carries a whole word."""
+    stripped = re.sub(r"\s+", "", text or "")
+    if not stripped:
+        return False
+    return len(_CJK_RE.findall(stripped)) * 2 >= len(stripped)
+
+
 def _title_case_label(raw: str) -> str:
     cleaned = re.sub(r"\s+", " ", raw.strip())
     if not cleaned:
@@ -353,10 +364,18 @@ def _split_prompt_beats(prompt: str) -> list[str]:
     if not text:
         return ["Establish the scene"]
 
+    cjk = _is_cjk_heavy(text)
+    # CJK carries no word boundaries, so \b cues never fire on Chinese prose.
+    min_beat_len = 5 if cjk else 8
+    merge_below = 10 if cjk else 25
     # Do not use bare \bnext\b — it false-splits on "next to her".
     split_re = re.compile(
         r"(?:"
-        r"\b(?:and then|after that|finally|afterward|afterwards|之后|然后|接着)\b"
+        r"\b(?:and then|after that|finally|afterward|afterwards)\b"
+        r"|(?:紧接着|接着|然后|随后|其后|之后|最后|最终|突然|忽然|"
+        r"画面(?:切换|切至|切到|转向|转为)|镜头(?:切换|切至|切到|转向|摇向)|"
+        r"下一(?:幕|镜|个镜头))"
+        r"|(?<=[。！？；])\s*"
         r"|\bnext(?:ly)?\s*,"
         r"|\bnext\s+(?:we|shot|scene|beat|the camera)\b"
         r"|\bwhile\s+(?:another|a second|the other)\b"
@@ -369,13 +388,15 @@ def _split_prompt_beats(prompt: str) -> list[str]:
     parts: list[str] = []
     last = 0
     for m in split_re.finditer(text):
-        left = text[last : m.start()].strip(" ,.")
-        if left and len(left) > 8:
+        if m.start() < last:
+            continue
+        left = text[last : m.start()].strip(" ,.，。")
+        if left and len(left) > min_beat_len:
             parts.append(left)
         cue = m.group(0).strip().lower()
         last = m.start() if re.search(r"\b(?:pan|cut)\b", cue) else m.end()
-    tail = text[last:].strip(" ,.")
-    if tail and len(tail) > 8:
+    tail = text[last:].strip(" ,.，。")
+    if tail and len(tail) > min_beat_len:
         parts.append(tail)
 
     merged: list[str] = []
@@ -393,10 +414,16 @@ def _split_prompt_beats(prompt: str) -> list[str]:
         ):
             merged[-1] = f"{merged[-1]}, {part}"
             continue
-        if merged and len(part) < 25:
+        if merged and len(part) < merge_below:
             merged[-1] = f"{merged[-1]} {part}"
             continue
         merged.append(part)
+
+    if len(merged) < 2 and cjk:
+        # Long Chinese paragraph with no terminators: comma clauses are the beats.
+        clauses = [c.strip() for c in re.split(r"[，,、；;]", text) if len(c.strip()) > 8]
+        if len(clauses) >= 2:
+            merged = clauses
 
     if len(merged) < 2:
         beats: list[str] = []
@@ -515,7 +542,7 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
             if ranked and ranked[0][0] > 0:
                 shot["character_ids"] = [ranked[0][1]]
             # else leave empty — fail closed; Supervisor/Manager must fill on_screen
-    return _clamp_list(shots, min(_MAX_SHOTS, shot_ceiling))
+    return _fold_shots_to_budget(shots, max(1, min(_MAX_SHOTS, shot_ceiling)))
 
 
 def _heuristic_scenes(prompt: str) -> list[dict[str, str]]:
@@ -614,6 +641,34 @@ def _select_shots_for_budget(
     for i, shot in enumerate(selected, start=1):
         shot["shot_index"] = i
     return selected
+
+
+def _fold_shots_to_budget(
+    shots: list[dict[str, Any]], budget: int
+) -> list[dict[str, Any]]:
+    """Fit shots into budget by folding trailing beats into the last kept shot.
+
+    Dropping beats would silently lose story the user wrote, so the overflow is
+    appended instead of discarded.
+    """
+    if budget < 1 or len(shots) <= budget:
+        return list(shots)
+    kept = [dict(s) for s in shots[:budget]]
+    tail = shots[budget:]
+    last = kept[-1]
+    extra = " ".join(str(s.get("action") or "") for s in tail).strip()
+    if extra:
+        last["action"] = f"{str(last.get('action') or '')} {extra}".strip()[:800]
+        last["keyframe_prompt"] = str(last["action"])[:1200]
+    ids = list(last.get("character_ids") or [])
+    for shot in tail:
+        for cid in shot.get("character_ids") or []:
+            if cid not in ids:
+                ids.append(cid)
+    last["character_ids"] = ids
+    for i, shot in enumerate(kept, start=1):
+        shot["shot_index"] = i
+    return kept
 
 
 def _supervisor_pipeline_decisions(
@@ -731,30 +786,29 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
 
     story_name = derive_story_name(prompt=prompt)
     explicit = 0
+    beats = 1
     try:
         from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
             _explicit_shot_count_from_prompt,
+            count_narrative_beats,
         )
 
         explicit = int(_explicit_shot_count_from_prompt(prompt) or 0)
+        beats = int(count_narrative_beats(prompt) or 1)
     except Exception:  # noqa: BLE001
         explicit = 0
+        beats = 1
 
-    # No LLM: default to ONE keyframe + ONE clip covering the full prompt + all cast.
-    # Explicit N-shot / N分镜 is the only general multi-shot escape hatch.
-    if explicit >= 2:
-        shots = _heuristic_shots(prompt, characters)
-        decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
-        decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
-        shots = _select_shots_for_budget(
-            shots, int(decisions["target_shot_count"]), characters
+    # No LLM: explicit N-shot / N分镜 wins, else follow the beats the prompt itself
+    # describes. A multi-beat story must not collapse into one keyframe just
+    # because the opening LLM call failed.
+    budget = explicit if explicit >= 2 else beats
+    if budget >= 2:
+        shots = _fold_shots_to_budget(
+            _heuristic_shots(prompt, characters), max(1, min(_MAX_SHOTS, budget))
         )
-        for i, shot in enumerate(shots, start=1):
-            shot["shot_index"] = i
         decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
-        decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
-        if len(shots) > explicit:
-            shots = shots[:explicit]
+        decisions["target_shot_count"] = len(shots)
     else:
         shots = [_heuristic_lean_shot(prompt, characters, story_name=story_name)]
         n_chars = len(characters)
@@ -776,7 +830,7 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         "audio": audio,
         "summary": (
             f"{len(characters)} characters, {len(scenes)} scenes, {len(shots)} shots, "
-            f"cast={decisions['cast_layout']}, lean={explicit < 2}"
+            f"cast={decisions['cast_layout']}, lean={budget < 2}"
         ),
         **decisions,
     }

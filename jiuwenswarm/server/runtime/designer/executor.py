@@ -67,6 +67,9 @@ from jiuwenswarm.server.runtime.designer.handlers import (
     get_node_handler,
 )
 from jiuwenswarm.server.runtime.designer.node_agent import NodeAgentHost, NodeAgentRunner
+from jiuwenswarm.server.runtime.designer.user_references import (
+    carry_user_references as _carry_user_references,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -809,8 +812,8 @@ class GraphExecutor:
                 else "role handlers / direct image-video APIs only"
             ),
             "force_handler": (
-                "music/speech stay on MusicNodeHandler/SpeechNodeHandler until TTS/music "
-                "backends exist; if audio not requested, nodes are omitted"
+                "TTS disabled; dialogue stays clip-native. Music uses "
+                "MusicNodeHandler until a music backend exists."
             ),
             "heuristic_when": "llm_available() is False (no Settings chat models)",
         }
@@ -902,6 +905,7 @@ class GraphExecutor:
                             meta_r["supervisor_analyzed"] = True
                             meta_r["supervisor_composed_on_bootstrap"] = True
                             rebuilt["metadata"] = meta_r
+                            _carry_user_references(meta0, rebuilt)
                             graph = self._store.save_graph(rebuilt)
                     else:
                         meta0["script_analysis"] = analysis
@@ -1661,6 +1665,7 @@ class GraphExecutor:
             rmeta["freeze_shot_topology"] = True
             rmeta["script_analysis"] = analysis
             rebuilt["metadata"] = rmeta
+            _carry_user_references(meta, rebuilt)
             saved = self._store.save_graph(apply_runtime_delegate(rebuilt))
             live_ids = {str(node.get("id") or "") for node in saved.get("nodes") or []}
             states = run.setdefault("node_states", {})
@@ -1759,6 +1764,7 @@ class GraphExecutor:
                 rmeta[key] = meta.get(key)
         rmeta["freeze_shot_topology"] = True
         rebuilt["metadata"] = rmeta
+        _carry_user_references(meta, rebuilt)
         saved = self._store.save_graph(
             apply_shot_generate_prompts(apply_runtime_delegate(rebuilt), prompts)
         )

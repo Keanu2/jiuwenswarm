@@ -27,8 +27,6 @@ _ROLE_ALIASES: dict[str, str] = {
     "final": "compose",
     "audio": "audio_bed",
     "music": "music",
-    "speech": "speech_tts",
-    "tts": "speech_tts",
     "mesh": "mesh",
     "3d": "mesh",
 }
@@ -96,6 +94,11 @@ def load_agent_skill(role_or_node: str) -> str:
 
 def load_subject_skill(subject: str) -> str:
     return load_skill(f"subjects/{subject}", subject)
+
+
+def load_style_skill(style_id: str) -> str:
+    """Load a named video director style skill (skills/styles/<id>.md)."""
+    return load_skill(f"styles/{style_id}", style_id)
 
 
 def detect_subjects(prompt: str) -> list[str]:
@@ -213,6 +216,7 @@ def skill_bundle_for_graph(
     scenario: str,
     prompt: str,
     node_roles: list[str] | None = None,
+    video_style: str | None = None,
 ) -> dict[str, Any]:
     subjects = detect_subjects(prompt)
     audio = detect_audio_intent(prompt)
@@ -220,6 +224,17 @@ def skill_bundle_for_graph(
         role: load_agent_skill(role) for role in (node_roles or [])
         if load_agent_skill(role)
     }
+    style_id = str(video_style or "").strip()
+    style_skill = load_style_skill(style_id) if style_id else ""
+    if not style_skill and style_id:
+        try:
+            from jiuwenswarm.server.runtime.designer.video_styles import (
+                video_style_skill_excerpt,
+            )
+
+            style_skill = video_style_skill_excerpt(style_id)
+        except Exception:  # noqa: BLE001
+            style_skill = ""
     return {
         "scenario": scenario,
         "scenario_skill": load_scenario_skill(scenario),
@@ -228,6 +243,8 @@ def skill_bundle_for_graph(
         "agent_skills": agent_skills,
         "subjects": subjects,
         "subject_skills": {s: load_subject_skill(s) for s in subjects},
+        "video_style": style_id,
+        "style_skill": style_skill,
         "audio": audio,
     }
 
@@ -280,6 +297,18 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
     meta = dict(graph.get("metadata") or {})
     scenario = str(meta.get("scenario") or "video")
     text = prompt or str(graph.get("description") or "")
+    try:
+        from jiuwenswarm.server.runtime.designer.video_styles import (
+            stamp_video_style_on_graph,
+            video_style_skill_excerpt,
+        )
+
+        style_id = stamp_video_style_on_graph(graph, text)
+        style_skill = load_style_skill(style_id) or video_style_skill_excerpt(style_id)
+    except Exception:  # noqa: BLE001
+        style_id = str(meta.get("video_style") or "")
+        style_skill = load_style_skill(style_id) if style_id else ""
+    meta = dict(graph.get("metadata") or {})
     roles: list[str] = []
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
@@ -288,10 +317,23 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
         # Leaf agents: role skill + matching tool playbook (image / video / ffmpeg).
         skill_text = load_agent_skill(role) or load_agent_skill(str(node.get("id") or ""))
         tool_text = _tool_skills_for_role(role)
-        merged = "\n\n".join(x for x in (skill_text, tool_text) if x).strip()
+        # Clip / storyboard / brief also receive the active director style.
+        role_l = _ROLE_ALIASES.get(role, role)
+        style_bit = ""
+        if style_skill and role_l in {
+            "clip",
+            "storyboard",
+            "brief",
+            "frame",
+            "keyframe",
+            "compose",
+        }:
+            style_bit = style_skill
+            cfg["video_style"] = style_id
+        merged = "\n\n".join(x for x in (skill_text, tool_text, style_bit) if x).strip()
         if merged:
             cfg["skill_id"] = _ROLE_ALIASES.get(role, role)
-            cfg["skill_excerpt"] = merged[:2200]
+            cfg["skill_excerpt"] = merged[:2800]
         else:
             cfg.pop("skill_excerpt", None)
         # Do not attach subject encyclopedia to every node here.
@@ -307,22 +349,37 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
             if pb and "call_image_model" not in excerpt and "call_video_model" not in excerpt:
                 cfg["skill_excerpt"] = (
                     str(cfg.get("skill_excerpt") or "") + "\n\n" + pb
-                ).strip()[:2400]
+                ).strip()[:2800]
         except Exception:
             pass
         node["config"] = cfg
-    bundle = skill_bundle_for_graph(scenario=scenario, prompt=text, node_roles=roles)
+    bundle = skill_bundle_for_graph(
+        scenario=scenario,
+        prompt=text,
+        node_roles=roles,
+        video_style=style_id,
+    )
     # Overall skills live only on graph metadata for supervisor / manager.
     meta["skills_package"] = "designer_catalog_skills_reports_trajectory"
     meta["scenario_skill_excerpt"] = (bundle.get("scenario_skill") or "")[:4000]
     meta["supervisor_skill_excerpt"] = (bundle.get("supervisor_skill") or "")[:4000]
     meta["manager_skill_excerpt"] = (bundle.get("manager_skill") or "")[:4000]
+    if style_skill:
+        # Prepend director style so Supervisor/Manager see it first.
+        meta["supervisor_skill_excerpt"] = (
+            style_skill + "\n\n" + str(meta.get("supervisor_skill_excerpt") or "")
+        ).strip()[:5000]
+        meta["manager_skill_excerpt"] = (
+            style_skill + "\n\n" + str(meta.get("manager_skill_excerpt") or "")
+        ).strip()[:5000]
+        meta["style_skill_excerpt"] = style_skill[:4000]
     meta["subject_keys"] = bundle.get("subjects") or []
     meta["audio_intent"] = bundle.get("audio") or {}
     meta["skill_guided"] = True
     meta["skill_policy"] = (
-        "Leaf nodes: agents/<role>.md + tools/(image_gen|video_gen|ffmpeg).md. "
-        "Supervisor/manager: orchestration skills in metadata."
+        "Leaf nodes: agents/<role>.md + tools/(image_gen|video_gen|ffmpeg).md + "
+        "styles/<video_style>.md when active. "
+        "Supervisor/manager: orchestration skills + active video style in metadata."
     )
     graph["metadata"] = meta
     return graph

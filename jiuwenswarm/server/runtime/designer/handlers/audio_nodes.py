@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Fast speech / music (BGM) handlers — avoid multi-iteration agent stalls."""
+"""Music/BGM handler with a silent no-API placeholder."""
 
 from __future__ import annotations
 
@@ -10,11 +10,18 @@ from pathlib import Path
 
 from jiuwenswarm.common.schema.designer_graph import NODE_TYPE_AUDIO, DesignerGraphNode
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref, write_workspace_text
+from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
 logger = logging.getLogger(__name__)
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+SILENT_MUSIC_PLACEHOLDER_TOKEN = "placeholder_silent"
+
+
+def is_silent_music_placeholder(path: Path | str | None) -> bool:
+    """True for the no-API music stub (must not be mixed onto the film)."""
+    name = Path(path or "").name.lower()
+    return SILENT_MUSIC_PLACEHOLDER_TOKEN in name
 
 
 def _find_ffmpeg() -> str | None:
@@ -31,34 +38,25 @@ def _find_ffmpeg() -> str | None:
 
 
 def _bed_duration_sec(cfg: dict) -> float:
-    mode = str(cfg.get("optimize_for") or "quality").lower()
     try:
-        explicit = float(cfg.get("duration_sec") or cfg.get("max_audio_sec") or 0)
+        film = float(cfg.get("film_duration_sec") or cfg.get("duration_sec") or cfg.get("max_audio_sec") or 0)
     except (TypeError, ValueError):
-        explicit = 0.0
-    if explicit > 0:
-        return max(4.0, min(36.0, explicit))
+        film = 0.0
+    if film > 0:
+        return max(4.0, min(90.0, film))
+    mode = str(cfg.get("optimize_for") or "quality").lower()
     return 6.0 if mode == "cost" else 18.0
 
 
 def _synthesize_bed(dest: Path, *, duration: float, kind: str) -> bool:
-    """Generate an audible non-vocal bed with ffmpeg lavfi (no remote music/TTS API)."""
+    """Create a silent local music placeholder."""
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if kind == "speech":
-        # Audible "spoken word" presence until a real TTS backend is wired:
-        # soft mid tone + amplitude modulation (not silence).
-        lavfi = (
-            f"sine=frequency=180:sample_rate=44100:duration={duration},"
-            f"volume=0.22,aformat=channel_layouts=stereo"
-        )
-    else:
-        lavfi = (
-            f"sine=frequency=196:sample_rate=44100:duration={duration},"
-            f"volume=0.35,aformat=channel_layouts=stereo"
-        )
+    del kind
+    # Empty BGM until a music API is wired — no noise, no sine score.
+    lavfi = f"anullsrc=r=44100:cl=stereo,atrim=0:{max(0.2, duration)}"
     args = [
         "-y",
         "-f",
@@ -66,7 +64,7 @@ def _synthesize_bed(dest: Path, *, duration: float, kind: str) -> bool:
         "-i",
         lavfi,
         "-t",
-        f"{duration:.2f}",
+        f"{max(0.2, duration):.2f}",
         "-ac",
         "2",
         "-ar",
@@ -87,8 +85,20 @@ def _synthesize_bed(dest: Path, *, duration: float, kind: str) -> bool:
         return False
 
 
+def _write_empty_music_placeholder(dest: Path) -> Path:
+    """Zero-byte stub when ffmpeg is missing. Compose must not mux this."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"")
+    return dest
+
+
 class MusicNodeHandler:
-    """BGM/audio-bed: local short bed (≤20s). No multi-minute agent loops."""
+    """BGM module: user ref → future music API → silent placeholder.
+
+    ``call_music_model`` stays on the node tools for when a music backend exists.
+    Until then this handler only occupies the slot with an empty/silent file so
+    compose will not color the film with a fake score.
+    """
 
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
@@ -115,44 +125,46 @@ class MusicNodeHandler:
                 output_ref=file_output_ref(dest, kind=NODE_TYPE_AUDIO, mime_type=mime),
                 message="music from user audio reference",
             )
-        dest = Path(get_agent_workspace_dir()) / f"{stem}.mp3"
+
+        # Hook for a future music API: if the tool is later implemented on this
+        # handler path, call it here before falling back to silence.
+        generated = await _try_music_api(node, ctx, duration_sec=duration)
+        if generated is not None:
+            return generated
+
+        dest = Path(get_agent_workspace_dir()) / f"{stem}_{SILENT_MUSIC_PLACEHOLDER_TOKEN}.m4a"
         if _synthesize_bed(dest, duration=duration, kind="music"):
             return NodeResult(
-                output_ref=file_output_ref(dest, kind=NODE_TYPE_AUDIO, mime_type="audio/mpeg"),
-                message=f"music bed {duration:.0f}s (local ffmpeg; no remote music API)",
+                output_ref=file_output_ref(dest, kind=NODE_TYPE_AUDIO, mime_type="audio/mp4"),
+                message=f"music placeholder silent {duration:.0f}s (no music API)",
             )
-        notes = (
-            "# Music / BGM\n\n"
-            "Remote `call_music_model` is not configured. "
-            f"Wrote notes instead of a {duration:.0f}s bed "
-            "(install ffmpeg for a local placeholder bed).\n"
-        )
-        path = write_workspace_text(stem, notes)
+        _write_empty_music_placeholder(dest)
         return NodeResult(
-            output_ref=file_output_ref(path, kind="text", mime_type="text/markdown"),
-            message="music notes (no ffmpeg / no music API)",
+            output_ref=file_output_ref(dest, kind=NODE_TYPE_AUDIO, mime_type="audio/mp4"),
+            message="music placeholder empty file (no music API / no ffmpeg)",
         )
 
 
-class SpeechNodeHandler:
-    """Speech/TTS placeholder: fast local silent/near-silent track or notes."""
+async def _try_music_api(
+    node: DesignerGraphNode,
+    ctx: NodeExecutionContext,
+    *,
+    duration_sec: float,
+) -> NodeResult | None:
+    """Reserved: generate real BGM when a music backend is configured.
 
-    async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        duration = _bed_duration_sec(cfg)
-        stem = f"designer_speech_{ctx.run_id}_{ctx.node_id}"
-        dest = Path(get_agent_workspace_dir()) / f"{stem}.mp3"
-        if _synthesize_bed(dest, duration=duration, kind="speech"):
-            return NodeResult(
-                output_ref=file_output_ref(dest, kind=NODE_TYPE_AUDIO, mime_type="audio/mpeg"),
-                message=f"speech placeholder {duration:.0f}s (local; wire TTS API for real speech)",
-            )
-        notes = (
-            "# Speech / TTS\n\n"
-            "Speech model not configured. Placeholder notes written.\n"
-        )
-        path = write_workspace_text(stem, notes)
-        return NodeResult(
-            output_ref=file_output_ref(path, kind="text", mime_type="text/markdown"),
-            message="speech notes (no TTS API)",
-        )
+    Returns None so the silent placeholder is used. Wire ``call_music_model``
+    (or an equivalent HTTP client) here when MUSIC_API_KEY / models.music exists.
+    """
+    _ = (node, ctx, duration_sec)
+    try:
+        from jiuwenswarm.server.runtime.designer.capabilities import detect_audio_backends
+
+        if not detect_audio_backends().get("can_music"):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    # Backend advertised but no generator is plugged into this handler yet.
+    return None
+
+

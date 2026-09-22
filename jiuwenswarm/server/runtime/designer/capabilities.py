@@ -47,17 +47,6 @@ _VIDEO_NAME_HINTS = (
 _VISION_TOOLS = ("inspect_image", "visual_question_answering", "call_vision_model")
 _VIDEO_TOOLS = ("inspect_video", "call_video_model", "visual_question_answering")
 
-_SPEECH_NAME_HINTS = (
-    "tts",
-    "speech",
-    "voice",
-    "audio-speech",
-    "openai-audio",
-    "whisper",  # often paired; not synthesis but signals audio stack
-    "eleven",
-    "bark",
-    "cosyvoice",
-)
 _MUSIC_NAME_HINTS = (
     "music",
     "bgm",
@@ -116,7 +105,6 @@ def _chat_models_capability() -> list[dict[str, Any]]:
                 "text": True,
                 "vision": _name_looks_multimodal(name),
                 "video": _name_looks_video_capable(name),
-                "speech": any(h in name.lower() for h in _SPEECH_NAME_HINTS),
                 "music": any(h in name.lower() for h in _MUSIC_NAME_HINTS),
             }
         )
@@ -124,39 +112,21 @@ def _chat_models_capability() -> list[dict[str, Any]]:
 
 
 def _audio_backend_configured(kind: str) -> dict[str, Any]:
-    """Detect TTS / music backends from env or config (no network).
-
-    kind: ``speech`` | ``music``
-    """
-    kind = "speech" if kind == "speech" else "music"
-    if kind == "speech":
-        key = (
-            os.environ.get("TTS_API_KEY")
-            or os.environ.get("SPEECH_API_KEY")
-            or os.environ.get("AUDIO_SPEECH_API_KEY")
-            or ""
-        ).strip()
-        model = (
-            os.environ.get("TTS_MODEL_NAME")
-            or os.environ.get("SPEECH_MODEL_NAME")
-            or ""
-        ).strip()
-        block_names = ("speech", "tts", "audio_speech")
-        tool = "call_speech_model"
-    else:
-        key = (
-            os.environ.get("MUSIC_API_KEY")
-            or os.environ.get("BGM_API_KEY")
-            or os.environ.get("AUDIO_MUSIC_API_KEY")
-            or ""
-        ).strip()
-        model = (
-            os.environ.get("MUSIC_MODEL_NAME")
-            or os.environ.get("BGM_MODEL_NAME")
-            or ""
-        ).strip()
-        block_names = ("music", "bgm", "audio_music")
-        tool = "call_music_model"
+    """Detect a music backend from env or config (no network)."""
+    del kind
+    key = (
+        os.environ.get("MUSIC_API_KEY")
+        or os.environ.get("BGM_API_KEY")
+        or os.environ.get("AUDIO_MUSIC_API_KEY")
+        or ""
+    ).strip()
+    model = (
+        os.environ.get("MUSIC_MODEL_NAME")
+        or os.environ.get("BGM_MODEL_NAME")
+        or ""
+    ).strip()
+    block_names = ("music", "bgm", "audio_music")
+    tool = "call_music_model"
 
     cfg = get_config() or {}
     models = cfg.get("models") if isinstance(cfg.get("models"), dict) else {}
@@ -173,8 +143,7 @@ def _audio_backend_configured(kind: str) -> dict[str, Any]:
     # Named chat/default models that look like speech/music also count.
     for m in list_configured_models():
         nid = f"{m.get('id') or ''} {m.get('model_name') or ''}".lower()
-        hints = _SPEECH_NAME_HINTS if kind == "speech" else _MUSIC_NAME_HINTS
-        if any(h in nid for h in hints):
+        if any(h in nid for h in _MUSIC_NAME_HINTS):
             if not model:
                 model = str(m.get("model_name") or m.get("id") or "")
             # Treat presence of a named audio model as available even without a
@@ -188,8 +157,12 @@ def _audio_backend_configured(kind: str) -> dict[str, Any]:
 
 
 def detect_audio_backends() -> dict[str, Any]:
-    """Public helper: whether speech/music generation backends exist."""
-    speech = _audio_backend_configured("speech")
+    """Public helper for Designer audio backends.
+
+    TTS is deliberately disabled: dialogue is generated only as clip-native
+    audio. Keep the unavailable ``speech`` record for payload compatibility.
+    """
+    speech = {"available": False, "model": None, "tool": None}
     music = _audio_backend_configured("music")
     can_video_audio = False
     video_audio_model = ""
@@ -206,7 +179,7 @@ def detect_audio_backends() -> dict[str, Any]:
         can_video_audio = False
         video_audio_model = ""
     return {
-        "can_speech": bool(speech.get("available")),
+        "can_speech": False,
         "can_music": bool(music.get("available")),
         "can_video_audio": bool(can_video_audio),
         "video_audio_model": video_audio_model,
@@ -231,9 +204,8 @@ def _tools_for_role(
     elif role in {"compose", "film"}:
         tools = ["call_model", "read_upstream", "compose_timeline", "mix_audio"]
     elif role in {"speech", "tts"}:
-        tools = ["call_model", "read_upstream", "call_speech_model"]
-        if not can_speech:
-            tools = ["call_model", "read_upstream", "write_artifact"]
+        # Kept only for loading legacy graphs. Designer no longer exposes TTS.
+        tools = ["call_model", "read_upstream", "write_artifact"]
     elif role in {"music", "audio", "audio_bed"}:
         tools = ["call_model", "read_upstream", "call_music_model"]
         if not can_music:
@@ -277,7 +249,9 @@ def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
     any_chat_vision = any(bool(m.get("vision")) for m in chat)
     can_vision = bool(vision_backend.get("available")) or any_chat_vision
     can_video = any(bool(m.get("video")) for m in chat)  # no dedicated video-VLM tool yet
-    can_speech = bool(audio.get("can_speech"))
+    # Designer dialogue is clip-native. A globally configured speech backend
+    # must not re-enable TTS nodes or tools on the canvas.
+    can_speech = False
     can_music = bool(audio.get("can_music"))
     # Prefer tool-backed vision for ratings when configured.
     rating_tools: list[str] = ["call_model", "read_upstream", "rate_nodes", "write_report"]
@@ -298,10 +272,7 @@ def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
             "No vision-capable model or inspect_image/VQA tool configured — "
             "rate from text status, messages, and shot labels only."
         )
-    reason = (
-        f"{reason} Speech backend={'yes' if can_speech else 'no'}; "
-        f"music backend={'yes' if can_music else 'no'}."
-    )
+    reason = f"{reason} TTS disabled; music backend={'yes' if can_music else 'no'}."
 
     agents: dict[str, Any] = {
         "supervisor": {
@@ -363,14 +334,10 @@ def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
         cfg["tools"] = tools
         cfg["rating_modality"] = node_mod
         cfg["modality_reason"] = reason[:400]
-        # Auto-promote speech/music to agents when backends exist; else keep fast handler.
+        # Legacy speech nodes are removed by Supervisor; never promote them.
         if role in {"speech", "tts"}:
-            if can_speech:
-                cfg["force_handler"] = False
-                cfg["delegate"] = "agent"
-            else:
-                cfg["force_handler"] = True
-                cfg["delegate"] = "handler"
+            cfg["force_handler"] = True
+            cfg["delegate"] = "handler"
         elif role in {"music", "audio", "audio_bed"}:
             if can_music:
                 cfg["force_handler"] = False

@@ -30,7 +30,10 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.image_nodes import _image_or_notes
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
-from jiuwenswarm.server.runtime.designer.user_references import user_reference_image_paths
+from jiuwenswarm.server.runtime.designer.user_references import (
+    user_reference_image_paths,
+    user_reference_node_file,
+)
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
@@ -143,6 +146,33 @@ class AudioNodeHandler(MusicNodeHandler):
     """Generic audio uses the same bed/music path as a music node."""
 
 
+class UserReferenceNodeHandler:
+    """Passthrough for an attached upload — the original file is the output."""
+
+    async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
+        del ctx
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        upload = cfg.get("upload") if isinstance(cfg.get("upload"), dict) else {}
+        kind = str(node.get("type") or NODE_TYPE_IMAGE)
+        mime = str(upload.get("mime_type") or "") or f"{kind}/*"
+        path = user_reference_node_file(node)
+        if path is None:
+            # A moved upload must not block the film; downstream skips dead refs.
+            declared = node.get("output_ref") if isinstance(node.get("output_ref"), dict) else {}
+            uri = str(declared.get("uri") or "")
+            if not uri:
+                raise RuntimeError("user reference file is missing")
+            return NodeResult(
+                output_ref={"kind": kind, "uri": uri, "mime_type": mime},
+                message="user reference file is no longer on disk",
+            )
+        return NodeResult(
+            output_ref=file_output_ref(path, kind=kind, mime_type=mime),
+            message=f"user reference {path.name}",
+        )
+
+
 GENERIC_IMAGE_HANDLER = ImageNodeHandler()
 GENERIC_VIDEO_HANDLER = VideoNodeHandler()
 GENERIC_AUDIO_HANDLER = AudioNodeHandler()
+USER_REFERENCE_HANDLER = UserReferenceNodeHandler()

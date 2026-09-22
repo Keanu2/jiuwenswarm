@@ -30,6 +30,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
 )
 from jiuwenswarm.server.runtime.designer.user_references import (
     graph_user_references,
+    identity_reference_image_paths,
     prompt_slot_roster,
     user_reference_image_paths,
 )
@@ -80,7 +81,23 @@ def _frame_prompt_looks_contaminated(text: str) -> bool:
     return len(text or "") > 500
 
 
-def _character_prompt(source: str, *, combined_cast: bool = False) -> str:
+def _character_prompt(
+    source: str, *, combined_cast: bool = False, keep_subject: bool = False
+) -> str:
+    if keep_subject:
+        # The upload is the subject. Text may re-dress it, never redesign it.
+        return (
+            "EDIT the attached reference image — do NOT invent a new character. "
+            "Image 1 is this character: keep the exact same identity — face, head shape, "
+            "species, skin/fur/scale texture, hair, eyes, age, sex, and body proportions. "
+            "Change ONLY wardrobe, accessories, props, pose, framing, and lighting as "
+            "described below. Single subject, three-quarter body, clean background. "
+            "If the text disagrees with the image about who this is, the IMAGE wins; "
+            "the text only governs clothing and accessories. "
+            "FORBIDDEN: redesign the subject, swap species or breed, restyle the face, "
+            "or replace it with a look described only in text.\n"
+            f"{source}"
+        )
     if combined_cast:
         return (
             "Combined cast postcard: all listed characters side-by-side on one sheet, "
@@ -398,13 +415,27 @@ class CharacterDesignNodeHandler:
         size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
         combined = bool(cfg.get("combined_cast"))
         max_tries = max(2, int(cfg.get("max_image_calls") or 1))
-        user_images = [str(path) for path in user_reference_image_paths(ctx.graph)]
-        roster = prompt_slot_roster(graph_user_references(ctx.graph))
-        prompt = _character_prompt(f"{name}\n{source}", combined_cast=combined)
-        if roster:
-            prompt = (
-                f"{prompt}\nUser reference slots (original files are visual authority):\n{roster}"
+        identity_images = [str(path) for path in identity_reference_image_paths(ctx.graph)]
+        user_images = identity_images or [
+            str(path) for path in user_reference_image_paths(ctx.graph)
+        ]
+        keep_subject = bool(identity_images) and not combined
+        prompt = _character_prompt(
+            f"{name}\n{source}", combined_cast=combined, keep_subject=keep_subject
+        )
+        if keep_subject:
+            slots = "\n".join(
+                f"image {i} = {Path(p).name} (this subject — preserve identity)"
+                for i, p in enumerate(identity_images, start=1)
             )
+            prompt = f"{prompt}\nUser reference slots:\n{slots}"
+        else:
+            roster = prompt_slot_roster(graph_user_references(ctx.graph))
+            if roster:
+                prompt = (
+                    f"{prompt}\nUser reference slots "
+                    f"(original files are visual authority):\n{roster}"
+                )
         result = await _image_or_notes(
             prompt=prompt,
             notes=fallback_character_sheet(source),

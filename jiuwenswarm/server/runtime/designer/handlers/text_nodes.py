@@ -70,6 +70,7 @@ Rules:
 - Comment is the keyframe prompt: subject(s), composition, light, action instant, environment — ready for image gen
 - Enhance sparse prompts: crowd, atmosphere, lighting, wardrobe detail — without inventing new lead characters
 - Do not invent a new world that contradicts the brief
+- If Brief / metadata marks video_style=final_frame_reverse: treat the user reference still as the LAST ~1s endpoint; reverse-form the action chain; use pseudo-oner push + key close-ups; give every cut a visual motif carrier; last row Comment must match the reference composition
 
 Do not output storyboard drawings. Do not explain.
 
@@ -425,6 +426,22 @@ def brief_story_focus(prompt: str) -> str:
 def fallback_brief(prompt: str) -> str:
     duration = brief_duration_seconds(prompt)
     focus = brief_story_focus(prompt) or prompt
+    style_line = "- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
+    try:
+        from jiuwenswarm.server.runtime.designer.video_styles import (
+            VIDEO_STYLE_FINAL_FRAME_REVERSE,
+            detect_video_style,
+            video_style_clause,
+        )
+
+        vs = detect_video_style(prompt)
+        if vs == VIDEO_STYLE_FINAL_FRAME_REVERSE:
+            style_line = (
+                f"- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
+                f"- Director style: {vs} — {video_style_clause(vs)}\n"
+            )
+    except Exception:  # noqa: BLE001
+        pass
     return (
         "# Brief\n\n"
         f"**User prompt (verbatim intent):** {prompt}\n\n"
@@ -433,7 +450,7 @@ def fallback_brief(prompt: str) -> str:
         "- Setting: follow the user description; keep architecture/lighting consistent\n"
         "- Continuity: time-coherent actions (no reseating someone who already left)\n"
         f"- Duration: {duration} seconds\n"
-        "- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
+        f"{style_line}"
     )
 
 

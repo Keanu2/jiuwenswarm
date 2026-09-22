@@ -937,6 +937,16 @@ def build_smart_video_graph(
     from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
 
     analysis = ensure_audio_locks_on_analysis(dict(analysis or {}), prompt_text)
+    # A named director style can require multiple beats (e.g. final_frame_reverse
+    # is never a single take) — grow the skeleton before nodes are built.
+    try:
+        from jiuwenswarm.server.runtime.designer.video_styles import (
+            enforce_style_shot_floor,
+        )
+
+        analysis = enforce_style_shot_floor(analysis, prompt_text)
+    except Exception:  # noqa: BLE001
+        pass
     analysis["user_prompt"] = prompt_text
     from jiuwenswarm.server.runtime.designer.node_labels import (
         derive_shot_name,
@@ -1769,12 +1779,13 @@ def build_smart_video_graph(
 
     audio_ids: list[str] = []
     film_sec = max(6, min(30, len(shots) * 5))
-    # Audio routing: separate nodes only when backends exist; else fold into clips.
+    # Routing: dialogue lives in clips (native video audio when the model can);
+    # one BGM track is always a separate Music node mixed after concat.
     from jiuwenswarm.server.runtime.designer.capabilities import detect_audio_backends
 
     backends = detect_audio_backends()
-    can_speech = bool(backends.get("can_speech"))
     can_music = bool(backends.get("can_music"))
+    can_video_audio = bool(backends.get("can_video_audio"))
     clip_embedded = False
     if audio.get("policy") != "silent":
         want_speech = bool(audio.get("include_speech"))
@@ -1782,36 +1793,10 @@ def build_smart_video_graph(
             audio.get("include_music")
             or audio.get("policy") in {"optional_music", "music", "speech_and_music"}
         )
-        if want_speech and not can_speech:
-            clip_embedded = True
-            want_speech = False
-        if want_music and not can_music:
-            clip_embedded = True
-            want_music = False
         if want_speech:
-            audio_ids.append("n_speech")
-            nodes.append(
-                {
-                    "id": "n_speech",
-                    "type": NODE_TYPE_AUDIO,
-                    "label": "Speech / TTS",
-                    "config": {
-                        "role": "speech",
-                        "prompt": prompt_text,
-                        "inputs": ["n_brief", "n_storyboard"],
-                        "optimize_for": mode,
-                        "agent_name": "Speech Agent",
-                        "kind": "agent",
-                        "skill_id": "speech_tts",
-                        "tools": ["call_speech_model", "read_upstream", "call_model"],
-                        "delegate": ("agent" if ai_mode else "handler"),
-                        "film_duration_sec": film_sec,
-                    },
-                    "layout": {"x": 1320, "y": float(40 + len(shots) * 160), "width": 220, "height": 120},
-                }
-            )
-            edges.append(_edge("e_sb_speech", "n_storyboard", "n_speech"))
-            edges.append(_edge("e_brief_speech", "n_brief", "n_speech"))
+            # TTS is intentionally not part of Designer. Spoken lines belong to
+            # the generated clip's native audio; never create a Speech node.
+            clip_embedded = True
         if want_music:
             audio_ids.append("n_music")
             nodes.append(
@@ -1828,8 +1813,16 @@ def build_smart_video_graph(
                         "kind": "agent",
                         "skill_id": "audio_bed",
                         "tools": ["call_music_model", "read_upstream", "call_model"],
-                        "delegate": ("agent" if ai_mode else "handler"),
+                        "delegate": "handler" if not can_music else ("agent" if ai_mode else "handler"),
+                        "force_handler": not can_music,
+                        "placeholder_until_api": not can_music,
                         "film_duration_sec": film_sec,
+                        "source": "brief",
+                        "bgm_lock": (
+                            analysis.get("bgm_lock")
+                            if isinstance(analysis.get("bgm_lock"), dict)
+                            else (audio.get("bgm_lock") if isinstance(audio.get("bgm_lock"), dict) else {})
+                        ),
                     },
                     "layout": {
                         "x": 1320,
@@ -1841,7 +1834,7 @@ def build_smart_video_graph(
             )
             edges.append(_edge("e_sb_music", "n_storyboard", "n_music"))
             edges.append(_edge("e_brief_music", "n_brief", "n_music"))
-        if clip_embedded:
+        if want_speech or want_music:
             from jiuwenswarm.server.runtime.designer.audio_locks import stamp_audio_fields_on_clip_config
 
             for n in nodes:
@@ -1863,13 +1856,17 @@ def build_smart_video_graph(
                     dict(cfg),
                     shot=shot_row if isinstance(shot_row, dict) else {},
                     analysis=analysis,
-                    meta={"audio_intent": audio, "audio_routing": {"can_speech": can_speech, "can_music": can_music}},
-                    clip_embedded=True,
+                    meta={
+                        "audio_intent": audio,
+                        "audio_routing": {
+                            "can_speech": False,
+                            "can_music": can_music,
+                            "can_video_audio": can_video_audio,
+                        },
+                    },
+                    clip_embedded=clip_embedded,
                 )
                 n["config"] = cfg
-            # Prefer clip-native audio when TTS/BGM backends are missing (capability-gated).
-            # (Stamped again on metadata below.)
-            pass
 
     compose_inputs = [*clip_ids, *audio_ids]
     nodes.append(
@@ -1888,8 +1885,9 @@ def build_smart_video_graph(
                 "tools": ["ffmpeg_compose", "mix_audio", "read_upstream", "call_model"],
                 "delegate": ("agent" if ai_mode else "handler"),
                 "supervisor_task": (
-                    "Concatenate shot clips in storyboard order; mux speech/music when present. "
-                    "Output a real non-empty .mp4 only — never markdown. Use ffmpeg_compose tool."
+                    "Concatenate shot clips in storyboard order (dialogue only). "
+                    "Then mix the single Brief-derived BGM onto the concatenated film. "
+                    "Output a real non-empty .mp4 — never markdown. Use ffmpeg_compose + mix_audio."
                 ),
             },
             "layout": {"x": 1620, "y": 180, "width": 260, "height": 150},
@@ -1917,12 +1915,13 @@ def build_smart_video_graph(
             "audio_intent": audio,
             "audio_routing": {
                 "clip_embedded": bool(clip_embedded),
-                "can_speech": can_speech,
+                "can_speech": False,
                 "can_music": can_music,
                 "can_video_audio": bool(backends.get("can_video_audio", True)),
                 "video_audio_model": str(backends.get("video_audio_model") or ""),
-                "speech_nodes": "n_speech" in audio_ids,
+                "speech_nodes": False,
                 "music_nodes": "n_music" in audio_ids,
+                "tts_enabled": False,
             },
             "language_lock": str(
                 analysis.get("language_lock") or audio.get("language_lock") or "en"

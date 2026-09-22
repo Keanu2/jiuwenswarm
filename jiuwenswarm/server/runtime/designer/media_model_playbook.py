@@ -103,8 +103,12 @@ Prompt structure (lead with subject/motion; be concrete):
   [Camera] explicit move or "static camera, locked shot" (default drift otherwise)
   [Environment] lighting/atmosphere that continues from Image 1 + scene bible
   [Locks] style_lock + spatial_lock + costume + occupancy + crowd_lock + already_done
+  [Audio] clip = spoken lines only (native dialogue when the model can). ONE BGM from Brief, mixed after concat — never inside the clip.
   [Handoff] PRIOR CLIP CONTINUITY — do not redo exits/lines; keep L/R from prior clip prompt
-Negative intent: morphing, face warp, teleport, disappearing crowd, identity swap.
+  [Video style] if metadata.video_style == final_frame_reverse: treat the user still as the
+    LAST 1s endpoint; reverse-form that composition; motif transitions; settle+freeze late
+Negative intent: morphing, face warp, teleport, disappearing crowd, identity swap,
+turntable orbit of a finished still, ending that misses the reference framing.
 Keep clips short (~5s); one primary camera move per clip.
 """.strip()
 

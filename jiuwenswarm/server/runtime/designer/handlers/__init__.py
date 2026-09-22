@@ -18,7 +18,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_FRAME,
     NODE_ROLE_MUSIC,
     NODE_ROLE_SCENE,
-    NODE_ROLE_SPEECH,
     NODE_ROLE_STORYBOARD,
     NODE_TYPE_AUDIO,
     NODE_TYPE_IMAGE,
@@ -32,7 +31,6 @@ from jiuwenswarm.common.schema.designer_graph import (
 )
 from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import (
     MusicNodeHandler,
-    SpeechNodeHandler,
 )
 from jiuwenswarm.server.runtime.designer.handlers.clip import ClipNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
@@ -45,6 +43,7 @@ from jiuwenswarm.server.runtime.designer.handlers.media_nodes import (
     GENERIC_AUDIO_HANDLER,
     GENERIC_IMAGE_HANDLER,
     GENERIC_VIDEO_HANDLER,
+    USER_REFERENCE_HANDLER,
 )
 from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
     BriefNodeHandler,
@@ -88,6 +87,8 @@ class MockNodeHandler(RoleNodeHandler):
         super().__init__("mock")
 
 
+HANDLER_KEY_USER_REFERENCE = "user_reference"
+
 NODE_HANDLERS: dict[str, NodeHandler] = {
     NODE_ROLE_BRIEF: BriefNodeHandler(),
     NODE_ROLE_CHARACTER_DESIGN: CharacterDesignNodeHandler(),
@@ -97,17 +98,22 @@ NODE_HANDLERS: dict[str, NodeHandler] = {
     NODE_ROLE_CLIP: ClipNodeHandler(),
     NODE_ROLE_COMPOSE: ComposeNodeHandler(),
     NODE_ROLE_MUSIC: MusicNodeHandler(),
-    NODE_ROLE_SPEECH: SpeechNodeHandler(),
     NODE_TYPE_TEXT: MockNodeHandler(),
     NODE_TYPE_TABLE: MockNodeHandler(),
     NODE_TYPE_IMAGE: GENERIC_IMAGE_HANDLER,
     NODE_TYPE_VIDEO: GENERIC_VIDEO_HANDLER,
     NODE_TYPE_AUDIO: GENERIC_AUDIO_HANDLER,
+    HANDLER_KEY_USER_REFERENCE: USER_REFERENCE_HANDLER,
 }
 
 
 def resolve_handler_key(node: DesignerGraphNode) -> str:
+    config = node.get("config") if isinstance(node, dict) else None
+    if isinstance(config, dict) and str(config.get("user_reference_id") or "").strip():
+        return HANDLER_KEY_USER_REFERENCE
     pipeline = node_pipeline(node)
+    if pipeline == "speech":
+        return "speech"
     if pipeline and pipeline in NODE_HANDLERS:
         return pipeline
     role = node_role(node)

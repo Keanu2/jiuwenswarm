@@ -170,9 +170,18 @@ def _list_graphs(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
     for graph in graphs:
         item = dict(graph)
         run = _store.get_latest_run_for_graph(str(item.get("graph_id") or ""))
-        item = hydrate_graph_node_outputs(item, run)
-        payload.append(item)
         summaries.append(_summarize_graph(item, run))
+        # Do not hydrate outputs or ship full node bodies here — Agent WS
+        # send budget is 6MB; a page of Designer graphs with images exceeds it.
+        payload.append(
+            {
+                "graph_id": item.get("graph_id"),
+                "project_id": item.get("project_id"),
+                "title": item.get("title"),
+                "updated_at": item.get("updated_at"),
+                "schema_version": item.get("schema_version"),
+            }
+        )
     return {
         "graphs": payload,
         "summaries": summaries,
@@ -424,18 +433,8 @@ def _bootstrap_graph(
     title = params.get("title")
     optimize_raw = str(params.get("optimize_for") or params.get("optimizeFor") or "quality")
     optimize_for = "cost" if optimize_raw.strip().lower() == "cost" else "quality"
-    scenario_raw = params.get("scenario")
-    scenario = (
-        str(scenario_raw).strip().lower()
-        if isinstance(scenario_raw, str) and scenario_raw.strip()
-        else None
-    )
     from pathlib import Path as _Path
 
-    from jiuwenswarm.server.runtime.designer.composer import (
-        compose_execution_graph,
-        detect_scenario,
-    )
     from jiuwenswarm.server.runtime.designer.script_analysis import (
         heuristic_analysis,
         _llm_configured,
@@ -460,79 +459,63 @@ def _bootstrap_graph(
         return None, str(exc), exc.code
     analysis_prompt = analysis_prompt_with_references(prompt, user_refs)
 
-    detected = scenario or detect_scenario(analysis_prompt)
+    # Catalog templates must not be dumped onto the canvas. Supervisor/Leader
+    # always owns topology via the smart video pipeline.
     if callable(on_progress):
         on_progress("thinking", "Supervisor · Reading brief")
     # Never call LLM from this sync thread (asyncio.run breaks AsyncOpenAI).
     # Caller passes LLM analysis from the main event loop when available.
-    if detected == "video":
-        if analysis is None:
-            if callable(on_progress):
-                on_progress("stage", "Supervisor · Provisional cast skeleton")
-            analysis = heuristic_analysis(analysis_prompt)
-        if not isinstance(analysis, dict):
-            analysis = heuristic_analysis(analysis_prompt)
-        analysis_mode = str(analysis.get("source") or "heuristic")
+    if analysis is None:
         if callable(on_progress):
-            on_progress(
-                "tool_call",
-                "Supervisor · Materializing graph",
-                "build_smart_video_graph",
-            )
-        graph = _prefer_runtime_pipeline(
-            build_smart_video_graph(
-                project_id=project_id,
-                prompt=prompt,
-                analysis=analysis,
-                title=str(title).strip() if isinstance(title, str) else None,
-                optimize_for=optimize_for,
-                ai_mode=_llm_configured(),
-            )
+            on_progress("stage", "Supervisor · Provisional cast skeleton")
+        analysis = heuristic_analysis(analysis_prompt)
+    if not isinstance(analysis, dict):
+        analysis = heuristic_analysis(analysis_prompt)
+    analysis_mode = str(analysis.get("source") or "heuristic")
+    if callable(on_progress):
+        on_progress(
+            "tool_call",
+            "Supervisor · Materializing graph",
+            "build_smart_video_graph",
         )
-        meta = dict(graph.get("metadata") or {})
-        meta["optimize_for"] = optimize_for
-        meta["scenario"] = "video"
-        meta["script_analysis"] = analysis
-        meta["script_analysis_mode"] = analysis_mode
-        meta["pending_llm_analysis"] = analysis_mode != "llm"
-        # One-pass Enter already authored the plan — no Play redesign pending.
-        meta["pending_supervisor_graph"] = False if analysis_mode == "llm" else bool(
-            _llm_configured()
+    graph = _prefer_runtime_pipeline(
+        build_smart_video_graph(
+            project_id=project_id,
+            prompt=prompt,
+            analysis=analysis,
+            title=str(title).strip() if isinstance(title, str) else None,
+            optimize_for=optimize_for,
+            ai_mode=_llm_configured(),
         )
-        meta["supervisor_composed_on_bootstrap"] = analysis_mode == "llm"
-        meta["supervisor_owns_graph"] = True
-        meta["freeze_shot_topology"] = False
-        meta["one_pass"] = analysis_mode == "llm"
-        meta["auto_accept_outputs"] = True
-        if isinstance(analysis.get("scene_locks"), dict) and analysis["scene_locks"]:
-            meta["scene_locks"] = analysis["scene_locks"]
-        graph["metadata"] = meta
-        graph = attach_skills_metadata(graph, prompt)
-        if callable(on_progress):
-            cast_n = sum(
-                1
-                for n in (graph.get("nodes") or [])
-                if str(n.get("id") or "").startswith("n_character")
-            )
-            on_progress(
-                "stage",
-                f"Supervisor · Graph materialised ({cast_n} solo cards, source={analysis_mode})",
-            )
-    else:
-        if callable(on_progress):
-            on_progress(
-                "tool_call",
-                "Supervisor · Composing non-video workflow",
-                "compose_execution_graph",
-            )
-        graph = _prefer_runtime_pipeline(
-            compose_execution_graph(
-                project_id=project_id,
-                prompt=prompt,
-                title=str(title).strip() if isinstance(title, str) else None,
-                optimize_for=optimize_for,  # type: ignore[arg-type]
-                scenario=detected,
-            )
+    )
+    meta = dict(graph.get("metadata") or {})
+    meta["optimize_for"] = optimize_for
+    meta["scenario"] = "video"
+    meta["script_analysis"] = analysis
+    meta["script_analysis_mode"] = analysis_mode
+    meta["pending_llm_analysis"] = analysis_mode != "llm"
+    # One-pass Enter already authored the plan — no Play redesign pending.
+    meta["pending_supervisor_graph"] = False if analysis_mode == "llm" else bool(
+        _llm_configured()
+    )
+    meta["supervisor_composed_on_bootstrap"] = analysis_mode == "llm"
+    meta["supervisor_owns_graph"] = True
+    meta["freeze_shot_topology"] = False
+    meta["one_pass"] = analysis_mode == "llm"
+    meta["auto_accept_outputs"] = True
+    if isinstance(analysis.get("scene_locks"), dict) and analysis["scene_locks"]:
+        meta["scene_locks"] = analysis["scene_locks"]
+    graph["metadata"] = meta
+    graph = attach_skills_metadata(graph, prompt)
+    if callable(on_progress):
+        cast_n = sum(
+            1
+            for n in (graph.get("nodes") or [])
+            if str(n.get("id") or "").startswith("n_character")
+        )
+        on_progress(
+            "stage",
+            f"Supervisor · Graph materialised ({cast_n} solo cards, source={analysis_mode})",
         )
     if user_refs:
         graph = attach_user_references_to_graph(graph, user_refs)
@@ -763,7 +746,6 @@ async def _bootstrap_graph_with_supervisor(
 
     Never runs AsyncOpenAI inside ``asyncio.to_thread`` / ``asyncio.run``.
     """
-    from jiuwenswarm.server.runtime.designer.composer import detect_scenario
     from jiuwenswarm.server.runtime.designer.model_tools import llm_available
     from jiuwenswarm.server.runtime.designer.script_analysis import analyze_creative_brief
     from jiuwenswarm.server.runtime.designer.user_references import (
@@ -772,12 +754,6 @@ async def _bootstrap_graph_with_supervisor(
     )
 
     prompt = str(params.get("prompt") or "").strip() or "根据参考素材创作"
-    scenario_raw = params.get("scenario")
-    scenario = (
-        str(scenario_raw).strip().lower()
-        if isinstance(scenario_raw, str) and scenario_raw.strip()
-        else None
-    )
     raw_references = params.get("references")
     if raw_references is None:
         raw_references = params.get("user_references")
@@ -791,9 +767,8 @@ async def _bootstrap_graph_with_supervisor(
     except Exception:  # noqa: BLE001
         user_refs_preview = []
     analysis_prompt = analysis_prompt_with_references(prompt, user_refs_preview)
-    detected = scenario or detect_scenario(analysis_prompt)
 
-    if detected == "video" and llm_available():
+    if llm_available():
         if callable(on_progress):
             on_progress("thinking", "Supervisor · Extracting cast and scenes (LLM)")
         try:
@@ -843,8 +818,6 @@ async def _bootstrap_graph_with_supervisor(
         return payload, error, code
 
     if not llm_available():
-        return payload, None, None
-    if str((graph.get("metadata") or {}).get("scenario") or "") != "video":
         return payload, None, None
 
     from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent, SupervisorAgent

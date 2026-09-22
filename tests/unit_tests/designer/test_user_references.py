@@ -177,6 +177,160 @@ def test_user_reference_video_and_audio_paths(tmp_path: Path) -> None:
     assert "audio 1 = " in prompt_slot_roster(refs)
 
 
+def test_reference_image_becomes_a_canvas_node_feeding_brief_and_cast(
+    tmp_path: Path,
+) -> None:
+    from jiuwenswarm.common.schema.designer_graph import normalize_execution_graph
+    from jiuwenswarm.server.runtime.designer.handlers import resolve_handler_key
+
+    image = tmp_path / "hero.png"
+    image.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [{"kind": "image", "path": str(image), "filename": "hero.png", "mime_type": "image/png"}],
+        dest_dir=tmp_path / "refs",
+    )
+    graph = attach_user_references_to_graph(
+        {
+            "graph_id": "graph_ref",
+            "project_id": "p",
+            "title": "t",
+            "schema_version": "designer-execution-graph.v1",
+            "nodes": [
+                {"id": "n_brief", "type": "text", "config": {"role": "brief"}},
+                {
+                    "id": "n_character",
+                    "type": "image",
+                    "config": {"role": "character_design"},
+                },
+            ],
+            "edges": [],
+            "metadata": {},
+        },
+        refs,
+    )
+    ref_node = next(n for n in graph["nodes"] if str(n["id"]).startswith("n_ref_"))
+    assert ref_node["output_ref"]["uri"].startswith("file:")
+    assert ref_node["config"]["interaction_mode"] == "upload"
+    wired = {(e["source"], e["target"]) for e in graph["edges"]}
+    assert ("n_ref_01", "n_brief") in wired
+    assert ("n_ref_01", "n_character") in wired
+    cast = next(n for n in graph["nodes"] if n["id"] == "n_character")
+    assert cast["config"]["character_source_reference"] == "ref_01"
+    # Survives schema validation and dispatches to the passthrough handler.
+    saved = normalize_execution_graph(graph)
+    kept = next(n for n in saved["nodes"] if n["id"] == "n_ref_01")
+    assert kept["output_ref"]["uri"].startswith("file:")
+    assert resolve_handler_key(kept) == "user_reference"
+
+
+@pytest.mark.asyncio
+async def test_reference_node_returns_the_uploaded_file(tmp_path: Path) -> None:
+    from jiuwenswarm.server.runtime.designer.handlers.media_nodes import (
+        UserReferenceNodeHandler,
+    )
+    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
+
+    image = tmp_path / "hero.png"
+    image.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [{"kind": "image", "path": str(image), "filename": "hero.png", "mime_type": "image/png"}],
+        dest_dir=tmp_path / "refs",
+    )
+    graph = attach_user_references_to_graph(
+        {"nodes": [{"id": "n_brief", "type": "text", "config": {"role": "brief"}}], "metadata": {}},
+        refs,
+    )
+    node = next(n for n in graph["nodes"] if str(n["id"]).startswith("n_ref_"))
+    result = await UserReferenceNodeHandler().execute(
+        node,
+        NodeExecutionContext(graph=graph, run_id="run_ref", node_id=node["id"], run={}),
+    )
+    assert result.output_ref["uri"] == Path(refs[0]["path"]).resolve().as_uri()
+
+
+@pytest.mark.asyncio
+async def test_character_card_edits_the_reference_instead_of_redesigning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiuwenswarm.server.runtime.designer.handlers import image_nodes
+    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
+
+    image = tmp_path / "hero.png"
+    image.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [{"kind": "image", "path": str(image), "filename": "hero.png", "mime_type": "image/png"}],
+        dest_dir=tmp_path / "refs",
+    )
+    graph = attach_user_references_to_graph(
+        {
+            "nodes": [
+                {"id": "n_brief", "type": "text", "config": {"role": "brief"}},
+                {
+                    "id": "n_character",
+                    "type": "image",
+                    "label": "Character",
+                    "config": {
+                        "role": "character_design",
+                        "prompt": "a tall knight in red armor",
+                    },
+                },
+            ],
+            "edges": [],
+            "metadata": {},
+        },
+        refs,
+    )
+    seen: dict[str, object] = {}
+
+    async def fake_image(prompt, size="1K", reference_images=None, max_tries=2, **kwargs):
+        seen["prompt"] = prompt
+        seen["refs"] = list(reference_images or [])
+        out = tmp_path / "out.png"
+        out.write_bytes(_png_bytes())
+        return {"image_path": str(out)}
+
+    monkeypatch.setattr(image_nodes.handler_io, "generate_designer_image", fake_image)
+    node = next(n for n in graph["nodes"] if n["id"] == "n_character")
+    await image_nodes.CharacterDesignNodeHandler().execute(
+        node,
+        NodeExecutionContext(graph=graph, run_id="run_char", node_id="n_character", run={}),
+    )
+    prompt = str(seen["prompt"])
+    assert [Path(p).name for p in seen["refs"]] == [Path(refs[0]["path"]).name]
+    assert "EDIT the attached reference image" in prompt
+    assert "do NOT invent a new character" in prompt
+    assert "the IMAGE wins" in prompt
+    # Wardrobe text still reaches the model; it just cannot recast the subject.
+    assert "red armor" in prompt
+
+
+def test_style_only_reference_does_not_lock_character_identity(tmp_path: Path) -> None:
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        identity_reference_image_paths,
+    )
+
+    image = tmp_path / "palette.png"
+    image.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [
+            {
+                "kind": "image",
+                "role": "style",
+                "path": str(image),
+                "filename": "palette.png",
+                "mime_type": "image/png",
+            }
+        ],
+        dest_dir=tmp_path / "refs",
+    )
+    graph = attach_user_references_to_graph(
+        {"nodes": [{"id": "n_brief", "type": "text", "config": {"role": "brief"}}], "metadata": {}},
+        refs,
+    )
+    assert user_reference_image_paths(graph)
+    assert identity_reference_image_paths(graph) == []
+
+
 def test_vision_user_content_keeps_original_image(tmp_path: Path) -> None:
     from jiuwenswarm.server.runtime.designer.model_tools import vision_user_content
 

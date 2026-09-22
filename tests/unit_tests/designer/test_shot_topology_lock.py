@@ -137,3 +137,44 @@ def test_failed_video_does_not_expand_shot_topology():
         {"n_clip_1": {"status": "completed"}},
     ) is True
     assert should_expand_shot_topology_after_nodes([], {"n_clip_1": {"status": "failed"}}) is True
+
+
+def test_heuristic_skeleton_does_not_lock_supervisor_shot_count():
+    from jiuwenswarm.server.runtime.designer.orchestration import (
+        _apply_llm_shot_list,
+        _shot_expand_lock_count,
+    )
+
+    graph = {
+        "metadata": {
+            "freeze_shot_topology": False,
+            "script_analysis": {"source": "heuristic_pending_llm", "target_shot_count": 1},
+        }
+    }
+    analysis = {"source": "heuristic_pending_llm", "target_shot_count": 1}
+    current = [{"shot_index": 1, "action": "placeholder"}]
+    llm_shots = [{"shot_index": i, "action": f"beat {i}"} for i in range(1, 5)]
+    lock = _shot_expand_lock_count(
+        graph=graph, analysis=analysis, current_shots=current
+    )
+    assert lock == 0
+    merged = _apply_llm_shot_list(current, llm_shots, lock_count=lock)
+    assert len(merged) == 4
+
+
+def test_frozen_llm_topology_still_clamps_extra_shots():
+    from jiuwenswarm.server.runtime.designer.orchestration import (
+        _apply_llm_shot_list,
+        _shot_expand_lock_count,
+    )
+
+    graph = {"metadata": {"freeze_shot_topology": True}}
+    analysis = {"source": "llm", "target_shot_count": 2}
+    current = [{"shot_index": 1}, {"shot_index": 2}]
+    llm_shots = [{"shot_index": i} for i in range(1, 6)]
+    lock = _shot_expand_lock_count(
+        graph=graph, analysis=analysis, current_shots=current
+    )
+    assert lock == 2
+    merged = _apply_llm_shot_list(current, llm_shots, lock_count=lock)
+    assert len(merged) == 2

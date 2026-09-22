@@ -31,6 +31,68 @@ from jiuwenswarm.server.runtime.designer.model_tools import (
 
 logger = logging.getLogger(__name__)
 
+
+def _heuristic_placeholder_source(analysis: dict[str, Any] | None) -> bool:
+    src = str((analysis or {}).get("source") or "")
+    return src in {"", "heuristic", "heuristic_pending_llm"}
+
+
+def _shot_expand_lock_count(
+    *,
+    graph: DesignerExecutionGraph,
+    analysis: dict[str, Any],
+    current_shots: list[dict[str, Any]],
+) -> int:
+    """How many shots the LLM is allowed to keep.
+
+    ``0`` means Supervisor owns N (heuristic 1-shot skeleton is not a lock).
+    A positive count truncates a longer LLM list — only after the canvas was
+    truly frozen by a prior director design, or the user edited topology.
+    """
+    meta = dict(graph.get("metadata") or {})
+    if meta.get("user_topology_edit"):
+        try:
+            target = int(analysis.get("target_shot_count") or 0)
+        except (TypeError, ValueError):
+            target = 0
+        return max(1, len(current_shots) or target or 1)
+    if _heuristic_placeholder_source(analysis):
+        return 0
+    # A style that forbids a single take must not be frozen below its floor.
+    try:
+        from jiuwenswarm.server.runtime.designer.video_styles import (
+            resolve_video_style,
+            video_style_min_shots,
+        )
+
+        floor = video_style_min_shots(resolve_video_style(graph))
+        if floor >= 2 and len(current_shots) < floor:
+            return 0
+    except Exception:  # noqa: BLE001
+        pass
+    if meta.get("freeze_shot_topology"):
+        try:
+            target = int(analysis.get("target_shot_count") or 0)
+        except (TypeError, ValueError):
+            target = 0
+        return max(1, len(current_shots) or target or 1)
+    return 0
+
+
+def _apply_llm_shot_list(
+    current_shots: list[dict[str, Any]],
+    cleaned: list[dict[str, Any]],
+    *,
+    lock_count: int,
+) -> list[dict[str, Any]]:
+    if not cleaned:
+        return current_shots
+    if lock_count >= 1 and len(cleaned) > lock_count:
+        cleaned = cleaned[:lock_count]
+        for i, shot in enumerate(cleaned, start=1):
+            shot["shot_index"] = i
+    return cleaned
+
 # Role → tool set for one-pass node agents (no feedback loop).
 _ROLE_TOOLS: dict[str, list[str]] = {
     "brief": ["call_model", "read_upstream"],
@@ -41,9 +103,8 @@ _ROLE_TOOLS: dict[str, list[str]] = {
     "frame": ["call_model", "read_upstream", "call_image_model"],
     "keyframe": ["call_model", "read_upstream", "call_image_model"],
     "clip": ["call_model", "read_upstream", "call_video_model"],
-    "speech": ["call_model", "read_upstream", "call_speech_model"],
     "music": ["call_model", "read_upstream", "call_music_model"],
-    "audio": ["call_model", "read_upstream", "call_speech_model", "call_music_model"],
+    "audio": ["call_model", "read_upstream", "call_music_model"],
     "compose": ["call_model", "read_upstream", "ffmpeg_compose", "mix_audio"],
 }
 
@@ -598,7 +659,10 @@ def _manager_reedit_artifacts_after_prune(
 
 
 def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
-    """If audio intent / analysis asks for speech or music, ensure nodes exist."""
+    """If audio intent / analysis asks for speech or music, ensure nodes exist.
+
+    Dialogue always stays in clip-native audio; Designer has no TTS node.
+    """
     from jiuwenswarm.common.schema.designer_graph import NODE_TYPE_AUDIO
 
     notes: list[str] = []
@@ -675,17 +739,13 @@ def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
                 node["config"] = cfg
         notes.append(f"added {node_id} for audio intent")
 
-    if want_speech:
-        _add("n_speech", "Speech / TTS", "speech", "speech_tts", "call_speech_model")
     if want_music:
         _add("n_music", "Music / BGM", "music", "audio_bed", "call_music_model")
 
     if notes:
         graph["nodes"] = nodes
         graph["edges"] = edges
-        meta["audio_nodes"] = [
-            nid for nid in ("n_speech", "n_music") if nid in existing
-        ]
+        meta["audio_nodes"] = ["n_music"] if "n_music" in existing else []
         graph["metadata"] = meta
     return notes
 
@@ -693,29 +753,33 @@ def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
 def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
     """Supervisor: promote speech/music to fast LLM agents when backends exist.
 
-    Without TTS/music backends, folds audio into clip leaves (``clip_embedded``)
-    and does not keep decorative speech/music nodes that cannot produce stems.
+    Dialogue always lives in clip leaves (``clip_embedded``), and any legacy
+    Speech node is dropped. The Music node always survives: it is the
+    single film-wide BGM mixed after concat, and without a music API its handler
+    writes a silent placeholder.
     """
     from jiuwenswarm.server.runtime.designer.capabilities import detect_audio_backends
     from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
 
     backends = detect_audio_backends()
-    can_speech = bool(backends.get("can_speech"))
+    can_speech = False
     can_music = bool(backends.get("can_music"))
     meta = dict(graph.get("metadata") or {})
     routing = dict(meta.get("audio_routing") or {})
-    clip_embedded = bool(routing.get("clip_embedded")) or (not can_speech and not can_music)
+    # Dialogue folds into the clips when there is no TTS backend. Music never
+    # folds in: one BGM track is mixed after concat, and the Music node emits a
+    # silent placeholder until a music API is wired.
+    clip_embedded = True
     if clip_embedded:
-        # Drop placeholder audio nodes when backends are missing.
-        drop = {"n_speech", "n_music"}
-        if not can_speech:
-            drop.add("n_speech")
-        else:
-            drop.discard("n_speech")
-        if not can_music:
-            drop.add("n_music")
-        else:
-            drop.discard("n_music")
+        drop = {
+            str(n.get("id") or "")
+            for n in (graph.get("nodes") or [])
+            if isinstance(n, dict)
+            and (
+                str(n.get("id") or "") == "n_speech"
+                or _role_key(n).lower() in {"speech", "tts"}
+            )
+        }
         if drop:
             graph["nodes"] = [
                 n
@@ -784,49 +848,15 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
             if isinstance(meta["script_analysis"].get("bgm_lock"), dict):
                 meta["bgm_lock"] = meta["script_analysis"]["bgm_lock"]
         graph["metadata"] = meta
-        meta["supervisor_audio_assignment"] = {
-            "can_speech": can_speech,
-            "can_music": can_music,
-            "can_video_audio": bool(backends.get("can_video_audio", True)),
-            "assigned": ["clip_embedded"],
-            "ensured_nodes": [],
-            "backends": backends,
-            "clip_embedded": True,
-            "prefer_clip_native_audio": True,
-            "prefer_wan3_clip_audio": True,  # legacy alias
-        }
-        return meta["supervisor_audio_assignment"]
 
     ensured = _ensure_audio_nodes_for_intent(graph)
-    assigned: list[str] = []
+    assigned: list[str] = ["clip_embedded"] if clip_embedded else []
 
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
         role = _role_key(node).lower()
         nid = str(node.get("id") or "")
-        if role in {"speech", "tts"} or nid == "n_speech":
-            cfg["role"] = "speech"
-            cfg["skill_id"] = cfg.get("skill_id") or "speech_tts"
-            cfg["tools"] = ["call_speech_model", "read_upstream"]
-            if can_speech:
-                cfg["force_handler"] = False
-                cfg["delegate"] = "agent"
-                cfg["supervisor_task"] = (
-                    cfg.get("supervisor_task")
-                    or "Write concise spoken lines from brief/storyboard, then call_speech_model "
-                    "to synthesize TTS. Keep under 8s; sync to film beats. Skip if silent policy."
-                )
-                assigned.append(f"{nid}:speech_agent")
-            else:
-                cfg.pop("force_handler", None)
-                cfg["delegate"] = "agent"
-                cfg["supervisor_task"] = (
-                    "No TTS backend — as Speech Agent, write speech timing into clip briefs "
-                    "via graph patch / notes; compose will use audible bed."
-                )
-                assigned.append(f"{nid}:speech_agent_no_backend")
-            node["config"] = cfg
-        elif role in {"music", "audio", "audio_bed"} or nid == "n_music":
+        if role in {"music", "audio", "audio_bed"} or nid == "n_music":
             cfg["role"] = "music"
             cfg["skill_id"] = cfg.get("skill_id") or "audio_bed"
             cfg["tools"] = ["call_music_model", "read_upstream", "call_model"]
@@ -835,28 +865,32 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
                 cfg["delegate"] = "agent"
                 cfg["supervisor_task"] = (
                     cfg.get("supervisor_task")
-                    or "Compose a short non-vocal BGM bed matching mood; call_music_model. "
-                    "Keep headroom for speech; ≤8s unless compose needs longer."
+                    or "Compose ONE non-vocal BGM bed from the Brief / bgm_lock for the "
+                    "full concatenated film. call_music_model. Never generate per-clip scores. "
+                    "Keep headroom so clip dialogue stays intelligible."
                 )
                 assigned.append(f"{nid}:music_agent")
             else:
-                cfg.pop("force_handler", None)
-                cfg["delegate"] = "agent"
+                cfg["force_handler"] = True
+                cfg["delegate"] = "handler"
                 cfg["supervisor_task"] = (
-                    "No music backend — as Music Agent, stamp mood/BGM style onto clip "
-                    "prompts; compose will mux an audible bed."
+                    "No music API yet. Output a silent/empty placeholder file only. "
+                    "Do not invent a score. When MUSIC_API_KEY / models.music is "
+                    "configured, this node will call_music_model instead."
                 )
-                assigned.append(f"{nid}:music_agent_no_backend")
+                assigned.append(f"{nid}:music_placeholder")
             node["config"] = cfg
 
     meta = dict(graph.get("metadata") or {})
     meta["supervisor_audio_assignment"] = {
         "can_speech": can_speech,
         "can_music": can_music,
+        "can_video_audio": bool(backends.get("can_video_audio", True)),
         "assigned": assigned,
         "ensured_nodes": ensured,
         "backends": backends,
-        "clip_embedded": False,
+        "clip_embedded": bool(clip_embedded),
+        "prefer_clip_native_audio": bool(clip_embedded),
     }
     graph["metadata"] = meta
     return meta["supervisor_audio_assignment"]
@@ -1258,8 +1292,9 @@ class SupervisorAgent:
             "Follow the scenario skill and audio policy. "
             "For each node, choose optimize_for (cost|quality) and a preferred_model "
             "from the configured Settings model list. "
-            "For speech/music nodes: if TTS/music backends exist, assign an agent task "
-            "with call_speech_model / call_music_model; otherwise note handler fallback. "
+            "Dialogue is clip-native; never create or assign a TTS/Speech node. "
+            "For the Music node, use call_music_model when available, otherwise keep "
+            "the silent handler placeholder. "
             "On rerun, incorporate prior feedback suggestions. "
             "Respond with JSON only: "
             '{"optimize_for_global":"cost|quality",'
@@ -1621,6 +1656,60 @@ class SupervisorAgent:
                     '"storyboard_markdown":"...","notes":"...","target_shot_count":N,'
                     '"skip_scene_plate":true}'
                 )
+                try:
+                    from jiuwenswarm.server.runtime.designer.video_styles import (
+                        VIDEO_STYLE_FINAL_FRAME_REVERSE,
+                        resolve_video_style,
+                        video_style_clause,
+                        video_style_skill_excerpt,
+                    )
+
+                    vs = resolve_video_style(graph, user_prompt)
+                    if vs == VIDEO_STYLE_FINAL_FRAME_REVERSE:
+                        system = (
+                            system
+                            + " "
+                            + video_style_clause(vs)
+                            + " "
+                            + video_style_skill_excerpt(vs)
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+                    infer_shot_budget,
+                )
+
+                sb_lock = _shot_expand_lock_count(
+                    graph=graph, analysis=analysis, current_shots=shots
+                )
+                if sb_lock:
+                    sb_rule = (
+                        "Keep shot count EQUAL to the provided shots list. "
+                        "Duration is timeline, not a license to add rows."
+                    )
+                else:
+                    # No-LLM skeleton: the director owns the beat breakdown.
+                    sb_rule = (
+                        "The provided shots are a DRAFT skeleton, not the final count. "
+                        "Break the story into as many shots as its beats need, up to "
+                        f"{infer_shot_budget(user_prompt, analysis)}."
+                    )
+                    try:
+                        from jiuwenswarm.server.runtime.designer.video_styles import (
+                            resolve_video_style,
+                            video_style_min_shots,
+                        )
+
+                        floor = video_style_min_shots(resolve_video_style(graph, user_prompt))
+                        if floor >= 2:
+                            sb_rule += (
+                                f" This video style is never a single take: author at "
+                                f"least {floor} shots — spatial push-in, key close-up(s), "
+                                "deceleration/settle, then a final beat that matches the "
+                                "reference composition."
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
                 result = await call_model_tool(
                     prompt=json.dumps(
                         {
@@ -1629,7 +1718,7 @@ class SupervisorAgent:
                             "characters": characters,
                             "shots": shots,
                             "spatial_lock": meta.get("spatial_lock"),
-                            "rule": "Keep shot count EQUAL to the provided shots list. Duration is timeline, not a license to add rows.",
+                            "rule": sb_rule,
                         },
                         ensure_ascii=False,
                     ),
@@ -1687,12 +1776,15 @@ class SupervisorAgent:
                             shot["speech_line"] = str(shot.get("speech_line"))[:500]
                         cleaned.append(shot)
                     if cleaned:
-                        locked = len(shots) or int(analysis.get("target_shot_count") or 0)
-                        if locked >= 1 and len(cleaned) > locked:
-                            cleaned = cleaned[:locked]
-                            for i, shot in enumerate(cleaned, start=1):
-                                shot["shot_index"] = i
-                        shots = cleaned
+                        shots = _apply_llm_shot_list(
+                            shots,
+                            cleaned,
+                            lock_count=_shot_expand_lock_count(
+                                graph=graph,
+                                analysis=analysis,
+                                current_shots=shots,
+                            ),
+                        )
                         source = "llm"
                         analysis["source"] = "llm"
                         notes = str(parsed.get("notes") or "Supervisor LLM authored storyboard.")[
@@ -1937,12 +2029,15 @@ class SupervisorAgent:
                         shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
                     cleaned.append(shot)
                 if cleaned:
-                    locked = len(shots)
-                    if locked >= 1 and len(cleaned) > locked:
-                        cleaned = cleaned[:locked]
-                        for i, shot in enumerate(cleaned, start=1):
-                            shot["shot_index"] = i
-                    shots = cleaned
+                    shots = _apply_llm_shot_list(
+                        shots,
+                        cleaned,
+                        lock_count=_shot_expand_lock_count(
+                            graph=graph,
+                            analysis=analysis,
+                            current_shots=shots,
+                        ),
+                    )
                     source = "llm"
                     analysis["source"] = "llm"
                     notes = str(parsed.get("notes") or "")[:1000]
@@ -2090,7 +2185,15 @@ class SupervisorAgent:
                 rmeta[key] = meta.get(key)
         rmeta["script_analysis"] = analysis
         rmeta["supervisor_owns_graph"] = True
-        rmeta["freeze_shot_topology"] = True
+        rebuilt["metadata"] = rmeta
+        # Uploads are user-authored assets: a redesign must not delete them.
+        from jiuwenswarm.server.runtime.designer.user_references import carry_user_references
+
+        carry_user_references(meta, rebuilt)
+        rmeta = dict(rebuilt.get("metadata") or {})
+        # Only freeze after the director actually authored shots. A heuristic
+        # 1-shot skeleton must not lock Play/redesign to a single beat.
+        rmeta["freeze_shot_topology"] = source == "llm" and len(shots) >= 1
         rmeta["lean_pipeline"] = False
         rmeta["graph_designed_by_supervisor"] = True
         rmeta["supervisor_graph_ack"] = {
@@ -4443,6 +4546,8 @@ class ManagerAgent:
                 or str(n.get("id") or "") in {"n_scene", "n_compose", "n_speech", "n_music"}
                 or _role_key(n)
                 in {"clip", "frame", "keyframe", "compose", "speech", "music"}
+                # User uploads are authored assets, not generated drafts.
+                or bool((n.get("config") or {}).get("user_reference_id"))
             )
         }
         prune_ids = [

@@ -53,7 +53,8 @@ _SCENARIO_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("speech", ("podcast", "tts", "voiceover", "voice over", "配音", "旁白", "语音", "播客")),
     ("image", ("illustration", "poster", "logo", "封面", "插画", "海报", "still image")),
     ("video", ("video", "film", "movie", "cinematic", "trailer", "视频", "短片", "分镜", "动画")),
-    ("multimodal", ("and also", "以及", "同时", "both", "pipeline", "全流程")),
+    # 「以及 / 同时」是普通连词，不能当成 multimodal。
+    ("multimodal", ("and also", "both a video and", "pipeline", "全流程")),
 ]
 
 
@@ -77,6 +78,12 @@ def detect_scenario(prompt: str) -> str:
         "短片",
         "分镜",
         "动画",
+        "油画",
+        "原画",
+        "画面",
+        "致敬",
+        "镜头",
+        "关键帧",
     )
     if any(cue in text for cue in video_cues):
         scores["video"] = scores.get("video", 0) + 3
@@ -125,7 +132,7 @@ def _append_audio_nodes(
         if node_id in existing:
             return
         node_type = _MODALITY_TO_NODE_TYPE.get(modality, NODE_TYPE_AUDIO)
-        skill_key = "speech_tts" if role == "speech" else "audio_bed"
+        skill_key = "audio_bed"
         nodes.append(
             {
                 "id": node_id,
@@ -145,7 +152,7 @@ def _append_audio_nodes(
                     "kind": "agent",
                     "modality": modality,
                     "inputs": inputs,
-                    # Local ffmpeg bed until remote music/TTS APIs are wired.
+                    # Local silent bed until a remote music API is wired.
                     "delegate": "handler",
                     "force_handler": True,
                     "duration_sec": 4 if str(meta.get("optimize_for") or "") == "cost" else 6,
@@ -167,15 +174,6 @@ def _append_audio_nodes(
 
     # Depend on Brief (not storyboard) so audio runs parallel with cast/scene/video.
     audio_srcs = [brief_id] if brief_id else ([storyboard_id] if storyboard_id else [])
-    if audio.get("include_speech"):
-        _add_node(
-            "n_speech",
-            "Speech / TTS",
-            "audio",
-            [s for s in audio_srcs if s],
-            520.0,
-            role="speech",
-        )
     if audio.get("include_music") and audio.get("policy") != "silent":
         _add_node(
             "n_music",
@@ -329,54 +327,47 @@ def compose_execution_graph(
     optimize_for: OptimizeMode = "quality",
     scenario: str | None = None,
 ) -> DesignerExecutionGraph:
-    """Build graph: video uses cast/shot-aware smart layout; others use catalog agents."""
-    mode: OptimizeMode = "cost" if optimize_for == "cost" else "quality"
-    detected = scenario or detect_scenario(prompt)
-    if detected == "video":
-        from jiuwenswarm.server.runtime.designer.script_analysis import (
-            analyze_creative_brief_sync,
-            heuristic_analysis,
-            _llm_configured,
-        )
-        from jiuwenswarm.server.runtime.designer.smart_graph import (
-            apply_runtime_delegate,
-            build_smart_video_graph,
-        )
+    """Bootstrap canvas via Supervisor/Leader smart video pipeline.
 
-        if _llm_configured():
-            try:
-                analysis = analyze_creative_brief_sync(
-                    prompt, use_llm=True, timeout_sec=20.0
-                )
-            except Exception:  # noqa: BLE001
-                analysis = heuristic_analysis(prompt)
-        else:
+    Catalog templates are a node library, not the workflow dumped onto the canvas.
+    """
+    _ = scenario
+    mode: OptimizeMode = "cost" if optimize_for == "cost" else "quality"
+    from jiuwenswarm.server.runtime.designer.script_analysis import (
+        analyze_creative_brief_sync,
+        heuristic_analysis,
+        _llm_configured,
+    )
+    from jiuwenswarm.server.runtime.designer.smart_graph import (
+        apply_runtime_delegate,
+        build_smart_video_graph,
+    )
+
+    if _llm_configured():
+        try:
+            analysis = analyze_creative_brief_sync(
+                prompt, use_llm=True, timeout_sec=20.0
+            )
+        except Exception:  # noqa: BLE001
             analysis = heuristic_analysis(prompt)
-        graph = build_smart_video_graph(
-            project_id=project_id,
-            prompt=prompt,
-            analysis=analysis,
-            title=title,
-            optimize_for=mode,
-            ai_mode=_llm_configured(),
-        )
-        graph = apply_runtime_delegate(graph)
-        meta = dict(graph.get("metadata") or {})
-        meta["script_analysis"] = analysis
-        meta["script_analysis_mode"] = str(analysis.get("source") or "heuristic")
-        meta["pending_llm_analysis"] = bool(
-            _llm_configured() and str(analysis.get("source") or "") != "llm"
-        )
-        meta["auto_accept_outputs"] = True
-        graph["metadata"] = meta
-        return attach_skills_metadata(graph, prompt)
-    graph = _compose_from_catalog(
+    else:
+        analysis = heuristic_analysis(prompt)
+    graph = build_smart_video_graph(
         project_id=project_id,
         prompt=prompt,
+        analysis=analysis,
         title=title,
         optimize_for=mode,
-        scenario=detected,
+        ai_mode=_llm_configured(),
     )
-    from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
-
-    return attach_skills_metadata(apply_runtime_delegate(graph), prompt)
+    graph = apply_runtime_delegate(graph)
+    meta = dict(graph.get("metadata") or {})
+    meta["script_analysis"] = analysis
+    meta["script_analysis_mode"] = str(analysis.get("source") or "heuristic")
+    meta["pending_llm_analysis"] = bool(
+        _llm_configured() and str(analysis.get("source") or "") != "llm"
+    )
+    meta["auto_accept_outputs"] = True
+    meta["scenario"] = "video"
+    graph["metadata"] = meta
+    return attach_skills_metadata(graph, prompt)

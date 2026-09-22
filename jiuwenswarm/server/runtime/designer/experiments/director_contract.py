@@ -61,17 +61,23 @@ _DURATION_RE = re.compile(
     r"(?P<a>\d+)\s*-?\s*second|\b(?P<b>\d+)s\b",
     re.I,
 )
+
+# One shot == one keyframe + one clip in this pipeline, so "N 个关键帧" is the
+# same contract as "N 个分镜".
+_SHOT_UNIT_CN = r"(?:分镜|镜头|关键帧|帧|幕)"
 _THREE_SHOT_RE = re.compile(
     r"\bthree[- ]shot\b|\b3[- ]shot\b|\bthree\s+shots?\b|"
-    r"三分镜|三个?(?:分镜|镜头)|3\s*个?(?:分镜|镜头)",
+    rf"三分镜|三个?{_SHOT_UNIT_CN}|3\s*个?{_SHOT_UNIT_CN}",
     re.I,
 )
 _FOUR_SHOT_RE = re.compile(
     r"\bfour[- ]shot\b|\b4[- ]shot\b|\bfour\s+shots?\b|"
-    r"四分镜|四个?(?:分镜|镜头)|4\s*个?(?:分镜|镜头)",
+    rf"四分镜|四个?{_SHOT_UNIT_CN}|4\s*个?{_SHOT_UNIT_CN}",
     re.I,
 )
-_N_SHOT_CN_RE = re.compile(r"(?P<n>[二三四五六七八九十两\d]+)\s*个?(?:分镜|镜头)", re.I)
+_N_SHOT_CN_RE = re.compile(
+    rf"(?P<n>[二三四五六七八九十两\d]+)\s*个?{_SHOT_UNIT_CN}", re.I
+)
 _CN_NUM = {
     "两": 2,
     "二": 2,
@@ -87,6 +93,19 @@ _CN_NUM = {
 _TIMELINE_BEAT_RE = re.compile(
     r"(?:0:)?(\d{1,2}):(\d{2})\s*[-–—]\s*(?:0:)?(\d{1,2}):(\d{2})",
     re.M,
+)
+# Beat separators, CJK + latin. A cue means "the story moves on", i.e. one more beat.
+_BEAT_CUE_RE = re.compile(
+    r"然后|接着|紧接着|随后|其后|之后|最后|最终|起初|首先|其次|突然|忽然|"
+    r"画面(?:切换|切至|切到|转向|转为)|镜头(?:切换|切至|切到|转向|拉近|推近|拉远|摇向)|"
+    r"下一(?:幕|镜|个镜头)|"
+    r"\band then\b|\bafter that\b|\bfinally\b|\bmeanwhile\b|\bcut(?:s)?\s+to\b|"
+    r"\bpan(?:s)?\s+to\b|\bnext\s+(?:shot|scene|beat)\b",
+    re.I,
+)
+_SHOT_LABEL_RE = re.compile(
+    r"(?:^|[\n,，。；;])\s*(?:镜头|分镜|shot)\s*[#no.：:]*\s*(?P<n>\d{1,2})\b",
+    re.I | re.M,
 )
 
 
@@ -125,7 +144,11 @@ def _explicit_shot_count_from_prompt(prompt: str) -> int:
             return max(1, min(_HARD_MAX_SHOTS, int(raw)))
         if raw in _CN_NUM:
             return max(1, min(_HARD_MAX_SHOTS, _CN_NUM[raw]))
-    m2 = re.search(r"\b(?P<n>\d+)\s*[- ]?(?:shot|shots|beat|beats)\b", text, re.I)
+    m2 = re.search(
+        r"\b(?P<n>\d+)\s*[- ]?(?:shot|shots|beat|beats|keyframe|keyframes|key\s+frames?)\b",
+        text,
+        re.I,
+    )
     if m2:
         return max(1, min(_HARD_MAX_SHOTS, int(m2.group("n"))))
     return 0
@@ -134,6 +157,32 @@ def _explicit_shot_count_from_prompt(prompt: str) -> int:
 # Soft safety for LLM-owned budgets (hard ceiling lives in script_analysis._MAX_SHOTS).
 _SOFT_MAX_SHOTS = 8
 _HARD_MAX_SHOTS = 16
+
+
+def is_placeholder_analysis(analysis: dict[str, Any] | None) -> bool:
+    """True when N came from the no-LLM fallback, not from a director decision."""
+    data = analysis or {}
+    if data.get("llm_pending"):
+        return True
+    return str(data.get("source") or "") in {"", "heuristic", "heuristic_pending_llm"}
+
+
+def count_narrative_beats(prompt: str) -> int:
+    """Estimate how many beats the prompt itself describes (>=1, language-agnostic)."""
+    text = prompt or ""
+    labels = [int(m.group("n")) for m in _SHOT_LABEL_RE.finditer(text)]
+    sentences = [
+        part
+        for part in re.split(r"[。！？；!?;]|(?<=[.!?])\s+", text)
+        if len(part.strip()) > 8
+    ]
+    candidates = [
+        max(labels) if labels else 1,
+        len(_TIMELINE_BEAT_RE.findall(text)) or 1,
+        len(_BEAT_CUE_RE.findall(text)) + 1,
+        len(sentences) or 1,
+    ]
+    return max(1, min(_SOFT_MAX_SHOTS, max(candidates)))
 
 
 def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
@@ -146,12 +195,31 @@ def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         target = 0
     n_shots = len(analysis.get("shots") or [])
-    # LLM / prior analysis owns N — do not clamp back to 2–4.
-    if target >= 1 or n_shots >= 1:
-        return max(1, min(_SOFT_MAX_SHOTS, max(target, n_shots)))
+    authored = max(target, n_shots)
+    # A named director style may forbid a single take (final_frame_reverse).
+    style_floor = 0
+    try:
+        from jiuwenswarm.server.runtime.designer.video_styles import (
+            detect_video_style,
+            video_style_min_shots,
+        )
+
+        style_floor = int(video_style_min_shots(detect_video_style(prompt or "")) or 0)
+    except Exception:  # noqa: BLE001
+        style_floor = 0
+    # A no-LLM skeleton is a floor, never a ceiling — otherwise a failed opening
+    # LLM call pins the whole film to its 1-shot placeholder.
+    placeholder = is_placeholder_analysis(analysis)
+    if authored >= 1 and not placeholder:
+        # LLM / prior analysis owns N — do not clamp back to 2–4.
+        return max(1, min(_SOFT_MAX_SHOTS, max(authored, style_floor)))
+    floor = max(authored if placeholder else 0, style_floor)
     beats = _TIMELINE_BEAT_RE.findall(prompt or "")
     if beats:
-        return max(1, min(_SOFT_MAX_SHOTS, len(beats)))
+        return max(1, min(_SOFT_MAX_SHOTS, max(len(beats), floor)))
+    cues = count_narrative_beats(prompt)
+    if cues >= 2:
+        return max(1, min(_SOFT_MAX_SHOTS, max(cues, floor)))
     dur = None
     m = _DURATION_RE.search(prompt or "")
     if m:
@@ -161,8 +229,9 @@ def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
             dur = float(m.group("a") or m.group("b") or 0)
     if dur and dur > 0:
         # ~7–8s per cinematic beat when no LLM plan yet.
-        return max(1, min(_SOFT_MAX_SHOTS, int(round(dur / 8.0)) or 1))
-    return 1
+        per_beat = int(round(dur / 8.0)) or 1
+        return max(1, min(_SOFT_MAX_SHOTS, max(per_beat, floor)))
+    return max(1, min(_SOFT_MAX_SHOTS, floor or 1))
 
 
 def _char_blob(ch: dict[str, Any]) -> str:

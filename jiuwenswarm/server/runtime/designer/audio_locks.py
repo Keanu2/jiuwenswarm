@@ -297,20 +297,24 @@ def audio_lock_prompt_block(
     bgm = bgm_lock if isinstance(bgm_lock, dict) else {}
     if include_music or bgm:
         lines.append(
-            "BGM LOCK (film-wide): "
+            "BGM LOCK (film-wide, NOT in this clip): one score is mixed onto the "
+            "concatenated film at compose. "
             f"mood={bgm.get('mood') or 'cinematic'}; "
             f"style={bgm.get('style') or 'soft underscore'}; "
-            f"instruments={bgm.get('instruments') or 'tasteful non-vocal'}; "
-            f"continuity={bgm.get('continuity') or 'same bed across clips'}. "
-            f"{str(bgm.get('rule') or 'Never drown dialogue; one score identity.')}"
+            f"instruments={bgm.get('instruments') or 'tasteful non-vocal'}. "
+            "Do NOT generate music, underscore, or ambient bed inside this clip."
         )
-    elif not include_speech and not by_char and not speech_line:
-        lines.append("BGM LOCK: no underscore this beat unless storyboard requires it.")
-    if clip_embedded and (include_speech or include_music or by_char or speech_line or bgm):
+    else:
+        lines.append("BGM LOCK: no underscore this film; clip stays dialogue-only or silent.")
+    if clip_embedded and (include_speech or by_char or speech_line):
         lines.append(
-            "AUDIO ROUTE: no separate TTS/BGM backend — generate native speech + BGM "
-            "inside this video clip (video-model audio=true). Keep speech intelligible; "
-            "BGM under dialogue."
+            "AUDIO ROUTE: this clip may synthesize NATIVE DIALOGUE only "
+            "(video-model audio=true). No BGM in the clip — score is one track after concat."
+        )
+    elif include_speech or by_char or speech_line:
+        lines.append(
+            "AUDIO ROUTE: clip audio = spoken lines only. Film BGM is a separate "
+            "Music node mixed after concat."
         )
     return "\n".join(lines).strip()
 
@@ -378,25 +382,22 @@ def resolve_audio_intent_flags(meta: dict[str, Any] | None, cfg: dict[str, Any] 
     }
 
 
-def should_request_video_audio(cfg: dict[str, Any] | None, meta: dict[str, Any] | None) -> bool:
-    """Whether the video model should synthesize native audio for this clip."""
-    flags = resolve_audio_intent_flags(meta, cfg)
-    if flags["policy"] == "silent":
+def clip_needs_dialogue_audio(flags: dict[str, Any] | None) -> bool:
+    """True when THIS clip should carry spoken lines (never BGM)."""
+    flags = flags if isinstance(flags, dict) else {}
+    if str(flags.get("policy") or "") == "silent":
         return False
-    if not (flags["include_speech"] or flags["include_music"] or flags["speech_by_character"] or flags["speech_line"]):
-        # Still request audio when clip-embedded routing is on (soft bed).
-        return bool(flags["clip_embedded"])
-    if flags["clip_embedded"]:
-        return True
-    cfg = cfg if isinstance(cfg, dict) else {}
-    if cfg.get("prefer_clip_native_audio") or cfg.get("prefer_wan3_clip_audio") or cfg.get("video_audio"):
-        return True
-    meta = meta if isinstance(meta, dict) else {}
     return bool(
-        meta.get("prefer_clip_native_audio")
-        or meta.get("prefer_wan3_clip_audio")
-        or meta.get("video_audio")
+        flags.get("include_speech")
+        or flags.get("speech_by_character")
+        or str(flags.get("speech_line") or "").strip()
     )
+
+
+def should_request_video_audio(cfg: dict[str, Any] | None, meta: dict[str, Any] | None) -> bool:
+    """Native clip audio is dialogue-only. BGM is mixed after concat, never in-clip."""
+    flags = resolve_audio_intent_flags(meta, cfg)
+    return clip_needs_dialogue_audio(flags)
 
 
 def video_model_supports_native_audio(model: str | None = None) -> bool:
@@ -523,15 +524,20 @@ def stamp_audio_fields_on_clip_config(
         include_music = False
     cfg["include_speech"] = include_speech
     cfg["include_music"] = include_music
-    if clip_embedded or (
-        (include_speech or include_music)
-        and not bool((meta.get("audio_routing") or {}).get("can_speech"))
-        and not bool((meta.get("audio_routing") or {}).get("can_music"))
+    # Clip-native audio is dialogue only. Missing music backends never fold BGM
+    # into the clip — compose mixes one brief-derived score after concat.
+    if include_speech and (
+        clip_embedded
+        or not bool((meta.get("audio_routing") or {}).get("can_speech"))
     ):
         cfg["clip_embedded_audio"] = True
         cfg["prefer_clip_native_audio"] = True
-        # Request native audio only when the configured video model supports it.
         cfg["video_audio"] = bool(video_model_supports_native_audio())
+    else:
+        cfg["clip_embedded_audio"] = False
+        cfg["video_audio"] = bool(
+            include_speech and video_model_supports_native_audio()
+        )
     block = audio_lock_prompt_block(
         language_lock=cfg["language_lock"],
         speech_by_character=by_char,
