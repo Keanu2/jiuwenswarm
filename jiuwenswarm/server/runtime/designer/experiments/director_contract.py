@@ -186,8 +186,21 @@ def count_narrative_beats(prompt: str) -> int:
 
 
 def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
-    """Domain-agnostic shot budget. Explicit N wins; else trust LLM/analysis N (soft max 8)."""
+    """Domain-agnostic shot budget. Explicit N wins; C slices when runtime > Wan max."""
+    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        WAN_MAX_CLIP_SEC,
+        needs_duration_slicing,
+        requested_film_duration_sec,
+        sequential_shot_count,
+    )
+
     explicit = _explicit_shot_count_from_prompt(prompt)
+    if needs_duration_slicing(prompt):
+        asked = int(requested_film_duration_sec(prompt) or 0)
+        n_c = sequential_shot_count(asked)
+        if explicit >= 1 and explicit * WAN_MAX_CLIP_SEC >= asked:
+            return max(1, min(_HARD_MAX_SHOTS, explicit))
+        return max(1, min(_HARD_MAX_SHOTS, max(n_c, explicit)))
     if explicit >= 1:
         return max(1, min(_HARD_MAX_SHOTS, explicit))
     try:
@@ -311,6 +324,14 @@ def _blocking_for_shot(
         else:
             pose = "engaged_in_beat"
             facing = "toward_camera_or_scene_focus"
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+                    infer_pose_from_action,
+                )
+
+                pose = infer_pose_from_action(action, fallback=pose)
+            except Exception:  # noqa: BLE001
+                pass
         positions.append(
             {
                 "character_id": cid,
@@ -330,6 +351,8 @@ def _blocking_for_shot(
         "positions": positions,
         "rule": (
             "Place each listed character in their zone relative to the landmark. "
+            "Honor pose contact with supports (seat/floor/edge) — never merge bodies "
+            "into solid furniture or props. "
             "Do not invent extra named leads. Do not clone one face onto two bodies."
         ),
     }
@@ -519,9 +542,9 @@ def _ensure_stay_on_leave_beats(
         shot["character_ids"] = list(dict.fromkeys(on_screen))
         shot["on_screen"] = list(shot["character_ids"])
         shot["staying"] = [c for c in shot["character_ids"] if c not in exiting]
-        # Prefer angle_variant so prior geography can carry while exit happens
+        # Prefer continuation so prior geography can carry while exit happens
         if str(shot.get("shot_relation") or "") == "hard_cut" and len(shot["character_ids"]) >= 2:
-            shot["shot_relation"] = "angle_variant"
+            shot["shot_relation"] = "continuation"
 
 
 def _split_prompt_into_beats(prompt: str, budget: int) -> list[str]:
@@ -584,7 +607,7 @@ def _expand_shots_to_budget(
             shot.pop("blocking", None)
             shot.pop("exiting_character_ids", None)
             shot.pop("exiting", None)
-        action = beats[i] if i < len(beats) else str(shot.get("action") or prompt)[:400]
+        action = beats[i] if i < len(beats) else str(shot.get("action") or (beats[-1] if beats else ""))[:400]
         shot["shot_index"] = i + 1
         shot["title"] = f"Shot {i + 1}"
         shot["action"] = action[:500]
@@ -688,7 +711,7 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
         ):
             relation = "hard_cut"
         elif exiting:
-            relation = "angle_variant"
+            relation = "continuation"
         else:
             relation = "hard_cut"
         shot["shot_relation"] = relation
@@ -751,6 +774,12 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
     out["experiment_plan"] = "A"
     out["keyframe_policy"] = "compose_solos"
     out["skip_domain_role_locks"] = True
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import apply_shot_scope
+
+        out = apply_shot_scope(out, prompt)
+    except Exception:  # noqa: BLE001
+        logger.info("apply_shot_scope skipped", exc_info=True)
     return out
 
 
@@ -774,19 +803,24 @@ async def enrich_analysis_with_llm(
             "You are a film DIRECTOR writing a production shot sheet for a multi-shot AI video. "
             "Domain-agnostic: never assume church, dinner, or office unless the prompt says so. "
             "Return ONE compact raw JSON object only — no markdown fences, no commentary. "
-            "For EACH shot provide: shot_index, title, action (<=160 chars), camera, timeline, "
+            "For EACH shot provide: shot_index, title, action (full detail for THIS window: "
+            "blocking, posture, gaze, speech — not a one-liner, not the entire remaining plot), "
             "on_screen (character ids featured ON CAMERA now), "
             "off_camera (other cast ids who exist in the setting but must stay OFF FRAME this beat), "
             "exiting (ids leaving THIS beat), staying, "
-            "shot_relation (hard_cut|angle_variant|continuation), "
+            "shot_relation (hard_cut|continuation; angle_variant only if the user asked "
+            "for same-moment multi-cam coverage), "
             "blocking={landmark, positions:[{character_id, zone, pose, facing}]}, "
-            "motion_detail (second-by-second acting beats for the full timeline — "
+            "motion_detail (second-by-second acting beats for THIS timeline window only — "
             "pose, gaze, hands, weight shifts like a movie shot sheet), "
             "speech_line (exact dialogue spoken in this beat, or empty string if silent — "
             "never invent lines for mute beats), "
             "wardrobe_lock (dress/outfit color, hair, facial features for EACH on_screen id), "
             "camera_framing_rule (how to frame so off_camera people are not visible). "
-            "Rules: (1) shot count matches brief budget; "
+            "Rules: (1) shot count matches brief budget; shots are consecutive TIME "
+            "windows that concatenate to the film — do not restage the full user prompt "
+            "in every shot and do not paste the entire user_prompt into every action; "
+            "each action is that window's full blocking/speech/wardrobe; "
             "(2) after exit, id not in later on_screen; "
             "(3) leave vs stay are DIFFERENT ids; "
             "(4) blocking zones concrete; "
@@ -940,6 +974,14 @@ async def enrich_analysis_with_llm(
         out["experiment_plan"] = "A"
         out["keyframe_policy"] = "compose_solos"
         out["skip_domain_role_locks"] = True
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                apply_shot_scope,
+            )
+
+            out = apply_shot_scope(out, prompt)
+        except Exception:  # noqa: BLE001
+            logger.info("apply_shot_scope skipped after director LLM", exc_info=True)
         return out
     except Exception:  # noqa: BLE001
         logger.info("Director LLM pass failed; using heuristic contract", exc_info=True)

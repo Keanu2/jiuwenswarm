@@ -34,101 +34,115 @@ _CROSS_RE = re.compile(
     re.I,
 )
 _VERTICAL_RE = re.compile(
-    r"(?:vertical|portrait(?:\s+video)?|9\s*[:x/]\s*16|tiktok|reels|shorts|"
-    r"竖屏|竖版|竖构图|竖拍)",
-    re.I,
+    r"\b(?:vertical|9\s*[:x]\s*16|tiktok|reels|shorts|portrait\s+video)\b", re.I
 )
-_SQUARE_RE = re.compile(r"(?:1\s*[:x/]\s*1|square(?:\s+(?:frame|video))?|方形|正方形)", re.I)
-_FOUR_THREE_RE = re.compile(r"(?:4\s*[:x/]\s*3|4比3)", re.I)
-_THREE_FOUR_RE = re.compile(r"(?:3\s*[:x/]\s*4|3比4)", re.I)
-_ULTRAWIDE_RE = re.compile(
-    r"(?:21\s*[:x/]\s*9|2[\.:](?:35|39)\s*[:x/]\s*1|ultrawide|cinemascope|"
-    r"宽屏|电影画幅)",
-    re.I,
-)
-_LANDSCAPE_RE = re.compile(r"(?:16\s*[:x/]\s*9|landscape|横屏|横版|横构图|横拍)", re.I)
-_RES_1080_RE = re.compile(r"(?:1080\s*p|1920\s*[x*]\s*1080|full\s*hd|2k|全高清|1080p)", re.I)
-_RES_720_RE = re.compile(r"(?:720\s*p|1280\s*[x*]\s*720|高清(?!度))", re.I)
-_RES_4K_RE = re.compile(r"(?:4k|2160\s*p|3840\s*[x*]\s*2160|超高清)", re.I)
-_RES_480_RE = re.compile(r"(?:480\s*p|854\s*[x*]\s*480)", re.I)
+_SQUARE_RE = re.compile(r"\b(?:1\s*[:x]\s*1|square\s+(?:frame|video))\b", re.I)
 
-_ASPECT_PIXELS: dict[str, dict[str, tuple[str, str]]] = {
-    "16:9": {
-        "480P": ("854*480", "1024x576"),
-        "720P": ("1280*720", "1280x720"),
-        "1080P": ("1920*1080", "1920x1080"),
-    },
-    "9:16": {
-        "480P": ("480*854", "576x1024"),
-        "720P": ("720*1280", "720x1280"),
-        "1080P": ("1080*1920", "1080x1920"),
-    },
-    "1:1": {
-        "480P": ("480*480", "1K"),
-        "720P": ("720*720", "720x720"),
-        "1080P": ("1080*1080", "1080x1080"),
-    },
-    "4:3": {
-        "480P": ("640*480", "1024x768"),
-        "720P": ("960*720", "960x720"),
-        "1080P": ("1440*1080", "1440x1080"),
-    },
-    "3:4": {
-        "480P": ("480*640", "768x1024"),
-        "720P": ("720*960", "720x960"),
-        "1080P": ("1080*1440", "1080x1440"),
-    },
-    "21:9": {
-        "480P": ("1128*480", "1280x548"),
-        "720P": ("1680*720", "1680x720"),
-        "1080P": ("2560*1080", "2560x1080"),
-    },
-}
+# DashScope Wan documented 480P sizes. Unofficial 854*480 is often ignored → 720/1080.
+WAN_480P_LANDSCAPE = "832*480"
+WAN_480P_PORTRAIT = "480*832"
+WAN_480P_SQUARE = "480*480"
 
 
-def _aspect_resolution_from_prompt(prompt: str) -> str:
-    text = prompt or ""
-    if _RES_4K_RE.search(text) or _RES_1080_RE.search(text):
-        return "1080P"
-    if _RES_720_RE.search(text):
-        return "720P"
-    if _RES_480_RE.search(text):
-        return "480P"
-    return "480P"
-
-
-def _aspect_ratio_from_prompt(prompt: str) -> str:
-    text = prompt or ""
-    if _VERTICAL_RE.search(text):
-        return "9:16"
-    if _SQUARE_RE.search(text):
-        return "1:1"
-    if _THREE_FOUR_RE.search(text):
-        return "3:4"
-    if _FOUR_THREE_RE.search(text):
-        return "4:3"
-    if _ULTRAWIDE_RE.search(text):
-        return "21:9"
-    if _LANDSCAPE_RE.search(text):
-        return "16:9"
-    return "16:9"
+def lock_clip_480p(size: str | None = None, resolution: str | None = None) -> tuple[str, str]:
+    """Force Designer clips to Wan 480P. Portrait/square follow the given size."""
+    raw = str(size or "").strip().replace("x", "*").replace("X", "*")
+    ratio = "16:9"
+    if "*" in raw:
+        try:
+            width_s, height_s = raw.split("*", 1)
+            width, height = int(width_s), int(height_s)
+            if width > 0 and height > 0:
+                if height > width * 1.15:
+                    ratio = "9:16"
+                elif abs(width - height) / max(width, height) < 0.08:
+                    ratio = "1:1"
+        except ValueError:
+            pass
+    sizes = {
+        "9:16": WAN_480P_PORTRAIT,
+        "1:1": WAN_480P_SQUARE,
+        "16:9": WAN_480P_LANDSCAPE,
+    }
+    _ = resolution
+    return sizes[ratio], "480P"
 
 
 def infer_aspect_lock(prompt: str) -> dict[str, str]:
     """One aspect for every sheet, keyframe, and clip in the film."""
-    ratio = _aspect_ratio_from_prompt(prompt)
-    resolution = _aspect_resolution_from_prompt(prompt)
-    video_size, image_size = _ASPECT_PIXELS.get(ratio, _ASPECT_PIXELS["16:9"]).get(
-        resolution, _ASPECT_PIXELS["16:9"]["480P"]
-    )
+    text = prompt or ""
+    if _VERTICAL_RE.search(text):
+        return {
+            "ratio": "9:16",
+            # ~1K budget (portrait): keep short side near 480–576, not 2K.
+            "image_size": "576x1024",
+            "video_size": WAN_480P_PORTRAIT,
+            "video_resolution": "480P",
+            "rule": "EVERY still and clip MUST be 9:16 portrait at ~1K/480P. Do not letterbox, crop to 16:9, or square-crop.",
+        }
+    if _SQUARE_RE.search(text):
+        return {
+            "ratio": "1:1",
+            "image_size": "1K",
+            "video_size": WAN_480P_SQUARE,
+            "video_resolution": "480P",
+            "rule": "EVERY still and clip MUST be 1:1 at 1K/480P. Do not change aspect mid-film.",
+        }
     return {
-        "ratio": ratio,
-        "image_size": image_size,
-        "video_size": video_size,
-        "video_resolution": resolution,
+        "ratio": "16:9",
+        # ~1K stills; clips use documented Wan 480P (832*480), not 720/1080.
+        "image_size": "1024x576",
+        "video_size": WAN_480P_LANDSCAPE,
+        "video_resolution": "480P",
+        "rule": "EVERY still and clip MUST be 16:9 landscape at ~1K/480P. Do not square-crop or switch to 9:16.",
+    }
+
+
+def infer_time_of_day_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]:
+    """Film-wide / per-setting time-of-day + lighting cue (domain-agnostic)."""
+    blob = f"{prompt or ''} {scene_desc or ''}".lower()
+    if any(
+        w in blob
+        for w in (
+            "midnight",
+            "late night",
+            "at night",
+            "nighttime",
+            "night time",
+            "nocturnal",
+            "moonlit",
+            "星夜",
+            "夜晚",
+            "夜里",
+            "深夜",
+        )
+    ):
+        tod = "night"
+        light = "night lighting — cool/dark key with practicals; keep night across same-setting shots"
+    elif any(w in blob for w in ("dusk", "sunset", "twilight", "golden hour", "傍晚", "黄昏", "日落")):
+        tod = "dusk"
+        light = "dusk / golden-hour warmth; long shadows; keep dusk across same-setting shots"
+    elif any(w in blob for w in ("dawn", "sunrise", "early morning", "破晓", "黎明", "日出")):
+        tod = "dawn"
+        light = "dawn light — cool-warm horizon glow; keep dawn across same-setting shots"
+    elif any(w in blob for w in ("morning", "breakfast", "上午", "早上", "清晨")):
+        tod = "morning"
+        light = "morning daylight; soft clear key; keep morning across same-setting shots"
+    elif any(w in blob for w in ("noon", "midday", "afternoon", "中午", "午后", "下午")):
+        tod = "day"
+        light = "daytime daylight; stable sun side; keep day across same-setting shots"
+    elif any(w in blob for w in ("evening", "dinner", "晚饭", "晚餐", "晚上")):
+        tod = "evening"
+        light = "evening interior/exterior practicals; keep evening across same-setting shots"
+    else:
+        tod = "unspecified"
+        light = "motivated key light with stable direction; no relight mid-scene"
+    return {
+        "time_of_day": tod,
+        "lighting": light,
         "rule": (
-            f"EVERY still and clip MUST be {ratio} at {resolution} ({video_size}). "
-            "Do not letterbox, crop, or change aspect mid-film."
+            f"TIME OF DAY LOCK={tod}: every same-setting still/clip must keep this "
+            "time-of-day and lighting direction — no day↔night jump mid-scene."
         ),
     }
 
@@ -252,6 +266,28 @@ def stamp_axis_locks(analysis: dict[str, Any]) -> dict[str, Any]:
         already_gone.update(exiting_now)
 
     spatial = dict(out.get("spatial_lock") or {}) if isinstance(out.get("spatial_lock"), dict) else {}
+    prompt_blob = str(out.get("user_prompt") or out.get("summary") or "")
+    tod_global = infer_time_of_day_lock(prompt_blob)
+    out["time_of_day_lock"] = tod_global
+    for shot in shots:
+        place = str(shot.get("setting_description") or shot.get("action") or "")
+        tod = infer_time_of_day_lock(prompt_blob, place)
+        # Prefer explicit shot lock if already set.
+        prior = shot.get("time_of_day_lock") if isinstance(shot.get("time_of_day_lock"), dict) else {}
+        if prior.get("time_of_day") and prior.get("time_of_day") != "unspecified":
+            tod = {**tod, **{k: v for k, v in prior.items() if str(v).strip()}}
+        shot["time_of_day_lock"] = tod
+        bible = shot.get("scene_bible") if isinstance(shot.get("scene_bible"), dict) else None
+        if bible is not None:
+            bible = dict(bible)
+            bible.setdefault("time_of_day", tod.get("time_of_day"))
+            if tod.get("lighting") and (
+                not bible.get("lighting")
+                or "motivated key light" in str(bible.get("lighting") or "").lower()
+            ):
+                bible["lighting"] = tod.get("lighting")
+            shot["scene_bible"] = bible
+    # Keep existing spatial merge below.
     if landmarks:
         spatial["landmarks"] = landmarks[:8]
         spatial["landmark_rule"] = (
@@ -303,7 +339,7 @@ def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | N
         bits.append(
             f"ASPECT LOCK: {aspect.get('ratio')} — {aspect.get('rule')} "
             f"(image_size={aspect.get('image_size') or ''}; "
-            f"video={aspect.get('video_size') or ''} @ {aspect.get('video_resolution') or ''})."
+            f"video={aspect.get('video_size') or ''} @ {aspect.get('video_resolution') or '480P'})."
         )
     if axis:
         named = []
@@ -338,7 +374,20 @@ def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | N
         "OCCLUSION: a partly hidden person is still the same identity "
         "(sex/age/hair/wardrobe) as the solo sheet — never recast."
     )
-    return " ".join(b for b in bits if str(b).strip())[:900]
+    tod = (
+        shot.get("time_of_day_lock")
+        if isinstance(shot.get("time_of_day_lock"), dict)
+        else analysis.get("time_of_day_lock")
+        if isinstance(analysis.get("time_of_day_lock"), dict)
+        else {}
+    )
+    tod_label = str((tod or {}).get("time_of_day") or "").strip()
+    if tod_label and tod_label != "unspecified":
+        bits.append(
+            str((tod or {}).get("rule") or "").strip()
+            or f"TIME OF DAY LOCK={tod_label}: {(tod or {}).get('lighting') or ''}".strip()
+        )
+    return " ".join(b for b in bits if str(b).strip())[:1100]
 
 
 def apply_aspect_to_node_config(cfg: dict[str, Any], aspect: dict[str, Any] | None) -> None:
@@ -568,11 +617,33 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
         cfg["aspect_lock"] = aspect
         if style:
             cfg["style_lock"] = style
+        # Per-shot or film-wide time-of-day lock on every still/clip.
+        tod_node = (
+            (shots.get(idx) or {}).get("time_of_day_lock")
+            if idx and isinstance((shots.get(idx) or {}).get("time_of_day_lock"), dict)
+            else analysis.get("time_of_day_lock")
+            if isinstance(analysis.get("time_of_day_lock"), dict)
+            else {}
+        )
+        if tod_node:
+            cfg["time_of_day_lock"] = tod_node
+            bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+            if bible is not None and role in {"scene", "clip", "frame", "keyframe"}:
+                bible = dict(bible)
+                bible.setdefault("time_of_day", tod_node.get("time_of_day"))
+                if tod_node.get("lighting") and (
+                    not bible.get("lighting")
+                    or "motivated key light" in str(bible.get("lighting") or "").lower()
+                ):
+                    bible["lighting"] = tod_node.get("lighting")
+                cfg["scene_bible"] = bible
         node["config"] = cfg
     meta["script_analysis"] = analysis
     meta["aspect_lock"] = aspect
     if style:
         meta["style_lock"] = style
     meta["axis_lock"] = analysis.get("axis_lock")
+    if isinstance(analysis.get("time_of_day_lock"), dict):
+        meta["time_of_day_lock"] = analysis["time_of_day_lock"]
     graph["metadata"] = meta
     return notes

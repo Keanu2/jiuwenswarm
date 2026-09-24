@@ -90,6 +90,32 @@ function normalizeMaterials(raw: unknown): MediaMaterialSlot[] {
   return out;
 }
 
+/** Prefer the last tool-call prompt (what actually hit image/video APIs). */
+export function resolveMediaPromptForToolbar(
+  config: Record<string, unknown> | undefined,
+): string {
+  const raw = (config ?? {}) as Record<string, unknown>;
+  const packet =
+    raw.regenerate_packet && typeof raw.regenerate_packet === 'object'
+      ? (raw.regenerate_packet as { prompt?: unknown })
+      : undefined;
+  const packetPrompt =
+    typeof packet?.prompt === 'string' ? packet.prompt.trim() : '';
+  const lastWan =
+    typeof raw.last_wan_prompt === 'string' ? raw.last_wan_prompt.trim() : '';
+  const lastApproved =
+    typeof raw.last_approved_prompt === 'string'
+      ? raw.last_approved_prompt.trim()
+      : '';
+  const gen =
+    raw.generate && typeof raw.generate === 'object'
+      ? String((raw.generate as { prompt?: unknown }).prompt ?? '').trim()
+      : '';
+  const rootPrompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : '';
+  // Final tool prompt first; fall back to scaffold generate.prompt for first run.
+  return packetPrompt || lastWan || lastApproved || gen || rootPrompt;
+}
+
 export function readMediaConfig(
   config: Record<string, unknown> | undefined,
   nodeType?: string,
@@ -99,11 +125,14 @@ export function readMediaConfig(
     typeof raw.interaction_mode === 'string' ? raw.interaction_mode : undefined,
     nodeType,
   );
+  const resolvedPrompt = resolveMediaPromptForToolbar(
+    config as Record<string, unknown> | undefined,
+  );
   return {
     ...raw,
     interaction_mode: mode,
     generate: {
-      prompt: raw.generate?.prompt ?? '',
+      prompt: resolvedPrompt,
       prompt_origin: raw.generate?.prompt_origin,
       aspect_ratio: raw.generate?.aspect_ratio ?? '16:9',
       resolution: raw.generate?.resolution ?? '1080p',
@@ -145,7 +174,7 @@ export function writeMediaGeneratePatch(
   if (patch.prompt !== undefined && patch.prompt_origin === undefined) {
     generate.prompt_origin = 'user';
   }
-  return {
+  const next: Record<string, unknown> = {
     ...(config ?? {}),
     interaction_mode:
       current.interaction_mode === 'upload' || current.interaction_mode === 'edit'
@@ -153,6 +182,19 @@ export function writeMediaGeneratePatch(
         : 'generate',
     generate,
   };
+  // Keep final-tool / regenerate seeds in sync so regenerate uses the edited text.
+  if (typeof patch.prompt === 'string') {
+    const text = patch.prompt;
+    next.prompt = text;
+    next.last_approved_prompt = text.slice(0, 4000);
+    next.last_wan_prompt = text.slice(0, 4000);
+    const prevPacket =
+      next.regenerate_packet && typeof next.regenerate_packet === 'object'
+        ? { ...(next.regenerate_packet as Record<string, unknown>) }
+        : {};
+    next.regenerate_packet = { ...prevPacket, prompt: text.slice(0, 4000) };
+  }
+  return next;
 }
 
 export function writeMediaUploadPatch(

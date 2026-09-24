@@ -11,6 +11,34 @@ from __future__ import annotations
 from typing import Any
 
 
+def _image_limit_clause() -> str:
+    try:
+        from jiuwenswarm.server.runtime.designer.audio_locks import (
+            image_prompt_limit_guidance,
+        )
+
+        return image_prompt_limit_guidance()
+    except Exception:  # noqa: BLE001
+        return (
+            "IMAGE PROMPT LIMIT: follow the configured image backend's documented "
+            "prompt length."
+        )
+
+
+def _video_limit_clause() -> str:
+    try:
+        from jiuwenswarm.server.runtime.designer.audio_locks import (
+            video_prompt_limit_guidance,
+        )
+
+        return video_prompt_limit_guidance()
+    except Exception:  # noqa: BLE001
+        return (
+            "VIDEO PROMPT LIMIT: follow the configured video backend's documented "
+            "prompt length."
+        )
+
+
 def hollywood_leaf_instructions(role: str) -> str:
     """Compact continuity bible for leaf agents — no scene-genre hardcodes."""
     r = str(role or "").strip().lower()
@@ -18,74 +46,112 @@ def hollywood_leaf_instructions(role: str) -> str:
         "You are a leaf craft artist under a film hierarchy: "
         "Supervisor = Director (creative authority: brief, storyboard, shot prompts); "
         "Manager = Producer (gates, budgets, identity/spatial consistency checks). "
-        "You MUST read BRIEF + STORYBOARD and obey the Director's on_screen cast + setting_id. "
+        "You MUST read the STORYBOARD (and BRIEF only when you are the storyboard leaf) "
+        "and obey the Director's on_screen cast + setting_id. "
         "If vision tools exist, inspect upstream sheets/scene/prior KF and reconcile conflicts "
         "toward the storyboard (never invent a new cast or set).\n"
         "Non-negotiables:\n"
-        "1) BRIEF + STORYBOARD + PRODUCTION LOCK BIBLE first — call read_upstream on "
-        "n_brief and n_storyboard BEFORE any image/video tool. Obey style, landmarks, "
+        "1) STORYBOARD + PRODUCTION LOCK BIBLE first — call read_upstream on "
+        "n_storyboard BEFORE any image/video tool. Clips and stills do not re-read the full "
+        "brief; the storyboard already carries the beat. Obey style, landmarks, "
         "lighting, crowd, speech_line, on_screen cast, setting_id.\n"
         "2) CAST IDENTITY: one body per character id; match wardrobe/face from the FEW attached "
         "solo sheets only. Never swap heroes; never clone one face onto two bodies. "
         "Do not request extra solo sheets for background people.\n"
         "3) SET: same setting_id → same architecture, furniture, window/wall layout, light side, "
-        "and landmark screen-side (never teleport pulpit/table/windows).\n"
+        "and landmark screen-side (never teleport landmarks).\n"
         "4) STYLE: obey style_lock / LOCK BIBLE for the entire film; "
+        "unspecified medium → photoreal cinematic STYLE LOCK (not soft HOLD alone); "
         "no mid-film medium switch (3D<->2D<->photoreal).\n"
-        "5) BLOCKING: honor zones + landmark; featured subjects face the landmark/action focus.\n"
-        "6) SCREEN AXIS: keep L/R seats stable under pans (180-degree). Do not flip who is left/right.\n"
-        "7) SETTING MASTER: first KF of a setting places ALL named cast clearly visible. "
-        "Later edits reframe that master — keep must_appear people unless exiting. "
-        "Solos = few identity refs only; no empty scene plate. "
-        "Occlusion of a placed person keeps the same sex/age/wardrobe.\n"
+        "5) BLOCKING: honor zones + landmark + CONTACT (bodies on supports, never "
+        "through furniture/props); featured subjects face the landmark/action focus. "
+        "Pose/placement come from THIS storyboard row — never invent sit/stand defaults.\n"
+        "6) SCREEN AXIS: keep L/R placement stable under pans (180-degree). Do not flip who is left/right.\n"
+        "7) SETTING MASTER: empty scene plate + identity solos. First clip of the setting "
+        "plays the storyboard open; later same-setting clips continue from structured "
+        "continuity (already_done / pose_holds / seat_anchors / forbidden_speech / end_state) "
+        "— never from raw prior Wan paragraphs. "
+        "Only name on_screen / returned cast. If someone left the setting, omit them from every "
+        "later same-setting prompt until the storyboard returns them. Never spawn unnamed extras.\n"
         "8) LANGUAGE: use storyboard speech_line exactly (empty = silent — do not invent lines).\n"
         "9) ASPECT: obey film aspect_lock on every still/clip.\n"
         "10) IMAGE-N: if references exist, name Image 1, Image 2… in attach order in your prompt.\n"
         "11) Finish with designer_node_complete(text=<FINAL visual-model prompt only>). "
-        "The pipeline materializes that text via call_image_model / call_video_model — "
-        "make it shot-ready, not a memo.\n"
+        "The pipeline materializes media from that text — make it shot-ready, not a memo.\n"
+        f"12) {_image_limit_clause()}\n"
+        f"13) {_video_limit_clause()}\n"
     )
     if r in {"character", "character_design"}:
         return (
             shared
-            + "ROLE=character sheet: PLAIN studio portrait, seamless neutral backdrop, "
-            "NO room furniture, NO set, NO text overlays. Lock face/hair/body/wardrobe only."
+            + "ROLE=character sheet. Write ONE positive Qwen-ready studio portrait prompt "
+            "from the locks (name, wardrobe, style, aspect). Plain empty backdrop, one person. "
+            "Fold wardrobe into 'wearing …' prose — no LOCK banners, no forbid lists, no examples. "
+            "Then call_image_model with that prompt only. Finish with designer_node_complete "
+            "preferring the PNG uri (text notes are optional debug only)."
         )
     if r == "scene":
         return (
             shared
-            + "ROLE=environment plate: empty set (no featured-cast faces). "
-            "Architecture + materials + light direction freeze for later keyframes."
+            + "ROLE=empty scene plate. Write ONE positive Qwen-ready environment prompt "
+            "from the locks (place, lighting/time-of-day, style, aspect, props). "
+            "Furniture, walls, windows, light, and props as a clear empty room. "
+            "No LOCK banners, no forbid lists, no examples. "
+            "Then call_image_model with that prompt only. Finish with designer_node_complete "
+            "preferring the PNG uri (text notes are optional debug only)."
         )
     if r in {"frame", "keyframe"}:
         return (
             shared
-            + "ROLE=keyframe still. "
-            "If strategy=compose_from_solo_refs: GENERATE the setting from storyboard/"
-            "style_lock AND place every ensemble cast solo into that still — NO empty "
-            "scene-plate node; solos = identity only. "
-            "If strategy=edit_prior_keyframe: prior KF is Image 1 — REPOSE/reframe/zoom/pose; "
-            "keep architecture + remaining ensemble unless exiting. "
-            "PROMPT ORDER: REPOSE FIRST, THEN identity. "
-            "New setting_id → new compose (do not edit across settings). "
-            "If vision unavailable, use storyboard text — no VQA retries. "
-            "Forbid cutout/paste collage; integrated lighting and floor contact."
+            + "ROLE=keyframe still (legacy graphs only). "
+            "Prefer scene-card + clip reference mode when available."
+        )
+    if r in {"storyboard", "brief"}:
+        return (
+            shared
+            + "ROLE=storyboard/brief. The BRIEF is your source. Turn it into timed shots with "
+            "setting_id, on_screen, offscreen, cast_actions, camera, and speech. "
+            "Downstream clips read the storyboard — not the raw brief."
         )
     if r == "clip":
         return (
             shared
-            + "ROLE=I2V clip: Image 1 = this shot's keyframe. Motion/camera creativity OK — "
-            "but you are LOCKED to Image 1's cast, sex/identity, wardrobe, set, and props. "
-            "If previous_clip_action / occupancy.must_appear exist: people who did NOT "
-            "leave must still be present; do not erase them. "
-            "Brand logos/mascots stay on phone/app UI if that is how the keyframe shows them — "
-            "FORBIDDEN: invent a free-flying mascot or swap the human hero for another sex. "
-            "Obey Director camera_framing_rule / on_camera vs off_camera lists. "
-            "I2V is first-frame only (no extra solo/scene Omni refs). "
-            "If vision exists, inspect once; if unavailable, use storyboard text — no VQA retries. "
-            "Keep STYLE HOLD + continuity guide + motion_detail/speech_line at the top."
+            +             "ROLE=clip. Write ONE concise positive story-form video prompt "
+            "(Wan / Seedance / MiniMax-H3).\n"
+            "FORM (locks folded into narrative — faithful, general, no examples):\n"
+            "The scene is as in Image N: <place>. Scene description: <lighting/props from bible>.\n"
+            "<Name> from Image k, wearing <wardrobe lock>, <placement from seat_anchors>, "
+            "in the scene from Image N, is <cast_action / storyboard beat>. "
+            "Name only people who are on_screen or partially visible this shot. "
+            "Omit exited cast entirely until the storyboard returns them. "
+            "The camera <one move>. <Speaker> says: \"<this shot's line>\".\n"
+            "PRIORITY: (1) this storyboard beat + camera visibility from occupancy, "
+            "(2) wardrobe + placement folded into those sentences, (3) same-setting continue "
+            "from structured continuity fields only — never paste prior Wan text "
+            "into call_video_model; never restage finished speech/action.\n"
+            "OPENING HOLDS: if pose_holds / beat_done / crowd_state exist, open the prompt "
+            "already past those beats (e.g. already facing the landmark; crowd already gone "
+            "or still in background). Never restage a finished turn/exit/onset unless THIS "
+            "storyboard row asks to repeat it.\n"
+            "Clip API call rules: positive sentences only — no forbid, no 'do not', no already-done, "
+            "no STYLE LOCK banners, no worked examples, no sit/stand defaults.\n"
+            + _wan_leaf_extra()
         )
     return shared
+
+
+def _wan_leaf_extra() -> str:
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+            wan_leaf_skill_block,
+        )
+
+        return wan_leaf_skill_block(role="clip")
+    except Exception:  # noqa: BLE001
+        return (
+            "CONTACT: bodies never intersect furniture/props; when the beat uses a support "
+            "surface, weight rests ON it. Solo sheets are identity — repose for the beat."
+        )
 
 
 def collect_production_context(
@@ -104,8 +170,8 @@ def collect_production_context(
         return t[:n] if t else ""
 
     return {
-        "brief_excerpt": _trim(brief_text, 1600),
-        "storyboard_excerpt": _trim(storyboard_text, 2200),
+        "brief_excerpt": _trim(brief_text, 2800),
+        "storyboard_excerpt": _trim(storyboard_text, 3200),
         "continuity_guide": _trim(continuity_guide, 1200),
         "skill_excerpt": _trim(skill_excerpt, 900),
         "current_generate_prompt": _trim(generate_prompt, 1200),

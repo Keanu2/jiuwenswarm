@@ -37,17 +37,6 @@ def _clamp_list(items: list[Any], limit: int) -> list[Any]:
     return items[: max(1, min(limit, len(items) or 1))]
 
 
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-
-
-def _is_cjk_heavy(text: str) -> bool:
-    """CJK prose needs different beat thresholds: one glyph carries a whole word."""
-    stripped = re.sub(r"\s+", "", text or "")
-    if not stripped:
-        return False
-    return len(_CJK_RE.findall(stripped)) * 2 >= len(stripped)
-
-
 def _title_case_label(raw: str) -> str:
     cleaned = re.sub(r"\s+", " ", raw.strip())
     if not cleaned:
@@ -220,6 +209,33 @@ def resolve_cast_token_list(
     return out
 
 
+_LEADING_ARTICLE = re.compile(r"^(?:the|a|an|his|her|their)\s+", re.I)
+_ROLE_STEMS = frozenset(_ROLE_NOUNS.split("|"))
+
+
+def _cast_identity_key(name: str) -> str:
+    """Fold 'The father' / 'Father' / \"Father's\" onto one key. Keep 'Man 2' distinct."""
+    key = re.sub(r"\s+", " ", str(name or "").strip().lower())
+    key = _LEADING_ARTICLE.sub("", key)
+    key = re.sub(r"['’]s\b", "", key).strip()
+    return key
+
+
+def _role_stem(name: str) -> str:
+    key = _cast_identity_key(name)
+    parts = [p for p in key.split() if p]
+    if not parts:
+        return ""
+    if parts[-1] in _ROLE_STEMS:
+        return parts[-1]
+    return ""
+
+
+def _is_cast_variant(key: str) -> bool:
+    """Numbered or exiting duplicates are different people, not article aliases."""
+    return bool(re.search(r"(?:^|\s)(?:\d+|leaving)$", key))
+
+
 def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
     """General cast extraction from role nouns / a|the X phrases."""
     text = prompt.strip()
@@ -227,16 +243,52 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
     used: set[str] = set()
 
     def add(name: str, desc: str) -> None:
-        key = name.lower()
-        if key in used or not name.strip():
+        raw = str(name or "").strip()
+        key = _cast_identity_key(raw)
+        if not key or key in used:
             return
+        display = _title_case_label(_LEADING_ARTICLE.sub("", raw)) or raw
+        if _is_cast_variant(key):
+            used.add(key)
+            found.append(
+                {
+                    "id": f"char_{len(found) + 1}",
+                    "name": display,
+                    "description": desc[:300],
+                    "match_terms": _match_terms_for_character(display, desc),
+                }
+            )
+            return
+        stem = _role_stem(display)
+        if stem:
+            for existing in found:
+                ek = _cast_identity_key(str(existing.get("name") or ""))
+                if _is_cast_variant(ek) or _role_stem(str(existing.get("name") or "")) != stem:
+                    continue
+                # "Father" / "The father", or bare "Child" vs "Young child".
+                if ek != key and ek != stem and key != stem:
+                    continue
+                aliases = [str(a) for a in (existing.get("aliases") or []) if str(a)]
+                if display not in aliases and display.lower() != str(existing.get("name") or "").lower():
+                    aliases.append(display)
+                    existing["aliases"] = aliases
+                if key != stem and len(key) > len(ek):
+                    existing["name"] = display
+                    existing["match_terms"] = _match_terms_for_character(
+                        display, str(existing.get("description") or desc)
+                    )
+                used.add(key)
+                used.add(ek)
+                return
         used.add(key)
+        if stem:
+            used.add(stem)
         found.append(
             {
                 "id": f"char_{len(found) + 1}",
-                "name": name,
+                "name": display,
                 "description": desc[:300],
-                "match_terms": _match_terms_for_character(name, desc),
+                "match_terms": _match_terms_for_character(display, desc),
             }
         )
 
@@ -276,7 +328,7 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
             r"\b(?:his|her|their)\s+date\b", match.group(0), flags=re.I
         ):
             continue
-        if label.lower() in used and role.lower() == "man":
+        if _cast_identity_key(label) in used and role.lower() == "man":
             continue
         add(label, clause or f"{label} from the user prompt")
         if len(found) >= _MAX_CHARS:
@@ -293,7 +345,7 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
         if role in {"person", "people", "guy", "date"}:
             continue
         label = _title_case_label(phrase)
-        if label.lower() in used:
+        if _cast_identity_key(label) in used:
             continue
         if len(label.split()) > 3:
             continue
@@ -364,18 +416,10 @@ def _split_prompt_beats(prompt: str) -> list[str]:
     if not text:
         return ["Establish the scene"]
 
-    cjk = _is_cjk_heavy(text)
-    # CJK carries no word boundaries, so \b cues never fire on Chinese prose.
-    min_beat_len = 5 if cjk else 8
-    merge_below = 10 if cjk else 25
     # Do not use bare \bnext\b — it false-splits on "next to her".
     split_re = re.compile(
         r"(?:"
-        r"\b(?:and then|after that|finally|afterward|afterwards)\b"
-        r"|(?:紧接着|接着|然后|随后|其后|之后|最后|最终|突然|忽然|"
-        r"画面(?:切换|切至|切到|转向|转为)|镜头(?:切换|切至|切到|转向|摇向)|"
-        r"下一(?:幕|镜|个镜头))"
-        r"|(?<=[。！？；])\s*"
+        r"\b(?:and then|after that|finally|afterward|afterwards|之后|然后|接着)\b"
         r"|\bnext(?:ly)?\s*,"
         r"|\bnext\s+(?:we|shot|scene|beat|the camera)\b"
         r"|\bwhile\s+(?:another|a second|the other)\b"
@@ -388,15 +432,13 @@ def _split_prompt_beats(prompt: str) -> list[str]:
     parts: list[str] = []
     last = 0
     for m in split_re.finditer(text):
-        if m.start() < last:
-            continue
-        left = text[last : m.start()].strip(" ,.，。")
-        if left and len(left) > min_beat_len:
+        left = text[last : m.start()].strip(" ,.")
+        if left and len(left) > 8:
             parts.append(left)
         cue = m.group(0).strip().lower()
         last = m.start() if re.search(r"\b(?:pan|cut)\b", cue) else m.end()
-    tail = text[last:].strip(" ,.，。")
-    if tail and len(tail) > min_beat_len:
+    tail = text[last:].strip(" ,.")
+    if tail and len(tail) > 8:
         parts.append(tail)
 
     merged: list[str] = []
@@ -414,16 +456,10 @@ def _split_prompt_beats(prompt: str) -> list[str]:
         ):
             merged[-1] = f"{merged[-1]}, {part}"
             continue
-        if merged and len(part) < merge_below:
+        if merged and len(part) < 25:
             merged[-1] = f"{merged[-1]} {part}"
             continue
         merged.append(part)
-
-    if len(merged) < 2 and cjk:
-        # Long Chinese paragraph with no terminators: comma clauses are the beats.
-        clauses = [c.strip() for c in re.split(r"[，,、；;]", text) if len(c.strip()) > 8]
-        if len(clauses) >= 2:
-            merged = clauses
 
     if len(merged) < 2:
         beats: list[str] = []
@@ -542,7 +578,7 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
             if ranked and ranked[0][0] > 0:
                 shot["character_ids"] = [ranked[0][1]]
             # else leave empty — fail closed; Supervisor/Manager must fill on_screen
-    return _fold_shots_to_budget(shots, max(1, min(_MAX_SHOTS, shot_ceiling)))
+    return _clamp_list(shots, min(_MAX_SHOTS, shot_ceiling))
 
 
 def _heuristic_scenes(prompt: str) -> list[dict[str, str]]:
@@ -550,7 +586,7 @@ def _heuristic_scenes(prompt: str) -> list[dict[str, str]]:
     lower = prompt.lower()
     # Capture the place word itself — no genre templates.
     place_re = re.compile(
-        r"\b(?:in|at|inside|outside|near|from)\s+(?:a|an|the|his|her|their)?\s*"
+        r"\b(?:in|at|on|inside|outside|near|from)\s+(?:a|an|the|his|her|their)?\s*"
         r"([a-z][a-z\-]*(?:\s+[a-z][a-z\-]*){0,2})\b",
         flags=re.I,
     )
@@ -643,34 +679,6 @@ def _select_shots_for_budget(
     return selected
 
 
-def _fold_shots_to_budget(
-    shots: list[dict[str, Any]], budget: int
-) -> list[dict[str, Any]]:
-    """Fit shots into budget by folding trailing beats into the last kept shot.
-
-    Dropping beats would silently lose story the user wrote, so the overflow is
-    appended instead of discarded.
-    """
-    if budget < 1 or len(shots) <= budget:
-        return list(shots)
-    kept = [dict(s) for s in shots[:budget]]
-    tail = shots[budget:]
-    last = kept[-1]
-    extra = " ".join(str(s.get("action") or "") for s in tail).strip()
-    if extra:
-        last["action"] = f"{str(last.get('action') or '')} {extra}".strip()[:800]
-        last["keyframe_prompt"] = str(last["action"])[:1200]
-    ids = list(last.get("character_ids") or [])
-    for shot in tail:
-        for cid in shot.get("character_ids") or []:
-            if cid not in ids:
-                ids.append(cid)
-    last["character_ids"] = ids
-    for i, shot in enumerate(kept, start=1):
-        shot["shot_index"] = i
-    return kept
-
-
 def _supervisor_pipeline_decisions(
     prompt: str,
     characters: list[dict[str, Any]],
@@ -734,13 +742,17 @@ def _heuristic_lean_shot(
     characters: list[dict[str, Any]],
     *,
     story_name: str = "",
+    setting_id: str = "set_1",
 ) -> dict[str, Any]:
-    """One full-narrative beat: no LLM → prefer a single KF/clip over naive multi-beat split."""
+    """One full-narrative beat: no LLM → one scene card + one clip (no keyframe)."""
     from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
 
     all_ids = [str(c.get("id")) for c in characters if str(c.get("id") or "").strip()]
     title = (story_name or derive_shot_name({"title": "", "action": prompt}, fallback_index=1))[:80]
     body = _strip_prompt_filler(prompt)[:1200] or prompt[:1200]
+    cast_actions = {
+        cid: body[:180] for cid in all_ids[:3]
+    }
     return {
         "shot_index": 1,
         "title": title or "Full narrative",
@@ -752,14 +764,48 @@ def _heuristic_lean_shot(
         "ensemble_cast_ids": list(all_ids),
         "offscreen": [],
         "keyframe_prompt": body[:1200],
-        "setting_id": "set_1",
+        "setting_id": str(setting_id or "set_1").strip() or "set_1",
         "timeline": "0-8s",
+        "cast_actions": cast_actions,
         "occupancy": {
             "must_appear": list(all_ids),
             "offscreen": [],
-            "cast_actions": {},
+            "cast_actions": cast_actions,
         },
     }
+
+
+def _assign_heuristic_setting_ids(
+    shots: list[dict[str, Any]],
+    scenes: list[dict[str, Any]],
+) -> None:
+    """Stamp setting_id on heuristic shots so each unique place becomes a Scene N card."""
+    if not shots:
+        return
+    scene_ids = [
+        str(s.get("id") or f"set_{i}").strip() or f"set_{i}"
+        for i, s in enumerate(scenes or [], start=1)
+    ] or ["set_1"]
+    # Normalize scene ids used as setting keys.
+    for i, sc in enumerate(scenes or []):
+        if isinstance(sc, dict) and not str(sc.get("id") or "").strip():
+            sc["id"] = scene_ids[i] if i < len(scene_ids) else f"set_{i + 1}"
+    for i, shot in enumerate(shots):
+        if not isinstance(shot, dict):
+            continue
+        if str(shot.get("setting_id") or "").strip():
+            continue
+        action = str(shot.get("action") or shot.get("title") or "").lower()
+        matched = ""
+        for sc in scenes or []:
+            if not isinstance(sc, dict):
+                continue
+            name = str(sc.get("name") or "").strip().lower()
+            sid = str(sc.get("id") or "").strip()
+            if name and name in action and sid:
+                matched = sid
+                break
+        shot["setting_id"] = matched or scene_ids[min(i, len(scene_ids) - 1)]
 
 
 def heuristic_analysis(prompt: str) -> dict[str, Any]:
@@ -770,6 +816,10 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
     prompt = _strip_reference_appendix(prompt)
     characters = _heuristic_characters(prompt)
     scenes = _heuristic_scenes(prompt)
+    # Align scene ids with setting_id keys used by smart_graph scene cards.
+    for i, sc in enumerate(scenes):
+        if isinstance(sc, dict):
+            sc["id"] = str(sc.get("id") or f"set_{i + 1}").strip() or f"set_{i + 1}"
     audio = detect_audio_intent(prompt)
     lower = prompt.lower()
     if any(
@@ -786,31 +836,39 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
 
     story_name = derive_story_name(prompt=prompt)
     explicit = 0
-    beats = 1
     try:
         from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
             _explicit_shot_count_from_prompt,
-            count_narrative_beats,
         )
 
         explicit = int(_explicit_shot_count_from_prompt(prompt) or 0)
-        beats = int(count_narrative_beats(prompt) or 1)
     except Exception:  # noqa: BLE001
         explicit = 0
-        beats = 1
 
-    # No LLM: explicit N-shot / N分镜 wins, else follow the beats the prompt itself
-    # describes. A multi-beat story must not collapse into one keyframe just
-    # because the opening LLM call failed.
-    budget = explicit if explicit >= 2 else beats
-    if budget >= 2:
-        shots = _fold_shots_to_budget(
-            _heuristic_shots(prompt, characters), max(1, min(_MAX_SHOTS, budget))
-        )
+    primary_setting = str((scenes[0] or {}).get("id") or "set_1") if scenes else "set_1"
+
+    # No LLM: default to ONE scene card + ONE clip (Wan reference mode: solos + scene refs).
+    # Explicit N-shot / N分镜 is the only general multi-shot escape hatch.
+    if explicit >= 2:
+        shots = _heuristic_shots(prompt, characters)
         decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
-        decisions["target_shot_count"] = len(shots)
+        decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
+        shots = _select_shots_for_budget(
+            shots, int(decisions["target_shot_count"]), characters
+        )
+        for i, shot in enumerate(shots, start=1):
+            shot["shot_index"] = i
+        decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
+        decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
+        if len(shots) > explicit:
+            shots = shots[:explicit]
+        _assign_heuristic_setting_ids(shots, scenes)
     else:
-        shots = [_heuristic_lean_shot(prompt, characters, story_name=story_name)]
+        shots = [
+            _heuristic_lean_shot(
+                prompt, characters, story_name=story_name, setting_id=primary_setting
+            )
+        ]
         n_chars = len(characters)
         decisions = {
             "target_shot_count": 1,
@@ -828,9 +886,11 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         "scenes": scenes,
         "shots": shots,
         "audio": audio,
+        "skip_scene_plate": False,
+        "scene_continuity_mode": "scene_card_plus_clip_shots",
         "summary": (
             f"{len(characters)} characters, {len(scenes)} scenes, {len(shots)} shots, "
-            f"cast={decisions['cast_layout']}, lean={budget < 2}"
+            f"cast={decisions['cast_layout']}, lean={explicit < 2}, scene_cards=on"
         ),
         **decisions,
     }
@@ -911,16 +971,16 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 def _prompt_mentions_duration(prompt: str) -> tuple[bool, int | None]:
-    """Detect short-clip / duration cues; return (is_short_clip, target_duration_sec)."""
+    """Detect duration cues; return (fits_in_one_wan_clip, target_duration_sec)."""
+    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        WAN_MAX_CLIP_SEC,
+        requested_film_duration_sec,
+    )
+
+    dur = requested_film_duration_sec(prompt)
+    if dur is not None:
+        return dur <= WAN_MAX_CLIP_SEC, dur
     low = (prompt or "").lower()
-    m = re.search(r"\b(\d{1,2}(?:\.\d+)?)\s*-?\s*sec(?:ond)?s?\b", low)
-    if m:
-        try:
-            sec = int(round(float(m.group(1))))
-        except (TypeError, ValueError):
-            sec = None
-        if sec is not None and 1 <= sec <= 30:
-            return True, sec
     if re.search(r"\b(short|one[- ]shot|single[- ]shot|movie clip|6s)\b", low):
         return True, 6
     return False, None
@@ -1131,7 +1191,8 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         "scenes": norm_scenes,
         "shots": norm_shots,
         "audio": audio,
-        "skip_scene_plate": bool(parsed.get("skip_scene_plate", True)),
+        "skip_scene_plate": False,
+        "scene_continuity_mode": "scene_card_plus_clip_shots",
         "summary": str(parsed.get("summary") or "")[:500]
         or f"{len(norm_chars)} characters, {len(norm_shots)} shots",
         **decisions,
@@ -1162,25 +1223,39 @@ async def analyze_creative_brief(
     try:
         from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool
 
-        shot_count_rule = (
-            "YOU decide target_shot_count (soft prefer ≤8, hard max 16; typical 1–6). "
-            "One clip = one continuous beat — no rapid scene changes inside a Wan I2V clip. "
-            "Reuse one KF when location/wardrobe/lighting/identity hold and only local "
-            "subject motion or ONE camera move (pan/dolly/push/orbit/static) changes. "
-            "New KF when: hard cut, new setting_id, wardrobe/prop set change, large "
-            "pose/framing jump, or on-screen cast set changes materially. "
-            "Qwen KF: lock identity+wardrobe in the still (entity+scene+light); change "
-            "only pose/action or one camera variable; first setting KF = "
-            "compose_from_solo_refs, later same setting = edit_prior_keyframe; prefer "
-            "≤2–3 people with refs. "
-            "Wan I2V prompt = motion+camera only (image already fixes look); aim ~3–5s "
-            "per clip for stability (up to ~10–15s if motion stays simple). "
-            "Explicit user N-shot / N分镜 is a HARD ceiling. "
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            WAN_MAX_CLIP_SEC,
+            needs_duration_slicing,
+            sequential_shot_count,
         )
-        if short_clip:
-            duration_rule = (
-                f"Film ~{duration_sec}s total: set target_duration_sec={duration_sec}. "
-            )
+
+        shot_count_rule = (
+            "Shots are consecutive TIME windows that concatenate to the film. "
+            "Each shot.action describes ONLY that window — do not paste the user prompt "
+            "into actions and do not restage the whole story from a new camera "
+            "(angle coverage only if the user asked for multi-cam / same-moment angles). "
+            f"One clip = one continuous beat, duration ≤{WAN_MAX_CLIP_SEC}s (Wan max). "
+            "New setting_id / hard cut / wardrobe / on-screen cast change → new shot. "
+            "Qwen KF: lock identity+wardrobe; first setting KF = compose_from_solo_refs, "
+            "later same setting = edit_prior_keyframe; prefer ≤2–3 people with refs. "
+            "Wan prompt = THIS beat's motion+camera only. "
+            "Explicit user N-shot / N分镜 is a HARD ceiling unless requested runtime "
+            f"exceeds {WAN_MAX_CLIP_SEC}s, then use ceil(duration/{WAN_MAX_CLIP_SEC}) "
+            "sequential clips (hard max 16). "
+        )
+        if target_duration_sec:
+            if needs_duration_slicing(prompt):
+                n_clips = sequential_shot_count(int(duration_sec))
+                duration_rule = (
+                    f"Requested runtime {duration_sec}s exceeds Wan max {WAN_MAX_CLIP_SEC}s. "
+                    f"Set target_duration_sec={duration_sec} and target_shot_count={n_clips}. "
+                    f"Use {n_clips} sequential clips of ≤{WAN_MAX_CLIP_SEC}s with contiguous "
+                    "timelines. Each clip covers only its window."
+                )
+            else:
+                duration_rule = (
+                    f"Film ~{duration_sec}s total: set target_duration_sec={duration_sec}. "
+                )
         else:
             duration_rule = ""
         # Compact schema — long prompts make deepseek-flash return prose/empty.
@@ -1204,16 +1279,18 @@ async def analyze_creative_brief(
             '"action":"...","camera":"...","on_screen":["char_1"],'
             '"offscreen":[],"cast_actions":{"char_1":"..."},"featured_cast_ids":["char_1"],'
             '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s"}],'
-            '"skip_scene_plate":true,"target_shot_count":N'
-            + (f',"target_duration_sec":{duration_sec}' if short_clip else "")
+            '"skip_scene_plate":false,"target_shot_count":N'
+            + (f',"target_duration_sec":{duration_sec}' if target_duration_sec else "")
             + "}"
         )
         user_payload = {
             "user_prompt": prompt[:3000],
             "instructions": (
                 "JSON only. Every named human must appear in characters[]. "
-                "Decide shot count wisely (prefer fewer; merge pans/same-cast continuous "
-                "action into one beat). Set target_shot_count = len(shots). "
+                "Shots are consecutive time windows (not camera coverage of the same plot). "
+                "Each action is THAT window in full detail (blocking, speech, wardrobe). "
+                "Do not paste the entire user_prompt into every action. "
+                "Set target_shot_count = len(shots). "
                 "Each shot title MUST be a 2–4 word description of the beat "
                 "(any language; e.g. 'Open Door', 'Quiet Glance', '离开房间') — never 'Shot 1'."
             ),
@@ -1233,7 +1310,7 @@ async def analyze_creative_brief(
                     '"shots":[{"shot_index":1,"action":"...","camera":"...",'
                     '"character_ids":["char_1"],"ensemble_cast_ids":["char_1"],'
                     '"featured_cast_ids":["char_1"],"setting_id":"set_1",'
-                    '"keyframe_prompt":"...","timeline":"0-5s"}],"skip_scene_plate":true}'
+                    '"keyframe_prompt":"...","timeline":"0-5s"}],"skip_scene_plate":false}'
                 )
                 payload["retry"] = True
             result = await call_model_tool(
@@ -1243,6 +1320,13 @@ async def analyze_creative_brief(
                 max_tokens=32768,
                 images=list(reference_images or []) or None,
             )
+            if result.get("unavailable"):
+                marked = dict(base)
+                marked["source"] = "heuristic"
+                marked["llm_pending"] = False
+                marked["chat_unavailable"] = str(result.get("error") or "402")[:300]
+                logger.info("LLM script analysis unavailable (billing); using heuristic")
+                return marked
             if result.get("fallback"):
                 logger.info("LLM script analysis used local fallback")
                 return None
@@ -1292,8 +1376,11 @@ async def analyze_creative_brief(
             return normalized
 
         # Prefer LLM; one reinforce if first reply empty/non-JSON (max 2 attempts).
+        # A 402 is terminal: do not spend the second attempt on a dead balance.
         first = await asyncio.wait_for(_call(), timeout=max(3.0, float(timeout_sec)))
-        if isinstance(first, dict) and first.get("source") == "llm":
+        if isinstance(first, dict) and (
+            first.get("source") == "llm" or first.get("chat_unavailable")
+        ):
             return first
         remaining = max(8.0, float(timeout_sec) * 0.4)
         second = await asyncio.wait_for(_call(reinforce_json=True), timeout=remaining)

@@ -3,13 +3,12 @@
 
 Quality layout (default, forward-only):
   Brief → Storyboard → solo cast sheets
-  → Keyframes per setting_id (ALL compose from character solos;
-    first KF authors scene bible/prompt; later same-setting KFs receive
-    prompt handoff + hierarchical view locks — never empty plates)
-  → Clips (I2V) + optional Speech/Music → Film (ffmpeg assemble)
+  → Empty scene plate per setting_id (room only, no people)
+  → Clips-as-shots: every clip is Wan R2V from on-screen solos plus that empty plate
+  → optional Speech/Music → Film (ffmpeg assemble)
 
-Empty scene plates are skipped (``skip_scene_plate``). Solo sheets are identity
-locks only. Manager prunes any node that cannot reach ``n_compose`` and re-edits
+``scene_continuity_mode = scene_card_plus_clip_shots``. Solo sheets are identity
+locks. Manager prunes any node that cannot reach ``n_compose`` and re-edits
 Brief / Storyboard / locks afterward.
 """
 
@@ -48,19 +47,13 @@ _IMAGE_SIZE = "1K"  # cost-save: ~1024 class, not 2K/4K
 
 
 def _duration_sec_for_graph(prompt: str, analysis: dict[str, Any], characters: list[dict[str, Any]]) -> int:
-    raw = analysis.get("target_duration_sec")
-    if isinstance(raw, (int, float)) and 1 <= int(raw) <= 30:
-        return int(raw)
-    match = re.search(r"\b(\d{1,2}(?:\.\d+)?)\s*-?\s*sec(?:ond)?s?\b", (prompt or "").lower())
-    if not match:
-        match = re.search(r"(\d{1,2}(?:\.\d+)?)\s*秒", prompt or "")
-    if match:
-        try:
-            sec = int(round(float(match.group(1))))
-        except (TypeError, ValueError):
-            sec = 0
-        if 1 <= sec <= 30:
-            return sec
+    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        film_duration_for_graph,
+    )
+
+    stamped = film_duration_for_graph(prompt, analysis)
+    if stamped >= 1:
+        return stamped
     return max(6, min(24, max(1, len(characters)) * 3 + 4))
 
 
@@ -103,8 +96,14 @@ def apply_runtime_delegate(graph: DesignerExecutionGraph) -> DesignerExecutionGr
         CONFIG_DELEGATE_AGENT,
         CONFIG_DELEGATE_HANDLER,
     )
-    from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        chat_model_billing_block,
+        demote_config_to_handler,
+        ensure_chat_model_reachable,
+        llm_available,
+    )
 
+    ensure_chat_model_reachable()
     use_agents = llm_available()
     delegate = CONFIG_DELEGATE_AGENT if use_agents else CONFIG_DELEGATE_HANDLER
     for node in graph.get("nodes") or []:
@@ -123,14 +122,15 @@ def apply_runtime_delegate(graph: DesignerExecutionGraph) -> DesignerExecutionGr
                 config["draft_prewritten"] = config.pop("prewritten")
             elif config.get("prewritten"):
                 config.pop("prewritten", None)
-        elif config.get("force_handler"):
-            config["delegate"] = CONFIG_DELEGATE_HANDLER
         else:
-            config["delegate"] = delegate
+            demote_config_to_handler(config)
     meta = dict(graph.get("metadata") or {})
     meta["ai_agent_pipeline"] = use_agents
     meta["runtime_delegate"] = delegate
     meta["all_nodes_agents"] = use_agents
+    block = chat_model_billing_block()
+    if block:
+        meta["chat_model_unavailable"] = block[:300]
     graph["metadata"] = meta
     return normalize_execution_graph(graph)
 
@@ -181,53 +181,6 @@ def find_non_contributing_node_ids(graph: DesignerExecutionGraph) -> list[str]:
             if p not in contributing:
                 stack.append(p)
     return sorted(ids - contributing)
-
-
-def prune_shot_nodes_beyond_analysis(graph: DesignerExecutionGraph) -> list[str]:
-    """Drop extra n_frame_N / n_clip_N whose shot_index is not in script_analysis."""
-    meta = dict(graph.get("metadata") or {})
-    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
-    keep_idx = {
-        int(s.get("shot_index") or 0)
-        for s in (analysis.get("shots") or [])
-        if isinstance(s, dict) and int(s.get("shot_index") or 0) >= 1
-    }
-    if not keep_idx:
-        return []
-    nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
-    pruned: list[str] = []
-    kept: list[dict[str, Any]] = []
-    for node in nodes:
-        nid = str(node.get("id") or "")
-        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        role = str(node_pipeline(node) or "").strip().lower()
-        is_shot_leaf = (
-            role in {NODE_ROLE_FRAME, NODE_ROLE_CLIP, "frame", "keyframe", "clip"}
-            or nid.startswith("n_frame_")
-            or nid.startswith("n_clip_")
-        )
-        if is_shot_leaf:
-            idx = int(cfg.get("shot_index") or 0)
-            if idx >= 1 and idx not in keep_idx:
-                pruned.append(nid)
-                continue
-        kept.append(node)
-    if not pruned:
-        return []
-    drop = set(pruned)
-    graph["nodes"] = kept
-    graph["edges"] = [
-        e
-        for e in (graph.get("edges") or [])
-        if isinstance(e, dict)
-        and str(e.get("source") or "") not in drop
-        and str(e.get("target") or "") not in drop
-    ]
-    notes = list(meta.get("prune_notes") or [])
-    notes.extend([f"pruned_extra_shot:{nid}" for nid in pruned])
-    meta["prune_notes"] = notes[-40:]
-    graph["metadata"] = meta
-    return pruned
 
 
 def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
@@ -342,8 +295,8 @@ def _write_brief_markdown(
         f"**Consistency gates:**\n"
         f"- Character: same face/wardrobe every shot unless brief says change\n"
         f"- Scene: shared architecture/lighting across shot views\n"
-        f"- Motion / continuity: time-coherent (e.g. after a man stands and leaves, "
-        f"later shots must not show him seated again)\n"
+        f"- Motion / continuity: time-coherent across shots "
+        f"(do not undo a completed beat on a later shot)\n"
         f"- Camera: distinct views per shot covering the prompt beats\n\n"
         f"**Duration:** ~{duration}s short film\n\n"
         f"**Visual style:** cinematic, coherent lighting, no subtitles\n\n"
@@ -585,9 +538,9 @@ def _plan_cast_sheets(
                 "identity_source": True,
                 "label": name[:48],
                 "prompt_body": (
-                    f"{name}: {desc}. CLOTHING LOCK: {costume}"
+                    f"{name}: {desc}. Wearing {costume}."
                     if desc
-                    else f"{name}. CLOTHING LOCK: {costume}"
+                    else f"{name}. Wearing {costume}."
                 ),
                 "costume_lock": costume[:320],
             }
@@ -724,8 +677,8 @@ def _combined_aid_nodes_for_shot(
 def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[str]:
     """Safety net: every combined-cast node must be an edge source into the DAG.
 
-    If a combined sheet never sources an edge to a frame/clip/compose/storyboard,
-    wire it to ``n_frame_1`` (or ``n_compose`` if no frames) and append to that
+    If a combined sheet never sources an edge to a scene/clip/compose/storyboard,
+    wire it to ``n_clip_1`` (then scene / compose / legacy frame) and append to that
     target's ``config.inputs``.
     """
     notes: list[str] = []
@@ -737,11 +690,13 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
         return notes
 
     sink_roles = {
+        NODE_ROLE_SCENE,
         NODE_ROLE_FRAME,
         "keyframe",
         NODE_ROLE_CLIP,
         NODE_ROLE_COMPOSE,
         NODE_ROLE_STORYBOARD,
+        "scene",
         "frame",
         "clip",
         "compose",
@@ -757,7 +712,8 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
         trole = node_pipeline(by_id[t])
         if (
             trole in sink_roles
-            or t in {"n_compose", "n_storyboard"}
+            or t in {"n_compose", "n_storyboard", "n_scene"}
+            or t.startswith("n_scene_")
             or t.startswith("n_frame_")
             or t.startswith("n_clip_")
         ):
@@ -769,21 +725,30 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
         if bool((node.get("config") or {}).get("combined_cast"))
         or sheet_id.startswith("n_cast_")
     ]
-    has_frame_1 = "n_frame_1" in ids
     has_compose = "n_compose" in ids or any(
         node_pipeline(by_id[i]) == NODE_ROLE_COMPOSE
         for i in ids
     )
-    fallback = "n_frame_1" if has_frame_1 else (
-        "n_compose" if "n_compose" in ids else next(
+    fallback = next(
+        (
+            cand
+            for cand in (
+                "n_clip_1",
+                "n_scene_1",
+                "n_scene",
+                "n_frame_1",
+                "n_compose",
+            )
+            if cand in ids
+        ),
+        next(
             (
                 i
                 for i in sorted(ids)
-                if node_pipeline(by_id[i])
-                == NODE_ROLE_COMPOSE
+                if node_pipeline(by_id[i]) == NODE_ROLE_COMPOSE
             ),
             None,
-        )
+        ),
     )
     if not fallback and not has_compose:
         return notes
@@ -928,8 +893,12 @@ def build_smart_video_graph(
     from jiuwenswarm.server.runtime.designer.experiments.keyframe_policy import (
         apply_compose_solos_setting_policy,
     )
-    from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        ensure_chat_model_reachable,
+        llm_available,
+    )
 
+    ensure_chat_model_reachable()
     if ai_mode is None:
         ai_mode = llm_available()
     prompt_text = prompt.strip()
@@ -937,17 +906,15 @@ def build_smart_video_graph(
     from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
 
     analysis = ensure_audio_locks_on_analysis(dict(analysis or {}), prompt_text)
-    # A named director style can require multiple beats (e.g. final_frame_reverse
-    # is never a single take) — grow the skeleton before nodes are built.
+    analysis["user_prompt"] = prompt_text
     try:
-        from jiuwenswarm.server.runtime.designer.video_styles import (
-            enforce_style_shot_floor,
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            apply_shot_scope,
         )
 
-        analysis = enforce_style_shot_floor(analysis, prompt_text)
+        analysis = apply_shot_scope(analysis, prompt_text)
     except Exception:  # noqa: BLE001
         pass
-    analysis["user_prompt"] = prompt_text
     from jiuwenswarm.server.runtime.designer.node_labels import (
         derive_shot_name,
         derive_story_name,
@@ -955,7 +922,7 @@ def build_smart_video_graph(
         label_character,
         label_clip,
         label_compose,
-        label_shot,
+        label_scene,
         label_storyboard,
     )
 
@@ -1006,11 +973,19 @@ def build_smart_video_graph(
     characters = list(analysis.get("characters") or characters)
     scenes = list(analysis.get("scenes") or scenes)
     shots = list(analysis.get("shots") or shots)
-    # Continuity: NEVER build empty scene plates. Every KF composes from solos;
-    # first KF/setting authors scene bible; later same-set KFs get prompt handoff.
-    skip_scene_plate = True
-    analysis["skip_scene_plate"] = True
-    analysis["scene_continuity_mode"] = "compose_solos_shared_scene_prompt"
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+            ensure_shot_start_end_states,
+        )
+
+        shots = ensure_shot_start_end_states(shots)
+        analysis["shots"] = shots
+    except Exception:  # noqa: BLE001
+        pass
+    # Continuity: empty scene plates + on-screen solos; storyboard start/end owns continuity.
+    skip_scene_plate = False
+    analysis["skip_scene_plate"] = False
+    analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
 
     # Quality path: solo identity sheets only — keyframes compose multi-person.
     prefer_combined = False
@@ -1028,14 +1003,22 @@ def build_smart_video_graph(
         duration_sec=film_duration,
     )
     storyboard_md = _write_storyboard_markdown(shots, characters)
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.production_bible import (
+            append_bible_to_markdown,
+            build_production_bible,
+        )
+
+        bible = build_production_bible(analysis, user_prompt=prompt_text)
+        analysis["production_bible"] = bible
+        brief_md = append_bible_to_markdown(brief_md, bible)
+        storyboard_md = append_bible_to_markdown(storyboard_md, bible)
+    except Exception:  # noqa: BLE001
+        pass
 
     graph_id = new_graph_id()
     now = utc_now_ms()
     graph_title = title.strip() if isinstance(title, str) and title.strip() else prompt_text[:80]
-    speed = (
-        "Be fast: one clear image, simple clean background, no grid, no text overlays. "
-        "Prioritize identity lock over ornate detail."
-    )
 
     nodes: list[dict[str, Any]] = [
         {
@@ -1057,9 +1040,10 @@ def build_smart_video_graph(
                 "skill_id": "brief",
                 "delegate": ("agent" if ai_mode else "handler"),
                 "supervisor_task": (
-                    "Author a detailed creative brief from the user prompt: cast identity locks, "
-                    "scene geography, motion/continuity rules, shot-view coverage, audio policy. "
-                    "Preserve every named beat from the user prompt."
+                    "Author a DETAILED creative brief from the user prompt: every named "
+                    "character with wardrobe/face locks, scene geography, language/speech, "
+                    "opening blocking, motion/continuity rules, shot-view coverage, audio. "
+                    "Preserve every named beat. Obey and include the PRODUCTION LOCK BIBLE."
                 ),
             },
             "layout": {"x": 40, "y": 220, "width": 260, "height": 140},
@@ -1079,9 +1063,11 @@ def build_smart_video_graph(
         "skill_id": "storyboard",
         "delegate": ("agent" if ai_mode else "handler"),
         "supervisor_task": (
-            "Build a time-coherent storyboard from the approved brief: shot duration, "
-            "camera/view, cast on screen, action, and continuity forbids "
-            "(e.g. after standing/leaving, do not reseat the same man)."
+            "Build a time-coherent DETAILED storyboard from the approved brief: "
+            "per-shot duration, camera/view, on-screen cast, full blocking/action, "
+            "exact speech_line, language lock, continuity forbids "
+            "(do not undo a completed beat). Each row is THAT window in full detail — "
+            "not a camera restage of the whole prompt, and not a stripped one-liner."
         ),
     }
     if ai_mode:
@@ -1103,6 +1089,17 @@ def build_smart_video_graph(
     )
     edges.append(_edge("e_brief_storyboard", "n_brief", "n_storyboard"))
 
+    from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+        ensure_photoreal_style_lock,
+    )
+    from jiuwenswarm.server.runtime.designer.media_model_playbook import style_lock_clause
+
+    film_style = ensure_photoreal_style_lock(
+        analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else None,
+        prompt=prompt_text,
+    )
+    film_style_line = (style_lock_clause(film_style) or "").strip()
+
     char_node_ids: list[str] = []
     sheet_by_id: dict[str, dict[str, Any]] = {}
     for i, sheet in enumerate(cast_sheets, start=1):
@@ -1113,13 +1110,38 @@ def build_smart_video_graph(
         # Namecard: character display name (Manager-approved via analysis cast).
         display = (names[0] if names else str(sheet.get("label") or f"Character {i}")).strip()
         label = label_character(i, display)
-        prompt = (
-            f"{speed}\nCANONICAL character identity postcard for "
-            f"{display} — lock face, hair, body type, and costume. "
-            f"Solo sheet only (never group/concat portraits). "
-            f"Do not invent alternate wardrobe. {sheet.get('prompt_body')}. "
-            f"Story context: {prompt_text[:180]}"
+        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            extract_clothing_parts,
         )
+
+        wardrobe_parts = extract_clothing_parts(
+            f"{sheet.get('costume_lock') or ''} {sheet.get('prompt_body') or ''}"
+        )
+        wardrobe = ", ".join(
+            str(v).strip() for v in wardrobe_parts.values() if str(v).strip()
+        )
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+                compose_character_sheet_prompt,
+            )
+
+            seed_cfg = {
+                "role": NODE_ROLE_CHARACTER_DESIGN,
+                "character_name": names[0] if names else display,
+                "character_names": names,
+                "costume_lock": wardrobe or str(sheet.get("costume_lock") or ""),
+                "style_lock": dict(film_style),
+                "image_size": _IMAGE_SIZE,
+            }
+            prompt = compose_character_sheet_prompt(cfg=seed_cfg, graph=None, seed="")
+        except Exception:  # noqa: BLE001
+            prompt = (
+                f"One person only: {display}, full or three-quarter body on a plain "
+                "empty studio backdrop. Solid neutral background, identity and costume only. "
+                + (f"Wearing {wardrobe}. " if wardrobe else "")
+                + (film_style_line + " " if film_style_line else "")
+                + "One clear image."
+            )
         agent = label
         nodes.append(
             {
@@ -1129,6 +1151,7 @@ def build_smart_video_graph(
                 "config": {
                     "role": NODE_ROLE_CHARACTER_DESIGN,
                     "prompt": prompt,
+                    "generate": {"prompt": prompt},
                     "character_id": (sheet["character_ids"][0] if len(sheet["character_ids"]) == 1 else None),
                     "character_ids": list(sheet["character_ids"]),
                     "character_name": (names[0] if names else display),
@@ -1136,6 +1159,7 @@ def build_smart_video_graph(
                     "combined_cast": False,
                     "identity_source": True,
                     "costume_lock": str(sheet.get("costume_lock") or ""),
+                    "style_lock": dict(film_style),
                     "image_size": _IMAGE_SIZE,
                     "max_image_calls": 1,
                     "inputs": ["n_brief", "n_storyboard"],
@@ -1145,6 +1169,12 @@ def build_smart_video_graph(
                     "skill_id": "character",
                     "tools": ["call_image_model", "read_upstream", "call_model"],
                     "delegate": ("agent" if ai_mode else "handler"),
+                    "supervisor_task": (
+                        f"Solo identity sheet for {display}. "
+                        "Write a positive Qwen-ready studio portrait from the locks "
+                        "(face, wardrobe, style, aspect) — no LOCK banners or negatives. "
+                        "Then call_image_model with that prompt only."
+                    ),
                 },
                 "layout": {"x": 680, "y": float(40 + (i - 1) * 160), "width": 240, "height": 140},
             }
@@ -1152,8 +1182,8 @@ def build_smart_video_graph(
         edges.append(_edge(f"e_sb_{nid}", "n_storyboard", nid))
         edges.append(_edge(f"e_brief_{nid}", "n_brief", nid))
 
-    # Spatial lock text (weak env hint only). Empty scene plates are never built —
-    # first KF per setting_id is the scene master (setting + visible cast).
+    # Spatial lock text (weak env hint only). Scene cards are built per setting_id;
+    # clips use them as Wan reference images (last env ref) with solos as character1…
     scene_base = scenes[0] if scenes else {"id": "scene_1", "name": "Setting", "description": ""}
     spatial_lock = default_spatial_lock(scene_base if isinstance(scene_base, dict) else None)
     prior_lock = analysis.get("spatial_lock") if isinstance(analysis.get("spatial_lock"), dict) else {}
@@ -1187,8 +1217,6 @@ def build_smart_video_graph(
         )
 
     master_id = ""
-    scene_node_by_shot: dict[int, str] = {}
-    # skip_scene_plate always True under safer continuity — no n_scene empty plates.
     scene_locks_meta: dict[str, Any] = (
         analysis.get("scene_locks")
         if isinstance(analysis.get("scene_locks"), dict)
@@ -1202,11 +1230,208 @@ def build_smart_video_graph(
     setting_num = {sid: i + 1 for i, sid in enumerate(setting_order)}
     shot_ord_by_setting: dict[str, int] = {sid: 0 for sid in setting_order}
 
-    clip_ids: list[str] = []
-    prev_frame_by_setting: dict[str, str] = {}
+    all_solo_ids = [
+        nid
+        for nid in char_node_ids
+        if not bool(sheet_by_id.get(nid, {}).get("combined_cast"))
+    ] or list(dict.fromkeys(char_node_ids))
+
+    scene_by_id: dict[str, dict[str, Any]] = {}
+    for sc in scenes:
+        if not isinstance(sc, dict):
+            continue
+        for key in (sc.get("id"), sc.get("setting_id")):
+            sid_k = str(key or "").strip()
+            if sid_k:
+                scene_by_id.setdefault(sid_k, sc)
+
+    def _scene_name_for_setting(sid: str) -> str:
+        sc = scene_by_id.get(sid) or {}
+        name = str(sc.get("name") or sc.get("place") or "").strip()
+        if name:
+            return name
+        place = str(setting_places.get(sid) or "").strip()
+        if place:
+            return place
+        for sh in shots:
+            if str(sh.get("setting_id") or "") != sid:
+                continue
+            title = str(sh.get("title") or "").strip()
+            if title:
+                return title
+        return f"Place {setting_num.get(sid, 1)}"
+
+    from jiuwenswarm.server.runtime.designer.script_analysis import (
+        _cast_id_maps,
+        resolve_cast_token_list,
+    )
+
+    _valid_cast, _by_name_cast = _cast_id_maps(characters)
+    id_to_node_early: dict[str, str] = {}
+    for s in cast_sheets:
+        if s.get("combined_cast"):
+            continue
+        ids = [str(x) for x in (s.get("character_ids") or []) if str(x)]
+        if len(ids) == 1 and s.get("node_id"):
+            id_to_node_early[ids[0]] = str(s["node_id"])
+
+    def _ensemble_cids_for_setting(sid: str) -> list[str]:
+        first = next(
+            (
+                sh
+                for sh in shots
+                if (str(sh.get("setting_id") or "set_1").strip() or "set_1") == sid
+            ),
+            None,
+        )
+        raw: list[Any] = []
+        if isinstance(first, dict):
+            occ0 = first.get("occupancy") if isinstance(first.get("occupancy"), dict) else {}
+            raw = list(
+                first.get("on_screen")
+                or first.get("character_ids")
+                or occ0.get("must_appear")
+                or []
+            )
+        if not raw:
+            for sh in shots:
+                if (str(sh.get("setting_id") or "set_1").strip() or "set_1") != sid:
+                    continue
+                raw.extend(sh.get("on_screen") or sh.get("character_ids") or [])
+        return resolve_cast_token_list(raw, valid_ids=_valid_cast, by_name=_by_name_cast)
+
+    scene_id_by_setting: dict[str, str] = {}
     scene_master_by_setting: dict[str, str] = {}
-    prev_clip_by_setting: dict[str, str] = {}
+    for sid in setting_order:
+        scene_num = setting_num.get(sid, 1)
+        scene_nid = f"n_scene_{scene_num}"
+        scene_id_by_setting[sid] = scene_nid
+        scene_master_by_setting[sid] = scene_nid
+        scene_bible_setting = (
+            scene_locks_meta.get(sid)
+            if isinstance(scene_locks_meta.get(sid), dict)
+            else {}
+        )
+        shot_spatial_scene = spatial_by_setting.get(sid) or spatial_lock
+        lock_line_scene = _lock_line_for(sid)
+        scene_name = _scene_name_for_setting(sid)
+        scene_label = label_scene(scene_number=scene_num, scene_name=scene_name)
+        sc_rec = scene_by_id.get(sid) or {}
+        env_desc = str(
+            sc_rec.get("description")
+            or sc_rec.get("name")
+            or setting_places.get(sid)
+            or scene_name
+        ).strip()[:400]
+        ensemble_cids = _ensemble_cids_for_setting(sid)
+        ensemble_nids = [id_to_node_early[c] for c in ensemble_cids if c in id_to_node_early]
+        ensemble_names = [
+            str(c.get("name") or c.get("id"))
+            for c in characters
+            if str(c.get("id")) in set(ensemble_cids)
+        ]
+        first_shot = next(
+            (
+                sh
+                for sh in shots
+                if (str(sh.get("setting_id") or "set_1").strip() or "set_1") == sid
+            ),
+            {},
+        )
+        opening_action = str(
+            (first_shot or {}).get("action") or (first_shot or {}).get("keyframe_prompt") or ""
+        )[:280]
+        opening_cast = ", ".join(ensemble_names) or "named cast"
+        tod: dict[str, str] = {}
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                infer_time_of_day_lock,
+            )
+            from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+                compose_scene_plate_prompt,
+            )
+
+            tod = infer_time_of_day_lock(
+                prompt_text,
+                str(
+                    (scene_bible_setting or {}).get("place")
+                    or env_desc
+                    or ""
+                ),
+            )
+            if isinstance(scene_bible_setting, dict) and scene_bible_setting.get("time_of_day"):
+                tod["time_of_day"] = str(scene_bible_setting.get("time_of_day"))
+            if isinstance(scene_bible_setting, dict) and scene_bible_setting.get("lighting"):
+                tod["lighting"] = str(scene_bible_setting.get("lighting"))
+            seed_cfg = {
+                "role": NODE_ROLE_SCENE,
+                "setting_id": sid,
+                "style_lock": dict(film_style),
+                "scene_bible": {
+                    **(scene_bible_setting or {}),
+                    "place": (scene_bible_setting or {}).get("place") or env_desc,
+                },
+                "spatial_lock": shot_spatial_scene,
+                "time_of_day_lock": tod,
+                "image_size": _IMAGE_SIZE,
+            }
+            scene_prompt = compose_scene_plate_prompt(cfg=seed_cfg, graph=None, seed="")
+        except Exception:  # noqa: BLE001
+            tod = {}
+            scene_prompt = (
+                f"Empty environment plate of {env_desc or sid}: furniture, walls, "
+                "windows, light, and props only. One clear image."
+            )
+            if film_style_line:
+                scene_prompt = film_style_line + " " + scene_prompt
+        _ = (opening_cast, opening_action, ensemble_nids, lock_line_scene)
+        scene_inputs = ["n_brief", "n_storyboard"]
+        nodes.append(
+            {
+                "id": scene_nid,
+                "type": NODE_TYPE_IMAGE,
+                "label": scene_label,
+                "config": {
+                    "role": NODE_ROLE_SCENE,
+                    "setting_id": sid,
+                    "composed_scene": False,
+                    "style_lock": dict(film_style),
+                    "on_screen": [],
+                    "character_ids": [],
+                    "character_node_ids": [],
+                    "cast_names": [],
+                    "scene_bible": scene_bible_setting or None,
+                    "spatial_lock": shot_spatial_scene,
+                    "time_of_day_lock": tod if isinstance(tod, dict) else None,
+                    "is_scene_master": True,
+                    "skip_scene_plate": False,
+                    "generate": {"prompt": scene_prompt},
+                    "prompt": scene_prompt,
+                    "image_size": _IMAGE_SIZE,
+                    "max_image_calls": 1,
+                    "inputs": scene_inputs,
+                    "optimize_for": mode,
+                    "agent_name": scene_label,
+                    "kind": "agent",
+                    "skill_id": "scene",
+                    "tools": ["call_image_model", "read_upstream"],
+                    "delegate": ("agent" if ai_mode else "handler"),
+                    "supervisor_task": (
+                        f"Empty environment plate for setting {sid}. "
+                        "Write a positive Qwen-ready plate prompt from the locks "
+                        "(place, lighting, style, aspect) — no LOCK banners or negatives. "
+                        "Then call_image_model with that prompt only."
+                    ),
+                },
+                "layout": {"x": 940, "y": float(40 + (scene_num - 1) * 180), "width": 240, "height": 140},
+            }
+        )
+        for src in scene_inputs:
+            edges.append(_edge(f"e_{src}_{scene_nid}", src, scene_nid))
+
+    clip_ids: list[str] = []
     prev_clip_global = ""
+    prev_clip_by_setting: dict[str, str] = {}
     camera_cycle = (
         "wide / establishing",
         "medium / eye-level",
@@ -1215,20 +1440,16 @@ def build_smart_video_graph(
     )
     for shot in shots:
         idx = int(shot.get("shot_index") or (len(clip_ids) + 1))
-        frame_id = f"n_frame_{idx}"
         clip_id = f"n_clip_{idx}"
         clip_ids.append(clip_id)
         setting_id = str(shot.get("setting_id") or "set_1").strip() or "set_1"
-        focus_char_nodes = list(
-            dict.fromkeys(shot_cast_nodes.get(str(idx), []))
-        )
-        # Prefer solo identity sheets only — NEVER default to the whole film cast.
+        scene_nid = scene_id_by_setting.get(setting_id) or ""
+        focus_char_nodes = list(dict.fromkeys(shot_cast_nodes.get(str(idx), [])))
         focus_char_nodes = [
             nid
             for nid in focus_char_nodes
             if not bool(sheet_by_id.get(nid, {}).get("combined_cast"))
         ]
-        # Visible / on_screen for THIS shot only — resolve ids OR display names.
         from jiuwenswarm.server.runtime.designer.script_analysis import (
             _cast_id_maps,
             resolve_cast_token_list,
@@ -1255,7 +1476,6 @@ def build_smart_video_graph(
             by_name=_by_name,
         )
         offscreen_cids = [c for c in offscreen_cids if c not in visible_cids]
-        # Compose / edit both draw only visible people; offscreen stay out of frame.
         focus_cids = list(dict.fromkeys(visible_cids))
         featured_cids = [
             str(x)
@@ -1272,8 +1492,6 @@ def build_smart_video_graph(
             if isinstance(shot.get("cast_actions"), dict)
             else (occ0.get("cast_actions") if isinstance(occ0.get("cast_actions"), dict) else {})
         )
-        # Do NOT expand on_screen from name tokens in action text — that bleeds
-        # later-meet cast into early beats. Trust Supervisor/Manager occupancy.
         shot["character_ids"] = list(dict.fromkeys(focus_cids))
         shot["on_screen"] = list(shot["character_ids"])
         shot["offscreen"] = [c for c in offscreen_cids if c not in shot["character_ids"]]
@@ -1285,7 +1503,6 @@ def build_smart_video_graph(
             if len(ids) == 1 and s.get("node_id"):
                 id_to_node[ids[0]] = str(s["node_id"])
         rebuilt = [id_to_node[c] for c in focus_cids if c in id_to_node]
-        # Lock/prompt identity = on-screen solos. Empty on_screen stays empty (fail closed).
         focus_char_nodes = list(dict.fromkeys(rebuilt)) if rebuilt else []
         focus_names = [
             str(c.get("name"))
@@ -1306,7 +1523,15 @@ def build_smart_video_graph(
         multi = len(focus_names) > 1
         camera = str(shot.get("camera") or "").strip() or camera_cycle[(idx - 1) % len(camera_cycle)]
         shot["camera"] = camera
-        action = str(shot.get("action") or shot.get("keyframe_prompt") or "")[:300]
+        action = str(shot.get("action") or shot.get("keyframe_prompt") or "").strip()
+        if not action:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                window_beat,
+            )
+
+            action = window_beat(prompt_text, idx, max(1, len(shots)))
+            shot["action"] = action
+        action = action[:800]
         costume_lock = _costume_lock_for_ids(characters, focus_cids)
         from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
             enrich_shot_staging,
@@ -1320,47 +1545,17 @@ def build_smart_video_graph(
             relationship_lock=staging.get("relationship_lock") or "",
             shot_index=idx,
             setting_id=setting_id,
-            for_clip=False,
+            for_clip=True,
         )
         shot_spatial = spatial_by_setting.get(setting_id) or spatial_lock
         lock_line = _lock_line_for(setting_id)
-        # Continuity: first KF of a setting = SCENE MASTER (compose + bible).
-        # Later same-setting KFs also compose from solos, but depend on the master
-        # for prompt handoff only (not as an image edit source).
-        prior_in_set = prev_frame_by_setting.get(setting_id)
-        scene_master_id = scene_master_by_setting.get(setting_id)
-        if prior_in_set:
-            keyframe_strategy = "compose_from_solo_refs"
-            is_scene_master = False
-            prompt_handoff_from = scene_master_id or prior_in_set
-        else:
-            keyframe_strategy = "compose_from_solo_refs"
-            is_scene_master = True
-            prompt_handoff_from = None
-        prev_frame_id = prompt_handoff_from
-        _ = prev_frame_id
-        shot_scene_id = scene_node_by_shot.get(idx) or ""
-        # Attach ALL solo sheets as predecessors (identity pool ready). Who appears is
-        # governed by on_screen / occupancy / clothing / staging locks — not by which
-        # solos are wired.
-        all_solo_ids = [
-            nid
-            for nid in char_node_ids
-            if not bool(sheet_by_id.get(nid, {}).get("combined_cast"))
-        ] or list(dict.fromkeys(char_node_ids))
-        frame_inputs = [*all_solo_ids, "n_storyboard", "n_brief"]
-        # Soft dep: wait for scene-master KF so its prompt can be handed off.
-        if prompt_handoff_from:
-            frame_inputs.append(prompt_handoff_from)
-        frame_inputs = list(dict.fromkeys([x for x in frame_inputs if x]))
-        clip_inputs = ["n_storyboard", frame_id]
-        if prompt_handoff_from:
-            clip_inputs.append(prompt_handoff_from)
-        # Film-order serial clips so prior Wan prompt can hand off before next runs.
-        # Without this edge, concurrency runs clips in parallel and continuity is empty.
-        if prev_clip_global:
-            clip_inputs.append(prev_clip_global)
-        clip_inputs = list(dict.fromkeys(clip_inputs))
+        keyframe_strategy = "clip_from_scene_and_solos"
+        # Storyboard-owned continuity: deps = storyboard + on-screen solos + scene only.
+        # No prior-clip edge — same-setting clips can run concurrently.
+        clip_inputs = ["n_storyboard", *focus_char_nodes]
+        if scene_nid:
+            clip_inputs.append(scene_nid)
+        clip_inputs = list(dict.fromkeys([x for x in clip_inputs if x]))
         y = 40 + (idx - 1) * 160
         occupancy = shot.get("occupancy") if isinstance(shot.get("occupancy"), dict) else {}
         already_done = [
@@ -1368,45 +1563,50 @@ def build_smart_video_graph(
             for x in (shot.get("already_done") or [])
             if str(x).strip()
         ]
+        # First clip of a setting must not inherit prior-room already_done notes.
+        if not prev_clip_by_setting.get(setting_id):
+            already_done = []
+        elif setting_id:
+            # Drop notes that clearly name a different setting_id.
+            filtered: list[str] = []
+            for note in already_done:
+                low = note.lower()
+                if "setting=" in low and f"setting={setting_id.lower()}" not in low:
+                    continue
+                filtered.append(note)
+            already_done = filtered
         scene_bible = (
             shot.get("scene_bible")
             if isinstance(shot.get("scene_bible"), dict)
             else (scene_locks_meta.get(setting_id) if isinstance(scene_locks_meta.get(setting_id), dict) else {})
         )
-        view_key = str(shot.get("view_key") or (scene_bible or {}).get("active_view") or "front")
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            ANGLE_VIEWS,
+            user_asked_coverage,
+        )
+
+        raw_view = str(shot.get("view_key") or "").strip()
+        relation = str(shot.get("shot_relation") or "").strip().lower()
+        show_angle = raw_view.lower() in ANGLE_VIEWS and (
+            user_asked_coverage(prompt_text) or relation == "angle_variant"
+        )
+        view_key = raw_view if show_angle else ""
+        shot["view_key"] = view_key
+        timeline = str(shot.get("timeline") or "").strip() or f"{(idx - 1) * 5:.1f}-{idx * 5:.1f}s"
         bible_line = ""
         if scene_bible:
             views = scene_bible.get("views") if isinstance(scene_bible.get("views"), dict) else {}
-            view_line = str(views.get(view_key) or views.get("front") or "")[:220]
+            view_line = ""
+            if show_angle:
+                view_line = str(views.get(view_key) or "")[:220]
             bible_line = (
                 f"SCENE BIBLE `{setting_id}`: place={scene_bible.get('place')}; "
                 f"lighting={scene_bible.get('lighting')}; "
                 f"objects={', '.join(str(x) for x in (scene_bible.get('objects') or [])[:6])}; "
                 f"crowd={scene_bible.get('crowd')}; "
                 f"{scene_bible.get('coherence_rule')}; "
-                f"ACTIVE {view_line}. "
+                + (f"ACTIVE {view_line}. " if view_line else "")
             )
-        if prompt_handoff_from and not is_scene_master:
-            cast_ref_line = (
-                f"IDENTITY: COMPOSE from solo sheets {', '.join(focus_char_nodes)} for ONLY "
-                f"{cast_who}. SCENE PROMPT HANDOFF from {prompt_handoff_from} locks architecture "
-                f"for setting `{setting_id}` (view={view_key}). "
-                f"Do NOT edit a prior image — regenerate the still from characters + scene bible. "
-                f"Offscreen (do not draw): {', '.join(offscreen_cids) or 'none'}. "
-                f"Costume lock: {costume_lock or cast_who}."
-            )
-        else:
-            cast_ref_line = (
-                f"SCENE MASTER COMPOSE for `{setting_id}` (view={view_key}): GENERATE this "
-                f"DISTINCT place AND composite solo sheets {', '.join(focus_char_nodes)} for "
-                f"ONLY {cast_who} into ONE still. This still's prompt IS the scene bible handoff "
-                f"for later same-setting shots. Offscreen (in scene, not drawn): "
-                f"{', '.join(offscreen_cids) or 'none'}. "
-                f"Do not include cast from other scenes. "
-                f"Costume lock: {costume_lock or cast_who}. "
-                f"All of {cast_who} must be DISTINCT people — NEVER clone one face."
-            )
-        cast_ref_line += f" STRATEGY={keyframe_strategy}."
         continuity = shot.get("continuity_lock") if isinstance(shot.get("continuity_lock"), dict) else {}
         if not continuity:
             from jiuwenswarm.server.runtime.designer.continuity import infer_continuity_lock
@@ -1434,53 +1634,76 @@ def build_smart_video_graph(
                 f"density={crowd.get('density')}; {str(crowd.get('rule') or '')[:220]} "
             )
         done_bits = ""
-        if already_done:
-            done_bits = "ALREADY_DONE (do not restage): " + "; ".join(already_done[:12]) + ". "
         scene_bits = ""
         if shot.get("scene_distinctness"):
             scene_bits = f"SCENE: {str(shot.get('scene_distinctness'))[:220]} "
         elif shot.get("setting_lock") and isinstance(shot.get("setting_lock"), dict):
             scene_bits = f"SCENE LOCK: {str((shot.get('setting_lock') or {}).get('rule') or '')[:220]} "
         detail_bits = (
-            "DETAIL REQUIRED: screen L/R for each ON-SCREEN person, gaze target, "
-            "motion direction, relative props/landmarks, and which bodies remain from "
-            "prior keyframe. Do not draw offscreen or other-scene cast. "
+            "DETAIL REQUIRED: screen L/R for each person in frame, gaze target, "
+            "motion direction, relative props/landmarks. "
         )
         staging_prompt = (staging_bits + " ") if staging_bits else ""
-        guide = (
-            f"UNIQUE shot {idx} keyframe (setting {setting_id}, view {view_key}). "
-            f"{cast_ref_line} {lock_line} {bible_line} {scene_bits}"
+        solo_ref_list = ", ".join(focus_char_nodes) or "none"
+        first_of_setting = int(shot_ord_by_setting.get(setting_id) or 0) == 0
+        layout_bits = (
+            f"Reference clip, setting {setting_id}: character sheets {solo_ref_list} "
+            f"for {cast_who}, then empty scene plate {scene_nid or 'scene'} as the room. "
+            "Place those people into that empty room for THIS storyboard beat. "
+            "Keep the film STYLE LOCK. "
+        )
+        if not first_of_setting:
+            layout_bits += (
+                f"CONTINUATION of setting {setting_id}: same room, same faces, same wardrobe. "
+                "This window continues the story. "
+            )
+        if show_angle and view_key:
+            shot_head = (
+                f"Film shot {idx} (setting {setting_id}, timeline {timeline}, view {view_key}). "
+            )
+        else:
+            shot_head = (
+                f"Film shot {idx} (setting {setting_id}, timeline {timeline}). "
+                "THIS time window only. "
+            )
+        clip_prompt_body = (
+            (film_style_line + "\n" if film_style_line else "")
+            + shot_head
+            + layout_bits
+            + (f"WHO DOES WHAT: {doing_line}. " if doing_line else "")
+            + f"People in frame: {cast_who}. "
+            f"{lock_line} {bible_line} {scene_bits}"
             f"{staging_prompt}"
-            f"Action: {action}. "
-            + (f"Per-character doing: {doing_line}. " if doing_line else "")
-            + f"Camera: {camera}. "
+            f"Action: {action}. Camera: {camera}. "
             + (f"CONTINUITY: {cont_bits}. " if cont_bits else "")
             + occ_bits
             + crowd_bits
             + done_bits
             + detail_bits
             + "ANTI-CLONE: one instance per named person. "
-            + "Must look different from other shots in pose/action/view, not in identity or architecture. "
-            "Be fast, one still only."
+            + f"STRATEGY={keyframe_strategy}. first_of_setting={first_of_setting}. "
+            + "Keep clothing / language / occupancy / position locks. "
+            + "Keep this Wan prompt ≤4000 characters. "
+            + "Real motion — animate this beat only."
         )
         identity_refs = {
             "character_ids": focus_cids,
             "character_node_ids": list(focus_char_nodes),
             "cast_names": list(focus_names),
             "costume_lock": costume_lock,
-            "scene_node_id": None,
-            "master_scene_node_id": None,
-            "scene_master_frame_id": scene_master_id or (frame_id if is_scene_master else None),
-            "is_scene_master": is_scene_master,
+            "scene_node_id": scene_nid or None,
+            "master_scene_node_id": scene_nid or None,
+            "scene_master_frame_id": None,
+            "is_scene_master": False,
             "prior_keyframe_node_id": None,
-            "scene_prompt_handoff_from": prompt_handoff_from,
+            "scene_prompt_handoff_from": scene_nid or None,
             "keyframe_strategy": keyframe_strategy,
             "setting_id": setting_id,
             "view_key": view_key,
             "spatial_lock": shot_spatial,
             "occupancy": occupancy or None,
             "crowd_lock": crowd or None,
-            "skip_scene_plate": True,
+            "skip_scene_plate": False,
             "on_screen": list(focus_cids),
             "offscreen": list(shot.get("offscreen") or []),
             "cast_actions": cast_actions or None,
@@ -1488,87 +1711,19 @@ def build_smart_video_graph(
             if isinstance(shot.get("setting_lock"), dict)
             else None,
             "scene_distinctness": shot.get("scene_distinctness"),
-            "scene_continuity_mode": "compose_solos_shared_scene_prompt",
+            "scene_continuity_mode": "scene_card_plus_clip_shots",
             "scene_bible": scene_bible or None,
+            "first_of_setting": first_of_setting,
+            "composed_scene": False,
+            "style_lock": dict(film_style),
         }
         scene_n = setting_num.get(setting_id, 1)
         shot_ord_by_setting[setting_id] = int(shot_ord_by_setting.get(setting_id) or 0) + 1
         shot_n = shot_ord_by_setting[setting_id]
         shot_name = derive_shot_name(shot, fallback_index=idx)
-        frame_label = label_shot(
-            scene_number=scene_n, shot_number=shot_n, shot_name=shot_name
-        )
         clip_label = label_clip(
             scene_number=scene_n, clip_number=shot_n, clip_name=shot_name
         )
-        nodes.append(
-            {
-                "id": frame_id,
-                "type": NODE_TYPE_IMAGE,
-                "label": frame_label,
-                "config": {
-                    "role": NODE_ROLE_FRAME,
-                    "shot_index": idx,
-                    "shot_title": shot.get("title"),
-                    "shot_action": action,
-                    "camera": camera,
-                    "setting_id": setting_id,
-                    "view_key": view_key,
-                    "scene_bible": scene_bible or None,
-                    "character_ids": focus_cids,
-                    "featured_cast_ids": featured_cids,
-                    "character_node_ids": focus_char_nodes,
-                    "cast_names": focus_names,
-                    "identity_refs": identity_refs,
-                    "costume_lock": costume_lock,
-                    "positioning_lock": staging.get("positioning_lock"),
-                    "action_lock": staging.get("action_lock"),
-                    "relationship_lock": staging.get("relationship_lock"),
-                    "blocking": shot.get("blocking")
-                    if isinstance(shot.get("blocking"), dict)
-                    else None,
-                    "cast_actions": cast_actions or None,
-                    "prior_keyframe_node_id": None,
-                    "scene_prompt_handoff_from": prompt_handoff_from,
-                    "scene_master_frame_id": scene_master_id
-                    or (frame_id if is_scene_master else None),
-                    "is_scene_master": is_scene_master,
-                    "keyframe_strategy": keyframe_strategy,
-                    "continuity_lock": continuity or None,
-                    "occupancy": occupancy or None,
-                    "crowd_lock": crowd or None,
-                    "already_done": already_done or None,
-                    "spatial_lock": shot_spatial,
-                    "master_scene_node_id": None,
-                    "skip_scene_plate": True,
-                    "generate": {"prompt": guide},
-                    "image_size": _IMAGE_SIZE,
-                    "max_image_calls": 1,
-                    "inputs": frame_inputs,
-                    "optimize_for": mode,
-                    "agent_name": frame_label,
-                    "kind": "agent",
-                    "skill_id": "frame",
-                    "tools": ["call_image_model", "read_upstream"],
-                    "delegate": ("agent" if ai_mode else "handler"),
-                    "supervisor_task": (
-                        (
-                            f"Compose SCENE MASTER for setting {setting_id} from solo sheets "
-                            f"{focus_char_nodes}. Author detailed scene bible (objects/lighting/"
-                            f"crowd/views). Later same-setting shots will reuse this prompt."
-                        )
-                        if is_scene_master
-                        else (
-                            f"Compose from solos using SCENE PROMPT HANDOFF from "
-                            f"{prompt_handoff_from} for setting {setting_id} (view={view_key}). "
-                            "Keep architecture; update on_screen + cast_actions only."
-                        )
-                    ),
-                },
-                "layout": {"x": 1020, "y": float(y), "width": 240, "height": 140},
-            }
-        )
-        timeline = str(shot.get("timeline") or "").strip() or f"{(idx-1)*5:.1f}-{idx*5:.1f}s"
         from jiuwenswarm.server.runtime.designer.audio_locks import (
             normalize_speech_by_character,
             speech_line_from_by_character,
@@ -1578,22 +1733,61 @@ def build_smart_video_graph(
         speech_line = speech_line_from_by_character(speech_by_character) or str(
             shot.get("speech_line") or shot.get("dialogue") or ""
         ).strip()
-        bible_for_clip = ""
-        if scene_bible:
-            bible_for_clip = (
-                f"SCENE BIBLE `{setting_id}` (keep place/objects/light; animate this beat only): "
-                f"place={scene_bible.get('place')}; lighting={scene_bible.get('lighting')}; "
-                f"objects={', '.join(str(x) for x in (scene_bible.get('objects') or [])[:6])}; "
-                f"crowd={scene_bible.get('crowd')}. "
+        # Film-wide / shot time-of-day on every clip config (story weave reads this).
+        tod_clip: dict[str, str] = {}
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                infer_time_of_day_lock,
             )
+
+            tod_clip = infer_time_of_day_lock(
+                prompt_text,
+                str(
+                    (scene_bible or {}).get("place")
+                    or shot.get("setting_description")
+                    or action
+                    or ""
+                ),
+            )
+            if isinstance(shot.get("time_of_day_lock"), dict):
+                tod_clip = {
+                    **tod_clip,
+                    **{
+                        k: str(v)
+                        for k, v in shot["time_of_day_lock"].items()
+                        if str(v).strip()
+                    },
+                }
+            if isinstance(scene_bible, dict):
+                if scene_bible.get("time_of_day") and (
+                    not tod_clip.get("time_of_day")
+                    or tod_clip.get("time_of_day") == "unspecified"
+                ):
+                    tod_clip["time_of_day"] = str(scene_bible.get("time_of_day"))
+                if scene_bible.get("lighting") and not tod_clip.get("lighting"):
+                    tod_clip["lighting"] = str(scene_bible.get("lighting"))
+                # Keep bible lighting aligned with ToD when still generic.
+                if tod_clip.get("lighting") and (
+                    not scene_bible.get("lighting")
+                    or "motivated key light"
+                    in str(scene_bible.get("lighting") or "").lower()
+                ):
+                    scene_bible = dict(scene_bible)
+                    scene_bible["lighting"] = tod_clip["lighting"]
+                    if tod_clip.get("time_of_day"):
+                        scene_bible.setdefault("time_of_day", tod_clip["time_of_day"])
+        except Exception:  # noqa: BLE001
+            tod_clip = {}
         clip_cfg: dict[str, Any] = {
             "role": NODE_ROLE_CLIP,
             "shot_index": idx,
             "shot_title": shot.get("title"),
             "shot_action": action,
+            "timeline": timeline,
             "camera": camera,
             "setting_id": setting_id,
             "view_key": view_key,
+            "scene_node_id": scene_nid or None,
             "scene_bible": scene_bible or None,
             "character_ids": focus_cids,
             "on_screen": list(focus_cids),
@@ -1629,50 +1823,14 @@ def build_smart_video_graph(
                 )
             ),
             "spatial_lock": shot_spatial,
-            "master_scene_node_id": None,
-            "scene_master_frame_id": scene_master_id
-            or (frame_id if is_scene_master else None),
-            "is_scene_master_keyframe": is_scene_master,
+            "time_of_day_lock": tod_clip or None,
+            "master_scene_node_id": scene_nid or None,
+            "keyframe_strategy": keyframe_strategy,
+            "first_of_setting": first_of_setting,
+            "composed_scene": False,
+            "style_lock": dict(film_style),
             "allow_still_clip_fallback": False,
-            "generate": {
-                "prompt": (
-                    f"Film shot {idx} only ({timeline}). Setting {setting_id} view={view_key}. "
-                    f"Camera {camera}. Action: {action}. "
-                    f"Cast on screen: {cast_who}. "
-                    + (f"All of {cast_who} must be visible and acting. " if multi else "")
-                    + f"Animate ONLY keyframe {frame_id} as first frame — do NOT re-attach solo "
-                    + "sheets (prevents cloning). "
-                    + "ANTI-CLONE: one body per person. "
-                    + f"Costume lock: {costume_lock}. "
-                    + (
-                        (
-                            staging_lock_clause(
-                                positioning_lock=staging.get("positioning_lock") or "",
-                                action_lock=staging.get("action_lock") or "",
-                                relationship_lock=staging.get("relationship_lock") or "",
-                                shot_index=idx,
-                                setting_id=setting_id,
-                                for_clip=True,
-                            )
-                            + " "
-                        )
-                        if staging
-                        else ""
-                    )
-                    + f"{lock_line} "
-                    + bible_for_clip
-                    + (f"CONTINUITY: {cont_bits}. " if cont_bits else "")
-                    + occ_bits
-                    + crowd_bits
-                    + done_bits
-                    + (f"Speech this beat: {speech_line}. " if speech_line else "")
-                    + "DETAIL: motion direction, gaze targets, relative L/R from prior beat. "
-                    + "Use CONTINUITY CARD / ALREADY_DONE when present — advance time; "
-                    "do not redo prior beats or copy a prior prompt. "
-                    + "Real I2V motion required — never still freezes. "
-                    + "Distinct action from other clips; same faces/costumes for this setting."
-                )
-            },
+            "generate": {"prompt": clip_prompt_body},
             "max_video_calls": 1,
             "inputs": clip_inputs,
             "optimize_for": mode,
@@ -1682,16 +1840,36 @@ def build_smart_video_graph(
             "tools": ["call_video_model", "read_upstream"],
             "delegate": ("agent" if ai_mode else "handler"),
             "supervisor_task": (
-                f"I2V from keyframe {frame_id}; keep identity ({cast_who}), scene_bible, "
-                "crowd_lock, and prior-clip handoff. Real video only. Do not redo already_done."
+                f"Clip shot {idx}: on-screen character sheets plus empty scene plate {scene_nid}. "
+                "Write ONE positive story-form video prompt from THIS storyboard row "
+                "(start_state → action/camera/speech → end_state). "
+                "No LOCK banners, no negatives, no prior-clip paste. "
+                "Then call_video_model with that prompt only."
             ),
         }
-        if prompt_handoff_from:
-            clip_cfg["continuity_frame_node_id"] = prompt_handoff_from
-        # Temporal handoff: previous clip in FILM order (serial DAG above).
-        prev_clip_id = prev_clip_global
-        if prev_clip_id:
-            clip_cfg["continuity_clip_node_id"] = prev_clip_id
+        # Storyboard owns continuity — never wire prior clip as a schedule/data parent.
+        clip_cfg.pop("continuity_clip_node_id", None)
+        clip_cfg["previous_clip_handoff_ready"] = False
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+                stamp_shot_states_on_clip_cfg,
+            )
+
+            clip_cfg = stamp_shot_states_on_clip_cfg(clip_cfg, shot=shot)
+        except Exception:  # noqa: BLE001
+            pass
+        from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+            compose_practice_prompt,
+        )
+
+        clip_cfg["generate"] = {
+            "prompt": compose_practice_prompt(
+                cfg=clip_cfg,
+                graph={"metadata": {"script_analysis": analysis}, "nodes": nodes},
+                action=action,
+                camera=camera,
+            )
+        }
         nodes.append(
             {
                 "id": clip_id,
@@ -1701,91 +1879,19 @@ def build_smart_video_graph(
                 "layout": {"x": 1320, "y": float(y), "width": 240, "height": 140},
             }
         )
-        for src in frame_inputs:
-            edges.append(_edge(f"e_{src}_{frame_id}", src, frame_id))
         for src in clip_inputs:
             edges.append(_edge(f"e_{src}_{clip_id}", src, clip_id))
-        if is_scene_master:
-            scene_master_by_setting[setting_id] = frame_id
-        prev_frame_by_setting[setting_id] = frame_id
         prev_clip_by_setting[setting_id] = clip_id
         prev_clip_global = clip_id
 
-    # Post-pass: force same-setting prompt-handoff wires (master → later compose KFs).
-    frame_nodes_ordered = sorted(
-        [
-            n
-            for n in nodes
-            if isinstance(n, dict)
-            and str(n.get("id") or "").startswith("n_frame_")
-        ],
-        key=lambda n: int((n.get("config") or {}).get("shot_index") or 0),
-    )
-    edge_pairs = {
-        (str(e.get("source") or ""), str(e.get("target") or ""))
-        for e in edges
-        if isinstance(e, dict)
-    }
-    repair_prev: dict[str, str] = {}
-    repair_master: dict[str, str] = dict(scene_master_by_setting)
-    for node in frame_nodes_ordered:
-        cfg = dict(node.get("config") or {})
-        nid = str(node.get("id") or "")
-        sid = str(cfg.get("setting_id") or "set_1").strip() or "set_1"
-        prior = repair_prev.get(sid)
-        master = repair_master.get(sid)
-        if prior:
-            cfg["keyframe_strategy"] = "compose_from_solo_refs"
-            cfg["is_scene_master"] = False
-            cfg.pop("prior_keyframe_node_id", None)
-            cfg["scene_prompt_handoff_from"] = master or prior
-            cfg["scene_master_frame_id"] = master or prior
-            inputs = list(cfg.get("inputs") or [])
-            dep = master or prior
-            if dep and dep not in inputs and dep != nid:
-                inputs.append(dep)
-            if dep and dep != nid and (dep, nid) not in edge_pairs:
-                edges.append(_edge(f"e_{dep}_{nid}", dep, nid))
-                edge_pairs.add((dep, nid))
-            cfg["inputs"] = inputs
-            irefs = dict(cfg.get("identity_refs") or {})
-            irefs["keyframe_strategy"] = "compose_from_solo_refs"
-            irefs["is_scene_master"] = False
-            irefs["prior_keyframe_node_id"] = None
-            irefs["scene_prompt_handoff_from"] = master or prior
-            irefs["scene_master_frame_id"] = master or prior
-            irefs["skip_scene_plate"] = True
-            irefs["scene_continuity_mode"] = "compose_solos_shared_scene_prompt"
-            cfg["identity_refs"] = irefs
-        else:
-            cfg["keyframe_strategy"] = "compose_from_solo_refs"
-            cfg["is_scene_master"] = True
-            cfg["scene_master_frame_id"] = nid
-            cfg.pop("prior_keyframe_node_id", None)
-            cfg.pop("scene_prompt_handoff_from", None)
-            irefs = dict(cfg.get("identity_refs") or {})
-            irefs["keyframe_strategy"] = "compose_from_solo_refs"
-            irefs["is_scene_master"] = True
-            irefs["scene_master_frame_id"] = nid
-            irefs["prior_keyframe_node_id"] = None
-            irefs["scene_prompt_handoff_from"] = None
-            irefs["skip_scene_plate"] = True
-            irefs["scene_continuity_mode"] = "compose_solos_shared_scene_prompt"
-            cfg["identity_refs"] = irefs
-            repair_master[sid] = nid
-        node["config"] = cfg
-        repair_prev[sid] = nid
-    scene_master_by_setting = repair_master
-
     audio_ids: list[str] = []
-    film_sec = max(6, min(30, len(shots) * 5))
-    # Routing: dialogue lives in clips (native video audio when the model can);
-    # one BGM track is always a separate Music node mixed after concat.
+    film_sec = max(6, int(film_duration or max(6, len(shots) * 5)))
+    # Audio routing: separate nodes only when backends exist; else fold into clips.
     from jiuwenswarm.server.runtime.designer.capabilities import detect_audio_backends
 
     backends = detect_audio_backends()
+    can_speech = bool(backends.get("can_speech"))
     can_music = bool(backends.get("can_music"))
-    can_video_audio = bool(backends.get("can_video_audio"))
     clip_embedded = False
     if audio.get("policy") != "silent":
         want_speech = bool(audio.get("include_speech"))
@@ -1793,10 +1899,36 @@ def build_smart_video_graph(
             audio.get("include_music")
             or audio.get("policy") in {"optional_music", "music", "speech_and_music"}
         )
-        if want_speech:
-            # TTS is intentionally not part of Designer. Spoken lines belong to
-            # the generated clip's native audio; never create a Speech node.
+        if want_speech and not can_speech:
             clip_embedded = True
+            want_speech = False
+        if want_music and not can_music:
+            clip_embedded = True
+            want_music = False
+        if want_speech:
+            audio_ids.append("n_speech")
+            nodes.append(
+                {
+                    "id": "n_speech",
+                    "type": NODE_TYPE_AUDIO,
+                    "label": "Speech / TTS",
+                    "config": {
+                        "role": "speech",
+                        "prompt": prompt_text,
+                        "inputs": ["n_brief", "n_storyboard"],
+                        "optimize_for": mode,
+                        "agent_name": "Speech Agent",
+                        "kind": "agent",
+                        "skill_id": "speech_tts",
+                        "tools": ["call_speech_model", "read_upstream", "call_model"],
+                        "delegate": ("agent" if ai_mode else "handler"),
+                        "film_duration_sec": film_sec,
+                    },
+                    "layout": {"x": 1320, "y": float(40 + len(shots) * 160), "width": 220, "height": 120},
+                }
+            )
+            edges.append(_edge("e_sb_speech", "n_storyboard", "n_speech"))
+            edges.append(_edge("e_brief_speech", "n_brief", "n_speech"))
         if want_music:
             audio_ids.append("n_music")
             nodes.append(
@@ -1813,16 +1945,8 @@ def build_smart_video_graph(
                         "kind": "agent",
                         "skill_id": "audio_bed",
                         "tools": ["call_music_model", "read_upstream", "call_model"],
-                        "delegate": "handler" if not can_music else ("agent" if ai_mode else "handler"),
-                        "force_handler": not can_music,
-                        "placeholder_until_api": not can_music,
+                        "delegate": ("agent" if ai_mode else "handler"),
                         "film_duration_sec": film_sec,
-                        "source": "brief",
-                        "bgm_lock": (
-                            analysis.get("bgm_lock")
-                            if isinstance(analysis.get("bgm_lock"), dict)
-                            else (audio.get("bgm_lock") if isinstance(audio.get("bgm_lock"), dict) else {})
-                        ),
                     },
                     "layout": {
                         "x": 1320,
@@ -1834,7 +1958,7 @@ def build_smart_video_graph(
             )
             edges.append(_edge("e_sb_music", "n_storyboard", "n_music"))
             edges.append(_edge("e_brief_music", "n_brief", "n_music"))
-        if want_speech or want_music:
+        if clip_embedded:
             from jiuwenswarm.server.runtime.designer.audio_locks import stamp_audio_fields_on_clip_config
 
             for n in nodes:
@@ -1856,17 +1980,22 @@ def build_smart_video_graph(
                     dict(cfg),
                     shot=shot_row if isinstance(shot_row, dict) else {},
                     analysis=analysis,
-                    meta={
-                        "audio_intent": audio,
-                        "audio_routing": {
-                            "can_speech": False,
-                            "can_music": can_music,
-                            "can_video_audio": can_video_audio,
-                        },
-                    },
-                    clip_embedded=clip_embedded,
+                    meta={"audio_intent": audio, "audio_routing": {"can_speech": can_speech, "can_music": can_music}},
+                    clip_embedded=True,
                 )
                 n["config"] = cfg
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                    chain_prior_speech_across_clips,
+                )
+
+                # nodes is a flat list; wrap briefly as a graph for the chain helper.
+                chain_prior_speech_across_clips({"nodes": nodes})
+            except Exception:  # noqa: BLE001
+                pass
+            # Prefer clip-native audio when TTS/BGM backends are missing (capability-gated).
+            # (Stamped again on metadata below.)
+            pass
 
     compose_inputs = [*clip_ids, *audio_ids]
     nodes.append(
@@ -1885,9 +2014,8 @@ def build_smart_video_graph(
                 "tools": ["ffmpeg_compose", "mix_audio", "read_upstream", "call_model"],
                 "delegate": ("agent" if ai_mode else "handler"),
                 "supervisor_task": (
-                    "Concatenate shot clips in storyboard order (dialogue only). "
-                    "Then mix the single Brief-derived BGM onto the concatenated film. "
-                    "Output a real non-empty .mp4 — never markdown. Use ffmpeg_compose + mix_audio."
+                    "Concatenate shot clips in storyboard order; mux speech/music when present. "
+                    "Output a real non-empty .mp4 only — never markdown. Use ffmpeg_compose tool."
                 ),
             },
             "layout": {"x": 1620, "y": 180, "width": 260, "height": 150},
@@ -1915,13 +2043,12 @@ def build_smart_video_graph(
             "audio_intent": audio,
             "audio_routing": {
                 "clip_embedded": bool(clip_embedded),
-                "can_speech": False,
+                "can_speech": can_speech,
                 "can_music": can_music,
                 "can_video_audio": bool(backends.get("can_video_audio", True)),
                 "video_audio_model": str(backends.get("video_audio_model") or ""),
-                "speech_nodes": False,
+                "speech_nodes": "n_speech" in audio_ids,
                 "music_nodes": "n_music" in audio_ids,
-                "tts_enabled": False,
             },
             "language_lock": str(
                 analysis.get("language_lock") or audio.get("language_lock") or "en"
@@ -1933,14 +2060,13 @@ def build_smart_video_graph(
             ),
             "prefer_clip_native_audio": bool(clip_embedded),
             "prefer_wan3_clip_audio": bool(clip_embedded),  # legacy alias
-            "skip_scene_plate": True,
-            "scene_continuity_mode": "compose_solos_shared_scene_prompt",
+            "skip_scene_plate": False,
+            "scene_continuity_mode": "scene_card_plus_clip_shots",
             "scene_masters": dict(scene_master_by_setting),
             "scene_locks": dict(scene_locks_meta),
             "lean_pipeline": False,
-            # Initial graphs stay unfrozen so the first storyboard-complete expand
-            # can align frame count. Supervisor design_execution_graph then freezes.
-            "freeze_shot_topology": False,
+            # Storyboard must not rebuild the node set (that spawned extra nodes).
+            "freeze_shot_topology": True,
             "supervisor_owns_graph": True,
             "ai_agent_pipeline": bool(ai_mode),
             "all_nodes_agents": bool(ai_mode),
@@ -1951,21 +2077,21 @@ def build_smart_video_graph(
             "spatial_lock_by_setting": spatial_by_setting,
             "consistency_plan": {
                 "character_identity": "solo_sheets_only",
-                "multi_shot_compose": "compose_solos_into_generated_setting",
+                "multi_shot_compose": "scene_card_plus_clip_shots",
                 "scene_spatial": "shared_scene_bible_prompt_handoff",
                 "sequential_keyframe": "prompt_handoff_same_setting_id_only",
                 "costume_lock": True,
                 "identity_refs_on_frame_clip": True,
+                "clip_from_scene_and_solos": True,
                 "solo_gate_before_keyframes": True,
                 "per_shot_scene_views": True,
                 "hierarchical_views": True,
-                "empty_scene_plates": False,
+                "empty_scene_plates": True,
                 "prior_prompt_handoff": True,
                 "notes": (
-                    "Continuity: Brief→Storyboard→Manager→ALL solo sheets→"
-                    "first KF per setting_id = SCENE MASTER prompt+bible→"
-                    "same-setting compose from solos with prompt handoff + view locks→"
-                    "clips→film. No empty plates; no prior-image edit."
+                    "Continuity: Brief+LOCK BIBLE→Storyboard→solo sheets→empty scene plate→"
+                    "every clip is R2V (character sheets + empty room) with STYLE LOCK. "
+                    "Later clips continue who is in the room and this window's action."
                 ),
             },
             "max_shots": len(shots),
@@ -1992,6 +2118,5 @@ def build_smart_video_graph(
         "updated_at": now,
     }
     graph = normalize_execution_graph(graph)
-    prune_shot_nodes_beyond_analysis(graph)
     prune_non_contributing_nodes(graph)
     return attach_skills_metadata(graph, prompt_text)

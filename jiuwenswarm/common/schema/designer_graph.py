@@ -1250,7 +1250,7 @@ def expand_shot_nodes(
     graph: DesignerExecutionGraph,
     shot_count: int,
 ) -> DesignerExecutionGraph:
-    """One keyframe node and one clip node per storyboard shot, plus compose."""
+    """One clip node per storyboard shot (scene-card I2V), plus compose."""
     count = max(1, min(int(shot_count or 1), MAX_SHOT_CLIP_NODES))
     raw = dict(graph)
     existing_by_id = {
@@ -1258,9 +1258,7 @@ def expand_shot_nodes(
         for node in raw.get("nodes") or []
         if str(node.get("id") or "")
     }
-    frame_template = existing_by_id.get("n_frame_1") or existing_by_id.get("n_frame") or {}
     clip_template = existing_by_id.get("n_clip_1") or existing_by_id.get("n_clip") or {}
-    frame_base = dict(frame_template.get("layout") or {})
     clip_base = dict(clip_template.get("layout") or {})
 
     kept_nodes = [
@@ -1287,49 +1285,34 @@ def expand_shot_nodes(
     character_ids = _role_node_ids(NODE_ROLE_CHARACTER_DESIGN)
     scene_ids = _role_node_ids(NODE_ROLE_SCENE)
     storyboard_id = (_role_node_ids(NODE_ROLE_STORYBOARD) or [None])[0]
+    brief_id = (_role_node_ids(NODE_ROLE_BRIEF) or [None])[0]
     delegate = _copied_delegate(graph)
-    frame_nodes: list[DesignerGraphNode] = []
     clip_nodes: list[DesignerGraphNode] = []
     for index in range(1, count + 1):
-        frame_id = frame_node_id(index)
         clip_id = clip_node_id(index)
-        frame_inputs = [*character_ids, *scene_ids]
-        if storyboard_id:
-            frame_inputs.append(storyboard_id)
-        clip_inputs = [*character_ids, *scene_ids]
+        clip_inputs: list[str] = []
+        if brief_id:
+            clip_inputs.append(brief_id)
         if storyboard_id:
             clip_inputs.append(storyboard_id)
-        clip_inputs.append(frame_id)
-        frame_config: dict[str, Any] = {
-            "role": NODE_TYPE_IMAGE,
-            "pipeline": PIPELINE_FRAME,
-            "shot_index": index,
-            "inputs": frame_inputs,
-        }
+        clip_inputs.extend(character_ids)
+        clip_inputs.extend(scene_ids)
+        if index > 1:
+            clip_inputs.append(clip_node_id(index - 1))
+        clip_inputs = list(dict.fromkeys([x for x in clip_inputs if x]))
         clip_config: dict[str, Any] = {
-            "role": NODE_TYPE_VIDEO,
+            "role": NODE_ROLE_CLIP,
             "pipeline": PIPELINE_CLIP,
             "shot_index": index,
+            "keyframe_strategy": "clip_from_scene_and_solos",
             "inputs": clip_inputs,
         }
-        prev_frame_generate = _generate_config(existing_by_id.get(frame_id) or {})
         prev_clip_generate = _generate_config(existing_by_id.get(clip_id) or {})
-        if prev_frame_generate:
-            frame_config[CONFIG_KEY_GENERATE] = prev_frame_generate
         if prev_clip_generate:
             clip_config[CONFIG_KEY_GENERATE] = prev_clip_generate
         if delegate:
-            frame_config["delegate"] = delegate
             clip_config["delegate"] = delegate
-        prev_frame_layout = dict((existing_by_id.get(frame_id) or {}).get("layout") or {})
         prev_clip_layout = dict((existing_by_id.get(clip_id) or {}).get("layout") or {})
-        frame_layout = _stacked_node_layout(
-            existing=prev_frame_layout,
-            base=frame_base,
-            index=index,
-            default_x=760.0,
-            default_y=240.0,
-        )
         clip_layout = _stacked_node_layout(
             existing=prev_clip_layout,
             base=clip_base,
@@ -1340,23 +1323,11 @@ def expand_shot_nodes(
         from jiuwenswarm.server.runtime.designer.node_labels import (
             derive_shot_name,
             label_clip,
-            label_shot,
         )
 
         shot_name = derive_shot_name(
             {"title": f"Shot {index}", "action": ""},
             fallback_index=index,
-        )
-        frame_nodes.append(
-            {
-                "id": frame_id,
-                "type": NODE_TYPE_IMAGE,
-                "label": label_shot(
-                    scene_number=1, shot_number=index, shot_name=shot_name
-                ),
-                "config": frame_config,
-                "layout": frame_layout,
-            }
         )
         clip_nodes.append(
             {
@@ -1369,39 +1340,8 @@ def expand_shot_nodes(
                 "layout": clip_layout,
             }
         )
-        for source_id in character_ids:
-            if source_id not in kept_ids:
-                continue
-            kept_edges.append(
-                {
-                    "id": f"e_{source_id}_{frame_id}",
-                    "source": source_id,
-                    "target": frame_id,
-                    "kind": EDGE_KIND_DATA,
-                }
-            )
-        for source_id in scene_ids:
-            if source_id not in kept_ids:
-                continue
-            kept_edges.append(
-                {
-                    "id": f"e_{source_id}_{frame_id}",
-                    "source": source_id,
-                    "target": frame_id,
-                    "kind": EDGE_KIND_DATA,
-                }
-            )
-        if storyboard_id and storyboard_id in kept_ids:
-            kept_edges.append(
-                {
-                    "id": f"e_storyboard_{frame_id}",
-                    "source": storyboard_id,
-                    "target": frame_id,
-                    "kind": EDGE_KIND_DATA,
-                }
-            )
-        for source_id in character_ids:
-            if source_id not in kept_ids:
+        for source_id in clip_inputs:
+            if source_id not in kept_ids and not source_id.startswith("n_clip_"):
                 continue
             kept_edges.append(
                 {
@@ -1411,34 +1351,6 @@ def expand_shot_nodes(
                     "kind": EDGE_KIND_DATA,
                 }
             )
-        for source_id in scene_ids:
-            if source_id not in kept_ids:
-                continue
-            kept_edges.append(
-                {
-                    "id": f"e_{source_id}_{clip_id}",
-                    "source": source_id,
-                    "target": clip_id,
-                    "kind": EDGE_KIND_DATA,
-                }
-            )
-        if storyboard_id and storyboard_id in kept_ids:
-            kept_edges.append(
-                {
-                    "id": f"e_storyboard_{clip_id}",
-                    "source": storyboard_id,
-                    "target": clip_id,
-                    "kind": EDGE_KIND_DATA,
-                }
-            )
-        kept_edges.append(
-            {
-                "id": f"e_{frame_id}_{clip_id}",
-                "source": frame_id,
-                "target": clip_id,
-                "kind": EDGE_KIND_DATA,
-            }
-        )
         kept_edges.append(
             {
                 "id": f"e_{clip_id}_compose",
@@ -1476,7 +1388,7 @@ def expand_shot_nodes(
             [node.get("layout") for node in clip_nodes]
         ),
     }
-    raw["nodes"] = kept_nodes + frame_nodes + clip_nodes + [compose_node]
+    raw["nodes"] = kept_nodes + clip_nodes + [compose_node]
     raw["edges"] = kept_edges
     return normalize_execution_graph(raw)
 
@@ -2416,6 +2328,10 @@ def is_soft_artifact_dependency(
         }
         return str(pred_id) in soft_ids and bool(str(pred_id))
 
+    # Scene card → clip: always hard (first_frame media). Prompt handoff alone is not enough.
+    if nrole == "clip" and prole == "scene":
+        return False
+
     return False
 
 
@@ -2441,35 +2357,24 @@ def artifact_dependency_satisfied(
     frame_roles = {"frame", "keyframe"}
 
     if nrole in {"clip"} and prole in {"clip"}:
-        if isinstance(ncfg.get("previous_clip_continuity_card"), dict):
-            return True
-        if bool(ncfg.get("previous_clip_handoff_ready")):
-            return True
-        if str(ncfg.get("previous_clip_action") or "").strip():
-            return True
+        # Same-setting clip handoff needs the prior Wan prompt text — not only the
+        # storyboard shot_action (that is known at graph build and would unlock too early).
         if str(ncfg.get("previous_clip_wan_prompt") or "").strip():
             return True
-        if bool(pcfg.get("handoff_artifact_ready")) and (
-            isinstance(pcfg.get("continuity_card"), dict)
-            or str(
-                pcfg.get("last_wan_prompt")
-                or pcfg.get("last_approved_prompt")
-                or pcfg.get("clip_prompt_preview")
-                or pcfg.get("shot_action")
-                or ""
-            ).strip()
+        if isinstance(ncfg.get("previous_clip_continuity_card"), dict):
+            return True
+        prior_prompt = str(
+            pcfg.get("last_wan_prompt")
+            or pcfg.get("last_approved_prompt")
+            or pcfg.get("clip_prompt_preview")
+            or ""
+        ).strip()
+        if prior_prompt and (
+            bool(pcfg.get("handoff_artifact_ready"))
+            or isinstance(pcfg.get("continuity_card"), dict)
         ):
             return True
-        return bool(
-            isinstance(pcfg.get("continuity_card"), dict)
-            or str(
-                pcfg.get("last_wan_prompt")
-                or pcfg.get("last_approved_prompt")
-                or pcfg.get("clip_prompt_preview")
-                or pcfg.get("shot_action")
-                or ""
-            ).strip()
-        )
+        return False
 
     if (nrole in frame_roles and prole in frame_roles) or (
         nrole == "clip" and prole in frame_roles
@@ -2507,17 +2412,41 @@ def artifact_dependency_satisfied(
     return False
 
 
+def _state_published_media(run: dict[str, Any] | None, node_id: str) -> bool:
+    """True when a running node has already stored the image/video a clip needs."""
+    if not isinstance(run, dict):
+        return False
+    state = (run.get("node_states") or {}).get(node_id) or {}
+    if not isinstance(state, dict):
+        return False
+    if str(state.get("status") or "") not in {"running", "completed"}:
+        return False
+    ref = state.get("output_ref")
+    if not isinstance(ref, dict):
+        return False
+    uri = str(ref.get("uri") or "").strip()
+    if not uri or uri.startswith("designer://"):
+        return False
+    kind = str(ref.get("kind") or "").strip().lower()
+    mime = str(ref.get("mime_type") or "").strip().lower()
+    if kind in {"text", "table"} or mime.startswith("text/"):
+        return False
+    return True
+
+
 def filter_ready_by_dependency_order(
     ready_ids: list[str],
     *,
     preds: dict[str, list[str]],
     in_flight: set[str] | frozenset[str] | None = None,
     graph: DesignerExecutionGraph | None = None,
+    run: dict[str, Any] | None = None,
 ) -> list[str]:
-    """From a same-level ready set, never start a node whose hard pred is also starting/running.
+    """Start a node once its inputs exist, even if a dependency is still running.
 
-    Soft artifact preds may already be in-flight: if their prompt artifact is published,
-    the dependent may join the batch (still subject to the global concurrency semaphore).
+    Another clip may start in the same batch when its storyboard beat is already
+    known. A character or scene plate unlocks its clip once the image file is
+    stored. The composer never joins while any dependency is still in flight.
     """
     if not ready_ids:
         return []
@@ -2535,16 +2464,19 @@ def filter_ready_by_dependency_order(
     selected_set: set[str] = set()
     for nid in ordered:
         blocked = False
+        compose_sink = is_compose_sink_node(by_id.get(nid))
         for pred in preds.get(nid, []):
-            if pred in selected_set:
+            if pred not in selected_set and pred not in flying:
+                continue
+            if compose_sink:
                 blocked = True
                 break
-            if pred not in flying:
-                continue
             soft = bool(
                 graph is not None and is_soft_artifact_dependency(graph, pred, nid)
             )
             if soft and graph is not None and artifact_dependency_satisfied(graph, nid, pred):
+                continue
+            if _state_published_media(run, pred):
                 continue
             blocked = True
             break
@@ -2622,13 +2554,13 @@ def build_bootstrap_graph(
         {
             "id": "n_scene",
             "type": NODE_TYPE_IMAGE,
-            "label": "Image 2",
+            "label": "Scene 1: Place",
             "config": {
                 "role": NODE_TYPE_IMAGE,
                 "pipeline": PIPELINE_SCENE,
-                "inputs": ["n_brief"],
+                "inputs": ["n_brief", "n_storyboard"],
             },
-            "layout": {"x": 400, "y": 240, "width": 280, "height": 160},
+            "layout": {"x": 760, "y": 240, "width": 280, "height": 160},
         },
         {
             "id": "n_storyboard",
@@ -2642,18 +2574,6 @@ def build_bootstrap_graph(
             "layout": {"x": 400, "y": 440, "width": 280, "height": 160},
         },
         {
-            "id": "n_frame_1",
-            "type": NODE_TYPE_IMAGE,
-            "label": "Image 3",
-            "config": {
-                "role": NODE_TYPE_IMAGE,
-                "pipeline": PIPELINE_FRAME,
-                "shot_index": 1,
-                "inputs": ["n_character", "n_scene", "n_storyboard"],
-            },
-            "layout": {"x": 760, "y": 240, "width": 280, "height": 160},
-        },
-        {
             "id": "n_clip_1",
             "type": NODE_TYPE_VIDEO,
             "label": "Video 1",
@@ -2661,7 +2581,7 @@ def build_bootstrap_graph(
                 "role": NODE_TYPE_VIDEO,
                 "pipeline": PIPELINE_CLIP,
                 "shot_index": 1,
-                "inputs": ["n_character", "n_scene", "n_storyboard", "n_frame_1"],
+                "inputs": ["n_character", "n_scene", "n_storyboard"],
             },
             "layout": {"x": 1120, "y": 240, "width": 280, "height": 160},
         },
@@ -2679,8 +2599,9 @@ def build_bootstrap_graph(
     ]
     edges: list[DesignerGraphEdge] = [
         {"id": "e_brief_character", "source": "n_brief", "target": "n_character", "kind": EDGE_KIND_DATA},
-        {"id": "e_brief_scene", "source": "n_brief", "target": "n_scene", "kind": EDGE_KIND_DATA},
         {"id": "e_brief_storyboard", "source": "n_brief", "target": "n_storyboard", "kind": EDGE_KIND_DATA},
+        {"id": "e_brief_scene", "source": "n_brief", "target": "n_scene", "kind": EDGE_KIND_DATA},
+        {"id": "e_storyboard_scene", "source": "n_storyboard", "target": "n_scene", "kind": EDGE_KIND_DATA},
         {
             "id": "e_character_storyboard",
             "source": "n_character",
@@ -2688,20 +2609,9 @@ def build_bootstrap_graph(
             "kind": EDGE_KIND_SYNC,
             "label": "Align",
         },
-        {
-            "id": "e_scene_storyboard",
-            "source": "n_scene",
-            "target": "n_storyboard",
-            "kind": EDGE_KIND_SYNC,
-            "label": "Align",
-        },
-        {"id": "e_character_n_frame_1", "source": "n_character", "target": "n_frame_1", "kind": EDGE_KIND_DATA},
-        {"id": "e_scene_n_frame_1", "source": "n_scene", "target": "n_frame_1", "kind": EDGE_KIND_DATA},
-        {"id": "e_storyboard_n_frame_1", "source": "n_storyboard", "target": "n_frame_1", "kind": EDGE_KIND_DATA},
         {"id": "e_character_n_clip_1", "source": "n_character", "target": "n_clip_1", "kind": EDGE_KIND_DATA},
         {"id": "e_scene_n_clip_1", "source": "n_scene", "target": "n_clip_1", "kind": EDGE_KIND_DATA},
         {"id": "e_storyboard_n_clip_1", "source": "n_storyboard", "target": "n_clip_1", "kind": EDGE_KIND_DATA},
-        {"id": "e_n_frame_1_n_clip_1", "source": "n_frame_1", "target": "n_clip_1", "kind": EDGE_KIND_DATA},
         {"id": "e_n_clip_1_compose", "source": "n_clip_1", "target": "n_compose", "kind": EDGE_KIND_DATA},
     ]
     graph: DesignerExecutionGraph = {
@@ -2713,7 +2623,10 @@ def build_bootstrap_graph(
         "source": GRAPH_SOURCE_PROMPT,
         "nodes": nodes,
         "edges": edges,
-        "metadata": {"bootstrap": "designer.graph.bootstrap.v1"},
+        "metadata": {
+            "bootstrap": "designer.graph.bootstrap.v1",
+            "scene_continuity_mode": "scene_card_plus_clip_shots",
+        },
         "created_at": now,
         "updated_at": now,
     }

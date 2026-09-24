@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from jiuwenswarm.agents.harness.common.tools import video_tools
 
@@ -229,3 +231,121 @@ async def test_invoke_model_video_generation_routes_to_volcengine(
     result = await video_tools._invoke_model_video_generation("hello", size="1280*720", duration=5)
     assert called.hit is True
     assert result["video_path"] == "/tmp/y.mp4"
+
+
+def test_minimax_and_seedance_send_reference_stills(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    plate = tmp_path / "plate.png"
+    plate.write_bytes(b"\x89PNG\r\n\x1a\n")
+    posts: list[dict] = []
+
+    class _Resp:
+        def __init__(self, payload: dict):
+            self.ok = True
+            self.status_code = 200
+            self._payload = payload
+            self.content = b"fake-mp4"
+            self.text = str(payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            return None
+
+    def fake_request(method: str, url: str, **kwargs):
+        if method == "POST":
+            posts.append(kwargs.get("json") or {})
+            if "minimaxi" in url:
+                return _Resp({"task_id": "tid-1"})
+            return _Resp({"id": "cgt-1"})
+        if method == "GET" and "tid-1" in url:
+            return _Resp({"task": {"status": "succeeded", "content": {"url": "https://cdn.example/out.mp4"}}})
+        if method == "GET" and "cgt-1" in url:
+            return _Resp({"status": "succeeded", "content": {"video_url": "https://ark.example/out.mp4"}})
+        if method == "GET":
+            return _Resp({})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(video_tools, "_http_request", fake_request)
+    monkeypatch.setattr(video_tools, "get_agent_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(video_tools.time, "sleep", lambda *_: None)
+
+    video_tools._invoke_minimax_video_generation_sync(
+        "father sits",
+        api_key="k",
+        api_base="https://api.minimaxi.com/v1",
+        model="MiniMax-H3",
+        size="832*480",
+        duration=5,
+        resolution="480P",
+        reference_images=[str(plate)],
+        audio=True,
+        force_reference_mode=True,
+    )
+    video_tools._invoke_volcengine_video_generation_sync(
+        "father sits",
+        api_key="k",
+        api_base="https://ark.cn-beijing.volces.com/api/v3",
+        model="doubao-seedance-2-0-260128",
+        size="832*480",
+        duration=5,
+        resolution="480P",
+        reference_images=[str(plate)],
+        audio=True,
+        force_reference_mode=True,
+    )
+    for body in posts:
+        roles = [item.get("role") for item in body["content"] if item.get("type") == "image_url"]
+        assert roles == ["reference_image"]
+        assert body["generate_audio"] is True
+
+
+def test_dropped_status_poll_still_saves_finished_video(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    task_id = "00a35677-8280-4e6e-8ec0-23726b5df68c"
+
+    class _Resp:
+        def __init__(self, payload: dict, content: bytes = b"mp4-bytes"):
+            self.ok = True
+            self.status_code = 200
+            self._payload = payload
+            self.content = content
+            self.text = str(payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            return None
+
+    def fake_request(method: str, url: str, **kwargs):
+        del kwargs
+        if method == "GET" and url.endswith(f"/tasks/{task_id}"):
+            return _Resp(
+                {
+                    "output": {
+                        "task_id": task_id,
+                        "task_status": "SUCCEEDED",
+                        "video_url": "https://cdn.example/saved.mp4",
+                    }
+                }
+            )
+        if method == "GET" and url.endswith(".mp4"):
+            return _Resp({}, content=b"mp4-bytes")
+        raise AssertionError(f"unexpected {method} {url}")
+
+    monkeypatch.setattr(video_tools, "_http_request", fake_request)
+    monkeypatch.setattr(video_tools, "get_agent_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(video_tools.time, "sleep", lambda *_: None)
+
+    exc = requests.exceptions.SSLError(
+        f"Max retries exceeded with url: /api/v1/tasks/{task_id}"
+    )
+    assert video_tools._task_id_from_error(exc) == task_id
+    saved = video_tools._recover_provider_task_file(
+        api_base="https://example.maas.aliyuncs.com/api/v1",
+        api_key="k",
+        task_id=task_id,
+        prompt="clip",
+    )
+    assert Path(saved["video_path"]).read_bytes() == b"mp4-bytes"
+    assert saved["original_url"] == "https://cdn.example/saved.mp4"

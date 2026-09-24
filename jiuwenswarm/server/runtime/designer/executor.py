@@ -22,6 +22,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_CLIP,
     NODE_ROLE_COMPOSE,
     NODE_ROLE_FRAME,
+    NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
     NODE_STATUS_CANCELLED,
     NODE_STATUS_COMPLETED,
@@ -50,10 +51,8 @@ from jiuwenswarm.common.schema.designer_graph import (
     new_run_id,
     node_pipeline,
     node_uses_agent_runtime,
-    shot_topology_ids_added_by_patch,
     sync_groups,
     utc_now_ms,
-    video_concat_source_ids,
 )
 from jiuwenswarm.common.schema.message import EventType
 from jiuwenswarm.server.runtime.designer.activity import (
@@ -67,9 +66,6 @@ from jiuwenswarm.server.runtime.designer.handlers import (
     get_node_handler,
 )
 from jiuwenswarm.server.runtime.designer.node_agent import NodeAgentHost, NodeAgentRunner
-from jiuwenswarm.server.runtime.designer.user_references import (
-    carry_user_references as _carry_user_references,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -84,52 +80,14 @@ class RunUpdateCallback(Protocol):
     ) -> None: ...
 
 _MOCK_NODE_DELAY_SECONDS = 0.35
+# Ready clips start together once their inputs exist. The cap only limits how
+# many node agents run at once; it is not a dependency lock.
 _MAX_CONCURRENT_NODE_AGENTS = 3
 _TERMINAL_NODE_STATUSES = {
     NODE_STATUS_COMPLETED,
     NODE_STATUS_FAILED,
     NODE_STATUS_CANCELLED,
 }
-
-
-def locked_storyboard_shot_count(graph: DesignerExecutionGraph) -> int | None:
-    """Approved storyboard / analysis shot count. Extra parsed rows must not expand past this."""
-    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
-    planned: list[Any] = []
-    for node in graph.get("nodes") or []:
-        if not isinstance(node, dict):
-            continue
-        nid = str(node.get("id") or "")
-        if node_pipeline(node) != NODE_ROLE_STORYBOARD and nid != "n_storyboard":
-            continue
-        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        raw = cfg.get("planned_shots")
-        if isinstance(raw, list) and raw:
-            planned = raw
-        break
-    if planned:
-        return max(1, min(len(planned), MAX_SHOT_CLIP_NODES))
-    target = int(analysis.get("target_shot_count") or 0) if analysis else 0
-    if 1 <= target <= MAX_SHOT_CLIP_NODES:
-        return target
-    shots = analysis.get("shots") if isinstance(analysis.get("shots"), list) else []
-    if shots:
-        return max(1, min(len(shots), MAX_SHOT_CLIP_NODES))
-    return None
-
-
-def should_expand_shot_topology_after_nodes(
-    finished_ids: list[str],
-    node_states: dict[str, Any] | None,
-) -> bool:
-    """Do not grow the canvas after a failed video/keyframe — retry the same nodes."""
-    states = node_states or {}
-    for node_id in finished_ids:
-        status = str((states.get(node_id) or {}).get("status") or "")
-        if status == NODE_STATUS_FAILED:
-            return False
-    return True
 
 
 @dataclass(frozen=True)
@@ -217,6 +175,18 @@ class GraphExecutor:
                 arch_m = architecture_clause_from_bible(bible_m)
                 c["scene_architecture_clause"] = arch_m or text[:900]
                 c["scene_master_prompt"] = (arch_m or text)[:900]
+            if role in {NODE_ROLE_SCENE, "scene"} or (
+                node_id.startswith("n_scene_") and bool(c.get("is_scene_master"))
+            ):
+                from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+                    architecture_clause_from_bible,
+                )
+
+                bible_m = c.get("scene_bible") if isinstance(c.get("scene_bible"), dict) else None
+                arch_m = architecture_clause_from_bible(bible_m)
+                c["scene_architecture_clause"] = arch_m or text[:900]
+                c["scene_master_prompt"] = (arch_m or text)[:900]
+                c["handoff_artifact_ready"] = True
             n["config"] = c
             node = n
             break
@@ -323,33 +293,11 @@ class GraphExecutor:
         incoming = execution_predecessors(graph)
         groups = sync_groups(graph)
         source_states = source_run.get("node_states") or {}
-        target_node = _node_by_id(graph, node_id)
-        concat_sources = video_concat_source_ids(graph, node_id)
-        concat_target = node_pipeline(target_node) == NODE_ROLE_COMPOSE or node_id in {
-            "n_compose",
-            "n_final",
-        }
-        if (
-            not concat_target
-            and str(target_node.get("type") or "") == NODE_TYPE_VIDEO
-            and node_pipeline(target_node) != NODE_ROLE_CLIP
-            and concat_sources
-        ):
-            concat_target = True
-        if concat_target:
-            from jiuwenswarm.server.runtime.designer.handlers.compose import (
-                node_has_concat_video,
-            )
-
-            for member in concat_sources:
-                if not node_has_concat_video(graph, source_states, member):
+        for pred in incoming.get(node_id, []):
+            members = groups.get(pred, frozenset({pred}))
+            for member in members:
+                if (source_states.get(member) or {}).get("status") != NODE_STATUS_COMPLETED:
                     raise ValueError(f"upstream not ready: {member}")
-        else:
-            for pred in incoming.get(node_id, []):
-                members = groups.get(pred, frozenset({pred}))
-                for member in members:
-                    if (source_states.get(member) or {}).get("status") != NODE_STATUS_COMPLETED:
-                        raise ValueError(f"upstream not ready: {member}")
         now = utc_now_ms()
         states = deepcopy(source_states)
         for node in graph.get("nodes", []):
@@ -361,6 +309,7 @@ class GraphExecutor:
         ]
         if kept_ref is not None and not kept_refs:
             kept_refs = [kept_ref]
+        target_node = _node_by_id(graph, node_id)
         target_type = str(target_node.get("type") or "")
         if (
             target_type in {NODE_TYPE_IMAGE, NODE_TYPE_VIDEO}
@@ -389,10 +338,27 @@ class GraphExecutor:
             "updated_at": now,
             "metadata": {"use_prior_feedback": True},
         }
-        # Opt-in: Run again may apply prior report constraints (still one-pass, no loop).
+        # Opt-in: Run again reuses stored prompts, images, and upstream outputs.
         meta = dict(graph.get("metadata") or {})
         meta["use_prior_feedback"] = True
+        meta["freeze_shot_topology"] = True
+        meta["pending_llm_analysis"] = False
         graph["metadata"] = meta
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+                capture_regenerate_packet,
+            )
+
+            target = _node_by_id(graph, node_id)
+            cfg = dict(target.get("config") or {})
+            cfg["regenerate_packet"] = capture_regenerate_packet(
+                target,
+                graph,
+                states,
+            )
+            target["config"] = cfg
+        except Exception:  # noqa: BLE001
+            logger.debug("regenerate packet capture failed", exc_info=True)
         self._store.save_graph(graph)
         return self._store.save_run(run)
 
@@ -415,9 +381,16 @@ class GraphExecutor:
             if not pending:
                 return run
         graph = self._require_graph(run["graph_id"])
-        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            chat_model_billing_block,
+            demote_config_to_handler,
+            ensure_chat_model_reachable,
+            llm_available,
+        )
 
-        # Framework: every node is an LLM agent with tools when models exist.
+        # Framework: every node is an LLM agent with tools when the chat model
+        # can actually answer. A 402 marks it unavailable and nodes stay handlers.
+        ensure_chat_model_reachable()
         use_agents = llm_available()
         for node in graph.get("nodes") or []:
             cfg = node.setdefault("config", {})
@@ -434,14 +407,13 @@ class GraphExecutor:
                 else:
                     cfg.pop("prewritten", None)
             else:
-                current = str(cfg.get("delegate") or "").strip()
-                if cfg.get("force_handler") or current == CONFIG_DELEGATE_HANDLER:
-                    cfg["delegate"] = CONFIG_DELEGATE_HANDLER
-                elif not current:
-                    cfg["delegate"] = CONFIG_DELEGATE_HANDLER
+                demote_config_to_handler(cfg)
         meta = dict(graph.get("metadata") or {})
         meta["ai_agent_pipeline"] = use_agents
         meta["all_nodes_agents"] = use_agents
+        block = chat_model_billing_block()
+        if block:
+            meta["chat_model_unavailable"] = block[:300]
         graph["metadata"] = meta
         run["status"] = RUN_STATUS_RUNNING
         run["updated_at"] = utc_now_ms()
@@ -603,10 +575,10 @@ class GraphExecutor:
             current = dict(states.get(target) or {"status": NODE_STATUS_PENDING})
             if current.get("status") == NODE_STATUS_RUNNING:
                 return f"already running: {target}"
+            if current.get("status") == NODE_STATUS_FAILED:
+                return f"node failed: {target}; regenerate that node instead of spawning another"
             if current.get("status") in _TERMINAL_NODE_STATUSES:
-                current["status"] = NODE_STATUS_PENDING
-                current["error"] = None
-                current["completed_at"] = None
+                return f"already finished: {target}"
             states[target] = current
             current_ids = list(run.get("current_node_ids") or [])
             if target not in current_ids:
@@ -628,13 +600,27 @@ class GraphExecutor:
         patch: dict[str, Any],
     ) -> DesignerExecutionGraph:
         graph = self._require_graph(graph_id)
-        extra = shot_topology_ids_added_by_patch(graph, patch)
-        if extra:
-            logger.info(
-                "Rejected shot-topology expansion via agent patch: %s",
-                extra,
-            )
-            return graph
+        meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+        locked = bool(meta.get("freeze_shot_topology"))
+        failed = False
+        for run in self._live_runs.values():
+            if str(run.get("graph_id") or "") != str(graph_id):
+                continue
+            for state in (run.get("node_states") or {}).values():
+                if (state or {}).get("status") == NODE_STATUS_FAILED:
+                    failed = True
+                    break
+        if locked or failed:
+            existing = {str(node.get("id") or "") for node in graph.get("nodes") or []}
+            patch = dict(patch or {})
+            upsert = patch.get("upsert_nodes") or []
+            if isinstance(upsert, list):
+                patch["upsert_nodes"] = [
+                    item
+                    for item in upsert
+                    if isinstance(item, dict) and str(item.get("id") or "") in existing
+                ]
+            patch["remove_node_ids"] = []
         saved = self._store.save_graph(apply_graph_patch(graph, patch))
         node_ids = {node["id"] for node in saved.get("nodes") or []}
         for run_id, run in list(self._live_runs.items()):
@@ -716,6 +702,7 @@ class GraphExecutor:
                     preds=incoming,
                     in_flight=set(),
                     graph=graph,
+                    run=run,
                 )
                 if not ready_ids:
                     pending = any(
@@ -812,8 +799,8 @@ class GraphExecutor:
                 else "role handlers / direct image-video APIs only"
             ),
             "force_handler": (
-                "TTS disabled; dialogue stays clip-native. Music uses "
-                "MusicNodeHandler until a music backend exists."
+                "music/speech stay on MusicNodeHandler/SpeechNodeHandler until TTS/music "
+                "backends exist; if audio not requested, nodes are omitted"
             ),
             "heuristic_when": "llm_available() is False (no Settings chat models)",
         }
@@ -905,7 +892,6 @@ class GraphExecutor:
                             meta_r["supervisor_analyzed"] = True
                             meta_r["supervisor_composed_on_bootstrap"] = True
                             rebuilt["metadata"] = meta_r
-                            _carry_user_references(meta0, rebuilt)
                             graph = self._store.save_graph(rebuilt)
                     else:
                         meta0["script_analysis"] = analysis
@@ -1225,6 +1211,11 @@ class GraphExecutor:
                     for n in (graph.get("nodes") or [])
                     if node_pipeline(n) == NODE_ROLE_FRAME
                 ]
+                scene_nodes = [
+                    n
+                    for n in (graph.get("nodes") or [])
+                    if node_pipeline(n) == NODE_ROLE_SCENE
+                ]
                 clip_pending = [
                     n
                     for n in (graph.get("nodes") or [])
@@ -1239,7 +1230,18 @@ class GraphExecutor:
                     in _TERMINAL_NODE_STATUSES
                     for n in frame_nodes
                 )
-                if not (frames_done and clip_pending):
+                scenes_done = bool(scene_nodes) and all(
+                    (run.get("node_states") or {}).get(str(n.get("id") or ""), {}).get("status")
+                    in _TERMINAL_NODE_STATUSES
+                    for n in scene_nodes
+                )
+                # Scene-card path: adjust once all scene plates finish (no n_frame_*).
+                # Legacy path: adjust once all keyframes finish.
+                ready_gate = (
+                    (scenes_done and not frame_nodes)
+                    or frames_done
+                )
+                if not (ready_gate and clip_pending):
                     return
                 with traj.span(
                     agent_id="supervisor",
@@ -1320,6 +1322,7 @@ class GraphExecutor:
                     preds=incoming,
                     in_flight=set(in_flight.keys()),
                     graph=graph,
+                    run=run,
                 )
                 if newly_ready:
                     enable_a2a = bool((graph.get("metadata") or {}).get("enable_a2a_collab"))
@@ -1397,22 +1400,19 @@ class GraphExecutor:
                         self._handoff_scene_prompt_after_frame(graph, node_id)
 
                 run["current_node_ids"] = list(in_flight.keys())
-                if should_expand_shot_topology_after_nodes(
-                    finished_ids, run.get("node_states")
-                ):
-                    await _maybe_review_storyboard()
-                    _maybe_adjust_clips()
-                    graph, remaining, incoming, groups = self._expand_clips_if_needed(
-                        graph, run, remaining, on_update=on_update
-                    )
-                    # Re-queue any newly expanded clip ids that are not in-flight.
-                    for node in graph.get("nodes") or []:
-                        nid = str(node.get("id") or "")
-                        if not nid or nid in in_flight:
-                            continue
-                        st = (run.get("node_states") or {}).get(nid) or {}
-                        if st.get("status") not in _TERMINAL_NODE_STATUSES:
-                            remaining.add(nid)
+                await _maybe_review_storyboard()
+                _maybe_adjust_clips()
+                graph, remaining, incoming, groups = self._expand_clips_if_needed(
+                    graph, run, remaining, on_update=on_update
+                )
+                # Re-queue any newly expanded clip ids that are not in-flight.
+                for node in graph.get("nodes") or []:
+                    nid = str(node.get("id") or "")
+                    if not nid or nid in in_flight:
+                        continue
+                    st = (run.get("node_states") or {}).get(nid) or {}
+                    if st.get("status") not in _TERMINAL_NODE_STATUSES:
+                        remaining.add(nid)
                 if run.get("status") == RUN_STATUS_FAILED or self._is_cancelled(run_id):
                     break
             if self._is_cancelled(run_id):
@@ -1583,9 +1583,6 @@ class GraphExecutor:
         shot_rows = self._completed_storyboard_shots(graph, run)
         if shot_rows is None:
             return graph, remaining, execution_predecessors(graph), sync_groups(graph)
-        lock = locked_storyboard_shot_count(graph)
-        if lock is not None and len(shot_rows) > lock:
-            shot_rows = shot_rows[:lock]
         shot_count = max(1, min(len(shot_rows) or 1, MAX_SHOT_CLIP_NODES))
         from jiuwenswarm.server.runtime.designer.handlers.text_nodes import shot_generate_prompt
 
@@ -1608,6 +1605,13 @@ class GraphExecutor:
             if str(node.get("id") or "").startswith("n_frame_")
             or node_pipeline(node) == NODE_ROLE_FRAME
         }
+        designed_clip_shots = (
+            str(meta.get("scene_continuity_mode") or "") == "scene_card_plus_clip_shots"
+        )
+        if designed_clip_shots and not current_frame_ids:
+            meta = dict(meta)
+            meta["freeze_shot_topology"] = True
+            graph["metadata"] = meta
         if len(current_frame_ids) != shot_count and not bool(meta.get("freeze_shot_topology")):
             from jiuwenswarm.server.runtime.designer.smart_graph import (
                 apply_runtime_delegate,
@@ -1662,10 +1666,9 @@ class GraphExecutor:
             ):
                 if key in meta and meta.get(key) is not None:
                     rmeta[key] = meta.get(key)
-            rmeta["freeze_shot_topology"] = True
+            rmeta["freeze_shot_topology"] = False
             rmeta["script_analysis"] = analysis
             rebuilt["metadata"] = rmeta
-            _carry_user_references(meta, rebuilt)
             saved = self._store.save_graph(apply_runtime_delegate(rebuilt))
             live_ids = {str(node.get("id") or "") for node in saved.get("nodes") or []}
             states = run.setdefault("node_states", {})
@@ -1719,12 +1722,6 @@ class GraphExecutor:
             for node_id in (current_frame_ids | {"n_frame"})
         )
         if topology_matches and not bundled_frames:
-            if not bool(meta.get("freeze_shot_topology")):
-                frozen = dict(graph)
-                frozen_meta = dict(meta)
-                frozen_meta["freeze_shot_topology"] = True
-                frozen["metadata"] = frozen_meta
-                graph = self._store.save_graph(frozen)
             synced = apply_shot_generate_prompts(graph, prompts)
             if synced is graph:
                 return graph, remaining, execution_predecessors(graph), sync_groups(graph)
@@ -1762,9 +1759,8 @@ class GraphExecutor:
         ):
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)
-        rmeta["freeze_shot_topology"] = True
+        rmeta["freeze_shot_topology"] = False
         rebuilt["metadata"] = rmeta
-        _carry_user_references(meta, rebuilt)
         saved = self._store.save_graph(
             apply_shot_generate_prompts(apply_runtime_delegate(rebuilt), prompts)
         )
@@ -1789,23 +1785,25 @@ class GraphExecutor:
     def _handoff_scene_prompt_after_frame(
         self,
         graph: DesignerExecutionGraph,
-        frame_id: str,
+        completed_id: str,
     ) -> None:
-        """Pass scene-master prompt text to later same-setting keyframes (compose path).
-
-        Visual refs stay solo character sheets; only the deterministic scene bible /
-        generate prompt is forwarded so later agents keep architecture consistent.
-        """
+        """Forward scene bible / master prompt after a scene card or scene-master frame completes."""
         by_id = {
             str(n.get("id") or ""): n
             for n in (graph.get("nodes") or [])
             if isinstance(n, dict) and n.get("id")
         }
-        src = by_id.get(str(frame_id or "").strip())
-        if not src or node_pipeline(src) != NODE_ROLE_FRAME:
+        src_id = str(completed_id or "").strip()
+        src = by_id.get(src_id)
+        if not src:
+            return
+        role = node_pipeline(src)
+        is_scene = role == NODE_ROLE_SCENE or src_id.startswith("n_scene_")
+        is_frame = role == NODE_ROLE_FRAME
+        if not is_scene and not is_frame:
             return
         scfg = src.get("config") if isinstance(src.get("config"), dict) else {}
-        if not bool(scfg.get("is_scene_master")):
+        if is_frame and not bool(scfg.get("is_scene_master")):
             return
         setting_id = str(scfg.get("setting_id") or "").strip()
         if not setting_id:
@@ -1822,42 +1820,56 @@ class GraphExecutor:
         )
 
         arch = architecture_clause_from_bible(bible)
-        if not arch and not bible:
+        gen_src = dict(scfg.get("generate") or {}) if isinstance(scfg.get("generate"), dict) else {}
+        master_prompt = str(
+            scfg.get("scene_master_prompt") or gen_src.get("prompt") or arch or ""
+        ).strip()[:900]
+        if not arch and not bible and not master_prompt:
             return
         changed = False
+        target_role = NODE_ROLE_CLIP if is_scene else NODE_ROLE_FRAME
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
                 continue
             nid = str(node.get("id") or "")
-            if nid == frame_id or node_pipeline(node) != NODE_ROLE_FRAME:
+            if nid == src_id or node_pipeline(node) != target_role:
                 continue
             cfg = dict(node.get("config") or {})
             if str(cfg.get("setting_id") or "").strip() != setting_id:
                 continue
-            if bool(cfg.get("is_scene_master")):
+            if target_role == NODE_ROLE_FRAME and bool(cfg.get("is_scene_master")):
                 continue
-            cfg["scene_prompt_handoff_from"] = frame_id
+            cfg["scene_prompt_handoff_from"] = src_id
+            if is_scene:
+                cfg["master_scene_node_id"] = src_id
+                cfg["scene_node_id"] = cfg.get("scene_node_id") or src_id
             if bible:
                 cfg["scene_bible"] = dict(bible)
-            if arch:
-                cfg["scene_architecture_clause"] = arch
-                # Architecture-only (no full prior action / generate prompt paste).
-                cfg["scene_master_prompt"] = arch[:900]
+            if arch or master_prompt:
+                cfg["scene_architecture_clause"] = arch or master_prompt[:900]
+                cfg["scene_master_prompt"] = master_prompt or (arch[:900] if arch else "")
             gen2 = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             prompt = str(gen2.get("prompt") or "")
             marker = "SCENE PROMPT HANDOFF"
-            if marker not in prompt and arch:
+            handoff_arch = arch or master_prompt
+            if marker not in prompt and handoff_arch:
                 handoff_bit = (
-                    f"{marker} from {frame_id} (same setting `{setting_id}`): "
-                    f"{arch} Change ONLY camera view + on-screen cast/actions for THIS beat."
+                    f"{marker} from {src_id} (same setting `{setting_id}`): "
+                    f"{handoff_arch} Change ONLY camera view + on-screen cast/actions for THIS beat."
                 )
                 gen2["prompt"] = (prompt + "\n" + handoff_bit).strip()[:2200]
                 cfg["generate"] = gen2
             irefs = dict(cfg.get("identity_refs") or {})
-            irefs["scene_prompt_handoff_from"] = frame_id
-            irefs["keyframe_strategy"] = "compose_from_solo_refs"
+            irefs["scene_prompt_handoff_from"] = src_id
+            if is_scene:
+                irefs["master_scene_node_id"] = src_id
+                irefs["scene_node_id"] = irefs.get("scene_node_id") or src_id
+                if bible:
+                    irefs["scene_bible"] = dict(bible)
+            else:
+                irefs["keyframe_strategy"] = "compose_from_solo_refs"
+                cfg["keyframe_strategy"] = "compose_from_solo_refs"
             cfg["identity_refs"] = irefs
-            cfg["keyframe_strategy"] = "compose_from_solo_refs"
             node["config"] = cfg
             changed = True
         if changed:
@@ -2102,7 +2114,15 @@ class GraphExecutor:
                     ACTIVITY_KIND_THINKING,
                 )
                 from jiuwenswarm.server.runtime.designer.activity import stage_text_for_node
+                from jiuwenswarm.server.runtime.designer.model_tools import (
+                    chat_model_billing_block,
+                    demote_config_to_handler,
+                )
 
+                if chat_model_billing_block():
+                    live_cfg = node.setdefault("config", {})
+                    if isinstance(live_cfg, dict):
+                        demote_config_to_handler(live_cfg)
                 uses_agent = node_uses_agent_runtime(node)
                 emit_activity(
                     ACTIVITY_KIND_THINKING,
@@ -2167,8 +2187,19 @@ class GraphExecutor:
                 return
             refs = [ref for ref in (result.output_refs or []) if ref]
             primary = result.output_ref or (refs[0] if refs else None)
-            if primary is not None and not refs:
-                refs = [primary]
+            if primary is not None:
+                # Always keep primary media first even when sidecars fill output_refs.
+                refs = [primary, *[r for r in refs if r is not primary]]
+                # Dedup by uri.
+                seen: set[str] = set()
+                deduped = []
+                for ref in refs:
+                    uri = str((ref or {}).get("uri") or "")
+                    if not uri or uri in seen:
+                        continue
+                    seen.add(uri)
+                    deduped.append(ref)
+                refs = deduped
             if node_pipeline(node) == NODE_ROLE_FRAME:
                 image_refs = [ref for ref in refs if _ref_kind(ref) == "image"]
                 if image_refs:
@@ -2248,8 +2279,12 @@ class GraphExecutor:
                     str(run.get("graph_id") or graph.get("graph_id") or "")
                 )
                 cfg_done = dict(node.get("config") or {})
+                # Prefer the prompt actually sent to video gen — last_approved / generate
+                # can be empty on the executor snapshot while last_wan_prompt was set.
                 approved = str(
-                    cfg_done.get("last_approved_prompt")
+                    cfg_done.get("last_wan_prompt")
+                    or cfg_done.get("last_approved_prompt")
+                    or cfg_done.get("prompt")
                     or (cfg_done.get("generate") or {}).get("prompt")
                     or ""
                 ).strip()
@@ -2495,6 +2530,14 @@ def _is_fallback_text_ref(ref: object) -> bool:
     return _ref_kind(ref) in _TEXT_FALLBACK_KINDS
 
 
+def _published_media_output(state: object) -> bool:
+    """True once a still-running node has already written the file a dependent needs."""
+    if not isinstance(state, dict):
+        return False
+    ref = state.get("output_ref")
+    return _usable_ref(ref) and not _is_fallback_text_ref(ref)
+
+
 def _is_media_ref(ref: object) -> bool:
     return _ref_kind(ref) in _MEDIA_KINDS
 
@@ -2560,9 +2603,14 @@ def _is_ready(
         except KeyError:
             node = None
         if node is not None and is_compose_sink_node(node):
+            compose_wait = True
             required = compose_required_predecessor_ids(graph)
             if required:
                 preds = list(dict.fromkeys([*preds, *required]))
+        else:
+            compose_wait = False
+    else:
+        compose_wait = False
     for pred in preds:
         group = groups.get(pred, frozenset({pred}))
         for member in group:
@@ -2570,15 +2618,38 @@ def _is_ready(
             # completed before it can start deadlocks storyboard forever.
             if member == node_id:
                 continue
-            member_status = (run.get("node_states", {}).get(member) or {}).get("status")
+            member_state = run.get("node_states", {}).get(member) or {}
+            member_status = member_state.get("status")
+            # Composer is the only hard barrier: every dependency must finish
+            # and hand over a real output before ffmpeg starts.
+            if compose_wait:
+                if member_status != NODE_STATUS_COMPLETED:
+                    return False
+                # Require a real on-disk clip/audio file — not just COMPLETED + URI.
+                try:
+                    from jiuwenswarm.server.runtime.designer.handlers.compose import (
+                        compose_predecessor_media_ready,
+                    )
+
+                    if not compose_predecessor_media_ready(graph, run, member):
+                        return False
+                except Exception:  # noqa: BLE001
+                    ref = member_state.get("output_ref")
+                    if ref is None or not _usable_ref(ref) or _is_fallback_text_ref(ref):
+                        return False
+                continue
             if member_status == NODE_STATUS_COMPLETED:
                 continue
-            # Soft artifact deps (clip prompt / scene prompt handoff): unlock as soon as
-            # the upstream node has published what we need — even while still generating media.
+            # Soft artifact deps (another clip's beat): unlock while that clip
+            # is still generating, once the storyboard beat is already known.
             if graph is not None and is_soft_artifact_dependency(graph, member, node_id):
                 if artifact_dependency_satisfied(graph, node_id, member):
                     continue
                 return False
+            # Hard inputs (character sheet, empty scene plate): proceed as soon
+            # as the file exists, even if that node is still finishing.
+            if member_status == NODE_STATUS_RUNNING and _published_media_output(member_state):
+                continue
             if member_status != NODE_STATUS_COMPLETED:
                 return False
     return True

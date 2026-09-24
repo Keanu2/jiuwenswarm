@@ -1,4 +1,4 @@
-import { Headphones, Image as ImageIcon, Trash2, Video } from 'lucide-react';
+import { FileText, Headphones, Image as ImageIcon, Trash2, Video } from 'lucide-react';
 import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -6,7 +6,7 @@ import {
   type DesignerAssetKind,
   type DesignerAssetSource,
 } from '../designerAssetLibraryStore';
-import { collectDesignerMaterials, type DesignerMaterial } from '../designerMaterials';
+import { collectDesignerMaterials, isDesignerFallbackTextAsset, type DesignerMaterial } from '../designerMaterials';
 import { DESIGNER_ASSET_DRAG_MIME } from '../designerCanvasNodes';
 import { useDesignerRunStore } from '../designerRunStore';
 import { useDesignerStore } from '../designerStore';
@@ -33,6 +33,16 @@ function formatBytes(size: number): string {
 }
 
 function kindFromMaterial(material: DesignerMaterial): DesignerAssetKind {
+  if (
+    isDesignerFallbackTextAsset({
+      kind: material.kind,
+      uri: material.uri,
+      mime_type: material.mimeType,
+      label: material.label,
+    })
+  ) {
+    return 'other';
+  }
   if (material.kind === 'video' || (material.mimeType || '').startsWith('video/')) return 'video';
   if (material.kind === 'audio' || (material.mimeType || '').startsWith('audio/')) return 'audio';
   if (material.kind === 'image' || (material.mimeType || '').startsWith('image/')) return 'image';
@@ -42,6 +52,7 @@ function kindFromMaterial(material: DesignerMaterial): DesignerAssetKind {
 function AssetKindIcon({ kind }: { kind: DesignerAssetKind }) {
   if (kind === 'video') return <Video size={18} aria-hidden />;
   if (kind === 'audio') return <Headphones size={18} aria-hidden />;
+  if (kind === 'other') return <FileText size={18} aria-hidden />;
   return <ImageIcon size={18} aria-hidden />;
 }
 
@@ -107,12 +118,13 @@ export function DesignerAssetsPanel() {
       }
       if (seenUris.has(material.uri)) continue;
       seenUris.add(material.uri);
+      const kind = kindFromMaterial(material);
       items.push({
         id: `gen:${material.id}`,
         filename: material.label,
-        kind: kindFromMaterial(material),
+        kind,
         source: material.source || (isUploadedMaterial(material) ? 'uploaded' : 'generated'),
-        previewUrl: material.previewUrl,
+        previewUrl: kind === 'image' ? material.previewUrl : null,
         sizeLabel: material.kind,
         onCanvas: true,
         deletable: false,

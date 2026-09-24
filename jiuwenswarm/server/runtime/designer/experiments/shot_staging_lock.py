@@ -138,6 +138,24 @@ def build_action_lock(
             beat = beat.split(marker, 1)[0].strip()
     if beat and not any(beat[:40] in b for b in bits):
         bits.append(f"beat={beat[:220]}")
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+            infer_pose_from_action,
+        )
+
+        pose_hint = infer_pose_from_action(
+            " ".join(
+                [
+                    beat,
+                    " ".join(str(cast_actions.get(c) or "") for c in (on_screen or [])),
+                    str(shot.get("motion_detail") or ""),
+                ]
+            )
+        )
+        if pose_hint and pose_hint != "engaged_in_beat":
+            bits.insert(0, f"beat_pose={pose_hint}")
+    except Exception:  # noqa: BLE001
+        pass
     motion = str(shot.get("motion_detail") or "").strip()
     if motion:
         bits.append(f"motion={motion[:200]}")
@@ -275,7 +293,7 @@ def staging_lock_clause(
     for_clip: bool = False,
 ) -> str:
     """Prompt block for keyframes and clips."""
-    where = "this clip (match Image 1 staging + storyboard)" if for_clip else "this keyframe"
+    where = "this clip (match storyboard contact poses — solos are identity only)" if for_clip else "this keyframe"
     scope = f"shot {shot_index}" if shot_index else "this shot"
     if setting_id:
         scope += f" / setting `{setting_id}`"
@@ -288,6 +306,16 @@ def staging_lock_clause(
         lines.append(f"- RELATIONSHIPS: {relationship_lock.strip()[:720]}")
     if len(lines) == 1:
         return ""
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+            contact_anti_penetration_clause,
+        )
+
+        lines.append(f"- {contact_anti_penetration_clause(for_clip=for_clip)}")
+    except Exception:  # noqa: BLE001
+        lines.append(
+            "- CONTACT: bodies on support surfaces only — never intersect solid furniture/props."
+        )
     lines.append(staging_priority_rule())
     return "\n".join(lines)
 

@@ -164,6 +164,33 @@ def test_build_call_stays_text_to_video_without_images() -> None:
     assert "img_url" not in params
 
 
+def test_r2v_480p_uses_size_not_resolution(tmp_path: Path) -> None:
+    extra = tmp_path / "character.png"
+    extra.write_bytes(b"png-extra")
+    params = _build_dashscope_video_call(
+        "wan2.6-t2v",
+        size="854*480",
+        resolution="480P",
+        first_frame=None,
+        reference_images=[str(extra)],
+        force_reference_mode=True,
+    )
+    assert params["model"] == "wan2.6-r2v"
+    assert params["size"] == "832*480"
+    assert "resolution" not in params
+
+
+def test_t2v_480p_uses_size_not_resolution() -> None:
+    params = _build_dashscope_video_call(
+        "wan2.6-t2v",
+        size="854*480",
+        resolution="480P",
+    )
+    assert params["model"] == "wan2.6-t2v"
+    assert params["size"] == "832*480"
+    assert "resolution" not in params
+    assert "img_url" not in params
+
 def test_align_video_api_base_to_image_gen_intl(monkeypatch) -> None:
     monkeypatch.setenv("IMAGE_GEN_API_BASE", _INTL_DASHSCOPE_API_BASE)
     monkeypatch.setenv("IMAGE_GEN_API_KEY", "sk-test")

@@ -17,21 +17,14 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerExecutionGraph,
     DesignerGraphNode,
     data_predecessors,
-    extra_media_ids_added_by_patch,
     node_agent_template,
     node_pipeline,
     node_role,
-    shot_topology_ids_added_by_patch,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.server.runtime.designer.audio_locks import (
-    image_gen_family_label,
-    video_gen_family_label,
-)
 from jiuwenswarm.server.runtime.designer.handlers.common import (
     file_output_ref,
     graph_prompt,
-    graph_workspace_dir,
     write_workspace_text,
 )
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
@@ -92,8 +85,24 @@ def _ref_media_family(ref: Any) -> str | None:
     if any(uri_l.endswith(suf) for suf in _IMAGE_URI_SUFFIXES):
         return "image"
     if any(uri_l.endswith(suf) for suf in _VIDEO_URI_SUFFIXES):
+        path = _path_from_file_uri(uri) if uri.startswith("file:") else None
+        if path is None:
+            try:
+                path = Path(uri)
+            except Exception:  # noqa: BLE001
+                path = None
+        if path is None or not path.is_file() or path.stat().st_size < 512:
+            return None
         return "video"
     if any(uri_l.endswith(suf) for suf in _AUDIO_URI_SUFFIXES):
+        path = _path_from_file_uri(uri) if uri.startswith("file:") else None
+        if path is None:
+            try:
+                path = Path(uri)
+            except Exception:  # noqa: BLE001
+                path = None
+        if path is None or not path.is_file() or path.stat().st_size < 64:
+            return None
         return "audio"
     # workspace:// or extension-less: fall back to kind only if not a known text kind
     kind = str(ref.get("kind") or "").lower()
@@ -298,6 +307,58 @@ def _seed_handler_prompt(node: DesignerGraphNode, agent_result: NodeResult | Non
         cfg["prompt"] = text[:6000]
 
 
+def _prefer_media_primary(
+    media: NodeResult | None,
+    agent: NodeResult | None,
+    *,
+    required: str | None,
+) -> NodeResult | None:
+    """Keep PNG/mp4 as canvas primary; demote agent markdown to secondary refs."""
+    if media is None and agent is None:
+        return None
+    if media is None:
+        return agent
+    if agent is None:
+        return media
+    media_family = _ref_media_family(media.output_ref)
+    agent_family = _ref_media_family(agent.output_ref)
+    want = required or media_family or "image"
+    refs: list[Any] = []
+    primary = None
+    if media_family == want and isinstance(media.output_ref, dict):
+        primary = media.output_ref
+        refs.append(primary)
+    for ref in media.output_refs or []:
+        if isinstance(ref, dict) and ref not in refs:
+            refs.append(ref)
+    if agent_family == want and isinstance(agent.output_ref, dict):
+        if primary is None:
+            primary = agent.output_ref
+        if agent.output_ref not in refs:
+            refs.append(agent.output_ref)
+    elif isinstance(agent.output_ref, dict) and agent.output_ref not in refs:
+        refs.append(agent.output_ref)
+    for ref in agent.output_refs or []:
+        if isinstance(ref, dict) and ref not in refs:
+            refs.append(ref)
+    if primary is None and refs:
+        # Prefer first matching media family among refs.
+        for ref in refs:
+            if _ref_media_family(ref) == want:
+                primary = ref
+                break
+        primary = primary or refs[0]
+    return NodeResult(
+        output_ref=primary,
+        output_refs=refs,
+        message=(
+            f"agent+handler: {getattr(media, 'message', None) or 'media preferred'}"
+            if media_family == want
+            else (getattr(media, "message", None) or getattr(agent, "message", None) or "")
+        ),
+    )
+
+
 class DesignerNodeSpawner(Protocol):
     async def spawn_node_agent(self, run_id: str, node_id: str) -> str: ...
 
@@ -454,7 +515,79 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         or identity.get("prior_keyframe_node_id"),
         "manager_prompt_reviewed": bool(cfg.get("manager_prompt_reviewed")),
         "manager_lock_gate": cfg.get("manager_lock_gate"),
+        "language_lock": cfg.get("language_lock"),
+        "speech_line": cfg.get("speech_line"),
+        "speech_by_character": cfg.get("speech_by_character"),
+        "first_of_setting": cfg.get("first_of_setting"),
+        "prompt_char_limit": cfg.get("prompt_char_limit"),
+        "media_prompt_limits": cfg.get("media_prompt_limits"),
     }
+    extra: dict[str, Any] = {}
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.leaf_agent_continuity import (
+            hollywood_leaf_instructions,
+        )
+        from jiuwenswarm.server.runtime.designer.experiments.production_bible import (
+            leaf_lock_packet,
+        )
+        from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+            same_scene_prompt_gate_clause,
+        )
+        from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+            agent_prior_story_block,
+            ensure_prior_clip_story_on_cfg,
+        )
+        from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+            merge_storyboard_continuity,
+        )
+        from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            media_prompt_limit_packet,
+            resolve_prompt_limit,
+        )
+
+        role = str(node_pipeline(node) or node_role(node) or "")
+        if role in {"clip", "video"}:
+            cfg = ensure_prior_clip_story_on_cfg(cfg, graph)
+            cfg, _ = merge_storyboard_continuity(cfg, graph=graph)
+            node["config"] = cfg
+        limits = media_prompt_limit_packet()
+        extra["hollywood_instructions"] = hollywood_leaf_instructions(role)
+        extra["media_prompt_limits"] = limits
+        kind = "video" if role in {"clip", "video"} else "image"
+        if role in {"scene", "character", "character_design", "frame", "keyframe", "clip", "video"}:
+            lim = resolve_prompt_limit("video" if kind == "video" else "image")
+            extra["prompt_char_limit"] = lim.max_chars
+            extra["prompt_limit_guidance"] = lim.guidance()
+            cfg.setdefault("prompt_char_limit", lim.max_chars)
+            cfg.setdefault("media_prompt_limits", limits)
+            node["config"] = cfg
+        extra["lock_packet"] = leaf_lock_packet(
+            role=role,
+            shot_index=int(cfg.get("shot_index") or 0),
+            analysis=(graph.get("metadata") or {}).get("script_analysis")
+            if isinstance(graph.get("metadata"), dict)
+            else None,
+            meta=graph.get("metadata") if isinstance(graph.get("metadata"), dict) else cfg,
+        )
+        extra["same_scene_prompt_gate"] = same_scene_prompt_gate_clause(
+            shot_index=int(cfg.get("shot_index") or 0),
+            this_action=str(cfg.get("shot_action") or ""),
+            this_camera=str(cfg.get("camera") or ""),
+            this_speech=str(cfg.get("speech_line") or ""),
+            already_done=[str(x) for x in (cfg.get("already_done") or []) if str(x)],
+            has_prior=bool(
+                str(cfg.get("previous_clip_action") or "").strip()
+                or cfg.get("end_state")
+                or (cfg.get("already_done") or [])
+                or (
+                    str(cfg.get("continuity_clip_node_id") or "").strip()
+                    and not bool(cfg.get("first_of_setting"))
+                )
+            ),
+        )
+        extra["previous_clip_story_state"] = agent_prior_story_block(cfg)
+    except Exception:  # noqa: BLE001
+        extra = {}
     snapshot = {
         "node_id": node["id"],
         "role": node_pipeline(node) or node_role(node),
@@ -464,6 +597,7 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "shot_index": cfg.get("shot_index"),
         "shot_action": str(cfg.get("shot_action") or "")[:500],
         "camera": str(cfg.get("camera") or "")[:120],
+        "speech_line": str(cfg.get("speech_line") or "")[:200],
         "agent_template": node_agent_template(node),
         "upstream_node_ids": preds,
         "suggested_next_node_ids": [item for item in suggested if isinstance(item, str)],
@@ -472,14 +606,31 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "keyframe_strategy": locks["keyframe_strategy"],
         "occupancy": locks["occupancy"],
         "already_done": cfg.get("already_done"),
+        "beat_done": cfg.get("beat_done"),
+        "pose_holds": cfg.get("pose_holds"),
+        "seat_anchors": cfg.get("seat_anchors"),
+        "forbidden_speech": cfg.get("forbidden_speech"),
+        "end_state": cfg.get("end_state"),
+        "scene_bible": cfg.get("scene_bible"),
         "previous_keyframe_prompt": str(cfg.get("previous_keyframe_prompt") or "")[:800],
         "previous_keyframe_action": str(cfg.get("previous_keyframe_action") or "")[:300],
-        "previous_clip_wan_prompt": str(cfg.get("previous_clip_wan_prompt") or "")[:800],
+        # Do NOT pass raw previous_clip_wan_prompt to the leaf — contamination source.
         "previous_clip_action": str(cfg.get("previous_clip_action") or "")[:300],
+        "previous_clip_finished_events": cfg.get("previous_clip_finished_events"),
         "scene_architecture_clause": str(cfg.get("scene_architecture_clause") or "")[:900],
         "locks": locks,
         "manager_prompt_reviewed": locks["manager_prompt_reviewed"],
     }
+    snapshot.update(extra)
+    prior_lead = str(extra.get("previous_clip_story_state") or "").strip()
+    prior_section = ""
+    if prior_lead:
+        prior_section = (
+            prior_lead
+            + "\n\nFilm ONLY this storyboard row. Continue seats / exits / opening holds "
+            "from CONTINUITY STATE above. Never restate forbidden_speech or restage "
+            "already_done beats unless THIS row asks.\n\n"
+        )
     return (
         "执行当前设计节点。先看 JSON 上下文，用工具完成本节点产物，最后 "
         "designer_node_complete。\n"
@@ -487,23 +638,21 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "Do not designer_node_run graph nodes that already exist — the scheduler "
         "starts them after this node completes. Only designer_node_run a node you "
         "just added with designer_graph_patch.\n"
-        "If call_video_model or media generation fails, retry the SAME node or "
-        "complete with the error. NEVER designer_graph_patch extra image/video "
-        "nodes (n_frame_*, n_clip_*, n_image_*, n_video_*).\n"
         "TOOLS (not heuristics): Use call_model for text reasoning; call_image_model "
-        f"for stills ({image_gen_family_label()} — on-screen character sheets are attached as "
-        "reference images automatically; name them Image 1 / Image 2 in the prompt); "
-        f"call_video_model for clips ({video_gen_family_label()}); "
-        "ffmpeg_compose / mix_audio for film assemble; read_upstream for prior "
-        "outputs. Prefer tool-produced file URIs in designer_node_complete.\n"
+        "for stills (configured image model); call_video_model for clips (configured "
+        "video model); ffmpeg_compose / mix_audio for film assemble; read_upstream "
+        "for prior outputs. Prefer tool-produced file URIs in designer_node_complete.\n"
         "LOCKS (must keep in every tool prompt before image/video calls): "
-        "obey locks.keyframe_strategy (compose_from_solo_refs for first KF of a setting; "
-        "edit_prior_keyframe for later same-setting KFs), costume_lock, spatial_lock, "
-        "occupancy, and solo identity sheets — never invent new faces/wardrobe/architecture.\n"
-        "CONTINUITY: When previous_* prompts are present, read them fully and continue — "
-        "do not restage finished onsets/exits/dialogue. Keep character consistency "
-        "(same faces/costumes) on every clip call. Advance this shot only unless the "
-        "storyboard asks for an explicit repeat.\n\n"
+        "obey PRODUCTION LOCK BIBLE + costume_lock, positioning_lock, language_lock, "
+        "speech_line, occupancy, spatial_lock, and solo identity sheets — never invent "
+        "new faces/wardrobe/architecture. Every clip uses character sheets plus the "
+        "empty scene plate, and keeps the film STYLE LOCK.\n"
+        "SAME-SCENE PROMPT GATE: the video prompt MUST agree with THIS storyboard shot "
+        "(action/camera/speech). Continue from structured continuity "
+        "(already_done / pose_holds / seat_anchors / forbidden_speech / end_state) — "
+        "do not restage finished onsets/exits/dialogue unless THIS row asks. "
+        "Keep character consistency (same faces/costumes) on every clip call.\n\n"
+        f"{prior_section}"
         f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n```"
     )
 
@@ -533,16 +682,6 @@ class DesignerGraphToolkit:
     ctx: NodeExecutionContext
     completed: NodeResult | None = None
     spawned: list[str] = field(default_factory=list)
-    _media_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    def _ready_media_uri(self, node: DesignerGraphNode | None = None) -> str:
-        target = node or _node_from_ctx(self.ctx)
-        if self.completed is None or not _result_satisfies_required_media(
-            self.completed, target, self.ctx
-        ):
-            return ""
-        ref = self.completed.output_ref if isinstance(self.completed.output_ref, dict) else {}
-        return str(ref.get("uri") or "").strip()
 
     def graph_get(self) -> dict[str, Any]:
         graph_id = str(self.ctx.graph.get("graph_id") or "")
@@ -550,26 +689,10 @@ class DesignerGraphToolkit:
 
     def graph_patch(self, patch: dict[str, Any]) -> dict[str, Any]:
         graph_id = str(self.ctx.graph.get("graph_id") or "")
-        snapshot = self.spawner.load_graph_snapshot(graph_id, self.ctx.run_id)
-        current = snapshot.get("graph") if isinstance(snapshot, dict) else None
-        if not isinstance(current, dict):
-            current = self.ctx.graph
-        extra = shot_topology_ids_added_by_patch(current, patch)
-        extra_media = extra_media_ids_added_by_patch(current, patch)
-        blocked = list(dict.fromkeys([*extra, *extra_media]))
-        if blocked:
-            return {
-                "ok": False,
-                "error": (
-                    "Cannot add extra image/video nodes. "
-                    f"Rejected: {', '.join(blocked)}. Produce this node's output instead."
-                ),
-            }
         graph = self.spawner.apply_agent_graph_patch(graph_id, patch)
         return {
             "graph_id": graph.get("graph_id"),
             "nodes": [node.get("id") for node in graph.get("nodes") or []],
-            "ok": True,
         }
 
     async def node_run(self, node_id: str) -> str:
@@ -603,7 +726,6 @@ class DesignerGraphToolkit:
             path = write_workspace_text(
                 f"designer_agent_{self.ctx.run_id}_{self.ctx.node_id}",
                 text,
-                graph=self.ctx.graph,
             )
             ref = file_output_ref(
                 path,
@@ -634,49 +756,64 @@ class DesignerGraphToolkit:
                 )
         if not refs:
             return "complete requires uri or text"
-        # call_image_model / call_video_model may already have the real asset.
-        # Do not clobber it with a markdown stub (that retriggers image/video gen).
-        if self._ready_media_uri(node):
-            return "completed with media"
         agent_result = NodeResult(
             output_ref=refs[0],
             output_refs=refs,
             message="node completed",
         )
+        # If call_image_model / call_video_model already produced media, keep it
+        # as primary and attach the agent's text dump as a secondary artifact.
+        prior = self.completed
+        required_family = _required_media_family(node)
+        if (
+            prior is not None
+            and required_family
+            and _ref_media_family(prior.output_ref) == required_family
+        ):
+            merged = _prefer_media_primary(prior, agent_result, required=required_family)
+            self.completed = merged or prior
+            if isinstance(self.ctx.run, dict) and self.completed is not None:
+                states = self.ctx.run.setdefault("node_states", {})
+                states[self.ctx.node_id] = {
+                    **dict(states.get(self.ctx.node_id) or {}),
+                    "output_ref": self.completed.output_ref,
+                    "output_refs": list(self.completed.output_refs or []),
+                    "message": self.completed.message,
+                }
+            return "completed with media"
+
         self.completed = agent_result
 
         # Eager media materialization: agents often spawn compose right after
         # submitting a clip/image text spec. Generate the real asset here so
         # downstream nodes (and run state) see a media URI before that spawn.
-        required_family = _required_media_family(node)
         if _node_expects_media(node) and not _result_satisfies_required_media(
             agent_result, node, self.ctx
         ):
             from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
 
-            async with self._media_lock:
-                ready = self._ready_media_uri(node)
-                if ready:
-                    return "completed with media"
-                _seed_handler_prompt(node, agent_result)
-                try:
-                    media = await get_node_handler(node).execute(node, self.ctx)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Eager media materialization failed node=%s: %s",
-                        self.ctx.node_id,
-                        exc,
-                    )
-                    return f"completed text; media materialization deferred: {exc}"
+            _seed_handler_prompt(node, agent_result)
+            try:
+                media = await get_node_handler(node).execute(node, self.ctx)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Eager media materialization failed node=%s: %s",
+                    self.ctx.node_id,
+                    exc,
+                )
+                return f"completed text; media materialization deferred: {exc}"
             if media is not None:
-                self.completed = media
+                preferred = _prefer_media_primary(
+                    media, agent_result, required=required_family
+                )
+                self.completed = preferred or media
                 if isinstance(self.ctx.run, dict):
                     states = self.ctx.run.setdefault("node_states", {})
                     states[self.ctx.node_id] = {
                         **dict(states.get(self.ctx.node_id) or {}),
-                        "output_ref": media.output_ref,
-                        "output_refs": list(media.output_refs or []),
-                        "message": media.message,
+                        "output_ref": self.completed.output_ref,
+                        "output_refs": list(self.completed.output_refs or []),
+                        "message": self.completed.message,
                     }
                 return "completed with media"
 
@@ -706,7 +843,7 @@ class DesignerGraphToolkit:
         return json.dumps(_upstream_outputs(self.ctx, preds), ensure_ascii=False)
 
     def _media_save_dir(self) -> Path:
-        root = graph_workspace_dir(self.ctx.graph) / "designer_media" / self.ctx.run_id
+        root = get_agent_workspace_dir() / "designer_media" / self.ctx.run_id
         root.mkdir(parents=True, exist_ok=True)
         return root
 
@@ -715,9 +852,10 @@ class DesignerGraphToolkit:
         *,
         prompt: str = "",
         size: str = "1024x1024",
-        reference_images: list[str] | str | None = None,
     ) -> str:
-        from jiuwenswarm.server.runtime.designer.handlers.common import generate_designer_image
+        from jiuwenswarm.server.runtime.designer.handlers.common import (
+            generate_designer_image,
+        )
 
         node = _node_from_ctx(self.ctx)
         text = str(prompt or "").strip() or str(
@@ -730,40 +868,80 @@ class DesignerGraphToolkit:
         if not isinstance(cfg, dict):
             cfg = {}
             node["config"] = cfg
-        cfg["prompt"] = text[:6000]
-        refs = _image_reference_paths_for_call(self.ctx, node, reference_images)
-        if refs:
-            text = _with_reference_slot_prompt(text, refs, cfg)
-            cfg["prompt"] = text[:6000]
-        resolved_size = _resolved_image_call_size(cfg, self.ctx.graph, size)
-        async with self._media_lock:
-            ready = self._ready_media_uri(node)
-            if ready:
-                return f"image_ready uri={ready}"
-            beat = asyncio.create_task(
-                _heartbeat_while(self.ctx, "call_image_model", "image model running")
-            )
+        refs: list[str] = []
+        role = str(node_pipeline(node) or node_role(node) or "")
+        if role == "scene":
+            nids = [str(x) for x in (cfg.get("character_node_ids") or []) if str(x).strip()]
+            if nids:
+                from jiuwenswarm.server.runtime.designer.handlers.common import (
+                    node_ids_output_image_paths,
+                )
+
+                refs = [str(p) for p in node_ids_output_image_paths(self.ctx, nids)]
+        if role in {
+            "scene",
+            "character",
+            "character_design",
+            "frame",
+            "keyframe",
+        }:
             try:
-                logger.info(
-                    "call_image_model node=%s size=%s refs=%s",
-                    node.get("id"),
-                    resolved_size,
-                    ",".join(Path(item).name for item in refs) or "none",
+                from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+                    apply_keyframe_call_locks,
                 )
-                result = await generate_designer_image(
-                    prompt=text[:4000],
-                    size=resolved_size,
-                    reference_images=refs or None,
+
+                text = apply_keyframe_call_locks(text, cfg=cfg, graph=self.ctx.graph)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+                resolve_prompt_limit,
+                trim_prompt_to_limit,
+            )
+
+            lim = resolve_prompt_limit("image")
+            cfg["prompt_char_limit"] = lim.max_chars
+            text, trimmed = trim_prompt_to_limit(text, lim)
+            if trimmed:
+                logger.warning(
+                    "call_image_model trimmed prompt to %s chars (model=%s source=%s)",
+                    lim.max_chars,
+                    lim.model,
+                    lim.source,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("call_image_model failed: %s", exc, exc_info=True)
-                return f"call_image_model error: {exc}"
-            finally:
-                beat.cancel()
-            path = str((result or {}).get("image_path") or "").strip()
-            if not path or not Path(path).is_file():
-                err = str((result or {}).get("error") or "call_image_model produced no file")
-                return f"call_image_model error: {err}"
+            elif lim.max_chars and len(text) > lim.max_chars:
+                logger.warning(
+                    "call_image_model prompt length=%s exceeds advisory %s (model=%s)",
+                    len(text),
+                    lim.max_chars,
+                    lim.model,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        store_cap = max(6000, int(cfg.get("prompt_char_limit") or 6000))
+        cfg["prompt"] = text[:store_cap]
+        try:
+            generated = await generate_designer_image(
+                text,
+                size=str(size or "1K"),
+                reference_images=refs[:4] if refs else None,
+                max_tries=2,
+            )
+            path = str((generated or {}).get("image_path") or "").strip()
+            out = f"Saved to: {path}" if path else str(generated or "")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("call_image_model failed: %s", exc, exc_info=True)
+            return f"call_image_model error: {exc}"
+        path = ""
+        for line in str(out or "").splitlines():
+            if "Saved to:" in line:
+                path = line.split("Saved to:", 1)[-1].strip()
+                break
+        if not path:
+            candidate = Path(str(out or "").strip())
+            if candidate.is_file():
+                path = str(candidate)
+        if path and Path(path).is_file():
             uri = Path(path).resolve().as_uri()
             self.completed = NodeResult(
                 output_ref=file_output_ref(Path(path), kind="image", mime_type="image/png"),
@@ -773,6 +951,7 @@ class DesignerGraphToolkit:
                 message="call_image_model",
             )
             return f"image_ready uri={uri} path={path}"
+        return str(out or "call_image_model produced no file")
 
     async def call_video_model(
         self,
@@ -784,27 +963,112 @@ class DesignerGraphToolkit:
         from jiuwenswarm.server.runtime.designer.handlers.clip import (
             _looks_like_contaminated_prompt,
             build_clip_prompt,
+            clip_wants_reference_mode,
+            collect_clip_reference_images,
             generate_clip_video,
+            parse_shot_duration_seconds,
+        )
+        from jiuwenswarm.common.schema.designer_graph import node_shot_index
+        from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+            extract_last_frame,
+            resolve_gated_last_frame_chain,
+            scrub_restated_speech,
+            stamp_last_frame_onto_next_clips,
+            stamp_scene_last_frame_chain,
         )
 
         node = _node_from_ctx(self.ctx)
-        # Always ground I2V in storyboard-aligned clip prompt (do not let the leaf
-        # invent a freeform motion brief that ignores the shot row).
+        graph = self.ctx.graph if isinstance(self.ctx.graph, dict) else {}
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        cfg = scrub_restated_speech(dict(cfg))
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+                ensure_prior_clip_story_on_cfg,
+            )
+
+            cfg = ensure_prior_clip_story_on_cfg(cfg, graph)
+        except Exception:  # noqa: BLE001
+            pass
+        node["config"] = cfg
+
+        # Gated same-scene last-frame chain before prompt so Wan binding matches attach order.
+        shot_index = node_shot_index(node)
+        ref_mode = clip_wants_reference_mode(node, graph)
+        refs = collect_clip_reference_images(
+            self.ctx, shot_index, node=node, reference_mode=ref_mode
+        )
+        _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+        ref_paths = [p for p in refs if p.is_file() and p.suffix.lower() in _IMG]
+        scene_chain = resolve_gated_last_frame_chain(cfg, graph=graph, ctx=self.ctx)
+        if scene_chain:
+            cfg = stamp_scene_last_frame_chain(cfg, scene_chain)
+            node["config"] = cfg
+        ref_files = [str(p) for p in ref_paths]
+
+        # Agent writes P2 (continuation). Structured prompt is fallback / lock scaffold.
         structured = ""
         try:
             structured = str(build_clip_prompt(self.ctx.graph, node, self.ctx) or "").strip()
         except Exception:  # noqa: BLE001
             logger.debug("build_clip_prompt failed in call_video_model", exc_info=True)
         agent_text = str(prompt or "").strip()
-        if structured:
+        prior_p1 = str(cfg.get("previous_clip_action") or cfg.get("previous_clip_wan_prompt") or "").strip()
+        meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+        user_prompt = str(graph.get("description") or meta.get("user_prompt") or "")
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+                merge_storyboard_continuity,
+                prompt_violates_continuity,
+            )
+
+            cfg, _ = merge_storyboard_continuity(cfg, graph=graph)
+            node["config"] = cfg
+        except Exception:  # noqa: BLE001
+            pass
+        if agent_text:
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                    looks_like_full_story_restatement,
+                    looks_like_prior_copy,
+                )
+                from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+                    narrative_from_wan_prompt,
+                )
+                from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+                    agent_replays_finished_events,
+                )
+
+                body = narrative_from_wan_prompt(agent_text, limit=2500) or agent_text
+                if looks_like_full_story_restatement(body, user_prompt):
+                    agent_text = ""
+                elif prior_p1 and looks_like_prior_copy(
+                    body, str(cfg.get("previous_clip_wan_prompt") or prior_p1)
+                ):
+                    agent_text = ""
+                elif agent_replays_finished_events(
+                    body,
+                    already_done=[str(x) for x in (cfg.get("already_done") or []) if str(x)],
+                    this_action=str(cfg.get("shot_action") or ""),
+                ):
+                    agent_text = ""
+                elif prompt_violates_continuity(body, cfg=cfg):
+                    agent_text = ""
+            except Exception:  # noqa: BLE001
+                pass
+        if (
+            prior_p1
+            and agent_text
+            and agent_text[:180].casefold() == prior_p1[:180].casefold()
+        ):
+            agent_text = ""
+        if (
+            agent_text
+            and not _looks_like_contaminated_prompt(agent_text)
+            and len(agent_text) >= 40
+        ):
+            text = agent_text
+        elif structured:
             text = structured
-            if (
-                agent_text
-                and len(agent_text) < 400
-                and not _looks_like_contaminated_prompt(agent_text)
-                and agent_text[:120].casefold() not in structured.casefold()
-            ):
-                text = f"{structured}\nAgent motion note: {agent_text[:300]}"
         else:
             text = agent_text or str(
                 (node.get("config") or {}).get("prompt")
@@ -813,86 +1077,206 @@ class DesignerGraphToolkit:
             )
         if not text:
             return "call_video_model error: prompt required"
-        cfg = node.get("config")
-        if not isinstance(cfg, dict):
-            cfg = {}
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+                resolve_prompt_limit,
+                trim_prompt_to_limit,
+            )
+
+            vlim = resolve_prompt_limit("video")
+            cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+            cfg["prompt_char_limit"] = vlim.max_chars
             node["config"] = cfg
-        cfg["prompt"] = text[:6000]
-        frame = str(first_frame or "").strip() or None
+            text, trimmed = trim_prompt_to_limit(text, vlim)
+            if trimmed:
+                logger.warning(
+                    "call_video_model trimmed prompt to %s chars (model=%s source=%s)",
+                    vlim.max_chars,
+                    vlim.model,
+                    vlim.source,
+                )
+            elif vlim.max_chars and len(text) > vlim.max_chars:
+                logger.warning(
+                    "call_video_model prompt length=%s exceeds advisory %s (model=%s); "
+                    "sending full text (LLM should self-limit)",
+                    len(text),
+                    vlim.max_chars,
+                    vlim.model,
+                )
+        except Exception:  # noqa: BLE001
+            if len(text) > 4000:
+                logger.warning(
+                    "call_video_model prompt length=%s (>4000); sending full text",
+                    len(text),
+                )
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else cfg
+        cfg = scrub_restated_speech(dict(cfg))
+        node["config"] = cfg
+        cfg["prompt"] = text
         from jiuwenswarm.server.runtime.designer.audio_locks import (
             audio_lock_prompt_block,
             resolve_audio_intent_flags,
             resolve_video_audio_request,
         )
+        from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+            apply_wan_call_locks,
+        )
 
-        meta = self.ctx.graph.get("metadata") if isinstance(self.ctx.graph, dict) else {}
-        meta = meta if isinstance(meta, dict) else {}
+        meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
         flags = resolve_audio_intent_flags(meta, cfg)
+        speech_line_now = str(cfg.get("speech_line") or flags.get("speech_line") or "").strip()
+        by_char_now = (
+            cfg.get("speech_by_character")
+            if isinstance(cfg.get("speech_by_character"), dict)
+            else {}
+        )
+        if not by_char_now:
+            by_char_now = flags.get("speech_by_character") or {}
+        include_speech = bool(speech_line_now or by_char_now) and not bool(
+            cfg.get("speech_continuation_only") and not speech_line_now and not by_char_now
+        )
         block = audio_lock_prompt_block(
             language_lock=str(flags.get("language_lock") or ""),
-            speech_by_character=flags.get("speech_by_character") or {},
-            speech_line=str(flags.get("speech_line") or ""),
+            speech_by_character=by_char_now if include_speech else {},
+            speech_line=speech_line_now if include_speech else "",
             bgm_lock=flags.get("bgm_lock") or {},
-            include_speech=bool(flags.get("include_speech")),
+            include_speech=include_speech,
             include_music=bool(flags.get("include_music")),
             clip_embedded=bool(flags.get("clip_embedded")),
         )
-        if block and "LANGUAGE LOCK" not in text:
-            text = (text + "\n" + block).strip()[:6000]
+        # Clip calls are rewritten to the short image-binding form. Speech and
+        # score stay on cfg and are spoken as positive lines, not lock essays.
+        rewrite_video = bool(ref_mode or cfg.get("force_reference_mode"))
+        if (
+            block
+            and not rewrite_video
+            and "LANGUAGE LOCK" not in text
+            and "SPEECH LOCK" not in text
+        ):
+            text = (text + "\n" + block).strip()
             cfg["prompt"] = text
+        from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+            apply_regenerate_packet,
+        )
+
+        text, ref_files = apply_regenerate_packet(
+            cfg,
+            graph,
+            self.ctx.run if isinstance(self.ctx.run, dict) else {},
+            prompt=text,
+            reference_paths=ref_files,
+        )
+        legacy_ff = None if ref_mode else (str(first_frame or "").strip() or None)
+        text = apply_wan_call_locks(
+            text,
+            cfg=cfg,
+            graph=graph,
+            shot_index=shot_index,
+            has_first_frame=bool(legacy_ff) and not ref_mode,
+            reference_mode=ref_mode,
+        )
+        cfg["prompt"] = text
         want_audio, _model_override = resolve_video_audio_request(cfg, meta)
-        aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
-        if not aspect:
-            aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
-        video_size = str(
-            cfg.get("video_size") or (aspect or {}).get("video_size") or ""
-        ).strip() or None
-        video_res = str(
-            cfg.get("video_resolution") or (aspect or {}).get("video_resolution") or ""
-        ).strip() or None
         if callable(getattr(self.ctx, "on_prompt_artifact", None)):
             try:
                 self.ctx.on_prompt_artifact(text)
             except Exception:  # noqa: BLE001
                 logger.debug("call_video_model early prompt handoff failed", exc_info=True)
-        # Always use the user-configured video model — never override.
-        async with self._media_lock:
-            ready = self._ready_media_uri(node)
-            if ready:
-                return f"video_ready uri={ready} audio={want_audio}"
-            beat = asyncio.create_task(
-                _heartbeat_while(
-                    self.ctx,
-                    "call_video_model",
-                    f"{video_gen_family_label()} I2V running",
-                )
+        _, shot = (None, None)
+        try:
+            from jiuwenswarm.server.runtime.designer.handlers.clip import _shot_for_node
+
+            _, shot = _shot_for_node(self.ctx.graph, node, self.ctx)
+        except Exception:  # noqa: BLE001
+            shot = None
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            clamp_clip_duration,
+        )
+
+        dur = parse_shot_duration_seconds(
+            (shot or {}).get("timeline") or "",
+            default=clamp_clip_duration(duration or 5),
+        )
+        try:
+            result = await generate_clip_video(
+                prompt=text,
+                save_dir=str(self._media_save_dir()),
+                first_frame=legacy_ff,
+                reference_images=ref_files or None,
+                duration=dur,
+                audio=True if want_audio else False,
+                model=None,
+                force_reference_mode=ref_mode,
+                size=str(cfg.get("video_size") or (meta.get("aspect_lock") or {}).get("video_size") or ""),
+                resolution=str(
+                    cfg.get("video_resolution")
+                    or (meta.get("aspect_lock") or {}).get("video_resolution")
+                    or ""
+                ),
             )
-            try:
-                result = await generate_clip_video(
-                    prompt=text[:4000],
-                    save_dir=str(self._media_save_dir()),
-                    first_frame=frame,
-                    duration=max(2, min(10, int(duration or 5))),
-                    audio=True if want_audio else False,
-                    size=video_size,
-                    resolution=video_res,
-                    model=None,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("call_video_model failed: %s", exc, exc_info=True)
-                return f"call_video_model error: {exc}"
-            finally:
-                beat.cancel()
-            video_path = str(result.get("video_path") or "").strip()
-            if not video_path or not Path(video_path).is_file():
-                return f"call_video_model error: no video_path ({result!r})"
-            path = Path(video_path)
-            self.completed = NodeResult(
-                output_ref=file_output_ref(path, kind="video", mime_type="video/mp4"),
-                output_refs=[file_output_ref(path, kind="video", mime_type="video/mp4")],
-                message="call_video_model" + ("_audio" if want_audio else ""),
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("call_video_model failed: %s", exc, exc_info=True)
+            return f"call_video_model error: {exc}"
+        video_path = str(result.get("video_path") or "").strip()
+        if not video_path or not Path(video_path).is_file():
+            return f"call_video_model error: no video_path ({result!r})"
+        path = Path(video_path)
+        cfg["last_wan_prompt"] = str(text)[:4000]
+        cfg["last_approved_prompt"] = str(text)[:4000]
+        cfg["clip_prompt_preview"] = str(text)[:1200]
+        node["config"] = cfg
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+                remember_generation,
             )
-            return f"video_ready uri={path.resolve().as_uri()} path={path} audio={want_audio}"
+
+            remember_generation(
+                node,
+                graph,
+                self.ctx.run if isinstance(self.ctx.run, dict) else {},
+                prompt=str(text),
+                reference_images=list(ref_files),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("regenerate packet stamp failed", exc_info=True)
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+                stamp_wan_prompt_handoff,
+            )
+
+            stamp_wan_prompt_handoff(
+                graph,
+                shot_index=shot_index,
+                prompt=str(text),
+                node_id=str(node.get("id") or ""),
+                shot_action=str(cfg.get("shot_action") or ""),
+                speech_line=str(cfg.get("speech_line") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("call_video_model wan-prompt stamp failed", exc_info=True)
+        try:
+            frame_out = path.with_name(f"{path.stem}_lastframe.jpg")
+            extracted = extract_last_frame(path, dest=frame_out)
+            if extracted is not None:
+                stamp_last_frame_onto_next_clips(
+                    graph,
+                    completed_clip_id=str(node.get("id") or ""),
+                    last_frame_path=str(extracted),
+                    shot_index=shot_index,
+                    speech_line=str(
+                        cfg.get("speech_line") or cfg.get("previous_clip_speech") or ""
+                    ),
+                )
+                cfg["last_frame_path"] = str(extracted)
+                node["config"] = cfg
+        except Exception:  # noqa: BLE001
+            logger.debug("call_video_model last-frame stamp failed", exc_info=True)
+        self.completed = NodeResult(
+            output_ref=file_output_ref(path, kind="video", mime_type="video/mp4"),
+            output_refs=[file_output_ref(path, kind="video", mime_type="video/mp4")],
+            message="call_video_model" + ("_audio" if want_audio else ""),
+        )
+        return f"video_ready uri={path.resolve().as_uri()} path={path} audio={want_audio}"
 
     async def ffmpeg_compose(self, *, prompt: str = "") -> str:
         """Run the compose handler for this node (ffmpeg assemble)."""
@@ -900,30 +1284,45 @@ class DesignerGraphToolkit:
             NODE_ROLE_CLIP,
             is_compose_sink_node,
             node_pipeline,
-            video_concat_source_ids,
         )
         from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
 
         node = _node_from_ctx(self.ctx)
         if is_compose_sink_node(node):
+            from jiuwenswarm.common.schema.designer_graph import (
+                compose_required_predecessor_ids,
+            )
+            from jiuwenswarm.server.runtime.designer.handlers.compose import (
+                compose_predecessor_media_ready,
+            )
+
             states = (self.ctx.run or {}).get("node_states") or {}
-            source_ids = set(video_concat_source_ids(self.ctx.graph, self.ctx.node_id))
             waiting: list[str] = []
-            for n in self.ctx.graph.get("nodes") or []:
-                nid = str(n.get("id") or "")
-                if source_ids:
-                    if nid not in source_ids:
-                        continue
-                elif node_pipeline(n) != NODE_ROLE_CLIP:
-                    continue
+            required = compose_required_predecessor_ids(
+                self.ctx.graph if isinstance(self.ctx.graph, dict) else {}
+            )
+            if not required:
+                required = [
+                    str(n.get("id") or "")
+                    for n in (self.ctx.graph.get("nodes") or [])
+                    if node_pipeline(n) == NODE_ROLE_CLIP and str(n.get("id") or "")
+                ]
+            for nid in required:
                 st = states.get(nid) if isinstance(states.get(nid), dict) else {}
                 status = str((st or {}).get("status") or "").strip().lower()
                 if status not in {"completed", "complete", "done", "success"}:
                     waiting.append(f"{nid}:{status or 'pending'}")
+                    continue
+                if not compose_predecessor_media_ready(
+                    self.ctx.graph if isinstance(self.ctx.graph, dict) else {},
+                    self.ctx.run if isinstance(self.ctx.run, dict) else {},
+                    nid,
+                ):
+                    waiting.append(f"{nid}:media_missing")
             if waiting:
                 return (
-                    "ffmpeg_compose blocked: waiting for clips "
-                    + ", ".join(waiting[:8])
+                    "ffmpeg_compose blocked: waiting for clips/audio "
+                    + ", ".join(waiting[:12])
                     + " — do not assemble an empty film"
                 )
         if prompt.strip():
@@ -952,209 +1351,6 @@ def _node_from_ctx(ctx: NodeExecutionContext) -> DesignerGraphNode:
     return {"id": ctx.node_id, "type": "text", "label": ctx.node_id}
 
 
-# Seedance / image_gen / ffmpeg regularly exceed AbilityManager's 300s default.
-# These tools already have an inner wait (video poll 1800s, node wait_for).
-_LONG_RUNNING_DESIGNER_TOOLS = frozenset(
-    {
-        "call_video_model",
-        "call_image_model",
-        "ffmpeg_compose",
-        "mix_audio",
-    }
-)
-
-
-def _designer_tool_timeout_s(name: str, node: DesignerGraphNode) -> float | None:
-    """Per-tool AbilityManager timeout. None = exempt (hard cap 3600s)."""
-    from jiuwenswarm.server.runtime.designer.executor import _node_execute_timeout_sec
-
-    if name in _LONG_RUNNING_DESIGNER_TOOLS:
-        return None
-    return float(_node_execute_timeout_sec(node))
-
-
-def _stamp_ability_manager_timeouts(agent: Any, node: DesignerGraphNode) -> None:
-    """Write timeouts onto the *registered* AbilityManager cards and resolver.
-
-    ``ToolCard.properties`` on LocalFunction is not enough: rails can rebind
-    cards without ``resilience.timeout_s``, and a cached DeepAgent keeps the
-    300s default. Stamp ``ability_manager._tools`` and override
-    ``_resolve_call_timeout`` on the instance so ``call_video_model`` cannot
-    fall back to 300s.
-    """
-    from openjiuwen.core.single_agent.ability_manager import (
-        AbilityManager,
-        DEFAULT_TOOL_CALL_TIMEOUT,
-    )
-    from jiuwenswarm.server.runtime.designer.executor import _node_execute_timeout_sec
-
-    am = getattr(agent, "ability_manager", None)
-    if am is None:
-        return
-    node_budget = float(_node_execute_timeout_sec(node))
-    setattr(am, "_designer_node_budget", node_budget)
-
-    tools = getattr(am, "_tools", None)
-    if isinstance(tools, dict):
-        for name, card in tools.items():
-            if card is None:
-                continue
-            timeout_s = _designer_tool_timeout_s(str(name), node)
-            props = dict(getattr(card, "properties", None) or {})
-            resilience = dict(props.get("resilience") or {})
-            resilience["timeout_s"] = timeout_s
-            props["resilience"] = resilience
-            try:
-                card.properties = props
-            except Exception:
-                logger.debug("Could not stamp tool card properties. tool=%s", name, exc_info=True)
-            resolved = AbilityManager._resolve_call_timeout(card)
-            logger.info(
-                "Designer tool timeout. tool=%s node=%s declared=%s resolved=%s budget=%.0f",
-                name,
-                node.get("id"),
-                timeout_s,
-                resolved,
-                node_budget,
-            )
-
-    if getattr(am, "_designer_timeout_resolver_installed", False):
-        return
-
-    original = am._resolve_call_timeout
-
-    def _resolve(tool_card: Any) -> float | None:
-        name = str(getattr(tool_card, "name", "") or "")
-        budget = float(getattr(am, "_designer_node_budget", node_budget))
-        if name in _LONG_RUNNING_DESIGNER_TOOLS:
-            return None
-        declared = original(tool_card)
-        if declared is None:
-            return None
-        try:
-            value = float(declared)
-        except (TypeError, ValueError):
-            return budget
-        if value <= float(DEFAULT_TOOL_CALL_TIMEOUT) + 0.01:
-            return budget
-        return value
-
-    am._resolve_call_timeout = _resolve  # type: ignore[method-assign]
-    setattr(am, "_designer_timeout_resolver_installed", True)
-
-
-_IMAGE_REF_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".jfif"}
-
-
-def _resolved_image_path(raw: str) -> Path | None:
-    from jiuwenswarm.server.runtime.designer.handlers.common import path_from_uri
-
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    path = path_from_uri(text) if ("://" in text or text.startswith("file:")) else Path(text)
-    if path is None or not path.is_file():
-        return None
-    if path.suffix.lower() not in _IMAGE_REF_SUFFIXES:
-        return None
-    return path.resolve()
-
-
-def _explicit_image_reference_paths(extra: list[str] | str | None) -> list[str]:
-    if extra is None:
-        items: list[str] = []
-    elif isinstance(extra, str):
-        items = [extra]
-    else:
-        items = [str(item) for item in extra]
-    paths: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        path = _resolved_image_path(item)
-        if path is None:
-            continue
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        paths.append(key)
-    return paths
-
-
-def _auto_image_reference_paths(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list[str]:
-    from jiuwenswarm.server.runtime.designer.handlers.common import collect_frame_reference_images
-    from jiuwenswarm.server.runtime.designer.user_references import user_reference_image_paths
-
-    role = node_pipeline(node)
-    graph = ctx.graph if isinstance(ctx.graph, dict) else {}
-    if role in {"frame", "keyframe", "scene"}:
-        return [str(path) for path in collect_frame_reference_images(ctx, node)]
-    if role in {"character", "character_design"}:
-        return [str(path) for path in user_reference_image_paths(graph)]
-    refs = collect_frame_reference_images(ctx, node)
-    if refs:
-        return [str(path) for path in refs]
-    return [str(path) for path in user_reference_image_paths(graph)]
-
-
-def _image_reference_paths_for_call(
-    ctx: NodeExecutionContext,
-    node: DesignerGraphNode,
-    extra: list[str] | str | None,
-) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for path in [*_explicit_image_reference_paths(extra), *_auto_image_reference_paths(ctx, node)]:
-        if path in seen:
-            continue
-        seen.add(path)
-        merged.append(path)
-        if len(merged) >= 4:
-            break
-    return merged
-
-
-def _with_reference_slot_prompt(
-    prompt: str,
-    refs: list[str],
-    cfg: dict[str, Any],
-) -> str:
-    if not refs:
-        return prompt
-    names = [str(item).strip() for item in (cfg.get("cast_names") or []) if str(item).strip()]
-    lines = []
-    for index, raw in enumerate(refs):
-        label = names[index] if index < len(names) else Path(raw).stem
-        lines.append(
-            f"Image {index + 1} is {label} ({Path(raw).name}) — keep this exact face, hair, body, and wardrobe."
-        )
-    header = "REFERENCE IMAGES (uploaded slots, visual authority):\n" + "\n".join(lines)
-    if str(cfg.get("pipeline") or cfg.get("role") or "") in {"character", "character_design"}:
-        header += (
-            "\nEDIT the subject in Image 1 — do not invent a new character. Identity "
-            "(face, head shape, species, hair, build, age, sex) must survive; only "
-            "wardrobe, accessories, props, pose, and lighting may change. When text "
-            "and image disagree about who this is, the image wins."
-        )
-    if "REFERENCE IMAGES (uploaded slots" in prompt:
-        return prompt
-    return f"{header}\n\n{prompt}".strip()
-
-
-def _resolved_image_call_size(cfg: dict[str, Any], graph: Any, size: str) -> str:
-    requested = str(size or "").strip()
-    aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
-    if not aspect and isinstance(graph, dict):
-        meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-        aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
-    locked = str(
-        (aspect or {}).get("image_size") or cfg.get("image_size") or ""
-    ).strip()
-    if not requested or requested in {"1024x1024", "1K", "1k"}:
-        return locked or requested or "1024x1024"
-    return requested
-
-
 def _emit_ctx_activity(
     ctx: NodeExecutionContext,
     kind: str,
@@ -1172,26 +1368,6 @@ def _emit_ctx_activity(
         emit(kind, text, tool)
 
 
-async def _heartbeat_while(ctx: NodeExecutionContext, tool: str, label: str) -> None:
-    """Keep node peek alive during long video / image_gen waits."""
-    from jiuwenswarm.common.schema.designer_graph import ACTIVITY_KIND_TOOL_CALL
-
-    elapsed = 0
-    try:
-        while True:
-            await asyncio.sleep(20.0)
-            elapsed += 20
-            _emit_ctx_activity(
-                ctx,
-                ACTIVITY_KIND_TOOL_CALL,
-                f"{label} ({elapsed}s)",
-                tool=tool,
-                force=True,
-            )
-    except asyncio.CancelledError:
-        return
-
-
 def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
     from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
@@ -1199,7 +1375,13 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
         ACTIVITY_KIND_TOOL_CALL,
     )
 
-    def make_tool(name: str, description: str, input_params: dict[str, Any], func: Any) -> Any:
+    def make_tool(
+        name: str,
+        description: str,
+        input_params: dict[str, Any],
+        func: Any,
+        properties: dict[str, Any] | None = None,
+    ) -> Any:
         async def wrapped(**kwargs: Any) -> Any:
             if toolkit.completed is not None and name == "designer_node_run":
                 return "already completed this node; scheduler will start remaining graph nodes"
@@ -1220,15 +1402,11 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
             )
             return result
 
-        # AbilityManager defaults to 300s. Long media tools must opt out
-        # (timeout_s=None → 3600s hard cap); others use this node's budget.
-        timeout_s = _designer_tool_timeout_s(name, _node_from_ctx(toolkit.ctx))
         card = ToolCard(
-            id=name,
             name=name,
             description=description,
             input_params=input_params,
-            properties={"resilience": {"timeout_s": timeout_s}},
+            properties=properties or {},
         )
         return LocalFunction(card=card, func=wrapped)
 
@@ -1290,7 +1468,6 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
         return await toolkit.call_image_model(
             prompt=str(payload.get("prompt") or ""),
             size=str(payload.get("size") or "1024x1024"),
-            reference_images=payload.get("reference_images") or payload.get("images"),
         )
 
     async def call_video_model(**kwargs: Any) -> str:
@@ -1404,22 +1581,31 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
             )
         )
     if "call_image_model" in wanted:
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+                image_prompt_limit_guidance,
+            )
+
+            image_tool_hint = image_prompt_limit_guidance()
+        except Exception:  # noqa: BLE001
+            image_tool_hint = (
+                "Follow the configured image backend's documented prompt length."
+            )
         tools.append(
             make_tool(
                 "call_image_model",
-                f"Generate a still via the configured image model ({image_gen_family_label()}). "
-                "Keyframe/scene calls auto-attach on-screen character sheets as "
-                "reference images. Name them Image 1, Image 2 in the prompt. "
-                "You may also pass extra file paths/URIs in reference_images.",
+                (
+                    "Generate a still via the configured image model. "
+                    + image_tool_hint
+                ),
                 {
                     "type": "object",
                     "properties": {
-                        "prompt": {"type": "string"},
-                        "size": {"type": "string"},
-                        "reference_images": {
-                            "type": "array",
-                            "items": {"type": "string"},
+                        "prompt": {
+                            "type": "string",
+                            "description": image_tool_hint,
                         },
+                        "size": {"type": "string"},
                     },
                     "required": ["prompt"],
                 },
@@ -1427,20 +1613,51 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
             )
         )
     if "call_video_model" in wanted:
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+                video_prompt_limit_guidance,
+            )
+
+            video_tool_hint = video_prompt_limit_guidance()
+        except Exception:  # noqa: BLE001
+            video_tool_hint = (
+                "Follow the configured video backend's documented prompt length."
+            )
         tools.append(
             make_tool(
                 "call_video_model",
-                f"Generate a clip via the configured video model ({video_gen_family_label()}).",
+                (
+                    "Generate a clip via the configured video model. "
+                    "Positive story form only: The scene is as in Image N. "
+                    "<Name> from Image k, wearing <wardrobe>, <placement>, is <action>. "
+                    "Name only on_screen / partial cast; omit exited cast until returned. "
+                    "Same-setting continue cue only — do not paste prior Wan text. "
+                    "Speaker says: \"<this shot's line>\". One camera move. One look phrase. "
+                    "No negatives, no examples, no sit/stand defaults, no lock banners. "
+                    + video_tool_hint
+                ),
                 {
                     "type": "object",
                     "properties": {
-                        "prompt": {"type": "string"},
+                        "prompt": {
+                            "type": "string",
+                            "description": (
+                                "Concise positive story-form prompt. Present cast only "
+                                "from Image k with wardrobe, placement, action; scene as "
+                                "in Image N; this shot's line. No forbid / do-not / "
+                                "examples. " + video_tool_hint
+                            ),
+                        },
                         "duration": {"type": "integer"},
-                        "first_frame": {"type": "string"},
+                        "first_frame": {
+                            "type": "string",
+                            "description": "Optional legacy still. Clip-as-shot uses reference images, not a first frame.",
+                        },
                     },
                     "required": ["prompt"],
                 },
                 call_video_model,
+                properties={"resilience": {"timeout_s": 1500}},
             )
         )
     if "ffmpeg_compose" in wanted:
@@ -1581,7 +1798,10 @@ class NodeAgentHost:
             for ref in agent_result.output_refs or []:
                 if isinstance(ref, dict) and ref not in refs:
                     refs.append(ref)
-            return NodeResult(
+            preferred = _prefer_media_primary(
+                media, agent_result, required=required_family
+            )
+            return preferred or NodeResult(
                 output_ref=media.output_ref or (refs[0] if refs else None),
                 output_refs=refs,
                 message=f"agent+handler: {media.message or 'media materialized'}",
@@ -1651,7 +1871,7 @@ class NodeAgentHost:
                 model_client_config=ModelClientConfig(**kwargs),
                 model_config=request,
             )
-            workspace_dir = graph_workspace_dir(ctx.graph)
+            workspace_dir = get_agent_workspace_dir()
             workspace_dir.mkdir(parents=True, exist_ok=True)
             card_name = str(
                 getattr(getattr(template, "agent_card", None), "name", "")
@@ -1675,10 +1895,6 @@ class NodeAgentHost:
                 if hasattr(maybe, "__await__"):
                     await maybe
             self._agents[key] = agent
-
-        # Cached agents keep the AbilityManager from first create. Stamp every
-        # invoke so a 300s default cannot survive a code change or rail rebind.
-        _stamp_ability_manager_timeouts(agent, node)
 
         invoke = getattr(agent, "invoke", None)
         if not callable(invoke):
@@ -1708,17 +1924,13 @@ class NodeAgentHost:
                     )
                     media = None
                 if media is not None and _result_satisfies_required_media(media, node, ctx):
-                    refs: list[AssetRef] = []
-                    if isinstance(media.output_ref, dict):
-                        refs.append(media.output_ref)
-                    for ref in media.output_refs or []:
-                        if isinstance(ref, dict) and ref not in refs:
-                            refs.append(ref)
-                    if isinstance(completed.output_ref, dict):
-                        refs.append(completed.output_ref)
-                    completed = NodeResult(
-                        output_ref=media.output_ref or (refs[0] if refs else None),
-                        output_refs=refs,
+                    preferred = _prefer_media_primary(
+                        media, completed, required=required_family
+                    )
+                    completed = preferred or NodeResult(
+                        output_ref=media.output_ref,
+                        output_refs=list(media.output_refs or [])
+                        + ([completed.output_ref] if isinstance(completed.output_ref, dict) else []),
                         message=f"agent+handler: {media.message or 'media materialized'}",
                     )
             if _node_expects_media(node):
@@ -1742,11 +1954,7 @@ class NodeAgentHost:
 
                 return await get_node_handler(node).execute(node, ctx)
             raise RuntimeError("node agent returned empty output")
-        path = write_workspace_text(
-            f"designer_agent_{ctx.run_id}_{ctx.node_id}",
-            text,
-            graph=ctx.graph,
-        )
+        path = write_workspace_text(f"designer_agent_{ctx.run_id}_{ctx.node_id}", text)
         agent_result = NodeResult(
             output_ref=file_output_ref(
                 path,
@@ -1764,6 +1972,15 @@ class NodeAgentHost:
             if not _result_satisfies_required_media(media, node, ctx):
                 raise RuntimeError(
                     f"node {ctx.node_id} handler did not produce required {required_family}"
+                )
+            preferred = _prefer_media_primary(
+                media, agent_result, required=required_family
+            )
+            if preferred is not None:
+                return NodeResult(
+                    output_ref=preferred.output_ref,
+                    output_refs=list(preferred.output_refs or []),
+                    message=f"agent-text+handler: {media.message or 'media materialized'}",
                 )
             refs = []
             if isinstance(media.output_ref, dict):

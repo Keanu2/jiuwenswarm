@@ -161,6 +161,15 @@ def label_character(index: int, name: str) -> str:
     return f"Character {n}: {_clean(name, limit=48) or f'Character {n}'}"
 
 
+def label_scene(*, scene_number: int, scene_name: str) -> str:
+    """Canvas label: Scene N: two-to-three-word place name."""
+    sn = max(1, int(scene_number or 1))
+    desc = short_shot_phrase(scene_name, max_words=3) or _clean(scene_name, limit=40)
+    if not desc or _is_generic_shot_title(desc):
+        desc = f"Place {sn}"
+    return f"Scene {sn}: {desc}"
+
+
 def label_shot(
     *,
     scene_number: int,
@@ -181,6 +190,7 @@ def label_clip(
     clip_number: int,
     clip_name: str,
 ) -> str:
+    """Clips are the shots — Scene N: Clip K: beat name."""
     sn = max(1, int(scene_number or 1))
     cn = max(1, int(clip_number or 1))
     desc = short_shot_phrase(clip_name, max_words=4) or _clean(clip_name, limit=40)

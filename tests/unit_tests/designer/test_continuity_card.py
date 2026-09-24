@@ -9,6 +9,10 @@ from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
     continuity_card_from_prior,
     extract_already_done_beats,
 )
+from jiuwenswarm.server.runtime.designer.audio_locks import (
+    resolve_video_audio_request,
+    video_model_supports_native_audio,
+)
 
 
 def test_extract_already_done_forbids_restarting_run():
@@ -19,7 +23,7 @@ def test_extract_already_done_forbids_restarting_run():
     assert "run" in joined
 
 
-def test_continuity_card_clause_has_no_full_prior_prompt():
+def test_continuity_card_clause_optional_helper_still_works():
     card = continuity_card_from_prior(
         prior_action="woman begins walking away from the altar",
         prior_prompt="HUGE FULL WAN PROMPT " * 80,
@@ -29,11 +33,9 @@ def test_continuity_card_clause_has_no_full_prior_prompt():
     clause = continuity_card_clause(card)
     assert "CONTINUITY CARD" in clause
     assert "ALREADY_DONE" in clause
-    assert "HUGE FULL WAN PROMPT" not in clause
-    assert "PRIOR CLIP CONTINUITY" not in clause
 
 
-def test_stamp_handoff_stamps_card_not_full_wan_on_next():
+def test_stamp_handoff_uses_continuity_note_not_full_prior_paste():
     graph = {
         "nodes": [
             {
@@ -49,7 +51,7 @@ def test_stamp_handoff_stamps_card_not_full_wan_on_next():
         ],
         "metadata": {},
     }
-    big = "SHOT1_ONLY_IDENTITY_MARKER " + ("style lock dump " * 100)
+    big = "SHOT1_ONLY_IDENTITY_MARKER " + ("style lock dump " * 40)
     notes = stamp_wan_prompt_handoff(
         graph,
         shot_index=1,
@@ -58,12 +60,10 @@ def test_stamp_handoff_stamps_card_not_full_wan_on_next():
         shot_action="man starts running",
     )
     assert notes
-    c1 = graph["nodes"][0]["config"]
     c2 = graph["nodes"][1]["config"]
-    assert "SHOT1_ONLY_IDENTITY_MARKER" in c1.get("last_wan_prompt", "")
-    assert "previous_clip_wan_prompt" not in c2
-    assert isinstance(c2.get("previous_clip_continuity_card"), dict)
-    assert any("onset" in str(x).lower() or "run" in str(x).lower() for x in (c2.get("already_done") or []))
+    assert "man starts running" in str(c2.get("previous_clip_action") or "")
+    assert c2.get("previous_clip_handoff_ready") is True
+    # Soft-dep may keep a short readiness marker, but clause must not paste the marker.
     clause = handoff_clause_for_prompt(
         [
             {
@@ -71,9 +71,36 @@ def test_stamp_handoff_stamps_card_not_full_wan_on_next():
                 "node_id": "n_clip_1",
                 "shot_action": "man starts running",
                 "wan_prompt": big,
-                "continuity_card": c2["previous_clip_continuity_card"],
             }
-        ]
+        ],
+        this_shot_index=2,
+        this_action="man enters the hallway",
     )
+    assert "PREVIOUS CLIP HAD" in clause
+    assert "YOUR ASSIGNMENT" in clause
     assert "SHOT1_ONLY_IDENTITY_MARKER" not in clause
-    assert "CONTINUITY CARD" in clause
+    assert "man starts running" in clause
+    assert "man enters the hallway" in clause
+    assert "do not" in clause.lower() or "do NOT" in clause
+
+
+def test_audio_request_never_overrides_model(monkeypatch):
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "wan2.6-t2v")
+    monkeypatch.delenv("VIDEO_GEN_NATIVE_AUDIO", raising=False)
+    assert not video_model_supports_native_audio("wan2.6-t2v")
+    want, override = resolve_video_audio_request(
+        {"clip_embedded_audio": True, "include_speech": True, "speech_line": "hello"},
+        {"prefer_clip_native_audio": True},
+        current_model="wan2.6-t2v",
+    )
+    assert want is False
+    assert override is None
+
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "wan3.0-video")
+    want2, override2 = resolve_video_audio_request(
+        {"clip_embedded_audio": True, "include_speech": True, "speech_line": "hello"},
+        {"prefer_clip_native_audio": True},
+        current_model="wan3.0-video",
+    )
+    assert want2 is True
+    assert override2 is None

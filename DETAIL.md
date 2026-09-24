@@ -1,13 +1,15 @@
 # Designer video pipeline — DETAIL
 
 Reproduce the AI-first **prompt → film** Play path (quality graph
-`designer.graph.smart_video.quality.v5`) as running on branch `design`.
+`designer.graph.smart_video.quality.v5`) as running on branch
+`design-no-keyframes-2.0`.
 
 This file documents architecture, **pipeline roles**, **agent spawning**,
 **scene bible / hierarchical views**, locks, audio routing, scheduling, LLM
 shot budgeting, compose readiness, and how to run the stack.
 
-Short companion notes: `a.md`.
+Short companion notes: `a.md`. Per-node docs:
+`jiuwenswarm/server/runtime/designer/docs/INDEX.md`.
 
 ---
 
@@ -20,7 +22,7 @@ flowchart TD
   SA --> G0["build_smart_video_graph provisional"]
   G0 --> BR["Supervisor author_creative_brief"]
   BR --> M1["Manager review / approve brief"]
-  M1 --> SB["Supervisor author_storyboard<br/>scene bible + occupancy"]
+  M1 --> SB["Supervisor author_storyboard<br/>start_state → beat → end_state"]
   SB --> M2["Manager review / approve storyboard"]
   M2 --> DG["Supervisor design_execution_graph"]
   DG --> MV["Manager validate_plan + locks"]
@@ -29,9 +31,10 @@ flowchart TD
   PLAY --> SCH["GraphExecutor ready-queue"]
   SCH --> PL["Supervisor.plan + Manager gates"]
   PL --> SOLO["n_character_* solo sheets"]
-  SOLO --> KF["n_frame_* keyframes<br/>compose_from_solo_refs"]
-  KF --> HO["Same-setting prompt handoff"]
-  HO --> CLIP["n_clip_* Wan I2V<br/>serial + prior Wan handoff"]
+  PL --> SC["n_scene_* empty plates"]
+  SOLO --> CLIP["n_clip_* R2V<br/>on-screen solos + scene"]
+  SC --> CLIP
+  SB --> CLIP
   CLIP --> AUD["Optional n_speech / n_music"]
   CLIP --> WAIT["Compose waits: all clips<br/>completed + usable mp4"]
   AUD --> WAIT
@@ -39,18 +42,21 @@ flowchart TD
   FILM --> RATE["Dual raters write-only"]
 ```
 
-**Continuity (code truth):** every keyframe **composes from character solo
-sheets** (`compose_from_solo_refs`). First KF of a `setting_id` authors the
-**scene bible + master prompt**. Later same-setting KFs still compose from
-solos; they soft-depend on the master for **prompt handoff only** (not as an
-image-edit source). Camera may change (`view_key`). **No empty scene plates.**
+**Continuity (code truth):** the **storyboard** owns each shot’s closed window
+(`start_state` → action/camera/speech → `end_state`). One **empty scene plate**
+per `setting_id` (no people). Each **clip is the shot**: R2V with
+`reference_images` = **on-screen** character solos + the scene plate
+(`scene_card_plus_clip_shots` / R2V). Prompts are **story-form**. Same-setting clips do **not**
+depend on prior Wan text or prior clip nodes — they run **concurrently** once
+storyboard + needed solos + scene are ready. Exited cast is omitted until the
+storyboard returns them on_screen. **No** `n_frame_*` keyframes.
 
 **Shot count:** the Supervisor LLM owns `target_shot_count` (prefer ≤8, hard
 max 16). Prefer fewer shots: same cast + same setting + continuous motion
-(including a pan) = one clip; put camera motion in the Wan I2V prompt. New
-shot / keyframe only on hard cut, new setting, wardrobe/prop change, large
-pose/framing jump, or on-screen cast change. Explicit user `N-shot` / `N分镜`
-is a hard ceiling. Without LLM, heuristic lean is **1 KF + 1 clip**.
+(including a pan) = one clip; put camera motion in the video prompt. New
+clip only on hard cut, new setting, wardrobe/prop change, large pose/framing
+jump, or on-screen cast change. Explicit user `N-shot` / `N分镜` is a hard
+ceiling. Without LLM, heuristic lean is **1 scene card + 1 clip**.
 
 ---
 
@@ -58,15 +64,15 @@ is a hard ceiling. Without LLM, heuristic lean is **1 KF + 1 clip**.
 
 User prompt (natural language) → Designer execution graph → **one forward Play**:
 
-1. **Supervisor (= Director)** authors **Production Brief** + **Storyboard**,
-   decides shot count with Qwen/Wan continuity cues, then (after Manager lock)
+1. **Supervisor (= Director)** authors **Production Brief** + **Storyboard**
+   (with per-shot start/end states), decides shot count, then (after Manager lock)
    **builds the graph** and assigns **minimal tools**.
 2. **Manager (= Producer)** gates Brief/Storyboard vs the user prompt, stamps
    **scene locks**, **prunes nodes that cannot reach `n_compose`**, re-edits
-   artifacts, reviews **every leaf media prompt**, and enforces prior-shot
-   handoff so completed storyboard actions are not repeated.
+   artifacts, reviews **every leaf media prompt**, and enforces the storyboard
+   continuity contract so completed beats / speech are not restaged.
 3. **Leaf workers** (`NodeAgentHost` DeepAgents) and/or **handlers** produce
-   solo cast sheets, setting-compose keyframes, clips, optional speech/music,
+   solo cast sheets, empty scene plates, clips-as-shots, optional speech/music,
    then **compose** a real `.mp4` only after every clip is completed and usable.
 4. **Dual rater agents** score the run; feedback JSON is write-only and applied
    only on an explicit **Run again** (`use_prior_feedback`).
@@ -79,18 +85,19 @@ Heuristics run **only** when no configured chat model is available.
 
 | Node id pattern | Role | Type | Job |
 |-----------------|------|------|-----|
-| `n_brief` | `brief` | text | Production brief: story, tone, duration, audio intent |
-| `n_storyboard` | `storyboard` | table/text | Beat sheet: timeline, camera, action, on_screen / offscreen, cast_actions |
+| `n_brief` | `brief` | text | Production brief + lock bible |
+| `n_storyboard` | `storyboard` | table/text | Timed windows: start/end state, occupancy, camera, speech |
 | `n_character` / `n_character_*` | `character_design` | image | Solo identity sheet per named human (wardrobe locked) |
-| `n_frame_*` | `frame` / `keyframe` | image | Still for shot *i* — compose solos into scene; scene master + handoff |
-| `n_clip_*` | `clip` | video | Wan I2V from keyframe; motion + camera only; serial film order |
+| `n_scene_*` | `scene` | image | Environment-only plate per `setting_id` — geography / light / props |
+| `n_clip_*` | `clip` | video | R2V shot: on-screen solos + empty scene; story-form; concurrent |
 | `n_speech` | `speech` | audio | Optional TTS bed when backend + brief request it |
 | `n_music` | `music` | audio | Optional BGM bed when backend + brief request it |
 | `n_compose` | `compose` | video | ffmpeg concat of **all** clips (+ mux speech/music); hard-waits media |
 
 **Canvas labels** (`node_labels.py`): `Brief: …`, `Story Board: …`,
-`Character N: …`, `Scene S: Shot K: <2–4 word beat>`, `Scene S: Clip K: …`,
-`Final Composed: …` — never generic `Image N` / `Video N`.
+`Character N: …`, `Scene N: <2–3 word place>`, `Scene S: Clip K: <beat>`,
+`Final Composed: …` — never generic `Image N` / `Video N`. Shot cards are gone;
+clips are the shots.
 
 **Orchestrators (not graph nodes):**
 
@@ -146,39 +153,46 @@ Media and run state live under `JIUWENSWARM_DATA_DIR` or `~/.jiuwenswarm`
 
 ```
 n_brief (text)
-  → n_storyboard (table)
-  → n_character_*  (solo identity sheets only; all before any KF)
-  → n_frame_*      (compose_from_solo_refs;
-                    first KF/setting = SCENE MASTER prompt+bible;
-                    later same setting = prompt handoff + view_key)
-  → n_clip_*       (I2V from keyframe; prior clip Wan prompt handoff; serial)
+  → n_storyboard (table; start_state → beat → end_state)
+  → n_character_*  (solo identity sheets)
+  → n_scene_*      (one empty plate per setting_id)
+  → n_clip_*       (R2V: on-screen solos + empty scene; story-form;
+                    deps = storyboard + on-screen solos + scene; concurrent)
   → n_speech / n_music  (only if TTS/BGM backends exist; else clip-embedded)
   → n_compose      (wait all clips usable → ffmpeg concat + mux)
 ```
 
 Bootstrap stamp: `metadata.bootstrap = designer.graph.smart_video.quality.v5`.  
-`metadata.skip_scene_plate = True` — **no empty environment plates**.  
-`metadata.scene_continuity_mode = compose_solos_shared_scene_prompt`.  
+`metadata.skip_scene_plate = False` — **scene cards are required**.  
+`metadata.scene_continuity_mode = scene_card_plus_clip_shots`.  
 `metadata.freeze_shot_topology = False` — Supervisor owns a **flexible**
-multi-shot graph; storyboard / LLM `target_shot_count` drives `n_frame_*` /
-`n_clip_*`.  
+multi-shot graph; storyboard / LLM `target_shot_count` drives `n_clip_*`
+(and one `n_scene_*` per unique setting).  
 `metadata.all_nodes_agents = True` when LLM is configured.
 
-### Setting / keyframe policy
+### Scene plate + clip-as-shot policy
 
-- **Solo gate:** every named character gets a solo identity card; **all solos
-  complete before any keyframe**.
-- Group shots by `setting_id`. Occupancy is **per shot**: `on_screen`,
-  `offscreen`, `cast_actions`. Offscreen stay **out of the drawing**.
-- First KF of a setting: `compose_from_solo_refs` + `is_scene_master`.
-  After it completes, `GraphExecutor` hands off `scene_bible` + master prompt
-  onto later same-setting frames.
-- Later same-setting KF: still `compose_from_solo_refs` from **character
-  solos** (not prior-image edit). Soft DAG dep on the master is **prompt
-  handoff only**. `view_key` cycles hierarchical coverage.
-- New `setting_id` → new scene bible + new compose master.
-- **Lock gate:** Manager `review_leaf_media_prompt` injects costume / spatial /
-  **SCENE BIBLE** / **SCENE PROMPT HANDOFF** before every frame/clip tool call.
+- **Solo gate:** every named character gets a solo identity card. Only
+  **on-screen** solos for that shot become clip `reference_images`.
+- **Scene plates:** one `n_scene_N` per `setting_id`, labeled
+  `Scene N: <2–3 word place>`. **Empty** — furniture/light/props only, no cast.
+- **Clips are shots:** each `n_clip_*` depends on **storyboard**, **on-screen**
+  solos, and its setting’s scene plate — **not** brief, not prior clips.
+  Config carries `start_state` / `end_state`, `scene_node_id`, occupancy,
+  `on_screen` / `offscreen`, costume / spatial / staging locks, speech locks,
+  and R2V reference mode (`keyframe_strategy = clip_from_scene_and_solos`).
+- **Video reference mode:** attach on-screen solos + Scene N as
+  `reference_images` (not a peopled first_frame). Prompt is story-form from
+  this row’s start → beat → end — Manager/Supervisor rewrite via
+  `video_prompt_practice.py`. Positive only: no forbid / examples /
+  sit-stand hardcodes on the API body.
+- **Same-setting continuity:** storyboard chain (`shot N start` = `shot N−1 end`)
+  plus `already_done` / `forbidden_speech` from prior **storyboard** rows.
+  Never cross rooms. Exited cast stays off prompts until returned on_screen.
+- **Concurrency:** no clip→clip edges; ready clips run up to concurrency **3**.
+- **Hard style default:** unspecified brief → film-wide **photoreal cinematic**.
+- **Lock gate:** Manager `review_leaf_media_prompt` + continuity contract then
+  `supervisor_approve_video_prompt` before every clip tool call.
 
 ### Hierarchical scene bible (per setting)
 
@@ -189,18 +203,18 @@ multi-shot graph; storyboard / LLM `target_shot_count` drives `n_frame_*` /
 | `objects` | Landmarks / props that exist in every view even if off-camera |
 | `crowd` | Density / silhouette lock |
 | `views` | `front`, `left`, `right`, `side`, `top`, `bottom` |
-| `active_view` | This shot’s camera |
+| `active_view` | This clip’s camera |
 | `coherence_rule` | Nothing pops into existence when the camera moves |
 
-### Prior-shot / clip handoff
+### Storyboard continuity (not prior-Wan handoff)
 
-- After each **scene-master** frame completes, later same-setting KFs receive
-  `scene_master_prompt` + `scene_bible`.
-- Clip leaves receive `previous_clip_wan_prompt` + `PRIOR CLIP CONTINUITY`.
-- Clips are **serial in film order** (`n_clip_N` depends on `n_clip_{N-1}`).
-- Storyboard text syncs into frame/clip configs after the storyboard leaf completes
-  (`sync_shot_nodes_from_storyboard_markdown`) so Action / camera stay live.
-- `already_done` lists completed storyboard actions so they are not restaged.
+- After storyboard completes, clip configs are stamped with start/end,
+  action, camera, speech (`sync_shot_nodes_from_storyboard_markdown` /
+  `stamp_shot_states_on_clip_cfg`).
+- `already_done` / speech uniqueness come from prior storyboard rows in the
+  same setting (`clip_continuity_contract.py`) — not from prior Wan dumps.
+- `last_wan_prompt` is saved on the **same** clip for regenerate/debug only.
+- Same-setting clips are **concurrent** once deps are ready.
 
 ### Compose readiness (anti black / 0:00 film)
 
@@ -235,7 +249,7 @@ Leaf tools (minimal per role): `call_model`, `call_image_model`,
 `call_video_model`, `ffmpeg_compose`, graph get/patch, `designer_node_complete`.
 
 Concurrency: `_MAX_CONCURRENT_NODE_AGENTS = 3`. Soft deps unlock clip↔clip /
-scene-prompt handoff early; compose stays hard.
+scene-prompt handoff early; scene→clip and compose stay hard.
 
 ---
 
@@ -249,8 +263,8 @@ scene-prompt handoff early; compose stays hard.
 3. Manager.decide_capabilities
 4. Supervisor.plan
 5. Manager.validate_plan (+ prune / identity stamp)
-6. Ready-queue leaves; Manager.review_leaf_media_prompt before each frame/clip
-7. Scene-master prompt handoff after first KF of each setting
+6. Ready-queue leaves; Manager.review_leaf_media_prompt before each scene/clip
+7. Scene-card prompt handoff onto same-setting clips
 8. Serial clips + Wan prompt stamp onto next clip
 9. Compose only when all clips completed + usable
 10. SupervisorReviewer.finalize + Manager.review + dual_rate_final
@@ -266,18 +280,33 @@ Shot count is LLM-owned (with soft/hard caps above).
 
 ```
 jiuwenswarm/server/runtime/designer/
-  smart_graph.py          # build_smart_video_graph (v5 compose + prompt handoff)
-  script_analysis.py      # LLM / heuristic creative brief + shot budget
-  orchestration.py        # Supervisor / Manager, prune+reedit, leaf prompt gate
-  executor.py             # ready-queue, handoff, storyboard→clip sync
-  node_agent.py           # NodeAgentHost + ffmpeg_compose gate
-  node_labels.py          # Brief / Story Board / Scene Shot|Clip / Final Composed
-  model_tools.py          # call_model / image / video tools
-  media_model_playbook.py # Qwen / Wan / lock clauses
+  README.md                 # this package's module map
+  smart_graph.py            # build_smart_video_graph (v5 empty plates + clip shots)
+  script_analysis.py        # LLM / heuristic creative brief + shot budget
+  orchestration.py          # Supervisor / Manager, prune+reedit, leaf prompt gate
+  executor.py               # ready-queue (≤3), storyboard sync, compose hard-wait
+  node_agent.py             # NodeAgentHost; call_image_model → generate_designer_image
+  node_labels.py            # Brief / Story Board / Scene / Clip / Final Composed
+  model_tools.py            # call_model / image / video tools
+  media_model_playbook.py   # Qwen / Wan / MiniMax lock clauses
+  audio_locks.py
   experiments/
-    keyframe_policy.py    # scene bible, compose-everywhere, hierarchical views
-    director_contract.py  # explicit N-shot + infer_shot_budget
-    clothing_lock.py / shot_staging_lock.py / clip_prompt_handoff.py / …
+    storyboard_shot_state.py   # start_state / end_state normalize + stamp
+    clip_continuity_contract.py # already_done / speech uniqueness / reject redo
+    video_prompt_practice.py   # story-form compose + manager/supervisor approve
+    wan_call_locks.py          # video API rewrite entry
+    wan_r2v_best_practices.py  # positive R2V formula
+    wan_reference_binding.py
+    wan_prompt_hygiene.py
+    clip_story_state.py        # self Wan stamp; prior-clip ensure no-op w/ start_state
+    clip_prompt_handoff.py     # last_wan_prompt on self only
+    clip_shot_scope.py
+    keyframe_policy.py         # scene bible / ensembles (no n_frame_*)
+    production_bible.py
+    leaf_agent_continuity.py
+    clothing_lock.py / shot_staging_lock.py / axis_locks.py / cast_prop_locks.py
+    director_contract.py
+    skills/wan-reference-video/
   handlers/
     image_nodes.py  clip.py  compose.py  audio_nodes.py  text_nodes.py  common.py
 
@@ -302,7 +331,8 @@ jiuwenswarm/agents/harness/common/tools/{image_tools,video_tools,multimodal_conf
 1. `jiuwenswarm-start all` (or stop then `jiuwenswarm-start all`).
 2. Open http://127.0.0.1:5173/ → Designer → bootstrap a video prompt → **Play**.
 3. Inspect `~/.jiuwenswarm/agent/workspace/` for compose mp4.
-4. Canvas labels: `Brief:…`, `Character N:…`, `Scene S: Shot K:…`, `Final Composed:…`.
+4. Canvas labels: `Brief:…`, `Character N:…`, `Scene N:…`, `Scene S: Clip K:…`,
+   `Final Composed:…`.
 
 ### Import-level check (no media cost)
 
@@ -310,7 +340,7 @@ jiuwenswarm/agents/harness/common/tools/{image_tools,video_tools,multimodal_conf
 conda run -n new --no-capture-output python -c "from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph; from jiuwenswarm.server.runtime.designer.orchestration import SupervisorAgent, ManagerAgent; print('ok')"
 ```
 
-Topology smoke (generic cast; no empty plates; same-setting prompt handoff):
+Topology smoke (scene cards + clip-as-shot; no `n_frame_*`):
 
 ```bash
 conda run -n new --no-capture-output python -c "
@@ -327,11 +357,13 @@ a=apply_compose_solos_setting_policy({
 })
 g=build_smart_video_graph(project_id='t',prompt='hall then street',analysis=a,ai_mode=False)
 ids=[n['id'] for n in g['nodes']]
-assert 'n_scene' not in ids
-assert g['metadata']['scene_continuity_mode']=='compose_solos_shared_scene_prompt'
+assert not any(i.startswith('n_frame_') for i in ids)
+assert 'n_scene_1' in ids and 'n_clip_1' in ids
+assert g['metadata']['scene_continuity_mode']=='scene_card_plus_clip_shots'
 by={n['id']:n for n in g['nodes']}
-assert by['n_frame_2']['config']['keyframe_strategy']=='compose_from_solo_refs'
-assert by['n_frame_2']['config'].get('scene_prompt_handoff_from')=='n_frame_1'
+assert by['n_clip_1']['config']['keyframe_strategy']=='clip_from_scene_and_solos'
+assert by['n_clip_1']['config'].get('scene_node_id')
+assert by['n_scene_1']['label'].startswith('Scene ')
 print('topology_ok', ids)
 "
 ```
@@ -340,14 +372,15 @@ print('topology_ok', ids)
 
 ## 9. Git / tag
 
-- Branch: `design` → `https://github.com/fhfuih/jiuwenswarm/tree/design`
-- Docs: `DETAIL.md`, `a.md`
+- Working branch: `Design-no-keyframes` →
+  `https://github.com/AI-Framework-leibniz/DesignSwarm`
+- Docs: `README.md`, `DETAIL.md`, `a.md`, `jiuwenswarm/server/runtime/designer/README.md`
 - Quality milestone stamp: **`designer.graph.smart_video.quality.v5`**
-- Continuity stamp: **`compose_solos_shared_scene_prompt`**
+- Continuity stamp: **`scene_card_plus_clip_shots`** (empty plates + R2V clips)
 
 Do not commit: videos, PNGs/JPEGs from runs, workspace media, `pipeline_*_out/`,
-`results_eval/`, trajectory dumps, `_smoke_*` / `_tmp_*` scripts, unit-test-only
-fixtures that are not required to run the UI, `.venv` / `Lib/` / `pyvenv.cfg`.
+`results_eval/`, trajectory dumps, `_smoke_*` / `_tmp_*` / `_patch_*` scripts,
+`.venv` / `Lib/` / `pyvenv.cfg`, `.env`.
 
 ---
 
@@ -357,12 +390,16 @@ fixtures that are not required to run the UI, `.venv` / `Lib/` / `pyvenv.cfg`.
 |---------|--------|
 | Heuristic-only / 1-shot lean | No chat model → expected; configure Settings / `.env` |
 | Too many / too few shots | LLM `target_shot_count`; explicit N-shot; soft ≤8 hard 16 |
+| `LocalFunction` not callable on image | Leaf must use `generate_designer_image` (fixed in `node_agent`) |
 | Run stops; UI shows Continue | Ready-queue path; pending nodes auto-resume |
-| Empty scene plates | `skip_scene_plate` / bootstrap v5 |
-| Architecture drifts | `scene_bible` + SCENE PROMPT HANDOFF + Manager leaf gate |
-| Wrong people in a shot | per-shot `on_screen` / `offscreen` / `cast_actions` |
-| Clip unrelated to storyboard | storyboard sync + `build_clip_prompt` grounding |
+| Missing scene plates | `skip_scene_plate=false` / `n_scene_*` present |
+| Architecture drifts | `scene_bible` + storyboard start/end chain + Manager leaf gate |
+| Clip redo / resay | continuity contract + start_state; no prior-Wan dump |
+| Clips stuck serial | no clip→clip edges; check on-screen-only deps |
+| Wrong people / lost identity | solos as refs + `on_screen` / occupancy; omit exited |
+| Clip unrelated to storyboard | storyboard sync + `compose_practice_prompt` beat coverage |
 | Black / 0:00 final film | compose wait for completed usable clips; check clip mp4 duration |
 | Silent film when sound requested | `audio_routing`; TTS/BGM or clip-embedded |
 | still freezes as clips | `allow_still_clip_fallback` must be false |
 | Generic node titles | `node_labels` + analysis names |
+| Negative / essay video prompts | Manager rewrite via `video_prompt_practice` |

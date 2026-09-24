@@ -37,14 +37,16 @@ _BRIEF_INSTRUCTION = """Turn the request below into an executable short-film Bri
 Write English Markdown with these sections:
 - User prompt (verbatim intent)
 - Logline
-- Cast (solo identity locks — face, hair, body, costume for EACH character; never concatenate)
-- Setting / scene geography and lighting
+- Cast (solo identity locks — face, hair, body, FULL costume for EACH character; never concatenate)
+- Setting / scene geography, lighting, landmarks, opening blocking (who sits/stands where)
+- Language / speech lock (film language; exact lines if the user gave them)
 - Consistency gates: character, scene, motion/continuity, camera views covering every beat
 - Shot-view coverage list (distinct cameras/angles needed)
 - Duration target and per-shot timing budget
 - Audio policy (speech vs music)
+- Production lock bible (style, axis, occupancy, wardrobe) — copy locks, do not drop them
 - What to avoid
-Preserve every named character and beat from the user prompt. Output Markdown only.
+Preserve every named character and beat from the user prompt in FULL DETAIL. Output Markdown only.
 
 Request:
 """
@@ -61,16 +63,21 @@ Use a Markdown table whose columns MUST be:
 Shot | Timeline | Camera | Move | Character action | Continuity | Comment
 
 Rules:
-- Cover every major beat from the user prompt, but keep the table row count EQUAL to planned shots / target_shot_count when those are given (do not invent extra shots to fill duration)
+- Cover every major beat from the user prompt (typically 3-5 shots; duration ~12-24s total unless brief says shorter)
 - Timeline as start-end seconds, e.g. 0.0-4.0s — durations must sum coherently
 - Camera is shot size + angle, e.g. wide/establishing, medium/eye-level, close-up/eye-level, medium/slow pan
 - Move is push/pull/pan/dolly/static and speed
-- Character action: who is on screen and what they do THIS shot only (match cast identity locks)
-- Continuity: explicit forbids from prior shots (e.g. after a man stands and leaves, later shots MUST NOT reseat him; posture/facing/location locks)
-- Comment is the keyframe prompt: subject(s), composition, light, action instant, environment — ready for image gen
+- Character action: FULL DETAIL for THIS shot only — who is on screen, where they sit/stand,
+  what they do, wardrobe hold. Match cast identity locks. Consecutive windows concatenate;
+  do not restage the whole user prompt from a new camera, and do not strip the row to a
+  one-liner that drops blocking/speech.
+- Continuity: explicit forbids from prior shots (do not undo a completed beat unless this
+  row or the user prompt asks to repeat it; posture/facing/location locks)
+- Comment is the keyframe/composed-scene prompt: subjects, composition, light, action instant,
+  environment — ready for image gen (composed scene with all opening-cast characters in place)
+- Language: keep speech_line exact; empty = silent
 - Enhance sparse prompts: crowd, atmosphere, lighting, wardrobe detail — without inventing new lead characters
 - Do not invent a new world that contradicts the brief
-- If Brief / metadata marks video_style=final_frame_reverse: treat the user reference still as the LAST ~1s endpoint; reverse-form the action chain; use pseudo-oner push + key close-ups; give every cut a visual motif carrier; last row Comment must match the reference composition
 
 Do not output storyboard drawings. Do not explain.
 
@@ -377,6 +384,13 @@ _LOGLINE_RE = re.compile(
 
 def brief_duration_seconds(text: str, default: int = 5) -> int:
     """Read an explicit duration from a brief or user request."""
+    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        requested_film_duration_sec,
+    )
+
+    asked = requested_film_duration_sec(text or "")
+    if asked is not None:
+        return int(asked)
     source = text or ""
     field = _DURATION_FIELD_RE.search(source)
     if field:
@@ -426,22 +440,6 @@ def brief_story_focus(prompt: str) -> str:
 def fallback_brief(prompt: str) -> str:
     duration = brief_duration_seconds(prompt)
     focus = brief_story_focus(prompt) or prompt
-    style_line = "- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
-    try:
-        from jiuwenswarm.server.runtime.designer.video_styles import (
-            VIDEO_STYLE_FINAL_FRAME_REVERSE,
-            detect_video_style,
-            video_style_clause,
-        )
-
-        vs = detect_video_style(prompt)
-        if vs == VIDEO_STYLE_FINAL_FRAME_REVERSE:
-            style_line = (
-                f"- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
-                f"- Director style: {vs} — {video_style_clause(vs)}\n"
-            )
-    except Exception:  # noqa: BLE001
-        pass
     return (
         "# Brief\n\n"
         f"**User prompt (verbatim intent):** {prompt}\n\n"
@@ -450,13 +448,37 @@ def fallback_brief(prompt: str) -> str:
         "- Setting: follow the user description; keep architecture/lighting consistent\n"
         "- Continuity: time-coherent actions (no reseating someone who already left)\n"
         f"- Duration: {duration} seconds\n"
-        f"{style_line}"
+        "- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
     )
 
 
 def fallback_storyboard(prompt: str) -> str:
+    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        apply_shot_scope,
+        needs_duration_slicing,
+    )
+
     duration = float(brief_duration_seconds(prompt))
     focus = (brief_logline(prompt) or brief_story_focus(prompt) or prompt).strip()[:120]
+    if needs_duration_slicing(prompt):
+        scoped = apply_shot_scope({"shots": []}, prompt)
+        rows = []
+        for shot in scoped.get("shots") or []:
+            idx = int(shot.get("shot_index") or len(rows) + 1)
+            tl = str(shot.get("timeline") or "")
+            act = str(shot.get("action") or focus)[:120].replace("|", "/")
+            rows.append(
+                f"| {idx} | {tl} | medium / eye-level | hold | {act} | hold geography | {act} |"
+            )
+        if rows:
+            return (
+                "# Storyboard\n\n"
+                "## Storyboard\n\n"
+                f"| {_STORYBOARD_COLUMNS} |\n"
+                "| --- | --- | --- | --- | --- | --- | --- |\n"
+                + "\n".join(rows)
+                + "\n"
+            )
     if duration <= 10:
         mid = min(4.0, max(2.0, round(duration * 0.4, 1)))
         rows = [
@@ -481,13 +503,34 @@ def fallback_storyboard(prompt: str) -> str:
     )
 
 
+def _stamp_bible_on_text(text: str, ctx: NodeExecutionContext) -> str:
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.production_bible import (
+            append_bible_to_markdown,
+            build_production_bible,
+        )
+
+        meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
+        bible = str(meta.get("production_bible") or "").strip()
+        if not bible:
+            analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+            bible = build_production_bible(
+                analysis,
+                user_prompt=str(ctx.graph.get("description") or ""),
+            )
+        return append_bible_to_markdown(text, bible)
+    except Exception:  # noqa: BLE001
+        return text
+
+
 class BriefNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         cfg = node_config(node)
         prewritten = str(cfg.get("prewritten") or "").strip()
         if prewritten or cfg.get("skip_llm"):
             text = prewritten or fallback_brief(graph_prompt(ctx.graph, node))
-            path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text, graph=ctx.graph)
+            text = _stamp_bible_on_text(text, ctx)
+            path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
             return NodeResult(
                 output_ref=file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown"),
                 message="brief written (supervisor prewrite)",
@@ -512,7 +555,8 @@ class BriefNodeHandler:
                 str(cfg.get("draft_prewritten") or "").strip()
                 or fallback_brief(source)
             )
-        path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text, graph=ctx.graph)
+        text = _stamp_bible_on_text(text, ctx)
+        path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown"),
             message="brief written",
@@ -576,7 +620,8 @@ class StoryboardNodeHandler:
                     role_output_text(ctx, NODE_ROLE_BRIEF) or graph_prompt(ctx.graph, node)
                 )
             sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
-            path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text, graph=ctx.graph)
+            text = _stamp_bible_on_text(text, ctx)
+            path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
             return NodeResult(
                 output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),
                 message="storyboard written (supervisor prewrite)",
@@ -589,9 +634,7 @@ class StoryboardNodeHandler:
             import json as _json
 
             planned_block = (
-                "\n\nPlanned shots from supervisor casting "
-                f"(exactly {len(planned)} table rows — honor these beats; "
-                "expand camera/action DETAIL inside each row, do not add extra shots):\n"
+                "\n\nPlanned shots from supervisor casting (honor these beats; expand camera detail):\n"
                 + _json.dumps(planned, ensure_ascii=False, indent=2)
                 + "\n"
             )
@@ -613,7 +656,8 @@ class StoryboardNodeHandler:
         if not text:
             text = str(cfg.get("draft_prewritten") or "").strip() or fallback_storyboard(source)
         sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
-        path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text, graph=ctx.graph)
+        text = _stamp_bible_on_text(text, ctx)
+        path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),
             message="storyboard table written",

@@ -106,9 +106,18 @@ def build_production_bible(
         )
         cast_lines.append(f"- {cid}={name}: {desc}" + (f" [{micro}]" if micro else ""))
 
+    intent = str(user_prompt or a.get("user_prompt") or "").strip()
     parts = [
         "=== PRODUCTION LOCK BIBLE (obey on EVERY leaf; do not invent overrides) ===",
-        f"USER INTENT (verbatim cue): {(user_prompt or '')[:400]}",
+        (
+            "USER INTENT (lock cue — keep character / wardrobe / place / language / "
+            "opening blocking; Wan still films only THIS storyboard window): "
+            + (intent[:500] if intent else "see brief")
+        ),
+        "PLOT RULE: each clip's MOTION is only its storyboard row / timeline window. "
+        "Copy ALL locks below (cast, clothing, first-clip positions, language, speech, "
+        "style, landmarks) into every leaf prompt. Do not drop locks. Do not paste "
+        "later shots or the full remaining plot into this Wan call.",
         _style_block(style),
         (
             f"ASPECT LOCK: ratio={aspect.get('ratio') or 'per brief'}; "
@@ -128,13 +137,16 @@ def build_production_bible(
         "\n".join(cast_lines) if cast_lines else "- per brief",
         _spatial_block(spatial),
         _speech_table(shots, characters),
-        "LANDMARK RULE: named furniture/pulpit/table/windows keep the SAME screen-side "
+        "LANDMARK RULE: named landmarks keep the SAME screen-side "
         "and place vs the scene plate across all same-setting keyframes and clips — "
         "never teleport a landmark mid-film.",
-        "CROWD RULE: if congregation/extras exist, keep the SAME silhouette layout across "
+        "CROWD RULE: if extras exist, keep the SAME silhouette layout across "
         "same-setting shots (do not empty then reinvent a new crowd).",
+        "EXIT RULE: once a character leaves a setting, omit them from later same-setting "
+        "prompts until the storyboard returns them — never spawn cast from nowhere.",
         "LEAF PROTOCOL: (1) read_upstream brief + storyboard (2) copy locks above into "
-        "your visual prompt (3) then call image/video tools — never tool-first.",
+        "your visual prompt (3) then call image/video tools — never tool-first. "
+        "Clip video calls: positive story form only — no negatives, no examples.",
         "=== END LOCK BIBLE ===",
     ]
     text = "\n".join(parts)

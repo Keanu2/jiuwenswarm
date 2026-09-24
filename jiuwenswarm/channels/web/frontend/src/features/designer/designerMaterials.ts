@@ -45,19 +45,25 @@ export function classifyDesignerOutput(input: {
   placeholder?: boolean;
   previewUrl?: string | null;
   textUrl?: string | null;
+  uri?: string;
 }): DesignerPreviewKind {
-  if (input.placeholder || (!input.previewUrl && !input.textUrl)) return 'placeholder';
-  if (input.kind === 'video' || (input.mimeType || '').startsWith('video/')) return 'video';
-  if (input.kind === 'image' || (input.mimeType || '').startsWith('image/')) return 'image';
-  if (input.kind === 'audio' || (input.mimeType || '').startsWith('audio/')) return 'audio';
+  if (input.placeholder) return 'placeholder';
+  const labelBlob = `${input.label || ''} ${input.uri || ''}`.toLowerCase();
+  const mime = (input.mimeType || '').toLowerCase();
+  // Extension / MIME win over node-inherited kind (avoids .md tagged as image).
   if (
     input.kind === 'text' ||
     input.kind === 'table' ||
-    (input.mimeType || '').startsWith('text/') ||
-    (input.label || '').endsWith('.md')
+    mime.startsWith('text/') ||
+    mime.includes('markdown') ||
+    labelBlob.includes('.md')
   ) {
     return 'text';
   }
+  if (!input.previewUrl && !input.textUrl) return 'placeholder';
+  if (input.kind === 'video' || mime.startsWith('video/')) return 'video';
+  if (input.kind === 'image' || mime.startsWith('image/')) return 'image';
+  if (input.kind === 'audio' || mime.startsWith('audio/')) return 'audio';
   return 'file';
 }
 
@@ -66,14 +72,24 @@ function refsFromState(
   kind: 'accepted' | 'candidate',
 ): AssetRef[] {
   if (!state) return [];
-  if (kind === 'candidate') {
-    if (state.candidate_output_refs && state.candidate_output_refs.length > 0) {
-      return state.candidate_output_refs;
-    }
-    return state.candidate_output_ref ? [state.candidate_output_ref] : [];
-  }
-  if (state.output_refs && state.output_refs.length > 0) return state.output_refs;
-  return state.output_ref ? [state.output_ref] : [];
+  const primary =
+    kind === 'candidate' ? state.candidate_output_ref : state.output_ref;
+  const list =
+    kind === 'candidate'
+      ? state.candidate_output_refs && state.candidate_output_refs.length > 0
+        ? state.candidate_output_refs
+        : primary
+          ? [primary]
+          : []
+      : state.output_refs && state.output_refs.length > 0
+        ? state.output_refs
+        : primary
+          ? [primary]
+          : [];
+  if (!primary?.uri || list.length === 0) return list;
+  // Always include primary media even when output_refs is only a .md sidecar.
+  if (list.some((ref) => ref?.uri === primary.uri)) return list;
+  return [primary, ...list];
 }
 
 export function materialsFromRefs(
@@ -86,22 +102,48 @@ export function materialsFromRefs(
     if (!ref?.uri) return [];
     const textUrl = designerAssetTextUrl(ref.uri);
     const placeholder = isPlaceholderAsset(ref.uri);
-    const kind = ref.kind || node.type;
+    const label = ref.label || (refs.length > 1 ? `${node.label} ${index + 1}` : node.label);
+    const mimeType = ref.mime_type;
+    // Prefer media extension over node.type so markdown sidecars are not "image".
+    const classified = classifyDesignerOutput({
+      kind: ref.kind || node.type,
+      mimeType,
+      label,
+      uri: ref.uri,
+      previewUrl: null,
+      textUrl,
+      placeholder,
+    });
+    const kind =
+      classified === 'text' || classified === 'file'
+        ? classified === 'text'
+          ? 'text'
+          : ref.kind || node.type
+        : classified;
+    const isTextish =
+      classified === 'text' ||
+      isDesignerFallbackTextAsset({
+        kind: ref.kind || node.type,
+        uri: ref.uri,
+        mime_type: mimeType,
+        label,
+      });
     const editable =
       !placeholder &&
       Boolean(textUrl) &&
-      (DESIGNER_EDITABLE_ROLES.has(role) || kind === 'text' || kind === 'table');
+      (DESIGNER_EDITABLE_ROLES.has(role) || kind === 'text' || kind === 'table' || isTextish);
     return [
       {
         id: `${idPrefix}:${index}`,
         nodeId: node.id,
-        label: ref.label || (refs.length > 1 ? `${node.label} ${index + 1}` : node.label),
-        kind,
+        label,
+        kind: isTextish ? 'text' : kind,
         role,
         uri: ref.uri,
-        mimeType: ref.mime_type,
+        mimeType,
         placeholder,
-        previewUrl: designerAssetPreviewUrl(ref.uri),
+        // Never treat markdown / text as an image preview thumbnail.
+        previewUrl: isTextish ? null : designerAssetPreviewUrl(ref.uri),
         textUrl,
         editable,
         source: placeholder ? undefined : 'generated',
@@ -112,6 +154,7 @@ export function materialsFromRefs(
 
 export function isDesignerMediaAsset(ref?: Pick<AssetRef, 'kind' | 'uri' | 'mime_type' | 'label'> | null): boolean {
   if (!ref?.uri || isPlaceholderAsset(ref.uri)) return false;
+  if (isDesignerFallbackTextAsset(ref)) return false;
   const kind = (ref.kind || '').toLowerCase();
   const mime = (ref.mime_type || '').toLowerCase();
   if (kind === 'image' || kind === 'video' || kind === 'audio') return true;
@@ -126,11 +169,20 @@ export function isDesignerMediaAsset(ref?: Pick<AssetRef, 'kind' | 'uri' | 'mime
 export function isDesignerFallbackTextAsset(
   ref?: Pick<AssetRef, 'kind' | 'uri' | 'mime_type' | 'label'> | null,
 ): boolean {
-  if (!ref?.uri || isDesignerMediaAsset(ref)) return false;
+  if (!ref?.uri) return false;
   const kind = (ref.kind || '').toLowerCase();
   const mime = (ref.mime_type || '').toLowerCase();
   const label = `${ref.label || ''} ${ref.uri}`.toLowerCase();
-  return kind === 'text' || kind === 'table' || mime.startsWith('text/') || label.includes('.md');
+  if (/\.(png|jpe?g|webp|gif|bmp|mp4|webm|mov|m4v|mp3|wav|ogg)(?:\?|$)/i.test(label)) {
+    return false;
+  }
+  return (
+    kind === 'text' ||
+    kind === 'table' ||
+    mime.startsWith('text/') ||
+    mime.includes('markdown') ||
+    label.includes('.md')
+  );
 }
 
 export function preferredDesignerPreviewRef(

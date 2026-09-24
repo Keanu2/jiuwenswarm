@@ -215,6 +215,12 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
           data-testid="designer-node-toolbar-panel-generate"
         >
           <DesignerMaterialStrip nodeId={nodeId} nodeType={nodeType} />
+          <p className="designer-node-toolbar__prompt-hint" data-testid="designer-node-toolbar-prompt-hint">
+            {t('designer.toolbar.finalPromptHint', {
+              defaultValue:
+                'Shows the last prompt sent to the image/video tool. Edit before regenerate; the leaf agent may still lightly refine locks.',
+            })}
+          </p>
           <textarea
             className="designer-node-toolbar__prompt"
             value={media.generate?.prompt ?? ''}

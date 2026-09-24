@@ -22,7 +22,6 @@ from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
 from jiuwenswarm.server.runtime.designer.handlers.common import (
     collect_frame_reference_images,
     file_output_ref,
-    graph_workspace_dir,
     graph_prompt,
     role_output_image_path,
     role_output_image_paths,
@@ -31,7 +30,6 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
 )
 from jiuwenswarm.server.runtime.designer.user_references import (
     graph_user_references,
-    identity_reference_image_paths,
     prompt_slot_roster,
     user_reference_image_paths,
 )
@@ -82,53 +80,54 @@ def _frame_prompt_looks_contaminated(text: str) -> bool:
     return len(text or "") > 500
 
 
-def _character_prompt(
-    source: str, *, combined_cast: bool = False, keep_subject: bool = False
-) -> str:
-    if keep_subject:
-        # The upload is the subject. Text may re-dress it, never redesign it.
-        return (
-            "EDIT the attached reference image — do NOT invent a new character. "
-            "Image 1 is this character: keep the exact same identity — face, head shape, "
-            "species, skin/fur/scale texture, hair, eyes, age, sex, and body proportions. "
-            "Change ONLY wardrobe, accessories, props, pose, framing, and lighting as "
-            "described below. Single subject, three-quarter body, clean background. "
-            "If the text disagrees with the image about who this is, the IMAGE wins; "
-            "the text only governs clothing and accessories. "
-            "FORBIDDEN: redesign the subject, swap species or breed, restyle the face, "
-            "or replace it with a look described only in text.\n"
-            f"{source}"
-        )
+def _drop_story_context(source: str) -> str:
+    """Solo sheets must not receive the scene paragraph or a 'Story context' dump."""
+    import re
+
+    kept: list[str] = []
+    for line in str(source or "").splitlines():
+        if re.search(r"(?i)\bstory context\s*:", line):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _character_prompt(source: str, *, combined_cast: bool = False) -> str:
+    cleaned = _drop_story_context(source)
     if combined_cast:
         return (
             "Combined cast postcard: all listed characters side-by-side on one sheet, "
-            "full or three-quarter body each, consistent scale, clean background, "
-            "cinematic lighting. Clear identity for each person. Be fast — one clear image. "
-            "No subtitles, no storyboard grid, no dense text labels.\n"
-            f"{source}"
+            "full or three-quarter body each, consistent scale, plain empty backdrop. "
+            "Clear identity for each person. One clear image.\n"
+            f"{cleaned}"
         )
     return (
-        "Character design sheet, single subject, full or three-quarter body, clean background, "
-        "cinematic lighting. Be fast — one clear image. Follow the brief. "
-        "No subtitles, no storyboard grid.\n"
-        f"{source}"
+        "One person only on a plain empty studio backdrop, solid neutral background. "
+        "Full or three-quarter body. Identity and costume only.\n"
+        f"{cleaned}"
     )
 
 
-def _scene_prompt(source: str, *, derive_from_master: bool = False) -> str:
+def _scene_prompt(source: str, *, derive_from_master: bool = False, composed: bool = True) -> str:
     if derive_from_master:
         return (
-            "EDIT / REFRAME the provided master environment reference. "
-            "Same landmarks, buildings, terrain, props, and lighting direction. "
-            "Only change camera angle/framing for this shot. Environment only — no people. "
-            "Do NOT invent a new location. Be fast — one clear image.\n"
+            "EDIT / REFRAME the provided master composed scene. "
+            "Same landmarks, buildings, terrain, props, lighting, and placed cast identities. "
+            "Only change camera angle/framing for this shot if asked. "
+            "One clear image.\n"
+            f"{source}"
+        )
+    if composed:
+        return (
+            "COMPOSED SCENE MASTER: generate the SETTING and place ALL listed characters "
+            "into it at opening blocking. Identity from attached solo sheets "
+            "(Image 1, Image 2, …). People are IN the place — not an empty room and "
+            "not a studio lineup. One instance per person. One clear image.\n"
             f"{source}"
         )
     return (
-        "Cinematic establishing shot of the environment only, no people. "
-        "Show space, weather, lighting, and ground so a character can be placed later. "
-        "This is the CANONICAL plate — freeze geography. "
-        "Be fast — one clear image. No people, no subtitles, no storyboard grid.\n"
+        "Empty environment plate: furniture, walls, windows, light, and props only. "
+        "Clear establishing view of the room as a single photograph. One clear image.\n"
         f"{source}"
     )
 
@@ -304,13 +303,8 @@ def fallback_keyframe_script(source: str, shot_index: int = 1) -> str:
     return "".join(lines)
 
 
-def _publish_shot_image(
-    src: Path,
-    *,
-    stem: str,
-    ctx: NodeExecutionContext | None = None,
-) -> Path:
-    dest = graph_workspace_dir(ctx.graph if ctx else None) / f"{stem}{src.suffix or '.png'}"
+def _publish_shot_image(src: Path, *, stem: str) -> Path:
+    dest = handler_io.get_agent_workspace_dir() / f"{stem}{src.suffix or '.png'}"
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.resolve() != src.resolve():
         copy2(src, dest)
@@ -345,6 +339,17 @@ async def _image_or_notes(
         except TypeError:
             emit("stage", "calling image model", "image_gen")
 
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            resolve_prompt_limit,
+            trim_prompt_to_limit,
+        )
+
+        lim = resolve_prompt_limit("image")
+        prompt, _ = trim_prompt_to_limit(str(prompt or ""), lim)
+    except Exception:  # noqa: BLE001
+        pass
+
     generated = await handler_io.generate_designer_image(
         prompt,
         size=size,
@@ -364,8 +369,6 @@ async def _image_or_notes(
         )
     if generated and generated.get("image_path"):
         path = Path(generated["image_path"])
-        if ctx is not None:
-            path = _publish_shot_image(path, stem=stem, ctx=ctx)
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
             message="image generated",
@@ -375,7 +378,7 @@ async def _image_or_notes(
         raise RuntimeError(
             f"image_gen required but failed for {stem}: {error or 'no image_path'}"
         )
-    path = write_workspace_text(stem, notes, graph=ctx.graph if ctx else None)
+    path = write_workspace_text(stem, notes)
     message = (
         f"image_gen failed: {error}; wrote notes"
         if error
@@ -388,9 +391,12 @@ async def _image_or_notes(
 
 
 def _aligned_source(ctx: NodeExecutionContext, role: str, node: DesignerGraphNode) -> str:
+    # Brief is for the storyboard leaf. Character / scene prefer the node prompt,
+    # collaboration card, or storyboard — not the full user brief.
     return (
         collaboration_card(ctx.run_id, role)
-        or role_output_text(ctx, NODE_ROLE_BRIEF)
+        or str((node.get("config") or {}).get("prompt") or "").strip()
+        or role_output_text(ctx, NODE_ROLE_STORYBOARD)
         or graph_prompt(ctx.graph, node)
     )
 
@@ -399,7 +405,7 @@ def _with_card_ref(result: NodeResult, ctx: NodeExecutionContext, role: str) -> 
     card = collaboration_card(ctx.run_id, role)
     if not card:
         return result
-    path = write_workspace_text(f"designer_a2a_{ctx.run_id}_{role}", card, graph=ctx.graph)
+    path = write_workspace_text(f"designer_a2a_{ctx.run_id}_{role}", card)
     card_ref = file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown")
     refs = [ref for ref in (result.output_refs or []) if ref]
     primary = result.output_ref
@@ -423,27 +429,26 @@ class CharacterDesignNodeHandler:
         size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
         combined = bool(cfg.get("combined_cast"))
         max_tries = max(2, int(cfg.get("max_image_calls") or 1))
-        identity_images = [str(path) for path in identity_reference_image_paths(ctx.graph)]
-        user_images = identity_images or [
-            str(path) for path in user_reference_image_paths(ctx.graph)
-        ]
-        keep_subject = bool(identity_images) and not combined
-        prompt = _character_prompt(
-            f"{name}\n{source}", combined_cast=combined, keep_subject=keep_subject
-        )
-        if keep_subject:
-            slots = "\n".join(
-                f"image {i} = {Path(p).name} (this subject — preserve identity)"
-                for i, p in enumerate(identity_images, start=1)
+        user_images = [str(path) for path in user_reference_image_paths(ctx.graph)]
+        roster = prompt_slot_roster(graph_user_references(ctx.graph))
+        prompt = _character_prompt(f"{name}\n{source}", combined_cast=combined)
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+                ensure_still_tool_prompt,
             )
-            prompt = f"{prompt}\nUser reference slots:\n{slots}"
-        else:
-            roster = prompt_slot_roster(graph_user_references(ctx.graph))
-            if roster:
-                prompt = (
-                    f"{prompt}\nUser reference slots "
-                    f"(original files are visual authority):\n{roster}"
-                )
+
+            prompt, _ = ensure_still_tool_prompt(
+                prompt,
+                role="character",
+                cfg=cfg,
+                graph=ctx.graph if isinstance(ctx.graph, dict) else {},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        if roster:
+            prompt = (
+                f"{prompt}\nUser reference slots (original files are visual authority):\n{roster}"
+            )
         result = await _image_or_notes(
             prompt=prompt,
             notes=fallback_character_sheet(source),
@@ -480,13 +485,50 @@ class SceneNodeHandler:
             else:
                 lock = cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else {}
                 if lock:
-                    source = (
-                        f"{source}\nSPATIAL LOCK: "
-                        + "; ".join(f"{k}={v}" for k, v in lock.items() if str(v).strip())
-                    )
+                    arch = str(lock.get("architecture") or lock.get("setting") or "").strip()
+                    if arch:
+                        source = f"{source}\n{arch}"
         else:
             refs = [str(path) for path in user_reference_image_paths(ctx.graph)]
-        scene_prompt = _scene_prompt(source, derive_from_master=derive)
+            char_nids = [
+                str(x)
+                for x in (
+                    cfg.get("character_node_ids")
+                    or ((cfg.get("identity_refs") or {}) if isinstance(cfg.get("identity_refs"), dict) else {}).get(
+                        "character_node_ids"
+                    )
+                    or []
+                )
+                if str(x).strip()
+            ]
+            if char_nids and bool(cfg.get("composed_scene")):
+                from jiuwenswarm.server.runtime.designer.handlers.common import (
+                    node_ids_output_image_paths,
+                )
+
+                refs = [str(p) for p in node_ids_output_image_paths(ctx, char_nids)] + refs
+        composed = bool(cfg.get("composed_scene", False)) and not derive
+        scene_prompt = _scene_prompt(source, derive_from_master=derive, composed=composed)
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+                ensure_still_tool_prompt,
+            )
+
+            scene_prompt, _ = ensure_still_tool_prompt(
+                scene_prompt,
+                role="scene",
+                cfg=cfg,
+                graph=ctx.graph if isinstance(ctx.graph, dict) else {},
+            )
+        except Exception:  # noqa: BLE001
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+                    apply_keyframe_call_locks,
+                )
+
+                scene_prompt = apply_keyframe_call_locks(scene_prompt, cfg=cfg, graph=ctx.graph)
+            except Exception:  # noqa: BLE001
+                pass
         roster = prompt_slot_roster(graph_user_references(ctx.graph))
         if roster:
             scene_prompt = (
@@ -510,10 +552,9 @@ class FrameNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         shot_index = node_shot_index(node)
         storyboard = role_output_text(ctx, NODE_ROLE_STORYBOARD)
-        brief = role_output_text(ctx, NODE_ROLE_BRIEF)
         all_chars = role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN)
         all_scenes = role_output_image_paths(ctx, NODE_ROLE_SCENE)
-        visual = brief or graph_prompt(ctx.graph, node)
+        visual = storyboard or graph_prompt(ctx.graph, node)
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         generate = cfg.get("generate") if isinstance(cfg.get("generate"), dict) else {}
         identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
@@ -686,7 +727,6 @@ class FrameNodeHandler:
             path = _publish_shot_image(
                 Path(generated["image_path"]),
                 stem=f"designer_frame_{ctx.run_id}_{ctx.node_id}_shot{shot_index}",
-                ctx=ctx,
             )
             ref = file_output_ref(path, kind=NODE_TYPE_IMAGE, mime_type="image/png")
             return NodeResult(

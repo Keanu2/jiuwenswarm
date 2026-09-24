@@ -118,7 +118,10 @@ def stamp_wan_prompt_handoff(
     shot_action: str = "",
     speech_line: str = "",
 ) -> list[str]:
-    """Save Wan prompt on self; stamp consecutive-next with short prior beat only."""
+    """Save Wan prompt on this clip only (debug/regenerate).
+
+    Continuity is storyboard start/end — do NOT stamp prior Wan onto later clips.
+    """
     notes: list[str] = []
     text = (prompt or "").strip()
     if not text and not shot_action:
@@ -150,27 +153,155 @@ def stamp_wan_prompt_handoff(
             if action:
                 cfg["shot_action"] = cfg.get("shot_action") or action[:300]
             cfg["handoff_artifact_ready"] = True
+            # Drop legacy prior-clip schedule wiring if present on older graphs.
+            cfg.pop("continuity_clip_node_id", None)
             node["config"] = cfg
-            notes.append(f"{nid}: saved last_wan_prompt")
-            continue
-        if idx <= int(shot_index or 0):
-            continue
-        # Consecutive only: shot N stamps onto shot N+1 (overwrite allowed).
-        is_immediate_next = idx == int(shot_index or 0) + 1
-        prev_id = str(cfg.get("continuity_clip_node_id") or "")
-        if not (is_immediate_next or prev_id == key):
-            continue
-        cfg["previous_clip_action"] = action[:220]
-        cfg["previous_clip_speech"] = speech[:200]
-        cfg["previous_clip_shot_index"] = int(shot_index or 0)
-        cfg["previous_clip_node_id"] = key
-        cfg["previous_clip_handoff_ready"] = True
-        # Soft-dep readiness marker without encouraging full-prompt paste.
-        if text and not str(cfg.get("previous_clip_wan_prompt") or "").strip():
-            cfg["previous_clip_wan_prompt"] = text[:800]
-        node["config"] = cfg
-        notes.append(f"{nid}: received previous_clip_action from {key}")
+            notes.append(f"{nid}: saved last_wan_prompt (no next-clip Wan stamp)")
     return notes
+
+
+def same_scene_prompt_gate_clause(
+    *,
+    shot_index: int = 0,
+    this_action: str = "",
+    this_camera: str = "",
+    this_speech: str = "",
+    already_done: list[str] | None = None,
+    has_prior: bool = False,
+) -> str:
+    """LLM instruction: agree with this storyboard row; continue; do not unasked-repeat."""
+    lines = [
+        "SAME-SCENE CONTINUITY GATE (write the Wan prompt to this contract):",
+        f"1) THIS storyboard shot {int(shot_index or 0) or 'N'} is the plot authority "
+        f"— action: {_short_action(this_action) or '(this row)'}"
+        + (f"; camera: {str(this_camera).strip()[:120]}" if str(this_camera or "").strip() else "")
+        + (f"; speech: {str(this_speech).strip()[:160]}" if str(this_speech or "").strip() else "")
+        + ".",
+        "2) The Wan prompt MUST agree with that row (blocking, who is on screen, what "
+        "happens in THIS window). Do not film another shot's beat.",
+    ]
+    if has_prior:
+        lines.append(
+            "3) Continue from the previous clip in this SAME setting: read "
+            "already_done / pose_holds / seat_anchors / forbidden_speech / end_state "
+            "as finished story STATE, then write a NEW motion prompt for THIS row only. "
+            "Do not paste or restage prior Wan text."
+        )
+        lines.append(
+            "4) Do NOT repeat actions / onsets / exits / walk-aways / dialogue / reseating "
+            "that already finished unless THIS storyboard row or the user prompt "
+            "explicitly asks to repeat them."
+        )
+    else:
+        lines.append(
+            "3) This is the first clip of the setting: animate the composed scene master; "
+            "do not restart later plot."
+        )
+    done = [str(x) for x in (already_done or []) if str(x).strip()]
+    if done:
+        lines.append("ALREADY FINISHED (do not redo unless this row asks): " + "; ".join(done[:8]))
+    lines.append(
+        "Keep clothing, language, occupancy, and seat locks. Identity/place from attached media."
+    )
+    return "\n".join(lines)
+
+
+_EVENT_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"walk", "walks", "walked", "walking", "away"}),
+    frozenset({"leave", "leaves", "leaving", "left", "exit", "exits", "exited", "exiting", "depart", "gone"}),
+    frozenset({"sit", "sits", "sat", "sitting", "seated", "reseated", "reseat"}),
+    frozenset({"start", "starts", "started", "starting", "begin", "begins", "began", "onset"}),
+    frozenset({"turn", "turns", "turned", "turning", "look", "looks", "looked", "looking", "gaze", "gazes", "glance"}),
+    frozenset({"reach", "reaches", "reached", "check", "checks", "checked", "grab", "grabs", "pick", "open", "opens"}),
+    frozenset({"crowd", "colleagues", "coworker", "coworkers", "extras", "bystanders", "staff"}),
+)
+
+
+def _stem_token(token: str) -> str:
+    t = str(token or "").strip().lower()
+    if len(t) <= 3:
+        return t
+    for suf in ("ing", "ied", "ies", "ed", "es", "s"):
+        if t.endswith(suf) and len(t) - len(suf) >= 3:
+            stem = t[: -len(suf)]
+            if stem.endswith("k") or len(stem) >= 3:
+                return stem
+    return t
+
+
+def _content_stems(text: str) -> set[str]:
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            content_tokens,
+        )
+    except Exception:  # noqa: BLE001
+        return { _stem_token(x) for x in re.findall(r"[A-Za-z]{2,}", str(text or "").lower()) }
+    return { _stem_token(t) for t in content_tokens(text) }
+
+
+def _families_in(text: str) -> set[int]:
+    tokens = set(re.findall(r"[A-Za-z]{2,}", str(text or "").lower()))
+    stems = { _stem_token(t) for t in tokens }
+    bag = tokens | stems
+    hit: set[int] = set()
+    for i, fam in enumerate(_EVENT_FAMILIES):
+        fam_stems = { _stem_token(x) for x in fam } | set(fam)
+        if bag & fam_stems:
+            hit.add(i)
+    return hit
+
+
+def agent_replays_finished_events(
+    text: str,
+    *,
+    already_done: list[str] | None = None,
+    this_action: str = "",
+) -> bool:
+    """True when the agent restages a finished event this shot did not ask to repeat."""
+    body = str(text or "").strip()
+    if not body:
+        return False
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            overlap_ratio,
+        )
+    except Exception:  # noqa: BLE001
+        overlap_ratio = None  # type: ignore[assignment]
+    asked = _families_in(this_action)
+    for note in already_done or []:
+        note_s = str(note or "").strip()
+        if len(note_s) < 12:
+            continue
+        if overlap_ratio is not None and overlap_ratio(note_s, this_action) >= 0.45:
+            continue
+        if overlap_ratio is not None and overlap_ratio(note_s, body) >= 0.45:
+            # This row asked to repeat that finished beat — allow it.
+            if overlap_ratio(note_s, this_action) >= 0.35:
+                continue
+            return True
+        this_stems = _content_stems(this_action)
+        note_stems = _content_stems(note_s) - this_stems
+        body_stems = _content_stems(body) - this_stems
+        shared = note_stems & body_stems
+        denom = float(max(1, min(len(note_stems), len(body_stems))))
+        if len(shared) >= 2 and (len(shared) / denom) >= 0.4:
+            return True
+        note_fams = _families_in(note_s) - asked
+        if note_fams and note_fams & _families_in(body):
+            return True
+    return False
+
+
+def _same_setting(src: dict[str, Any] | None, dst: dict[str, Any] | None) -> bool:
+    """True only when both sides name the same setting_id.
+
+    Missing IDs do not count as a match — that would leak continuity across rooms.
+    """
+    a = str((src or {}).get("setting_id") or "").strip()
+    b = str((dst or {}).get("setting_id") or "").strip()
+    if not a or not b:
+        return False
+    return a == b
 
 
 def this_shot_assignment_clause(
@@ -210,7 +341,12 @@ def previous_clip_had_clause(prior: list[dict[str, Any]] | None) -> str:
     ]
     if latest.get("speech_line"):
         lines.append(
-            f"- Prior speech already delivered: {str(latest.get('speech_line'))[:160]}"
+            f"- Prior speech already delivered (do NOT restate): "
+            f"\"{str(latest.get('speech_line'))[:160]}\""
+        )
+        lines.append(
+            "Dialogue continuity: do not restart that line; only speak NEW words for THIS beat "
+            "(or stay silent if this beat has no new speech_line)."
         )
     if len(items) > 1:
         earlier = "; ".join(
@@ -222,7 +358,12 @@ def previous_clip_had_clause(prior: list[dict[str, Any]] | None) -> str:
             lines.append(f"- Earlier clips already covered: {earlier}")
     lines.append(
         "Do not restart finished onsets/exits/dialogue from the previous clip "
-        "unless the storyboard explicitly asks for a repeat."
+        "unless THIS storyboard row or the user prompt explicitly asks for a repeat."
+    )
+    lines.append(
+        "Write a NEW motion prompt that AGREES with YOUR ASSIGNMENT (this storyboard "
+        "shot) and CONTINUES from structured continuity state (already_done / holds / "
+        "forbidden_speech). Never paste prior Wan prose into this clip's Wan call."
     )
     return "\n".join(lines)
 
@@ -249,6 +390,17 @@ def handoff_clause_for_prompt(
                 camera=this_camera,
                 speech_line=this_speech,
                 already_done=already_done,
+            )
+        )
+    if prior:
+        parts.append(
+            same_scene_prompt_gate_clause(
+                shot_index=int(this_shot_index or 0),
+                this_action=this_action,
+                this_camera=this_camera,
+                this_speech=this_speech,
+                already_done=already_done,
+                has_prior=True,
             )
         )
     return "\n\n".join(parts)

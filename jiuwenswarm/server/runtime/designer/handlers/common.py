@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlparse
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CLIP,
     NODE_ROLE_SCENE,
     AssetRef,
     DesignerExecutionGraph,
@@ -31,13 +32,73 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
     if node is not None:
         config = node.get("config") if isinstance(node.get("config"), dict) else {}
         node_prompt = str(config.get("prompt") or "").strip()
-        if node_prompt:
-            return node_prompt
         generate = config.get("generate")
+        generate_prompt = ""
         if isinstance(generate, dict):
             generate_prompt = str(generate.get("prompt") or "").strip()
-            if generate_prompt:
+        if node_pipeline(node) == NODE_ROLE_CLIP:
+            user = str(graph.get("description") or "")
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                    clip_assignment_text,
+                    duration_from_timeline,
+                    looks_like_full_story_restatement,
+                )
+            except Exception:  # noqa: BLE001
+                clip_assignment_text = None  # type: ignore[assignment]
+                duration_from_timeline = None  # type: ignore[assignment]
+                looks_like_full_story_restatement = None  # type: ignore[assignment]
+
+            def _ok(text: str) -> bool:
+                if not text:
+                    return False
+                markers = (
+                    "YOUR ASSIGNMENT",
+                    "STORYBOARD BEAT",
+                    "STAGING LOCK",
+                    "SAME-SCENE CONTINUITY GATE",
+                    "Film shot",
+                    "CLOTHING LOCK",
+                    "LANGUAGE LOCK",
+                )
+                if any(m in text for m in markers):
+                    return True
+                if looks_like_full_story_restatement is None:
+                    return True
+                return not looks_like_full_story_restatement(text, user)
+
+            if _ok(generate_prompt):
                 return generate_prompt
+            if _ok(node_prompt):
+                return node_prompt
+            if clip_assignment_text is not None:
+                dur = 5
+                if duration_from_timeline is not None:
+                    dur = duration_from_timeline(str(config.get("timeline") or ""), default=5)
+                assignment = clip_assignment_text(
+                    shot_index=int(config.get("shot_index") or 1),
+                    action=str(config.get("shot_action") or config.get("character_action") or ""),
+                    camera=str(config.get("camera") or ""),
+                    speech_line=str(config.get("speech_line") or ""),
+                    duration_sec=dur,
+                    on_screen=list(config.get("on_screen") or config.get("cast_names") or []),
+                )
+                lock_bits: list[str] = [assignment]
+                for key, label in (
+                    ("costume_lock", "CLOTHING LOCK"),
+                    ("positioning_lock", "STAGING LOCK"),
+                    ("language_lock", "LANGUAGE LOCK"),
+                    ("speech_line", "SPEECH"),
+                ):
+                    val = str(config.get(key) or "").strip()
+                    if val:
+                        lock_bits.append(f"{label}: {val[:400]}")
+                return "\n".join(lock_bits)
+            return str(config.get("shot_action") or "")[:500] or "this storyboard shot only"
+        if node_prompt:
+            return node_prompt
+        if generate_prompt:
+            return generate_prompt
         if node_pipeline(node) == NODE_ROLE_BRIEF:
             pass
     for candidate in graph.get("nodes") or []:

@@ -42,6 +42,51 @@ def configured_image_gen_model() -> str:
     return (os.environ.get("IMAGE_GEN_MODEL_NAME") or "").strip()
 
 
+def image_gen_is_minimax() -> bool:
+    """True when the configured stills backend is MiniMax image-01 / live."""
+    provider = (os.environ.get("IMAGE_GEN_PROVIDER") or "").strip().lower()
+    profile = (os.environ.get("IMAGE_GEN_ENDPOINT_PROFILE") or "").strip().lower()
+    model = configured_image_gen_model().strip().lower()
+    base = (os.environ.get("IMAGE_GEN_API_BASE") or "").strip().lower()
+    return (
+        "minimax" in provider
+        or profile == "minimax"
+        or "minimax" in base
+        or model.startswith("image-01")
+    )
+
+
+def image_prompt_limit_guidance() -> str:
+    """LLM-facing stills prompt length rule from the configured IMAGE_GEN backend."""
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            image_prompt_limit_guidance as _guide,
+        )
+
+        return _guide()
+    except Exception:  # noqa: BLE001
+        return (
+            "IMAGE PROMPT LIMIT: follow the configured image backend's documented "
+            "prompt length; write a dense shot-ready stills prompt."
+        )
+
+
+def video_prompt_limit_guidance() -> str:
+    """LLM-facing video prompt length rule from the configured VIDEO_GEN backend."""
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            video_prompt_limit_guidance as _guide,
+        )
+
+        return _guide()
+    except Exception:  # noqa: BLE001
+        return (
+            "VIDEO PROMPT LIMIT: follow the configured video backend's documented "
+            "prompt length; write a dense shot-ready clip prompt."
+        )
+
+
+
 def infer_language_lock(prompt: str, *, hint: str | None = None) -> str:
     """Return a short language code/name for spoken dialogue (locked film-wide)."""
     explicit = str(hint or "").strip().lower()
@@ -549,7 +594,51 @@ def stamp_audio_fields_on_clip_config(
     )
     gen = dict(cfg.get("generate") or {})
     prompt = str(gen.get("prompt") or "")
-    if block and "LANGUAGE LOCK" not in prompt and "SPEECH LOCK" not in prompt:
+    image_binding = "image 1 is" in prompt.lower() or "@image 1 is" in prompt.lower()
+    if (
+        block
+        and not image_binding
+        and "LANGUAGE LOCK" not in prompt
+        and "SPEECH LOCK" not in prompt
+    ):
         gen["prompt"] = (prompt + "\n" + block).strip()
         cfg["generate"] = gen
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+            scrub_restated_speech,
+        )
+
+        cfg = scrub_restated_speech(cfg)
+        if bool(cfg.get("speech_continuation_only")) and not str(cfg.get("speech_line") or "").strip():
+            cfg["include_speech"] = False
+            # Drop SPEECH LOCK from generate.prompt if we scrubbed duplicate dialogue.
+            gen2 = dict(cfg.get("generate") or {})
+            p2 = str(gen2.get("prompt") or "")
+            if (
+                "SPEECH LOCK" in p2
+                and "image 1 is" not in p2.lower()
+                and not str(cfg.get("speech_line") or "").strip()
+            ):
+                # Rebuild without speech lock lines — keep language/BGM.
+                block2 = audio_lock_prompt_block(
+                    language_lock=str(cfg.get("language_lock") or ""),
+                    speech_by_character={},
+                    speech_line="",
+                    bgm_lock=cfg.get("bgm_lock") or {},
+                    include_speech=False,
+                    include_music=bool(cfg.get("include_music")),
+                    clip_embedded=bool(cfg.get("clip_embedded_audio")),
+                )
+                # Strip prior audio block markers then re-append.
+                for marker in ("LANGUAGE LOCK", "SPEECH LOCK", "BGM LOCK", "CLIP-EMBEDDED"):
+                    if marker in p2:
+                        p2 = p2.split(marker, 1)[0].rstrip()
+                        break
+                if block2:
+                    gen2["prompt"] = (p2 + "\n" + block2).strip()
+                else:
+                    gen2["prompt"] = p2
+                cfg["generate"] = gen2
+    except Exception:  # noqa: BLE001
+        pass
     return cfg

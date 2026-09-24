@@ -31,68 +31,6 @@ from jiuwenswarm.server.runtime.designer.model_tools import (
 
 logger = logging.getLogger(__name__)
 
-
-def _heuristic_placeholder_source(analysis: dict[str, Any] | None) -> bool:
-    src = str((analysis or {}).get("source") or "")
-    return src in {"", "heuristic", "heuristic_pending_llm"}
-
-
-def _shot_expand_lock_count(
-    *,
-    graph: DesignerExecutionGraph,
-    analysis: dict[str, Any],
-    current_shots: list[dict[str, Any]],
-) -> int:
-    """How many shots the LLM is allowed to keep.
-
-    ``0`` means Supervisor owns N (heuristic 1-shot skeleton is not a lock).
-    A positive count truncates a longer LLM list — only after the canvas was
-    truly frozen by a prior director design, or the user edited topology.
-    """
-    meta = dict(graph.get("metadata") or {})
-    if meta.get("user_topology_edit"):
-        try:
-            target = int(analysis.get("target_shot_count") or 0)
-        except (TypeError, ValueError):
-            target = 0
-        return max(1, len(current_shots) or target or 1)
-    if _heuristic_placeholder_source(analysis):
-        return 0
-    # A style that forbids a single take must not be frozen below its floor.
-    try:
-        from jiuwenswarm.server.runtime.designer.video_styles import (
-            resolve_video_style,
-            video_style_min_shots,
-        )
-
-        floor = video_style_min_shots(resolve_video_style(graph))
-        if floor >= 2 and len(current_shots) < floor:
-            return 0
-    except Exception:  # noqa: BLE001
-        pass
-    if meta.get("freeze_shot_topology"):
-        try:
-            target = int(analysis.get("target_shot_count") or 0)
-        except (TypeError, ValueError):
-            target = 0
-        return max(1, len(current_shots) or target or 1)
-    return 0
-
-
-def _apply_llm_shot_list(
-    current_shots: list[dict[str, Any]],
-    cleaned: list[dict[str, Any]],
-    *,
-    lock_count: int,
-) -> list[dict[str, Any]]:
-    if not cleaned:
-        return current_shots
-    if lock_count >= 1 and len(cleaned) > lock_count:
-        cleaned = cleaned[:lock_count]
-        for i, shot in enumerate(cleaned, start=1):
-            shot["shot_index"] = i
-    return cleaned
-
 # Role → tool set for one-pass node agents (no feedback loop).
 _ROLE_TOOLS: dict[str, list[str]] = {
     "brief": ["call_model", "read_upstream"],
@@ -103,8 +41,9 @@ _ROLE_TOOLS: dict[str, list[str]] = {
     "frame": ["call_model", "read_upstream", "call_image_model"],
     "keyframe": ["call_model", "read_upstream", "call_image_model"],
     "clip": ["call_model", "read_upstream", "call_video_model"],
+    "speech": ["call_model", "read_upstream", "call_speech_model"],
     "music": ["call_model", "read_upstream", "call_music_model"],
-    "audio": ["call_model", "read_upstream", "call_music_model"],
+    "audio": ["call_model", "read_upstream", "call_speech_model", "call_music_model"],
     "compose": ["call_model", "read_upstream", "ffmpeg_compose", "mix_audio"],
 }
 
@@ -130,12 +69,6 @@ def _tools_for_node(node: DesignerGraphNode) -> list[str]:
     if ntype == "image":
         return ["call_model", "read_upstream", "call_image_model"]
     if ntype == "video":
-        inputs = [str(x) for x in (cfg.get("inputs") or []) if str(x)]
-        if any(
-            item.startswith("n_clip") or item.startswith("n_video") or item in {"n_compose", "n_final"}
-            for item in inputs
-        ):
-            return list(_ROLE_TOOLS["compose"])
         return ["call_model", "read_upstream", "call_video_model"]
     if "speech" in role or "tts" in role:
         return list(_ROLE_TOOLS["speech"])
@@ -323,7 +256,6 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
     from jiuwenswarm.server.runtime.designer.smart_graph import (
         ensure_combined_cast_reach_compose,
         prune_non_contributing_nodes,
-        prune_shot_nodes_beyond_analysis,
     )
 
     notes: list[str] = []
@@ -426,8 +358,6 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
                     notes.append(f"cohere_inputs:{nid}")
                 n["config"] = cfg
 
-    extra_shots = prune_shot_nodes_beyond_analysis(graph)
-    notes.extend([f"pruned_extra_shot:{x}" for x in extra_shots])
     pruned = prune_non_contributing_nodes(graph)
     notes.extend([f"pruned:{x}" for x in pruned])
     notes.extend(ensure_combined_cast_reach_compose(graph))
@@ -478,13 +408,16 @@ def _manager_reedit_artifacts_after_prune(
                 s for s in shots if int(s.get("shot_index") or 0) in kept
             ]
             notes.append(f"reedit_shots_keep:{sorted(kept)}")
-        # Rebuild already_done chains from surviving chronological shots.
-        already: list[str] = []
+        # Rebuild already_done chains per setting (never leak office beats into a new room).
+        already_by_setting: dict[str, list[str]] = {}
+        exited_by_setting: dict[str, set[str]] = {}
         revised: list[dict[str, Any]] = []
         for s in analysis.get("shots") or []:
             if not isinstance(s, dict):
                 continue
             shot = dict(s)
+            sid = str(shot.get("setting_id") or "set_1").strip() or "set_1"
+            already = list(already_by_setting.get(sid) or [])
             shot["already_done"] = list(already)
             action = str(shot.get("action") or shot.get("keyframe_prompt") or "").strip()
             exits = [
@@ -495,9 +428,13 @@ def _manager_reedit_artifacts_after_prune(
             idx = int(shot.get("shot_index") or 0)
             if action:
                 already.append(f"shot{idx}: {action[:120]}")
+            carried = set(exited_by_setting.get(sid) or ())
             for cid in exits:
-                already.append(f"{cid} exited by shot{idx} — do not show leaving again")
-            # Refresh occupancy from storyboard visible / offscreen / doing.
+                already.append(
+                    f"{cid} exited by shot{idx} — omit from later same-setting prompts until returned"
+                )
+                carried.add(cid)
+            # Storyboard return clears exit for anyone listed on_screen again.
             visible = [
                 str(x)
                 for x in (
@@ -508,11 +445,19 @@ def _manager_reedit_artifacts_after_prune(
                 )
                 if str(x)
             ]
+            returned = {c for c in visible if c in carried}
+            carried -= returned
+            exited_by_setting[sid] = set(carried)
+            shot["exited_ids"] = sorted(carried)
             offscreen = [
                 str(x)
                 for x in (shot.get("offscreen") or shot.get("off_screen_cast_ids") or [])
                 if str(x) and str(x) not in visible
             ]
+            # Exited stay out of on_screen unless just returned above.
+            visible = [c for c in visible if c not in carried]
+            shot["on_screen"] = list(visible)
+            shot["character_ids"] = list(visible)
             ensemble = [
                 str(x)
                 for x in (
@@ -523,22 +468,27 @@ def _manager_reedit_artifacts_after_prune(
                 )
                 if str(x)
             ]
-            exited = set(exits)
             occ = dict(shot.get("occupancy") or {}) if isinstance(shot.get("occupancy"), dict) else {}
-            occ["must_appear"] = [c for c in visible if c not in exited]
+            occ["must_appear"] = list(visible)
             occ["offscreen"] = list(offscreen)
+            occ["exited"] = sorted(carried)
             occ["featured"] = [
                 str(x)
                 for x in (shot.get("featured_cast_ids") or visible or ensemble)
-                if str(x)
+                if str(x) and str(x) not in carried
             ]
             if isinstance(shot.get("cast_actions"), dict):
-                occ["cast_actions"] = shot["cast_actions"]
+                occ["cast_actions"] = {
+                    k: v
+                    for k, v in shot["cast_actions"].items()
+                    if str(k) not in carried
+                }
             occ.setdefault(
                 "rule",
-                "Draw must_appear only; keep offscreen out of frame; do not restage already_done.",
+                "Draw must_appear only; omit exited until storyboard returns them; keep offscreen out of frame.",
             )
             shot["occupancy"] = occ
+            already_by_setting[sid] = already
             revised.append(shot)
         analysis["shots"] = revised
         meta["script_analysis"] = analysis
@@ -637,19 +587,6 @@ def _manager_reedit_artifacts_after_prune(
             cfg["occupancy"] = shot["occupancy"]
         if shot.get("already_done") is not None:
             cfg["already_done"] = list(shot.get("already_done") or [])
-        # Append already_done clause into generate.prompt if missing.
-        gen = dict(cfg.get("generate") or {})
-        prompt = str(gen.get("prompt") or "")
-        done = [str(x) for x in (cfg.get("already_done") or []) if str(x)]
-        if done and "ALREADY_DONE" not in prompt:
-            prompt = (
-                prompt.rstrip()
-                + "\nALREADY_DONE (do not restage): "
-                + "; ".join(done[:12])
-            )
-            gen["prompt"] = prompt
-            cfg["generate"] = gen
-            notes.append(f"reedit_prompt_already_done:{n.get('id')}")
         n["config"] = cfg
 
     graph["metadata"] = meta
@@ -659,10 +596,7 @@ def _manager_reedit_artifacts_after_prune(
 
 
 def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
-    """If audio intent / analysis asks for speech or music, ensure nodes exist.
-
-    Dialogue always stays in clip-native audio; Designer has no TTS node.
-    """
+    """If audio intent / analysis asks for speech or music, ensure nodes exist."""
     from jiuwenswarm.common.schema.designer_graph import NODE_TYPE_AUDIO
 
     notes: list[str] = []
@@ -739,13 +673,17 @@ def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
                 node["config"] = cfg
         notes.append(f"added {node_id} for audio intent")
 
+    if want_speech:
+        _add("n_speech", "Speech / TTS", "speech", "speech_tts", "call_speech_model")
     if want_music:
         _add("n_music", "Music / BGM", "music", "audio_bed", "call_music_model")
 
     if notes:
         graph["nodes"] = nodes
         graph["edges"] = edges
-        meta["audio_nodes"] = ["n_music"] if "n_music" in existing else []
+        meta["audio_nodes"] = [
+            nid for nid in ("n_speech", "n_music") if nid in existing
+        ]
         graph["metadata"] = meta
     return notes
 
@@ -753,33 +691,29 @@ def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
 def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
     """Supervisor: promote speech/music to fast LLM agents when backends exist.
 
-    Dialogue always lives in clip leaves (``clip_embedded``), and any legacy
-    Speech node is dropped. The Music node always survives: it is the
-    single film-wide BGM mixed after concat, and without a music API its handler
-    writes a silent placeholder.
+    Without TTS/music backends, folds audio into clip leaves (``clip_embedded``)
+    and does not keep decorative speech/music nodes that cannot produce stems.
     """
     from jiuwenswarm.server.runtime.designer.capabilities import detect_audio_backends
     from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
 
     backends = detect_audio_backends()
-    can_speech = False
+    can_speech = bool(backends.get("can_speech"))
     can_music = bool(backends.get("can_music"))
     meta = dict(graph.get("metadata") or {})
     routing = dict(meta.get("audio_routing") or {})
-    # Dialogue folds into the clips when there is no TTS backend. Music never
-    # folds in: one BGM track is mixed after concat, and the Music node emits a
-    # silent placeholder until a music API is wired.
-    clip_embedded = True
+    clip_embedded = bool(routing.get("clip_embedded")) or (not can_speech and not can_music)
     if clip_embedded:
-        drop = {
-            str(n.get("id") or "")
-            for n in (graph.get("nodes") or [])
-            if isinstance(n, dict)
-            and (
-                str(n.get("id") or "") == "n_speech"
-                or _role_key(n).lower() in {"speech", "tts"}
-            )
-        }
+        # Drop placeholder audio nodes when backends are missing.
+        drop = {"n_speech", "n_music"}
+        if not can_speech:
+            drop.add("n_speech")
+        else:
+            drop.discard("n_speech")
+        if not can_music:
+            drop.add("n_music")
+        else:
+            drop.discard("n_music")
         if drop:
             graph["nodes"] = [
                 n
@@ -824,6 +758,14 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
                     clip_embedded=True,
                 )
                 n["config"] = cfg
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                    chain_prior_speech_across_clips,
+                )
+
+                chain_prior_speech_across_clips(graph)
+            except Exception:  # noqa: BLE001
+                logger.debug("chain_prior_speech_across_clips failed", exc_info=True)
             prune_non_contributing_nodes(graph)
         routing["clip_embedded"] = True
         routing["can_speech"] = can_speech
@@ -848,15 +790,49 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
             if isinstance(meta["script_analysis"].get("bgm_lock"), dict):
                 meta["bgm_lock"] = meta["script_analysis"]["bgm_lock"]
         graph["metadata"] = meta
+        meta["supervisor_audio_assignment"] = {
+            "can_speech": can_speech,
+            "can_music": can_music,
+            "can_video_audio": bool(backends.get("can_video_audio", True)),
+            "assigned": ["clip_embedded"],
+            "ensured_nodes": [],
+            "backends": backends,
+            "clip_embedded": True,
+            "prefer_clip_native_audio": True,
+            "prefer_wan3_clip_audio": True,  # legacy alias
+        }
+        return meta["supervisor_audio_assignment"]
 
     ensured = _ensure_audio_nodes_for_intent(graph)
-    assigned: list[str] = ["clip_embedded"] if clip_embedded else []
+    assigned: list[str] = []
 
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
         role = _role_key(node).lower()
         nid = str(node.get("id") or "")
-        if role in {"music", "audio", "audio_bed"} or nid == "n_music":
+        if role in {"speech", "tts"} or nid == "n_speech":
+            cfg["role"] = "speech"
+            cfg["skill_id"] = cfg.get("skill_id") or "speech_tts"
+            cfg["tools"] = ["call_speech_model", "read_upstream"]
+            if can_speech:
+                cfg["force_handler"] = False
+                cfg["delegate"] = "agent"
+                cfg["supervisor_task"] = (
+                    cfg.get("supervisor_task")
+                    or "Write concise spoken lines from brief/storyboard, then call_speech_model "
+                    "to synthesize TTS. Keep under 8s; sync to film beats. Skip if silent policy."
+                )
+                assigned.append(f"{nid}:speech_agent")
+            else:
+                cfg.pop("force_handler", None)
+                cfg["delegate"] = "agent"
+                cfg["supervisor_task"] = (
+                    "No TTS backend — as Speech Agent, write speech timing into clip briefs "
+                    "via graph patch / notes; compose will use audible bed."
+                )
+                assigned.append(f"{nid}:speech_agent_no_backend")
+            node["config"] = cfg
+        elif role in {"music", "audio", "audio_bed"} or nid == "n_music":
             cfg["role"] = "music"
             cfg["skill_id"] = cfg.get("skill_id") or "audio_bed"
             cfg["tools"] = ["call_music_model", "read_upstream", "call_model"]
@@ -865,32 +841,28 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
                 cfg["delegate"] = "agent"
                 cfg["supervisor_task"] = (
                     cfg.get("supervisor_task")
-                    or "Compose ONE non-vocal BGM bed from the Brief / bgm_lock for the "
-                    "full concatenated film. call_music_model. Never generate per-clip scores. "
-                    "Keep headroom so clip dialogue stays intelligible."
+                    or "Compose a short non-vocal BGM bed matching mood; call_music_model. "
+                    "Keep headroom for speech; ≤8s unless compose needs longer."
                 )
                 assigned.append(f"{nid}:music_agent")
             else:
-                cfg["force_handler"] = True
-                cfg["delegate"] = "handler"
+                cfg.pop("force_handler", None)
+                cfg["delegate"] = "agent"
                 cfg["supervisor_task"] = (
-                    "No music API yet. Output a silent/empty placeholder file only. "
-                    "Do not invent a score. When MUSIC_API_KEY / models.music is "
-                    "configured, this node will call_music_model instead."
+                    "No music backend — as Music Agent, stamp mood/BGM style onto clip "
+                    "prompts; compose will mux an audible bed."
                 )
-                assigned.append(f"{nid}:music_placeholder")
+                assigned.append(f"{nid}:music_agent_no_backend")
             node["config"] = cfg
 
     meta = dict(graph.get("metadata") or {})
     meta["supervisor_audio_assignment"] = {
         "can_speech": can_speech,
         "can_music": can_music,
-        "can_video_audio": bool(backends.get("can_video_audio", True)),
         "assigned": assigned,
         "ensured_nodes": ensured,
         "backends": backends,
-        "clip_embedded": bool(clip_embedded),
-        "prefer_clip_native_audio": bool(clip_embedded),
+        "clip_embedded": False,
     }
     graph["metadata"] = meta
     return meta["supervisor_audio_assignment"]
@@ -992,10 +964,8 @@ class SupervisorAgent:
 
     def onboard_user_added_nodes(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
         """When the user adds canvas nodes: promote to LLM agents (if available),
-        decide tools, and let Manager lock-check media prompts.
-
-        Never auto-wires into clip/compose — the user's successor ``+`` / drawn
-        edge is the only topology. Never deletes user_added orphans.
+        decide tools, try to wire contribution into the final clip/compose path,
+        and let Manager lock-check media prompts. Never deletes user_added orphans.
         """
         from jiuwenswarm.server.runtime.designer.model_tools import llm_available
         from jiuwenswarm.server.runtime.designer.smart_graph import (
@@ -1005,6 +975,26 @@ class SupervisorAgent:
         use_agents = bool(llm_available())
         notes: list[str] = []
         onboarded: list[str] = []
+        ids = {
+            str(n.get("id") or "")
+            for n in (graph.get("nodes") or [])
+            if isinstance(n, dict) and n.get("id")
+        }
+        compose_id = next(
+            (i for i in ("n_compose", "n_final") if i in ids),
+            next(
+                (
+                    str(n.get("id") or "")
+                    for n in (graph.get("nodes") or [])
+                    if isinstance(n, dict) and _role_key(n) == "compose"
+                ),
+                "",
+            ),
+        )
+        edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
+        edge_pairs = {
+            (str(e.get("source") or ""), str(e.get("target") or "")) for e in edges
+        }
 
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
@@ -1031,14 +1021,74 @@ class SupervisorAgent:
                     cfg["supervisor_task"] = (
                         f"User-added {role or node.get('type') or 'node'} agent. "
                         f"Use tools {', '.join(tools)}. "
-                        "Produce only this node's output. Do not add extra image or "
-                        "video nodes, and do not rewire into clip/compose."
+                        "Respect film-wide aspect_lock, style_lock, spatial_lock, and "
+                        "costume/identity locks. Contribute usable media toward the "
+                        "final compose/clip pipeline."
                     )[:800]
                 notes.append(f"agent:{nid}")
             else:
                 cfg["delegate"] = "handler"
                 notes.append(f"handler_no_llm:{nid}")
+
+            # Soft contribution wiring for media that can feed compose directly.
+            if compose_id and role in {
+                "clip",
+                "speech",
+                "music",
+                "audio",
+                "video",
+                "compose",
+            }:
+                key = (nid, compose_id)
+                if key not in edge_pairs and nid != compose_id:
+                    edges.append(
+                        {
+                            "id": f"e_{nid}_{compose_id}",
+                            "source": nid,
+                            "target": compose_id,
+                            "kind": "data",
+                        }
+                    )
+                    edge_pairs.add(key)
+                    notes.append(f"wire_compose:{nid}")
+            elif compose_id and role in {
+                "frame",
+                "keyframe",
+                "image",
+                "character",
+                "character_design",
+                "scene",
+            }:
+                # Prefer wire into an existing clip that lacks this upstream.
+                clip_targets = [
+                    str(n.get("id") or "")
+                    for n in (graph.get("nodes") or [])
+                    if isinstance(n, dict)
+                    and _role_key(n) in {"clip", "video"}
+                    and str(n.get("id") or "")
+                ]
+                wired = False
+                for clip_id in clip_targets:
+                    key = (nid, clip_id)
+                    if key not in edge_pairs:
+                        edges.append(
+                            {
+                                "id": f"e_{nid}_{clip_id}",
+                                "source": nid,
+                                "target": clip_id,
+                                "kind": "data",
+                            }
+                        )
+                        edge_pairs.add(key)
+                        notes.append(f"wire_clip:{nid}->{clip_id}")
+                        wired = True
+                        break
+                if not wired:
+                    notes.append(f"needs_edge:{nid}")
+
             node["config"] = cfg
+
+        graph["edges"] = edges
 
         # Manager lock-gates every user-added media leaf.
         manager = ManagerAgent()
@@ -1213,10 +1263,14 @@ class SupervisorAgent:
         node_states: dict[str, Any] | None,
         agent_feedback: dict[str, dict[str, Any]] | None = None,
     ) -> list[str]:
-        """Once after all keyframes complete: rewrite pending clip prompts from shot + frame text."""
+        """After scene cards (or legacy keyframes) complete: refresh pending clip briefs."""
         notes = _shot_distinctness_patch(graph)
         feedback = agent_feedback or {}
         states = node_states or {}
+        meta0 = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+        scene_card_mode = (
+            str(meta0.get("scene_continuity_mode") or "") == "scene_card_plus_clip_shots"
+        )
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
             if _role_key(node) != "clip":
@@ -1228,15 +1282,39 @@ class SupervisorAgent:
             }:
                 continue
             idx = int(cfg.get("shot_index") or 0) or 1
-            frame_id = f"n_frame_{idx}"
-            frame_msg = str((feedback.get(frame_id) or {}).get("message") or "")
             action = str(cfg.get("shot_action") or "").strip()
             camera = str(cfg.get("camera") or "medium / eye-level")
             gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             lock = cfg.get("continuity_lock") if isinstance(cfg.get("continuity_lock"), dict) else {}
             clause = _continuity_prompt_clause(lock if isinstance(lock, dict) else None)
-            # Preserve storyboard/analysis beat — never wipe to "follow keyframe".
             beat = action or "match storyboard beat for this shot"
+            if scene_card_mode:
+                scene_nid = str(cfg.get("scene_node_id") or "").strip()
+                scene_msg = str((feedback.get(scene_nid) or {}).get("message") or "") if scene_nid else ""
+                solos = [str(x) for x in (cfg.get("character_node_ids") or []) if str(x).strip()]
+                who = cfg.get("cast_actions") if isinstance(cfg.get("cast_actions"), dict) else {}
+                who_line = "; ".join(f"{k}: {v}" for k, v in who.items() if v) if who else ""
+                # Preserve locks already stamped on generate.prompt — append beat only if empty.
+                existing = str(gen.get("prompt") or "").strip()
+                if not existing or "FIRST FRAME" not in existing:
+                    gen["prompt"] = (
+                        f"Film shot {idx} from scene card {scene_nid or 'n_scene'} + solo refs "
+                        f"{', '.join(solos) or 'cast'}. Camera {camera}. Action: {beat}. "
+                        + (f"WHO DOES WHAT: {who_line}. " if who_line else "")
+                        + (f"Scene note: {scene_msg[:180]}. " if scene_msg else "")
+                        + "Do not repeat other shots."
+                        f"{clause}"
+                    )
+                cfg["generate"] = gen
+                if action:
+                    cfg["shot_action"] = action[:500]
+                cfg["max_video_calls"] = 1
+                cfg.pop("continuity_clip_node_id", None)
+                node["config"] = cfg
+                notes.append(f"{node.get('id')}: post-scene-card clip brief updated")
+                continue
+            frame_id = f"n_frame_{idx}"
+            frame_msg = str((feedback.get(frame_id) or {}).get("message") or "")
             gen["prompt"] = (
                 f"Film shot {idx} only from its keyframe. Camera {camera}. "
                 f"Action: {beat}. "
@@ -1292,9 +1370,8 @@ class SupervisorAgent:
             "Follow the scenario skill and audio policy. "
             "For each node, choose optimize_for (cost|quality) and a preferred_model "
             "from the configured Settings model list. "
-            "Dialogue is clip-native; never create or assign a TTS/Speech node. "
-            "For the Music node, use call_music_model when available, otherwise keep "
-            "the silent handler placeholder. "
+            "For speech/music nodes: if TTS/music backends exist, assign an agent task "
+            "with call_speech_model / call_music_model; otherwise note handler fallback. "
             "On rerun, incorporate prior feedback suggestions. "
             "Respond with JSON only: "
             '{"optimize_for_global":"cost|quality",'
@@ -1536,7 +1613,7 @@ class SupervisorAgent:
                     "You are the Designer Supervisor. Author a detailed creative brief "
                     "for a short film. Cover: character identity locks (face/hair/body/costume), "
                     "scene geography (spatial lock), motion consistency, time-coherent continuity "
-                    "(e.g. after a man stands and leaves he must not reappear seated), "
+                    "(do not undo a completed beat on a later shot), "
                     "shot-view coverage for every named beat, audio policy. "
                     "Stay faithful to the user prompt — do not invent plot. "
                     "Respond with markdown brief only (no JSON wrapper)."
@@ -1623,7 +1700,13 @@ class SupervisorAgent:
                     "named human as characters[] (id, name, description) — one solo card "
                     "each. NOT every character appears in every scene. "
                     "Different setting_id = DIFFERENT place (distinct architecture). "
-                    "Group shots by setting_id. First shot of each setting: "
+                    "Group shots by setting_id. Shots are consecutive TIME windows that "
+                    "concatenate to the film — each action is THAT window in FULL DETAIL "
+                    "(blocking, speech, wardrobe, camera); do not paste the entire user "
+                    "prompt into every shot; do not restage the whole story from a new "
+                    "camera unless the user asked for same-moment coverage. "
+                    "Keep language_lock and exact speech_line. "
+                    "First shot of each setting: "
                     "keyframe_strategy=compose_from_solo_refs — composer places ONLY "
                     "on_screen cast with cast_actions (who is doing what). "
                     "Later same setting: edit_prior_keyframe (architecture locked); "
@@ -1633,10 +1716,14 @@ class SupervisorAgent:
                     "NO empty scene plates. Crowd/extras persist across same-setting shots "
                     "unless they exit. Each shot needs timeline, camera, action, "
                     "on_screen, offscreen, cast_actions, featured_cast_ids, setting_id, "
+                    "start_state {pose,seats,facing,on_screen,offscreen}, "
+                    "end_state {pose,seats,facing,exited,speech_done,on_screen}, "
                     "continuity_lock, keyframe_prompt, exiting_character_ids, "
                     "speech_by_character (map character_id→exact spoken line for THIS beat; "
                     "empty {} if silent), speech_line (joined fallback). "
-                    "Film-wide locks: language_lock (e.g. en/zh — ALL dialogue in that "
+                    "Same setting_id: next shot start_state MUST match prior end_state. "
+                    "Shots are self-contained continuity windows — do not rely on prior "
+                    "clip media. Film-wide locks: language_lock (e.g. en/zh — ALL dialogue in that "
                     "language), bgm_lock {mood,style,instruments,continuity,rule}, "
                     "include_speech, include_music. "
                     "Respond JSON only: "
@@ -1646,6 +1733,8 @@ class SupervisorAgent:
                     '"featured_cast_ids":["char_1"],"cast_actions":{"char_1":"preaching"},'
                     '"ensemble_cast_ids":["char_1","char_2"],"setting_id":"set_1",'
                     '"keyframe_strategy":"compose_from_solo_refs",'
+                    '"start_state":{"pose":"...","seats":{},"facing":"..."},'
+                    '"end_state":{"pose":"...","exited":[],"speech_done":"..."},'
                     '"continuity_lock":{"forbid":"..."},"keyframe_prompt":"...",'
                     '"exiting_character_ids":[],'
                     '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
@@ -1654,62 +1743,8 @@ class SupervisorAgent:
                     '"continuity":"same bed","rule":"non-vocal underscore"},'
                     '"include_speech":true,"include_music":true,'
                     '"storyboard_markdown":"...","notes":"...","target_shot_count":N,'
-                    '"skip_scene_plate":true}'
+                    '"skip_scene_plate":false}'
                 )
-                try:
-                    from jiuwenswarm.server.runtime.designer.video_styles import (
-                        VIDEO_STYLE_FINAL_FRAME_REVERSE,
-                        resolve_video_style,
-                        video_style_clause,
-                        video_style_skill_excerpt,
-                    )
-
-                    vs = resolve_video_style(graph, user_prompt)
-                    if vs == VIDEO_STYLE_FINAL_FRAME_REVERSE:
-                        system = (
-                            system
-                            + " "
-                            + video_style_clause(vs)
-                            + " "
-                            + video_style_skill_excerpt(vs)
-                        )
-                except Exception:  # noqa: BLE001
-                    pass
-                from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
-                    infer_shot_budget,
-                )
-
-                sb_lock = _shot_expand_lock_count(
-                    graph=graph, analysis=analysis, current_shots=shots
-                )
-                if sb_lock:
-                    sb_rule = (
-                        "Keep shot count EQUAL to the provided shots list. "
-                        "Duration is timeline, not a license to add rows."
-                    )
-                else:
-                    # No-LLM skeleton: the director owns the beat breakdown.
-                    sb_rule = (
-                        "The provided shots are a DRAFT skeleton, not the final count. "
-                        "Break the story into as many shots as its beats need, up to "
-                        f"{infer_shot_budget(user_prompt, analysis)}."
-                    )
-                    try:
-                        from jiuwenswarm.server.runtime.designer.video_styles import (
-                            resolve_video_style,
-                            video_style_min_shots,
-                        )
-
-                        floor = video_style_min_shots(resolve_video_style(graph, user_prompt))
-                        if floor >= 2:
-                            sb_rule += (
-                                f" This video style is never a single take: author at "
-                                f"least {floor} shots — spatial push-in, key close-up(s), "
-                                "deceleration/settle, then a final beat that matches the "
-                                "reference composition."
-                            )
-                    except Exception:  # noqa: BLE001
-                        pass
                 result = await call_model_tool(
                     prompt=json.dumps(
                         {
@@ -1718,7 +1753,7 @@ class SupervisorAgent:
                             "characters": characters,
                             "shots": shots,
                             "spatial_lock": meta.get("spatial_lock"),
-                            "rule": sb_rule,
+                            "rule": "Multi-shot storyboard required when multiple beats exist.",
                         },
                         ensure_ascii=False,
                     ),
@@ -1776,15 +1811,7 @@ class SupervisorAgent:
                             shot["speech_line"] = str(shot.get("speech_line"))[:500]
                         cleaned.append(shot)
                     if cleaned:
-                        shots = _apply_llm_shot_list(
-                            shots,
-                            cleaned,
-                            lock_count=_shot_expand_lock_count(
-                                graph=graph,
-                                analysis=analysis,
-                                current_shots=shots,
-                            ),
-                        )
+                        shots = cleaned
                         source = "llm"
                         analysis["source"] = "llm"
                         notes = str(parsed.get("notes") or "Supervisor LLM authored storyboard.")[
@@ -1820,9 +1847,24 @@ class SupervisorAgent:
                 logger.info("Supervisor author_storyboard LLM failed", exc_info=True)
 
         from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import apply_shot_scope
 
         analysis = ensure_audio_locks_on_analysis(analysis, user_prompt)
+        analysis = apply_shot_scope(analysis, user_prompt)
         shots = list(analysis.get("shots") or shots)
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+                ensure_shot_start_end_states,
+                validate_storyboard_state_chain,
+            )
+
+            shots = ensure_shot_start_end_states(shots)
+            analysis["shots"] = shots
+            chain_notes = validate_storyboard_state_chain(shots)
+            if chain_notes:
+                meta["storyboard_state_notes"] = chain_notes[:20]
+        except Exception:  # noqa: BLE001
+            pass
         characters = list(analysis.get("characters") or characters)
         meta["language_lock"] = str(analysis.get("language_lock") or "en")
         if isinstance(analysis.get("bgm_lock"), dict):
@@ -1895,6 +1937,16 @@ class SupervisorAgent:
                 node["config"] = cfg
                 break
 
+        # Chain prior speech across consecutive clips so N+1 does not restate N.
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                chain_prior_speech_across_clips,
+            )
+
+            chain_prior_speech_across_clips(graph)
+        except Exception:  # noqa: BLE001
+            logger.debug("chain_prior_speech_across_clips failed", exc_info=True)
+
         meta["approved_storyboard"] = sb_md
         meta["supervisor_storyboard_ack"] = {
             "ok": True,
@@ -1947,24 +1999,28 @@ class SupervisorAgent:
                     "MUST include characters[] — every named human gets one solo identity "
                     "card (id, name, description). NOT every character in every scene. "
                     "MUST include shots[] grouped by setting_id (distinct places). "
-                    "YOU own target_shot_count (prefer ≤8, hard max 16; typical 1–6). "
-                    "One clip = one continuous beat. Reuse one KF for local motion or ONE "
-                    "camera move (pan/dolly/push); Wan I2V prompt = motion+camera only "
-                    "(~3–5s preferred). New KF on hard cut, new setting, wardrobe/prop "
-                    "change, large pose/framing jump, or on-screen cast change. "
+                    "Shots are consecutive TIME windows that concatenate to the film. "
+                    "Each shot.action is THAT window only — do not paste the user prompt "
+                    "into every clip. "
+                    "If requested runtime exceeds Wan max (15s), use "
+                    "ceil(duration/15) sequential clips (hard max 16) with contiguous timelines. "
+                    "Otherwise YOU own target_shot_count (prefer ≤8, hard max 16). "
+                    "One clip = one continuous beat ≤15s. New KF on hard cut, new setting, "
+                    "wardrobe/prop change, or on-screen cast change. "
                     "Qwen KF: lock identity+wardrobe; ≤2–3 people with refs; one variable "
                     "per new KF. Honor explicit N-shot / N分镜 as a HARD ceiling. "
                     "First KF of each setting: compose_from_solo_refs with on_screen + "
                     "cast_actions (composer decides who appears and what they are doing). "
                     "Later same setting: edit_prior_keyframe (architecture locked). "
-                    "offscreen stay out of frame. skip_scene_plate=true. "
+                    "offscreen stay out of frame. skip_scene_plate=false "
+                    "(empty scene plates ARE required — environment-only Qwen stills). "
                     "Each shot: shot_index, timeline, camera, action, on_screen, offscreen, "
                     "cast_actions, featured_cast_ids, ensemble_cast_ids, setting_id, "
                     "keyframe_prompt, exiting_character_ids, keyframe_strategy. "
                     "Schema: "
                     '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
                     '"shots":[...],"target_shot_count":N,"include_speech":bool,'
-                    '"include_music":bool,"skip_scene_plate":true,"notes":"..."}'
+                    '"include_music":bool,"skip_scene_plate":false,"notes":"..."}'
                 )
                 from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
                     infer_shot_budget,
@@ -1984,11 +2040,10 @@ class SupervisorAgent:
                                 "Decide shot count wisely: prefer fewer; merge same-cast "
                                 "continuous motion into one beat. Explicit N-shot / "
                                 "target_shot_count from the user is a hard ceiling. Soft prefer "
-                                "≤8 shots. Do not invent extra keyframes or coverage views as "
-                                "new nodes after the canvas is frozen. All solo cast cards "
-                                "before keyframes; compose first KF per setting_id; edit_prior "
-                                "only within the same setting_id. Per-shot on_screen is "
-                                "authoritative for who appears — not every solo in every frame."
+                                "≤8 shots. All solo cast cards before keyframes; compose "
+                                "first KF per setting_id; edit_prior only within the same "
+                                "setting_id. Per-shot on_screen is authoritative for who "
+                                "appears — not every solo in every frame."
                             ),
                         },
                         ensure_ascii=False,
@@ -2029,15 +2084,7 @@ class SupervisorAgent:
                         shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
                     cleaned.append(shot)
                 if cleaned:
-                    shots = _apply_llm_shot_list(
-                        shots,
-                        cleaned,
-                        lock_count=_shot_expand_lock_count(
-                            graph=graph,
-                            analysis=analysis,
-                            current_shots=shots,
-                        ),
-                    )
+                    shots = cleaned
                     source = "llm"
                     analysis["source"] = "llm"
                     notes = str(parsed.get("notes") or "")[:1000]
@@ -2052,8 +2099,17 @@ class SupervisorAgent:
                         llm_tsc = int(parsed.get("target_shot_count") or 0)
                     except (TypeError, ValueError):
                         llm_tsc = 0
-                    # LLM redesign owns N; explicit user language is the only hard ceiling.
-                    if explicit_n >= 1:
+                    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                        needs_duration_slicing as _nds,
+                    )
+
+                    # LLM redesign owns N; explicit user language is the only hard ceiling
+                    # unless requested runtime exceeds Wan max (then sequential slice count).
+                    if _nds(user_prompt):
+                        cap = _HARD_MAX_SHOTS
+                        keep = min(cap, max(llm_tsc, explicit_n, len(shots), 1))
+                        shots = shots[:keep]
+                    elif explicit_n >= 1:
                         shots = shots[: min(explicit_n, _HARD_MAX_SHOTS)]
                     else:
                         cap = min(_SOFT_MAX_SHOTS, _HARD_MAX_SHOTS)
@@ -2071,7 +2127,9 @@ class SupervisorAgent:
                         audio["policy"] = "speech_and_music"
                     analysis["audio"] = audio
                     if parsed.get("skip_scene_plate") is not None:
-                        analysis["skip_scene_plate"] = bool(parsed.get("skip_scene_plate"))
+                        # Scene cards are required (empty plates + R2V). Ignore LLM skips.
+                        analysis["skip_scene_plate"] = False
+                        analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
             except Exception:  # noqa: BLE001
                 logger.info("Supervisor design_execution_graph LLM failed; using storyboard shots", exc_info=True)
                 notes = "LLM graph design failed; materializing from storyboard shots."
@@ -2086,7 +2144,16 @@ class SupervisorAgent:
             )
 
             explicit_n = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
-            if explicit_n >= 1:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                needs_duration_slicing,
+            )
+
+            if needs_duration_slicing(user_prompt):
+                final_ceiling = min(
+                    _HARD_MAX_SHOTS,
+                    max(len(shots), int(infer_shot_budget(user_prompt, analysis) or 0), 1),
+                )
+            elif explicit_n >= 1:
                 final_ceiling = min(explicit_n, _HARD_MAX_SHOTS)
             else:
                 # Prefer live shot list length; soft-cap only.
@@ -2114,6 +2181,15 @@ class SupervisorAgent:
                 }
             ]
         analysis["shots"] = shots
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                apply_shot_scope,
+            )
+
+            analysis = apply_shot_scope(analysis, user_prompt)
+            shots = list(analysis.get("shots") or shots)
+        except Exception:  # noqa: BLE001
+            pass
         analysis["target_shot_count"] = len(shots)
         meta["script_analysis"] = analysis
 
@@ -2185,15 +2261,7 @@ class SupervisorAgent:
                 rmeta[key] = meta.get(key)
         rmeta["script_analysis"] = analysis
         rmeta["supervisor_owns_graph"] = True
-        rebuilt["metadata"] = rmeta
-        # Uploads are user-authored assets: a redesign must not delete them.
-        from jiuwenswarm.server.runtime.designer.user_references import carry_user_references
-
-        carry_user_references(meta, rebuilt)
-        rmeta = dict(rebuilt.get("metadata") or {})
-        # Only freeze after the director actually authored shots. A heuristic
-        # 1-shot skeleton must not lock Play/redesign to a single beat.
-        rmeta["freeze_shot_topology"] = source == "llm" and len(shots) >= 1
+        rmeta["freeze_shot_topology"] = False
         rmeta["lean_pipeline"] = False
         rmeta["graph_designed_by_supervisor"] = True
         rmeta["supervisor_graph_ack"] = {
@@ -2339,9 +2407,13 @@ def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
         camera = str(cfg.get("camera") or "").strip() or camera_cycle[(idx - 1) % len(camera_cycle)]
         cfg["camera"] = camera
         if not action:
-            action = f"Distinct beat for shot {idx}"
+            timeline = str(cfg.get("timeline") or "").strip()
+            action = (
+                f"Film only the {timeline or f'shot {idx}'} time window. "
+                "Do not restage another window from a new camera angle."
+            )
             cfg["shot_action"] = action
-            notes.append(f"{node.get('id')}: filled missing shot_action")
+            notes.append(f"{node.get('id')}: filled missing shot_action from time window")
         gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
         prompt = str(gen.get("prompt") or "").strip()
         marker = f"shot {idx}"
@@ -2779,13 +2851,13 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             "view_key": cfg.get("view_key"),
             "spatial_lock": cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else None,
             "occupancy": cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else None,
-            "skip_scene_plate": True,
-            "scene_continuity_mode": "compose_solos_shared_scene_prompt",
+            "skip_scene_plate": False,
+            "scene_continuity_mode": "scene_card_plus_clip_shots",
             "scene_bible": bible,
             "all_solo_node_ids": list(all_solo_ids),
         }
         cfg["identity_refs"] = identity_refs
-        cfg["skip_scene_plate"] = True
+        cfg["skip_scene_plate"] = False
         if names:
             cfg["cast_names"] = identity_refs["cast_names"]
         # Sensible LLM-style node names (Brief: … / Scene N: Shot M: …).
@@ -2930,19 +3002,20 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
     plan.update(
         {
             "character_identity": "solo_sheets_first",
-            "multi_shot_compose": "compose_from_solo_refs",
+            "multi_shot_compose": "scene_card_plus_clip_shots",
             "sequential_keyframe": "prompt_handoff_same_setting_id_only",
-            "scene_spatial": "shared_scene_bible_prompt_handoff",
-            "empty_scene_plates": False,
+            "scene_spatial": "empty_scene_plate_plus_r2v_clips",
+            "empty_scene_plates": True,
             "solo_gate_before_keyframes": True,
             "hierarchical_views": True,
             "costume_lock": True,
+            "time_of_day_lock": True,
             "validated_by_manager": True,
         }
     )
     meta["consistency_plan"] = plan
-    meta["skip_scene_plate"] = True
-    meta["scene_continuity_mode"] = "compose_solos_shared_scene_prompt"
+    meta["skip_scene_plate"] = False
+    meta["scene_continuity_mode"] = "scene_card_plus_clip_shots"
     meta["scene_masters"] = dict(scene_master_by_setting)
     meta["scene_locks"] = dict(scene_locks)
     graph["metadata"] = meta
@@ -3193,14 +3266,8 @@ class ManagerAgent:
                     already_done = [str(x) for x in (s.get("already_done") or []) if str(x)]
                     cfg["already_done"] = already_done
                     break
-        if already_done and "ALREADY_DONE" not in prompt:
-            prompt = (
-                prompt
-                + "\nALREADY_DONE (do not restage unless storyboard explicitly repeats): "
-                + "; ".join(already_done[:12])
-            )
-            notes.append("inject_already_done")
-            changed = True
+        if already_done:
+            cfg["already_done"] = already_done
 
         occupancy = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
         if not occupancy and isinstance(identity.get("occupancy"), dict):
@@ -3306,7 +3373,7 @@ class ManagerAgent:
                     if crowd:
                         cfg["crowd_lock"] = crowd
                     break
-        if crowd and "CROWD LOCK" not in prompt:
+        if crowd and role != "clip" and "CROWD LOCK" not in prompt:
             prompt = (
                 prompt
                 + f"\nCROWD LOCK: present={crowd.get('present')}; "
@@ -3314,6 +3381,27 @@ class ManagerAgent:
             )
             notes.append("inject_crowd_lock")
             changed = True
+        elif role == "clip" and crowd:
+            # Clips: stamp structured crowd_state for story-form coverage (no LOCK banner).
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+                    infer_crowd_state,
+                    stamp_continuity_story_fields,
+                )
+
+                cfg["crowd_lock"] = crowd
+                cfg = stamp_continuity_story_fields(
+                    cfg,
+                    events=list(cfg.get("previous_clip_finished_events") or []),
+                    prior_text=str(cfg.get("previous_clip_wan_prompt") or ""),
+                    prior_action=str(cfg.get("previous_clip_action") or ""),
+                )
+                if not isinstance(cfg.get("crowd_state"), dict):
+                    cfg["crowd_state"] = infer_crowd_state(cfg, events=[])
+                notes.append("stamp_crowd_state")
+                changed = True
+            except Exception:  # noqa: BLE001
+                pass
 
         detail_needles = ("gaze", "screen-left", "screen left", "motion direction", "looks at")
         if not any(n in prompt.lower() for n in detail_needles):
@@ -3392,12 +3480,18 @@ class ManagerAgent:
                     notes.append("stamp_image_size_aspect")
                     changed = True
             if role == "clip":
-                vsize = str(aspect.get("video_size") or cfg.get("video_size") or "").strip()
-                vres = str(aspect.get("video_resolution") or cfg.get("video_resolution") or "").strip()
-                if vsize and (str(cfg.get("video_size") or "") != vsize or str(cfg.get("video_resolution") or "") != vres):
+                from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                    lock_clip_480p,
+                )
+
+                vsize, vres = lock_clip_480p(
+                    aspect.get("video_size") or cfg.get("video_size"),
+                    aspect.get("video_resolution") or cfg.get("video_resolution"),
+                )
+                if str(cfg.get("video_size") or "") != vsize or str(cfg.get("video_resolution") or "") != vres:
                     cfg["video_size"] = vsize
                     cfg["video_resolution"] = vres
-                    notes.append("stamp_video_aspect")
+                    notes.append("stamp_video_aspect_480p")
                     changed = True
             ratio = str(aspect.get("ratio") or "").strip()
             rule = str(aspect.get("rule") or "").strip()
@@ -3412,7 +3506,8 @@ class ManagerAgent:
 
         if style:
             cfg["style_lock"] = style
-            if "STYLE LOCK" not in prompt and "STYLE HOLD" not in prompt:
+            # Hard STYLE LOCK always — soft STYLE HOLD must not block film-wide lock.
+            if "STYLE LOCK" not in prompt:
                 try:
                     from jiuwenswarm.server.runtime.designer.media_model_playbook import (
                         style_lock_clause,
@@ -3424,10 +3519,52 @@ class ManagerAgent:
                 if not clause:
                     look = str(style.get("look") or style.get("medium") or "").strip()
                     clause = f"STYLE LOCK (film-wide): {look}" if look else ""
+                if not clause:
+                    try:
+                        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+                            ensure_photoreal_style_lock,
+                        )
+
+                        style = ensure_photoreal_style_lock(
+                            style,
+                            prompt=str(graph.get("description") or meta.get("user_prompt") or ""),
+                        )
+                        cfg["style_lock"] = style
+                        look = str(style.get("look") or style.get("medium") or "").strip()
+                        clause = f"STYLE LOCK (film-wide): {look}" if look else ""
+                    except Exception:  # noqa: BLE001
+                        clause = (
+                            "STYLE LOCK (film-wide): photoreal cinematic — "
+                            "SAME medium whole film; never cartoon restyle mid-film."
+                        )
                 if clause:
                     prompt = prompt + "\n" + clause
                     notes.append("inject_style_lock")
                     changed = True
+        elif role in {"clip", "frame", "keyframe", "scene", "character"}:
+            # Unspecified style → hard photoreal lock (domain-agnostic default).
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+                    ensure_photoreal_style_lock,
+                )
+                from jiuwenswarm.server.runtime.designer.media_model_playbook import (
+                    style_lock_clause,
+                )
+
+                style = ensure_photoreal_style_lock(
+                    None,
+                    prompt=str(graph.get("description") or meta.get("user_prompt") or ""),
+                )
+                cfg["style_lock"] = style
+                if "STYLE LOCK" not in prompt:
+                    clause = (style_lock_clause(style) or "").strip() or (
+                        f"STYLE LOCK (film-wide): {style.get('look') or 'photoreal cinematic'}"
+                    )
+                    prompt = prompt + "\n" + clause
+                    notes.append("inject_default_photoreal_style_lock")
+                    changed = True
+            except Exception:  # noqa: BLE001
+                pass
 
         if role == "clip":
             # Scene bible + setting isolation for clips (same locks as keyframes).
@@ -3439,11 +3576,24 @@ class ManagerAgent:
                     bible = dict(locks_b[setting_id])
                     cfg["scene_bible"] = bible
             if bible and "SCENE BIBLE" not in prompt:
+                tod_b = (
+                    cfg.get("time_of_day_lock")
+                    if isinstance(cfg.get("time_of_day_lock"), dict)
+                    else {}
+                )
+                tod_bit = ""
+                if tod_b.get("time_of_day") and str(tod_b.get("time_of_day")) != "unspecified":
+                    tod_bit = (
+                        f"; time_of_day={tod_b.get('time_of_day')}; "
+                        f"lighting={tod_b.get('lighting') or bible.get('lighting')}"
+                    )
                 prompt = (
                     prompt
-                    + f"\nSCENE BIBLE: place={bible.get('place')}; lighting={bible.get('lighting')}; "
+                    + f"\nSCENE BIBLE: place={bible.get('place')}; "
+                    f"lighting={bible.get('lighting')}; "
                     f"objects={', '.join(str(x) for x in (bible.get('objects') or [])[:6])}; "
-                    f"crowd={bible.get('crowd')}; coherence={bible.get('coherence_rule')}."
+                    f"crowd={bible.get('crowd')}; coherence={bible.get('coherence_rule')}"
+                    f"{tod_bit}."
                 )
                 notes.append("enforce_scene_bible_clip")
                 changed = True
@@ -3455,34 +3605,41 @@ class ManagerAgent:
                 )
                 notes.append("enforce_setting_lock_clip")
                 changed = True
-            # Pull prior clip beat (action) from continuity node — never paste full Wan text.
-            cont_clip = str(cfg.get("continuity_clip_node_id") or cfg.get("previous_clip_node_id") or "").strip()
-            if cont_clip and not str(cfg.get("previous_clip_action") or "").strip():
-                for n in graph.get("nodes") or []:
-                    if str(n.get("id") or "") != cont_clip:
-                        continue
-                    pcfg = n.get("config") if isinstance(n.get("config"), dict) else {}
-                    prior_act = str(
-                        pcfg.get("shot_action")
-                        or pcfg.get("character_action")
-                        or ""
-                    ).strip()
-                    prior_txt = str(
-                        pcfg.get("last_wan_prompt")
-                        or pcfg.get("last_approved_prompt")
-                        or (pcfg.get("generate") or {}).get("prompt")
-                        or ""
-                    ).strip()
-                    if prior_act or prior_txt:
-                        if prior_act:
-                            cfg["previous_clip_action"] = prior_act[:220]
-                        if prior_txt and not str(cfg.get("previous_clip_wan_prompt") or "").strip():
-                            cfg["previous_clip_wan_prompt"] = prior_txt[:800]
-                        cfg["previous_clip_node_id"] = cont_clip
-                        cfg["previous_clip_handoff_ready"] = True
-                        notes.append("pull_prior_clip_action_from_dep")
-                        changed = True
-                    break
+            # Storyboard start/end owns continuity — do not pull prior Wan into cfg.
+            if isinstance(cfg.get("start_state"), dict) and cfg.get("start_state"):
+                cfg.pop("continuity_clip_node_id", None)
+            else:
+                cont_clip = str(cfg.get("continuity_clip_node_id") or cfg.get("previous_clip_node_id") or "").strip()
+                if cont_clip:
+                    try:
+                        from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+                            ensure_prior_clip_story_on_cfg,
+                        )
+
+                        cfg = ensure_prior_clip_story_on_cfg(cfg, graph if isinstance(graph, dict) else {})
+                    except Exception:  # noqa: BLE001
+                        pass
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                    scrub_restated_speech,
+                )
+
+                cfg = scrub_restated_speech(cfg)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+                    contact_anti_penetration_clause,
+                )
+
+                if "ANTI-PENETRATION" not in prompt and "CONTACT / ANTI-PENETRATION" not in prompt:
+                    prompt = prompt + "\n" + contact_anti_penetration_clause(for_clip=True)
+                    notes.append("inject_contact_anti_penetration")
+                    changed = True
+            except Exception:  # noqa: BLE001
+                pass
+            # Character consistency / costume still injected below for the leaf;
+            # the video API body is rewritten by manager_approve_video_prompt.
             prior_clips = collect_prior_clip_prompts(graph, shot_index=shot_index)
             if not prior_clips and str(cfg.get("previous_clip_action") or "").strip():
                 prior_clips = [
@@ -3495,18 +3652,54 @@ class ManagerAgent:
                         "speech_line": str(cfg.get("previous_clip_speech") or ""),
                     }
                 ]
-            clause = handoff_clause_for_prompt(
-                prior_clips,
-                this_shot_index=shot_index,
-                this_action=str(cfg.get("shot_action") or cfg.get("character_action") or ""),
-                this_camera=str(cfg.get("camera") or ""),
-                this_speech=str(cfg.get("speech_line") or ""),
-                already_done=already_done,
-            )
-            if clause and "PREVIOUS CLIP HAD" not in prompt and "PRIOR CLIP CONTINUITY" not in prompt:
-                prompt = prompt + "\n\n" + clause
-                notes.append("inject_prior_clip_handoff")
-                changed = True
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+                    apply_continuity_contract,
+                    prompt_violates_continuity,
+                )
+
+                cfg, prompt, cont_notes = apply_continuity_contract(
+                    cfg,
+                    graph=graph if isinstance(graph, dict) else {},
+                    prompt=prompt,
+                )
+                for n in cont_notes:
+                    if n and n not in notes:
+                        notes.append(n)
+                        changed = True
+                # Hard reject: blank contaminated draft so supervisor rewrite uses
+                # this storyboard row + structured holds (not prior Wan prose).
+                if prompt_violates_continuity(prompt, cfg=cfg):
+                    prompt = ""
+                    notes.append("reject_continuity_violation_blank_prompt")
+                    changed = True
+            except Exception:  # noqa: BLE001
+                pass
+            # Keep prior_clips available for debug / regenerate packets only.
+            if prior_clips:
+                cfg["prior_storyboard_beats"] = [
+                    {
+                        "shot_index": p.get("shot_index"),
+                        "shot_action": p.get("shot_action"),
+                        "speech_line": p.get("speech_line"),
+                        "camera": p.get("camera"),
+                    }
+                    for p in prior_clips
+                    if isinstance(p, dict)
+                ][-6:]
+            if "CONTINUITY STATE" not in prompt:
+                try:
+                    from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+                        positive_continuity_clause,
+                    )
+
+                    positive = positive_continuity_clause(cfg)
+                    if positive:
+                        prompt = prompt + "\n\n" + positive
+                        notes.append("inject_positive_continuity")
+                        changed = True
+                except Exception:  # noqa: BLE001
+                    pass
             # Character consistency on every clip call (Manager enforce).
             cast_who = ", ".join(
                 str(x)
@@ -3519,14 +3712,29 @@ class ManagerAgent:
                 if str(x)
             )
             if "CHARACTER CONSISTENCY" not in prompt:
-                prompt = (
-                    prompt
-                    + "\nCHARACTER CONSISTENCY LOCK: animate ONLY people already in Image 1 "
-                    "(this shot's keyframe); keep the same faces, body types, ages, and "
-                    f"costumes{(' for ' + cast_who) if cast_who else ''}. "
-                    "Do not recast, redesign wardrobe, or invent a different hero. "
-                    "IDENTITY solo sheets remain the face authority."
+                from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
+                    clip_uses_scene_card,
                 )
+
+                if clip_uses_scene_card(cfg, graph if isinstance(graph, dict) else {}):
+                    prompt = (
+                        prompt
+                        + "\nCHARACTER CONSISTENCY LOCK: animate ONLY on-screen people from "
+                        "solo sheets bound as character1/character2… (attach order). "
+                        "The LAST reference is the Scene card (environment) — not a person. "
+                        f"Keep faces, body types, ages, and costumes"
+                        f"{(' for ' + cast_who) if cast_who else ''}. "
+                        "Do not recast, redesign wardrobe, or invent unlabeled extras."
+                    )
+                else:
+                    prompt = (
+                        prompt
+                        + "\nCHARACTER CONSISTENCY LOCK: animate ONLY people already in Image 1 "
+                        "(this shot's keyframe); keep the same faces, body types, ages, and "
+                        f"costumes{(' for ' + cast_who) if cast_who else ''}. "
+                        "Do not recast, redesign wardrobe, or invent a different hero. "
+                        "IDENTITY solo sheets remain the face authority."
+                    )
                 notes.append("inject_clip_character_consistency")
                 changed = True
             if costume_lock and "Costume lock" not in prompt and "costume lock" not in prompt.lower():
@@ -3582,13 +3790,39 @@ class ManagerAgent:
                     or meta.get("prefer_wan3_clip_audio")
                 ),
             )
+            # stamp_audio re-copies storyboard speech — re-enforce uniqueness after.
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+                    enforce_speech_uniqueness,
+                )
+
+                cfg, speech_notes = enforce_speech_uniqueness(
+                    cfg, graph=graph if isinstance(graph, dict) else {}
+                )
+                for n in speech_notes:
+                    if n and n not in notes:
+                        notes.append(n)
+                        changed = True
+            except Exception:  # noqa: BLE001
+                pass
             flags = resolve_audio_intent_flags(meta, cfg)
+            speech_line_now = str(cfg.get("speech_line") or flags.get("speech_line") or "").strip()
+            by_char_now = (
+                cfg.get("speech_by_character")
+                if isinstance(cfg.get("speech_by_character"), dict)
+                else {}
+            )
+            if not by_char_now:
+                by_char_now = flags.get("speech_by_character") or {}
+            include_speech = bool(speech_line_now or by_char_now) and not bool(
+                cfg.get("speech_continuation_only") and not speech_line_now and not by_char_now
+            )
             block = audio_lock_prompt_block(
                 language_lock=str(flags.get("language_lock") or ""),
-                speech_by_character=flags.get("speech_by_character") or {},
-                speech_line=str(flags.get("speech_line") or ""),
+                speech_by_character=by_char_now if include_speech else {},
+                speech_line=speech_line_now if include_speech else "",
                 bgm_lock=flags.get("bgm_lock") or {},
-                include_speech=bool(flags.get("include_speech")),
+                include_speech=include_speech,
                 include_music=bool(flags.get("include_music")),
                 clip_embedded=bool(flags.get("clip_embedded")),
             )
@@ -3603,21 +3837,208 @@ class ManagerAgent:
                     notes.append("reinforce_audio_locks")
                     changed = True
 
-        # Soft anti-repeat: if prompt re-states a finished exit verb from already_done, flag.
-        for item in already_done:
-            low = item.lower()
-            if "exited" in low or "leaving" in low or "walked out" in low:
-                # Ensure explicit forbid clause once.
-                if "do not show them leaving again" not in prompt.lower():
-                    prompt = (
-                        prompt
-                        + "\nDo not show characters leaving again if already_done says they exited."
+        # Soft anti-repeat for stills only. Clip video calls stay positive — supervisor
+        # omits exited cast instead of appending forbid lines.
+        if role != "clip":
+            for item in already_done:
+                low = item.lower()
+                if "exited" in low or "leaving" in low or "walked out" in low:
+                    if "do not show them leaving again" not in prompt.lower():
+                        prompt = (
+                            prompt
+                            + "\nDo not show characters leaving again if already_done says they exited."
+                        )
+                        notes.append("enforce_no_repeat_exit")
+                        changed = True
+                        break
+
+        if role == "clip":
+            from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+                ensure_story_lock_coverage,
+                supervisor_approve_video_prompt,
+            )
+
+            # Stamp film-wide / shot ToD onto cfg before story-form coverage.
+            if not isinstance(cfg.get("time_of_day_lock"), dict) or not (
+                cfg.get("time_of_day_lock") or {}
+            ).get("time_of_day"):
+                meta_tod = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+                analysis_tod = (
+                    meta_tod.get("script_analysis")
+                    if isinstance(meta_tod.get("script_analysis"), dict)
+                    else {}
+                )
+                try:
+                    from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                        infer_time_of_day_lock,
                     )
-                    notes.append("enforce_no_repeat_exit")
-                    changed = True
-                    break
+
+                    tod = infer_time_of_day_lock(
+                        str(graph.get("description") or meta_tod.get("user_prompt") or ""),
+                        str(
+                            (cfg.get("scene_bible") or {}).get("place")
+                            or cfg.get("shot_action")
+                            or ""
+                        ),
+                    )
+                    shot_tod = next(
+                        (
+                            s.get("time_of_day_lock")
+                            for s in (analysis_tod.get("shots") or [])
+                            if isinstance(s, dict)
+                            and int(s.get("shot_index") or 0) == shot_index
+                            and isinstance(s.get("time_of_day_lock"), dict)
+                        ),
+                        None,
+                    )
+                    if isinstance(shot_tod, dict):
+                        tod = {**tod, **{k: v for k, v in shot_tod.items() if str(v).strip()}}
+                    elif isinstance(analysis_tod.get("time_of_day_lock"), dict):
+                        tod = {
+                            **tod,
+                            **{
+                                k: v
+                                for k, v in analysis_tod["time_of_day_lock"].items()
+                                if str(v).strip()
+                            },
+                        }
+                    bible = (
+                        cfg.get("scene_bible")
+                        if isinstance(cfg.get("scene_bible"), dict)
+                        else {}
+                    )
+                    if bible.get("time_of_day") and (
+                        not tod.get("time_of_day") or tod.get("time_of_day") == "unspecified"
+                    ):
+                        tod["time_of_day"] = str(bible.get("time_of_day"))
+                    if bible.get("lighting") and not tod.get("lighting"):
+                        tod["lighting"] = str(bible.get("lighting"))
+                    if tod:
+                        cfg["time_of_day_lock"] = tod
+                except Exception:  # noqa: BLE001
+                    pass
+
+            approved, reasons = supervisor_approve_video_prompt(
+                prompt,
+                cfg=cfg,
+                graph=graph if isinstance(graph, dict) else {},
+                shot_index=shot_index,
+                action=str(cfg.get("shot_action") or ""),
+                camera=str(cfg.get("camera") or ""),
+            )
+            if approved != str(prompt or "").strip():
+                notes.append("supervisor_rewrote_video_prompt")
+                prompt = approved
+                changed = True
+            cfg["manager_video_prompt_notes"] = reasons
+            cfg["supervisor_video_prompt_notes"] = reasons
+            cfg["supervisor_video_prompt_approved"] = True
+            # After story-form rewrite: fill missing language / ToD / style as prose
+            # (never LOCK essays — those get scrubbed on the next pass).
+            covered, cov_notes = ensure_story_lock_coverage(
+                prompt,
+                cfg,
+                graph=graph if isinstance(graph, dict) else {},
+            )
+            if covered != str(prompt or "").strip():
+                prompt = covered
+                notes.extend(cov_notes or ["ensure_story_lock_coverage"])
+                changed = True
 
         # Always stamp Manager lock gate; patched=True when prompt text changed.
+        # Stills + clips: positive practice prompts only (no LOCK essays on tool body).
+        if role in {"scene", "frame", "keyframe", "character", "character_design"}:
+            meta_l = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+            analysis_l = (
+                meta_l.get("script_analysis")
+                if isinstance(meta_l.get("script_analysis"), dict)
+                else {}
+            )
+            tod = cfg.get("time_of_day_lock") if isinstance(cfg.get("time_of_day_lock"), dict) else {}
+            if not tod:
+                shot_tod = next(
+                    (
+                        s.get("time_of_day_lock")
+                        for s in (analysis_l.get("shots") or [])
+                        if isinstance(s, dict)
+                        and int(s.get("shot_index") or 0) == shot_index
+                        and isinstance(s.get("time_of_day_lock"), dict)
+                    ),
+                    None,
+                )
+                tod = shot_tod if isinstance(shot_tod, dict) else (
+                    analysis_l.get("time_of_day_lock")
+                    if isinstance(analysis_l.get("time_of_day_lock"), dict)
+                    else {}
+                )
+            if not tod:
+                try:
+                    from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                        infer_time_of_day_lock,
+                    )
+
+                    tod = infer_time_of_day_lock(
+                        str(graph.get("description") or meta_l.get("user_prompt") or ""),
+                        str((cfg.get("scene_bible") or {}).get("place") or cfg.get("shot_action") or ""),
+                    )
+                except Exception:  # noqa: BLE001
+                    tod = {}
+            if tod:
+                cfg["time_of_day_lock"] = tod
+            style_l = cfg.get("style_lock") if isinstance(cfg.get("style_lock"), dict) else {}
+            if not style_l:
+                style_l = meta_l.get("style_lock") if isinstance(meta_l.get("style_lock"), dict) else {}
+            if style_l and not isinstance(cfg.get("style_lock"), dict):
+                cfg["style_lock"] = style_l
+            # Fidelity: rewrite lock essays into positive still prompts; soft-fill gaps.
+            try:
+                from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+                    ensure_still_tool_prompt,
+                )
+
+                approved_still, still_notes = ensure_still_tool_prompt(
+                    prompt,
+                    role=role,
+                    cfg=cfg,
+                    graph=graph if isinstance(graph, dict) else {},
+                )
+                if approved_still != str(prompt or "").strip():
+                    prompt = approved_still
+                    notes.extend(still_notes or ["still_prompt_fidelity"])
+                    changed = True
+                cfg["manager_still_prompt_notes"] = still_notes
+                cfg["supervisor_still_prompt_approved"] = True
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Stamp configured backend prompt budgets onto the leaf (never forces a model).
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+                media_prompt_limit_packet,
+                resolve_prompt_limit,
+                trim_prompt_to_limit,
+            )
+
+            packet = media_prompt_limit_packet()
+            cfg["media_prompt_limits"] = packet
+            kind = "video" if role == "clip" else "image"
+            lim = resolve_prompt_limit(kind)
+            cfg["prompt_char_limit"] = lim.max_chars
+            cfg["prompt_limit_guidance"] = lim.guidance()
+            if lim.max_chars and len(prompt) > lim.max_chars:
+                trimmed, did = trim_prompt_to_limit(prompt, lim)
+                if did:
+                    prompt = trimmed
+                    notes.append(f"trim_to_prompt_limit:{lim.max_chars}")
+                    changed = True
+                else:
+                    notes.append(
+                        f"prompt_over_advisory_limit:{len(prompt)}>{lim.max_chars}"
+                    )
+        except Exception:  # noqa: BLE001
+            packet = {}
+            lim = None
+
         cfg["manager_prompt_reviewed"] = True
         cfg["manager_lock_gate"] = {
             "setting_id": setting_id,
@@ -3637,16 +4058,28 @@ class ManagerAgent:
             "bgm_lock": bool(cfg.get("bgm_lock") or meta.get("bgm_lock")),
             "clip_embedded_audio": bool(cfg.get("clip_embedded_audio")),
             "video_audio": bool(cfg.get("video_audio") or cfg.get("prefer_wan3_clip_audio")),
+            "time_of_day_lock": (
+                (cfg.get("time_of_day_lock") or {}).get("time_of_day")
+                if isinstance(cfg.get("time_of_day_lock"), dict)
+                else None
+            ),
+            "story_lock_coverage": True,
+            "prompt_char_limit": cfg.get("prompt_char_limit"),
+            "prompt_limit_known": bool(getattr(lim, "known", False)),
+            "prompt_limit_source": str(getattr(lim, "source", "") or ""),
+            "media_prompt_limits": packet or cfg.get("media_prompt_limits"),
         }
         gen["prompt"] = prompt.strip()
         cfg["generate"] = gen
         # Character/scene leaves read cfg.prompt; keep both in sync after Manager gate.
+        store_cap = max(6000, int(cfg.get("prompt_char_limit") or 6000))
         if role in {"character", "character_design", "scene"} or not str(cfg.get("prompt") or "").strip():
-            cfg["prompt"] = prompt.strip()[:6000]
+            cfg["prompt"] = prompt.strip()[:store_cap]
+        approved_cap = max(4000, int(cfg.get("prompt_char_limit") or 4000))
         if changed:
-            cfg["last_approved_prompt"] = prompt.strip()[:4000]
+            cfg["last_approved_prompt"] = prompt.strip()[:approved_cap]
         else:
-            cfg.setdefault("last_approved_prompt", prompt.strip()[:4000])
+            cfg.setdefault("last_approved_prompt", prompt.strip()[:approved_cap])
         node["config"] = cfg
         nid = str(node.get("id") or "")
         for n in graph.get("nodes") or []:
@@ -3752,10 +4185,7 @@ class ManagerAgent:
     def ensure_agents_and_prune(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
         """For every node: kind=agent, tools via _tools_for_node, delegate=agent when LLM up."""
         from jiuwenswarm.server.runtime.designer.model_tools import llm_available
-        from jiuwenswarm.server.runtime.designer.smart_graph import (
-            prune_non_contributing_nodes,
-            prune_shot_nodes_beyond_analysis,
-        )
+        from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
 
         use_agents = bool(llm_available())
         notes: list[str] = []
@@ -3780,11 +4210,13 @@ class ManagerAgent:
                 else:
                     cfg.pop("prewritten", None)
             else:
-                cfg["delegate"] = "handler"
+                from jiuwenswarm.server.runtime.designer.model_tools import (
+                    demote_config_to_handler,
+                )
+
+                demote_config_to_handler(cfg)
             node["config"] = cfg
 
-        extra_shots = prune_shot_nodes_beyond_analysis(graph)
-        notes.extend([f"pruned_extra_shot:{x}" for x in extra_shots])
         pruned = prune_non_contributing_nodes(graph)
         notes.extend([f"pruned:{x}" for x in pruned])
 
@@ -3800,9 +4232,6 @@ class ManagerAgent:
                     continue
                 nid = str(node.get("id") or "")
                 role = _role_key(node)
-                cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-                if cfg.get("user_added"):
-                    continue
                 if role in {"clip", "speech", "music"} or nid.startswith("n_clip"):
                     key = (nid, "n_compose")
                     if key not in existing and nid != "n_compose":
@@ -3848,7 +4277,7 @@ class ManagerAgent:
             find_non_contributing_node_ids,
         )
 
-        # Re-onboard (tools/agents only; no auto-wire) before auditing.
+        # Re-onboard + soft-wire before auditing so Run sees latest Supervisor decisions.
         try:
             SupervisorAgent().onboard_user_added_nodes(graph)
         except Exception:  # noqa: BLE001
@@ -4272,8 +4701,10 @@ class ManagerAgent:
                 logger.info("Manager storyboard LLM review failed; keeping heuristic", exc_info=True)
 
         from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import apply_shot_scope
 
         analysis = ensure_audio_locks_on_analysis(analysis, user_prompt)
+        analysis = apply_shot_scope(analysis, user_prompt)
         shots = list(analysis.get("shots") or shots)
         meta["language_lock"] = str(analysis.get("language_lock") or meta.get("language_lock") or "en")
         if isinstance(analysis.get("bgm_lock"), dict):
@@ -4338,6 +4769,14 @@ class ManagerAgent:
                             )
                         node["config"] = cfg
                         break
+                try:
+                    from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                        chain_prior_speech_across_clips,
+                    )
+
+                    chain_prior_speech_across_clips(graph)
+                except Exception:  # noqa: BLE001
+                    logger.debug("chain_prior_speech_across_clips failed", exc_info=True)
                 meta["approved_storyboard"] = sb_md
             except Exception:  # noqa: BLE001
                 logger.info("Manager storyboard patch of leaf configs failed", exc_info=True)
@@ -4546,8 +4985,6 @@ class ManagerAgent:
                 or str(n.get("id") or "") in {"n_scene", "n_compose", "n_speech", "n_music"}
                 or _role_key(n)
                 in {"clip", "frame", "keyframe", "compose", "speech", "music"}
-                # User uploads are authored assets, not generated drafts.
-                or bool((n.get("config") or {}).get("user_reference_id"))
             )
         }
         prune_ids = [

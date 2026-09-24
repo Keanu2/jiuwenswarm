@@ -9,6 +9,7 @@ import base64
 import mimetypes
 import os
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -91,6 +92,26 @@ def _http_post(url: str, **kwargs) -> requests.Response:
 
 def _http_get(url: str, **kwargs) -> requests.Response:
     return _http_request("GET", url, **kwargs)
+
+
+def _http_get_resilient(url: str, *, attempts: int = 6, **kwargs) -> requests.Response:
+    """GET that survives a dropped TLS poll (SSL EOF) long enough to save the file."""
+    last: BaseException | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return _http_get(url, **kwargs)
+        except (
+            requests.exceptions.SSLError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) as exc:
+            last = exc
+            if attempt + 1 >= attempts:
+                break
+            time.sleep(min(8.0, 1.0 * (attempt + 1)))
+    assert last is not None
+    raise last
 
 
 def _guess_video_mime(path: str) -> str:
@@ -271,6 +292,26 @@ def _normalize_video_size(size: str | None) -> str | None:
     return value or None
 
 
+def _wan_480p_size_for(size: str | None) -> str:
+    """Map any size onto a documented Wan 480P W*H."""
+    ratio = _size_to_ratio(size, default="16:9")
+    if ratio == "9:16":
+        return "480*832"
+    if ratio == "1:1":
+        return "480*480"
+    return "832*480"
+
+
+def _apply_requested_resolution(
+    size: str | None, resolution: str | None
+) -> tuple[str | None, str | None]:
+    """When caller asks 480P, coerce unofficial sizes (e.g. 854*480) to Wan 480P."""
+    resol = (resolution or "").strip().upper().replace(" ", "")
+    if resol in {"480P", "480"}:
+        return _wan_480p_size_for(size), "480P"
+    return _normalize_video_size(size), (str(resolution).strip() if resolution else None)
+
+
 def _parse_video_size(size: str | None) -> tuple[int, int] | None:
     normalized = _normalize_video_size(size)
     if not normalized or "*" not in normalized:
@@ -413,12 +454,14 @@ def _download_generated_video(video_url: str, prompt: str) -> dict[str, Any]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     random_suffix = random.randint(1000, 9999)
     output_path = output_dir / f"generated_{timestamp}_{random_suffix}.mp4"
-    response = _http_get(
+    response = _http_get_resilient(
         video_url,
         headers={"User-Agent": _USER_AGENT},
         timeout=300,
     )
     response.raise_for_status()
+    if not response.content:
+        raise ValueError("video download returned an empty file")
     with open(output_path, "wb") as f:
         f.write(response.content)
     return {
@@ -439,8 +482,22 @@ def _poll_until_video_url(
     deadline_ts = time.monotonic() + timeout_seconds
     last_status = "unknown"
     while time.monotonic() < deadline_ts:
-        response = _http_get(query_url, headers=headers, timeout=60)
+        try:
+            response = _http_get_resilient(query_url, headers=headers, timeout=60)
+        except requests.exceptions.RequestException as exc:
+            last_status = f"transport:{type(exc).__name__}"
+            logger.warning("video poll transport error, retrying: %s", exc)
+            time.sleep(interval_seconds)
+            continue
         if not response.ok:
+            if response.status_code >= 500 or response.status_code in {408, 429}:
+                last_status = f"http {response.status_code}"
+                logger.warning(
+                    "video poll HTTP %s, retrying until the task finishes",
+                    response.status_code,
+                )
+                time.sleep(interval_seconds)
+                continue
             raise ValueError(
                 f"poll failed {response.status_code}: {_video_api_error_message(response)}"
             )
@@ -474,6 +531,56 @@ def _ark_api_root(api_base: str) -> str:
     return root
 
 
+def _split_reference_media(
+    *,
+    first_frame: str | None,
+    reference_images: list[str] | None,
+    force_reference_mode: bool,
+) -> tuple[str | None, list[str]]:
+    """Character sheets and the empty scene plate, shared by every video backend."""
+    refs = _unique_dashscope_image_urls(reference_images)
+    frame = _as_dashscope_media_url(first_frame)
+    if force_reference_mode and frame and frame not in refs:
+        refs.append(frame)
+        frame = None
+    if frame and frame in refs:
+        frame = None
+    return frame, refs
+
+
+def _video_content_parts(
+    prompt: str,
+    *,
+    first_frame: str | None = None,
+    reference_images: list[str] | None = None,
+    force_reference_mode: bool = False,
+) -> list[dict[str, Any]]:
+    """Text plus optional first frame and reference stills (Seedance / MiniMax-H3)."""
+    frame, refs = _split_reference_media(
+        first_frame=first_frame,
+        reference_images=reference_images,
+        force_reference_mode=force_reference_mode,
+    )
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    if frame:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": frame},
+                "role": "first_frame",
+            }
+        )
+    for url in refs:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": url},
+                "role": "reference_image",
+            }
+        )
+    return content
+
+
 def _invoke_minimax_video_generation_sync(
     prompt: str,
     *,
@@ -483,11 +590,17 @@ def _invoke_minimax_video_generation_sync(
     size: str | None,
     duration: int,
     resolution: str | None,
+    first_frame: str | None = None,
+    reference_images: list[str] | None = None,
+    audio: bool | None = None,
+    force_reference_mode: bool = False,
 ) -> dict[str, Any]:
     """MiniMax V2 async video generation (MiniMax-H3 / MiniMax-H3-Max)."""
     root = _minimax_api_root(api_base)
     create_url = f"{root}/v2/video_generation"
-    model_name = (model or "MiniMax-H3").strip() or "MiniMax-H3"
+    model_name = (model or "").strip()
+    if not model_name:
+        raise ValueError("video model is required (configure models.video_gen)")
     is_max = model_name.lower().endswith("-max")
     duration_int = _clamp_duration(duration, minimum=5 if is_max else 4, maximum=15)
     ratio = _size_to_ratio(size, default="16:9")
@@ -495,13 +608,27 @@ def _invoke_minimax_video_generation_sync(
     if is_max and resol == "2K":
         resol = "768P"
 
+    frame, _refs = _split_reference_media(
+        first_frame=first_frame,
+        reference_images=reference_images,
+        force_reference_mode=force_reference_mode,
+    )
     payload: dict[str, Any] = {
         "model": model_name,
-        "content": [{"type": "text", "text": prompt}],
+        "content": _video_content_parts(
+            prompt,
+            first_frame=first_frame,
+            reference_images=reference_images,
+            force_reference_mode=force_reference_mode,
+        ),
         "resolution": resol,
         "duration": duration_int,
         "ratio": ratio,
     }
+    if frame:
+        payload["first_frame_image"] = frame
+    if audio is not None:
+        payload["generate_audio"] = bool(audio)
     headers = {**_REQUEST_HEADERS, "Authorization": f"Bearer {api_key}"}
     response = _http_post(create_url, headers=headers, json=payload, timeout=60)
     if not response.ok:
@@ -543,23 +670,36 @@ def _invoke_volcengine_video_generation_sync(
     size: str | None,
     duration: int,
     resolution: str | None,
+    first_frame: str | None = None,
+    reference_images: list[str] | None = None,
+    audio: bool | None = None,
+    force_reference_mode: bool = False,
 ) -> dict[str, Any]:
     """火山方舟 Seedance async video generation."""
     root = _ark_api_root(api_base)
     create_url = f"{root}/contents/generations/tasks"
-    model_name = (model or "doubao-seedance-2-5-260628").strip()
+    model_name = (model or "").strip()
+    if not model_name:
+        raise ValueError("video model is required (configure models.video_gen)")
     duration_int = _clamp_duration(duration, minimum=2, maximum=12)
     ratio = _size_to_ratio(size, default="16:9")
     resol = _normalize_ark_resolution(resolution, size)
 
     payload: dict[str, Any] = {
         "model": model_name,
-        "content": [{"type": "text", "text": prompt}],
+        "content": _video_content_parts(
+            prompt,
+            first_frame=first_frame,
+            reference_images=reference_images,
+            force_reference_mode=force_reference_mode,
+        ),
         "ratio": ratio,
         "duration": duration_int,
         "resolution": resol,
         "watermark": False,
     }
+    if audio is not None:
+        payload["generate_audio"] = bool(audio)
     headers = {**_REQUEST_HEADERS, "Authorization": f"Bearer {api_key}"}
     response = _http_post(create_url, headers=headers, json=payload, timeout=60)
     if not response.ok:
@@ -589,6 +729,60 @@ def _invoke_volcengine_video_generation_sync(
     return _download_generated_video(video_url, prompt)
 
 
+_TASK_ID_RE = re.compile(
+    r"(?:/tasks/|task_id['\"=: ]+)"
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+
+def _task_id_from_error(exc: BaseException) -> str:
+    """Pull a provider task id out of an SSL/retry error so the file can still be saved."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(str(current))
+        current = current.__cause__ or current.__context__
+    match = _TASK_ID_RE.search("\n".join(parts))
+    return match.group(1) if match else ""
+
+
+def _dashscope_task_status(payload: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    output = payload.get("output") if isinstance(payload.get("output"), dict) else payload
+    if not isinstance(output, dict):
+        return "unknown", None, "invalid task payload"
+    status = str(output.get("task_status") or output.get("status") or "").strip().lower()
+    video_url = str(output.get("video_url") or output.get("url") or "").strip() or None
+    if not video_url:
+        results = output.get("results")
+        if isinstance(results, list) and results and isinstance(results[0], dict):
+            video_url = str(
+                results[0].get("url") or results[0].get("video_url") or ""
+            ).strip() or None
+    err = str(output.get("message") or output.get("code") or "").strip() or None
+    return status, video_url, err
+
+
+def _recover_provider_task_file(
+    *,
+    api_base: str,
+    api_key: str,
+    task_id: str,
+    prompt: str,
+) -> dict[str, Any]:
+    """Poll a task that already exists and save the mp4 once the provider marks it done."""
+    root = (api_base or "").strip().rstrip("/") or _CHINA_DASHSCOPE_API_BASE
+    query_url = f"{root}/tasks/{task_id}"
+    headers = {**_REQUEST_HEADERS, "Authorization": f"Bearer {api_key}"}
+    video_url = _poll_until_video_url(
+        query_url=query_url,
+        headers=headers,
+        extract_status_and_url=_dashscope_task_status,
+    )
+    return _download_generated_video(video_url, prompt)
+
+
 async def _invoke_dashscope_video_generation(
     prompt: str,
     *,
@@ -605,6 +799,7 @@ async def _invoke_dashscope_video_generation(
     reference_images: list[str] | None = None,
     reference_file: str | None = None,
     audio: bool | None = None,
+    force_reference_mode: bool = False,
 ) -> dict[str, Any]:
     """Generate a video via DashScope (openjiuwen Model client)."""
     from openjiuwen.core.foundation.llm import (
@@ -639,12 +834,19 @@ async def _invoke_dashscope_video_generation(
         model_config=model_config,
         model_client_config=model_client_config,
     )
+    # Reference mode: put all images in reference_images for multimodal content too.
+    msg_refs = list(reference_images or [])
+    msg_ff = first_frame
+    if force_reference_mode and first_frame:
+        if first_frame not in msg_refs:
+            msg_refs.append(first_frame)
+        msg_ff = None
     messages = [
         UserMessage(
             content=video_generation_message_content(
                 prompt,
-                first_frame=first_frame,
-                reference_images=reference_images,
+                first_frame=msg_ff,
+                reference_images=msg_refs or None,
             )
         )
     ]
@@ -657,6 +859,7 @@ async def _invoke_dashscope_video_generation(
         reference_images=reference_images,
         reference_file=reference_file,
         audio=audio,
+        force_reference_mode=force_reference_mode,
     )
     media = video_call.get("media") or []
     logger.info(
@@ -674,7 +877,23 @@ async def _invoke_dashscope_video_generation(
             model_instance.generate_video(messages=messages, **video_call)
         )
 
-    result = await asyncio.to_thread(_generate_video_blocking)
+    try:
+        result = await asyncio.to_thread(_generate_video_blocking)
+    except Exception as exc:
+        task_id = _task_id_from_error(exc)
+        if not task_id:
+            raise
+        logger.warning(
+            "video status poll failed after task %s was created; downloading the finished file",
+            task_id,
+        )
+        return await asyncio.to_thread(
+            _recover_provider_task_file,
+            api_base=api_base,
+            api_key=api_key,
+            task_id=task_id,
+            prompt=prompt,
+        )
 
     video_url = getattr(result, "video_url", None)
     video_data = getattr(result, "video_data", None)
@@ -832,14 +1051,6 @@ def _switch_wan_task(model: str, task: str) -> str:
     return text
 
 
-def _video_frame_fields(size: str | None) -> tuple[str | None, str | None]:
-    """Return DashScope ``size`` + matching ``ratio`` from the requested frame."""
-    normalized = _normalize_video_size(size)
-    if not normalized:
-        return None, None
-    return normalized, _size_to_ratio(normalized)
-
-
 def _build_dashscope_video_call(
     model: str,
     *,
@@ -850,10 +1061,15 @@ def _build_dashscope_video_call(
     reference_images: list[str] | None = None,
     reference_file: str | None = None,
     audio: bool | None = None,
+    force_reference_mode: bool = False,
 ) -> dict[str, Any]:
     """Map Designer clip inputs onto DashScope T2V / I2V / R2V / wan3 media."""
     refs = _unique_dashscope_image_urls(reference_images)
     img_url = _as_dashscope_media_url(first_frame)
+    # Reference-mode clips: fold any accidental first_frame into refs; never I2V empty plates.
+    if force_reference_mode and img_url and img_url not in refs:
+        refs = [*refs, img_url]
+        img_url = None
     extra_refs = [item for item in refs if item != img_url]
     file_url = _as_dashscope_file_url(reference_file)
     chosen = model.strip() or ""
@@ -861,14 +1077,16 @@ def _build_dashscope_video_call(
         raise ValueError("video model is required (configure models.video_gen)")
     params: dict[str, Any] = {"duration": duration}
     wan3 = _is_wan3_video(chosen)
-    frame_size, frame_ratio = _video_frame_fields(size)
-    default_size = frame_size or "1280*720"
-    default_ratio = frame_ratio or _size_to_ratio(default_size)
-    # User video/audio is a generic file reference, not a first frame.
-    # wan2.6 r2v only accepts image URLs, so a file must not kick I2V off.
+    locked_size, locked_res = _apply_requested_resolution(size, resolution)
     use_reference_mode = bool(
-        extra_refs or (refs and not img_url) or (file_url and wan3)
+        force_reference_mode
+        or extra_refs
+        or (refs and not img_url)
+        or (file_url and wan3)
     )
+    if force_reference_mode and not refs and not file_url:
+        # Nothing to reference — fall through to T2V rather than empty I2V.
+        use_reference_mode = False
 
     if _is_wan3_video(chosen):
         want_audio = False if audio is None else bool(audio)
@@ -882,22 +1100,18 @@ def _build_dashscope_video_call(
                 media.append({"type": "file", "url": file_url})
             params["model"] = chosen
             params["media"] = media
-            # openjiuwen rejects resolution unless img_url is set; wan3 media is not I2V.
-            params["size"] = default_size
-            params["ratio"] = default_ratio
+            params["size"] = locked_size or "1280*720"
+            params["ratio"] = "16:9" if not locked_size else _size_to_ratio(locked_size)
             params["audio"] = want_audio
             return params
-        if img_url:
+        if img_url and not force_reference_mode:
             params["model"] = chosen
             params["img_url"] = img_url
-            params["size"] = default_size
-            params["ratio"] = default_ratio
-            params["resolution"] = (resolution or "720P").strip() or "720P"
+            params["resolution"] = (locked_res or resolution or "720P").strip() or "720P"
             params["audio"] = want_audio
             return params
         params["model"] = chosen
-        params["size"] = default_size
-        params["ratio"] = default_ratio
+        params["size"] = locked_size or "1280*720"
         params["audio"] = want_audio
         return params
 
@@ -908,8 +1122,7 @@ def _build_dashscope_video_call(
         chosen = _switch_wan_task(chosen, "r2v")
         params["model"] = chosen
         params["reference_urls"] = all_refs[:5]
-        params["size"] = default_size
-        params["ratio"] = default_ratio
+        params["size"] = locked_size or "1280*720"
         if any(token in chosen for token in ("2.2", "2.5", "2.6", "2.7")):
             params["shot_type"] = "multi"
         return params
@@ -917,22 +1130,19 @@ def _build_dashscope_video_call(
         chosen = _switch_wan_task(chosen, "i2v")
         params["model"] = chosen
         params["img_url"] = img_url
-        params["size"] = default_size
-        params["ratio"] = default_ratio
-        params["resolution"] = (resolution or "720P").strip() or "720P"
+        params["resolution"] = (locked_res or resolution or "720P").strip() or "720P"
         if any(token in chosen for token in ("2.2", "2.5", "2.6", "2.7")):
             params["shot_type"] = "single"
         return params
     params["model"] = chosen
-    params["size"] = default_size
-    params["ratio"] = default_ratio
+    params["size"] = locked_size or "1280*720"
     return params
 
 
 async def _invoke_model_video_generation(
     prompt: str,
     *,
-    size: str | None = None,
+    size: str = "1280*720",
     duration: int = 5,
     resolution: str | None = None,
     first_frame: str | None = None,
@@ -940,6 +1150,7 @@ async def _invoke_model_video_generation(
     reference_file: str | None = None,
     audio: bool | None = None,
     model: str | None = None,
+    force_reference_mode: bool = False,
 ) -> dict[str, Any]:
     """Generate a video via DashScope / MiniMax / 火山方舟 backends."""
     cfg = get_config() or {}
@@ -953,9 +1164,6 @@ async def _invoke_model_video_generation(
     ).strip().strip("'\"")
     if not api_key:
         return {"error": "[ERROR]: VIDEO_GEN_API_KEY is not configured for video generation."}
-
-    size = str(size).strip() if size else None
-    resolution = str(resolution).strip() if resolution else None
 
     model = str(
         model
@@ -1013,6 +1221,10 @@ async def _invoke_model_video_generation(
                 size=size,
                 duration=duration,
                 resolution=resolution,
+                first_frame=first_frame,
+                reference_images=reference_images,
+                audio=audio,
+                force_reference_mode=force_reference_mode,
             )
         if backend == "volcengine":
             return await asyncio.to_thread(
@@ -1024,6 +1236,10 @@ async def _invoke_model_video_generation(
                 size=size,
                 duration=duration,
                 resolution=resolution,
+                first_frame=first_frame,
+                reference_images=reference_images,
+                audio=audio,
+                force_reference_mode=force_reference_mode,
             )
         return await _invoke_dashscope_video_generation(
             prompt,
@@ -1040,6 +1256,7 @@ async def _invoke_model_video_generation(
             reference_images=reference_images,
             reference_file=reference_file,
             audio=audio,
+            force_reference_mode=force_reference_mode,
         )
     except Exception as ex:
         return {"error": f"[ERROR]: Video generation failed: {ex}"}

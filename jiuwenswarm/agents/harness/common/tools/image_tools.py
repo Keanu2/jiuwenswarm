@@ -827,9 +827,12 @@ def _invoke_minimax_image_generation_sync(
     """MiniMax text-to-image (POST /v1/image_generation)."""
     url = _minimax_image_api_url(api_base)
     model_name = (model or "image-01").strip() or "image-01"
+    # Do not hard-truncate: image-01 rejects prompts ≥1500 chars — leaf agents
+    # are instructed to stay under that limit when MiniMax is the image backend.
+    text = str(prompt or "").strip()
     payload: dict[str, Any] = {
         "model": model_name,
-        "prompt": prompt,
+        "prompt": text,
         "aspect_ratio": _size_to_minimax_aspect_ratio(size),
         "response_format": "url",
         "n": 1,
@@ -859,7 +862,7 @@ def _invoke_minimax_image_generation_sync(
     b64s = data.get("image_base64") if isinstance(data.get("image_base64"), list) else []
     image_url = str(urls[0]).strip() if urls else None
     image_b64 = str(b64s[0]).strip() if b64s else None
-    return _save_generated_image(prompt=prompt, image_url=image_url, image_b64=image_b64)
+    return _save_generated_image(prompt=text, image_url=image_url, image_b64=image_b64)
 
 
 def _invoke_volcengine_image_generation_sync(

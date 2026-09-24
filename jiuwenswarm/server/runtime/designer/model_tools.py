@@ -81,8 +81,66 @@ def _message_text(msg: Any) -> str:
     return ""
 
 
+# Process-wide: a 402 / insufficient-balance reply means Designer must not
+# label nodes as live chat agents. Cleared only when this process restarts.
+_chat_billing_block: str = ""
+_chat_confirmed: bool = False
+_chat_probe_done: bool = False
+
+
+def is_chat_payment_block(detail: object) -> bool:
+    """True for HTTP 402 / insufficient balance on the chat model (not image or video)."""
+    code = getattr(detail, "status_code", None)
+    if code is None:
+        resp = getattr(detail, "response", None)
+        code = getattr(resp, "status_code", None) if resp is not None else None
+    try:
+        if int(code) == 402:
+            return True
+    except (TypeError, ValueError):
+        pass
+    low = str(detail or "").lower()
+    return (
+        "insufficient balance" in low
+        or "insufficient_quota" in low
+        or "payment required" in low
+        or "error code: 402" in low
+    )
+
+
+def chat_model_billing_block() -> str:
+    """Non-empty when the chat account is known to be unpaid / 402."""
+    return _chat_billing_block
+
+
+def note_chat_model_unavailable(detail: object) -> bool:
+    """Record a payment block. Returns True only for 402-style failures."""
+    global _chat_billing_block
+    if not is_chat_payment_block(detail):
+        return False
+    _chat_billing_block = str(detail or "402")[:300]
+    return True
+
+
+def demote_config_to_handler(cfg: dict[str, Any]) -> None:
+    """Stop treating this node as a live chat agent; handlers keep prewritten text."""
+    if not isinstance(cfg, dict):
+        return
+    cfg["delegate"] = "handler"
+    draft = cfg.get("draft_prewritten")
+    if draft and not str(cfg.get("prewritten") or "").strip():
+        cfg["prewritten"] = draft
+    cfg["skip_llm"] = True
+
+
 def llm_available() -> bool:
-    """True when Settings has a usable chat model with credentials for Designer agents."""
+    """True when Settings has a usable chat model with credentials for Designer agents.
+
+    A recorded 402 / insufficient balance makes this False so graphs are not
+    stamped ``delegate=agent``.
+    """
+    if _chat_billing_block:
+        return False
     try:
         from jiuwenswarm.common.utils import get_env_file
         from jiuwenswarm.dotenv_early import load_dotenv_runtime
@@ -111,6 +169,65 @@ def llm_available() -> bool:
         if base and not base.startswith("https://example.com") and env_key:
             return True
     return bool(env_key and env_base)
+
+
+def ensure_chat_model_reachable() -> bool:
+    """Probe the chat model once. A 402 marks it unavailable for this process.
+
+    Unit tests skip the network probe (``PYTEST_CURRENT_TEST``). Image and video
+    vendors are not probed here.
+    """
+    global _chat_confirmed, _chat_probe_done
+    import os
+
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return llm_available()
+    if _chat_billing_block:
+        return False
+    if _chat_confirmed:
+        return True
+    if not llm_available():
+        return False
+    if _chat_probe_done:
+        return llm_available()
+    _chat_probe_done = True
+    try:
+        from openai import OpenAI
+
+        models = list_configured_models()
+        chosen = pick_model_for_optimize("cost") or (models[0] if models else None)
+        if not isinstance(chosen, dict):
+            return llm_available()
+        api_key = (os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+        api_base = resolve_env_vars(
+            str(chosen.get("api_base") or os.environ.get("API_BASE") or os.environ.get("OPENAI_API_BASE") or "")
+        ).strip()
+        model_name = resolve_env_vars(
+            str(chosen.get("model_name") or chosen.get("id") or os.environ.get("MODEL_NAME") or "")
+        ).strip()
+        if not api_key or not api_base or not model_name or api_base.startswith("https://example.com"):
+            return llm_available()
+        client = OpenAI(api_key=api_key, base_url=api_base, timeout=8.0)
+        try:
+            client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": "ok"}],
+                max_tokens=1,
+                temperature=0,
+            )
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _chat_confirmed = True
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if note_chat_model_unavailable(exc):
+            logger.warning("chat model unavailable (billing): %s", exc)
+            return False
+        logger.info("chat model probe failed open: %s", exc)
+        return llm_available()
 
 
 def list_configured_models() -> list[dict[str, Any]]:
@@ -241,6 +358,15 @@ async def call_model_tool(
     images: list[str] | None = None,
 ) -> dict[str, Any]:
     """Call a configured chat model (OpenAI-compatible) as an agent tool."""
+    global _chat_confirmed
+    if _chat_billing_block:
+        return {
+            "ok": False,
+            "unavailable": True,
+            "error": _chat_billing_block,
+            "model": None,
+            "text": "",
+        }
     # Ensure ~/.jiuwenswarm/config/.env is loaded (API_KEY / API_BASE).
     try:
         from jiuwenswarm.common.utils import get_env_file
@@ -361,6 +487,7 @@ async def call_model_tool(
 
         first = await _once(temperature=0.4 if optimize_for == "quality" else 0.7)
         if first.get("ok"):
+            _chat_confirmed = True
             return first
         if first.get("error") == "empty_model_response":
             logger.warning(
@@ -372,9 +499,11 @@ async def call_model_tool(
             return await _once(temperature=0.2)
         return first
     except Exception as exc:  # noqa: BLE001
+        blocked = note_chat_model_unavailable(exc)
         logger.warning("call_model_tool failed: %s", exc)
         return {
             "ok": False,
+            "unavailable": blocked,
             "error": str(exc),
             "model": chosen.get("id"),
             "model_name": model_name,

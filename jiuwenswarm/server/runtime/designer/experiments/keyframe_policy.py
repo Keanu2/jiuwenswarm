@@ -264,7 +264,9 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     ensembles = compute_setting_ensembles(shots, characters)
     # Do NOT force orphan cast into scene 1 visuals — solo cards still come from characters[].
     out["setting_ensembles"] = ensembles
-    out["skip_scene_plate"] = True
+    # Empty scene plates are the geography lock for clip R2V (Qwen stills).
+    out["skip_scene_plate"] = False
+    out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
 
     # Distinct place text per setting_id (from scenes[] or first compose action).
     scenes = [s for s in (out.get("scenes") or []) if isinstance(s, dict)]
@@ -278,6 +280,14 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     prev_set = ""
     crowd_by_set: dict[str, dict[str, Any]] = {}
     compose_actions_by_set: dict[str, dict[str, str]] = {}
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            user_asked_coverage,
+        )
+
+        coverage = user_asked_coverage(str(out.get("user_prompt") or ""))
+    except Exception:  # noqa: BLE001
+        coverage = False
     for i, shot in enumerate(shots, start=1):
         shot["shot_index"] = i
         sid = str(shot.get("setting_id") or "set_1").strip() or "set_1"
@@ -374,22 +384,38 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
                 "setting_id": sid,
                 "place": place or setting_place.get(sid) or "",
                 "rule": (
-                    "SAME SCENE LOCK: compose again from solo character sheets using the "
-                    "scene bible + master scene prompt (handoff). Keep architecture, lighting, "
-                    "landmarks, crowd, and fixed props identical. Change ONLY camera view + "
-                    "on_screen + cast_actions. Never invent new set dressing; never borrow "
-                    "another setting_id."
+                    (
+                        "SAME SCENE LOCK: compose again from solo character sheets using the "
+                        "scene bible + master scene prompt (handoff). Keep architecture, lighting, "
+                        "landmarks, crowd, and fixed props identical. Change ONLY camera view + "
+                        "on_screen + cast_actions. Never invent new set dressing; never borrow "
+                        "another setting_id."
+                    )
+                    if coverage
+                    else (
+                        "SAME SCENE LOCK: same place, lighting, landmarks, and wardrobe. "
+                        "This clip is the NEXT time window — film THIS shot's action only. "
+                        "Do not restage the previous window from a new angle. Never borrow "
+                        "another setting_id."
+                    )
                 ),
                 "compose_cast_actions": prior_actions,
             }
             if str(shot.get("shot_relation") or "").lower() == "hard_cut":
                 shot["master_still_hard_cut"] = True
 
-        # Hierarchical coverage views so objects do not "pop in" across angles.
+        # Angle orbit only when the user asked for coverage. Otherwise each clip
+        # is its own time window, not front/left/right of one empty action.
         view_cycle = ("front", "left", "right", "side", "top", "bottom")
         view_i = int(shot.get("shot_index") or 1) - 1
-        view_key = str(shot.get("view_key") or view_cycle[view_i % len(view_cycle)])
-        shot["view_key"] = view_key
+        relation = str(shot.get("shot_relation") or "").strip().lower()
+        raw_view = str(shot.get("view_key") or "").strip().lower()
+        if coverage or relation == "angle_variant":
+            view_key = raw_view or view_cycle[view_i % len(view_cycle)]
+            shot["view_key"] = view_key
+        else:
+            view_key = "sequence"
+            shot["view_key"] = ""
         shot["scene_bible"] = build_scene_bible_for_setting(
             setting_id=sid,
             place=place or setting_place.get(sid) or "",
@@ -444,17 +470,16 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     out["crowd_locks_by_setting"] = crowd_by_set
     out["setting_places"] = setting_place
     out["scene_locks"] = scene_locks
-    out["skip_scene_plate"] = True
-    out["scene_continuity_mode"] = "compose_solos_shared_scene_prompt"
-    out["keyframe_policy"] = "compose_solos_prior"
+    out["skip_scene_plate"] = False
+    out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
+    out["keyframe_policy"] = "scene_card_plus_clip_shots"
     out["keyframe_policy_notes"] = {
-        "version": "plan_a.compose_solos_setting.v16_scene_prompt_lock",
+        "version": "plan_a.scene_card_clip.v17_time_lock",
         "rule": (
-            "NO empty scene plates. Every KF composes from solo character sheets. "
-            "First KF of each setting_id authors the scene master prompt + scene_bible "
-            "(objects, lighting, crowd, hierarchical views). Later same-setting KFs "
-            "receive that prompt handoff and must keep architecture while changing view/"
-            "cast only. Manager enforces scene locks on keyframes and clips."
+            "Empty scene plate per setting_id (Qwen image) + solo sheets. "
+            "Clips use R2V: on-screen solos + empty scene. Same-setting clips "
+            "continue from previous_clip_wan_prompt. Lock time-of-day / lighting / "
+            "language / style across every same-setting shot."
         ),
     }
     return out
@@ -474,9 +499,23 @@ def build_scene_bible_for_setting(
     lighting_raw = shot.get("lighting")
     if not lighting_raw and isinstance(shot.get("setting_lock"), dict):
         lighting_raw = (shot.get("setting_lock") or {}).get("lighting")
-    lighting = str(
-        lighting_raw or "motivated key light with stable direction; no relight mid-scene"
-    ).strip()
+    tod_raw = ""
+    if isinstance(shot.get("time_of_day_lock"), dict):
+        tod_raw = str((shot.get("time_of_day_lock") or {}).get("time_of_day") or "")
+        if not lighting_raw:
+            lighting_raw = (shot.get("time_of_day_lock") or {}).get("lighting")
+    if not lighting_raw:
+        try:
+            from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                infer_time_of_day_lock,
+            )
+
+            tod_lock = infer_time_of_day_lock(place_bit, str(shot.get("action") or ""))
+            lighting_raw = tod_lock.get("lighting")
+            tod_raw = tod_raw or str(tod_lock.get("time_of_day") or "")
+        except Exception:  # noqa: BLE001
+            lighting_raw = "motivated key light with stable direction; no relight mid-scene"
+    lighting = str(lighting_raw or "motivated key light with stable direction; no relight mid-scene").strip()
     objects = shot.get("scene_objects") if isinstance(shot.get("scene_objects"), list) else []
     if not objects:
         objects = [
@@ -492,15 +531,20 @@ def build_scene_bible_for_setting(
         "side": f"VIEW side: oblique ~45°; reveal depth while keeping object L/R continuity.",
         "top": f"VIEW top/high: elevated angle; floor plan of props matches other views.",
         "bottom": f"VIEW bottom/low: low angle looking up; ceiling/sky consistent with lighting lock.",
+        "sequence": (
+            "TIME WINDOW: film this shot's own action. Do not restage another "
+            "window of the same scene from front, left, or right."
+        ),
     }
-    active = str(view_key or "front").strip().lower() or "front"
+    active = str(view_key or "sequence").strip().lower() or "sequence"
     if active not in view_defs:
-        active = "front"
+        active = "sequence"
     return {
         "setting_id": setting_id,
         "place": place_bit[:400],
         "architecture": place_bit[:400],
         "lighting": lighting[:320],
+        "time_of_day": (tod_raw or "unspecified")[:40],
         "objects": [str(x)[:160] for x in objects[:12]],
         "crowd": {
             "present": crowd.get("present"),
@@ -510,8 +554,9 @@ def build_scene_bible_for_setting(
         "views": view_defs,
         "active_view": active,
         "coherence_rule": (
-            "All views of this setting describe ONE place. Objects/lighting/crowd exist in "
-            "every view even if off-camera; nothing pops into existence when the camera moves."
+            "All views of this setting describe ONE place at ONE time of day. "
+            "Objects/lighting/crowd exist in every view even if off-camera; nothing "
+            "pops into existence when the camera moves; no day↔night jump mid-scene."
         ),
     }
 

@@ -419,7 +419,10 @@ def enforce_setting_transitions(analysis: dict[str, Any]) -> list[str]:
 
 
 def occupancy_clause_for_clip(
-    shot: dict[str, Any] | None, characters: list[dict[str, Any]] | None = None
+    shot: dict[str, Any] | None,
+    characters: list[dict[str, Any]] | None = None,
+    *,
+    reference_mode: bool = False,
 ) -> str:
     shot = shot if isinstance(shot, dict) else {}
     by_id = {
@@ -433,10 +436,20 @@ def occupancy_clause_for_clip(
         by_id.get(str(x), str(x)) for x in (occ.get("must_not_appear") or []) if str(x)
     ]
     props = str(shot.get("prop_presentation") or "").strip()
-    bits = [
-        "KEYFRAME CAST LOCK: animate ONLY people already in Image 1; "
-        "do not swap sex/identity; do not invent a different hero."
-    ]
+    if reference_mode:
+        bits = [
+            "R2V CAST LOCK: show ONLY people bound as character1, character2, … "
+            "(on-screen solos). Off-screen / already-exited people must not appear. "
+            "Do not attach a peopled scene master as the last environment ref. "
+            "Place people by STAGING LOCK / SEAT HOLDS / previous Wan story state. "
+            "Do not restage finished exits, walk-aways, or onsets. "
+            "Do not swap sex/identity; do not invent a different hero."
+        ]
+    else:
+        bits = [
+            "KEYFRAME CAST LOCK: animate ONLY people already in Image 1; "
+            "do not swap sex/identity; do not invent a different hero."
+        ]
     if must:
         bits.append(
             f"MUST STILL BE PRESENT (unless this beat's exit list says otherwise): {', '.join(must)}."

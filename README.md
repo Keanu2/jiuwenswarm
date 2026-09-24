@@ -1,104 +1,129 @@
-**JiuwenSwarm extension to support multi-modal creation/design scenarios and designer-users.**
+**JiuwenSwarm Designer — AI-first short-film pipeline (no keyframes)**
 
-Branch: `design` (~~based on `img-vid-gen-inline`~~ not any more. This branch also adds some AI provider support).
+Branch: `design-no-keyframes-2.0` (from Design-no-keyframes). Target remote:
+[`AI-Framework-leibniz/DesignSwarm`](https://github.com/AI-Framework-leibniz/DesignSwarm).
 
-Operational pipeline notes (AI-first Play path): see also [`a.md`](./a.md) and [`designer_catalog_skills_reports_trajectory/`](./designer_catalog_skills_reports_trajectory/).
+Full reproduction notes: [`DETAIL.md`](./DETAIL.md) · short map: [`a.md`](./a.md) ·
+module map: [`jiuwenswarm/server/runtime/designer/README.md`](./jiuwenswarm/server/runtime/designer/README.md) ·
+per-node docs: [`designer/docs/INDEX.md`](./jiuwenswarm/server/runtime/designer/docs/INDEX.md).
 
 ---
 
-We curerntly focus on video design scenario. An example workflow:
+## Pipeline at a glance (user prompt → film)
+
+```mermaid
+flowchart TD
+  U["User prompt in Designer UI"] --> BOOT["designer.graph.bootstrap"]
+  BOOT --> SA["analyze_creative_brief LLM"]
+  SA --> G0["build_smart_video_graph"]
+  G0 --> BR["Supervisor → Brief"]
+  BR --> M1["Manager approve Brief"]
+  M1 --> SB["Supervisor → Storyboard<br/>start_state → beat → end_state"]
+  SB --> M2["Manager approve Storyboard"]
+  M2 --> PLAY["Play → GraphExecutor"]
+  PLAY --> CHAR["n_character_* solo sheets"]
+  PLAY --> SCENE["n_scene_* empty plates"]
+  CHAR --> CLIP["n_clip_* R2V shots<br/>on-screen solos + scene"]
+  SCENE --> CLIP
+  SB --> CLIP
+  CLIP --> COMP["n_compose ffmpeg"]
+  COMP --> RATE["Dual raters"]
+```
+
+**No per-shot keyframes.** Clips *are* the shots. Continuity is:
+
+1. **Storyboard** per-shot `start_state` → action/camera/speech → `end_state` (sole plot authority)
+2. **Solo identity sheets** (face + wardrobe) — only **on-screen** solos wire into each clip
+3. **Empty scene plate** per `setting_id` (room only — no people)
+4. **R2V** clip: attach on-screen solos + scene plate; **story-form** prompt
+5. **Same-setting clips run concurrently** once shared deps are ready (no clip→clip edges)
+6. **Compose** hard-waits real on-disk clip/audio media
 
 ```mermaid
 flowchart LR
-    Brief --> CD[Character Design]
-    Brief --> SB[Storyboard]
-
-    CD --> K1[Keyframes 1]
-    CD --> K2[Keyframes 2]
-    CD --> K3[Keyframes 3]
-
-    SB --> K1
-    SB --> K2
-    SB --> K3
-
-    K1 --> C1[Clip 1]
-    K2 --> C2[Clip 2]
-    K3 --> C3[Clip 3]
-
-    C1 --> Film
-    C2 --> Film
-    C3 --> Film
-
-    Brief --> M[Optional Music] --> Film
+  Brief --> SB[Storyboard]
+  SB --> CD[Character solos]
+  SB --> Scene[Empty scene plates]
+  SB --> Clip1[Clip 1 R2V]
+  SB --> Clip2[Clip 2 R2V]
+  CD --> Clip1
+  CD --> Clip2
+  Scene --> Clip1
+  Scene --> Clip2
+  Clip1 --> Film[Compose]
+  Clip2 --> Film
 ```
 
-- Each "connection" marks real data flow (left node used as an input to the right node). **Not simply execution order constraints**. (Real data flow indicates execution order but not the other way around)
-- No need to pass Keyframe 1 as an input to Keyframe 2. Since there can be cutscenes, KF1 content is less informative/useful to KF2.
-- If multiple nodes' dependency are all finished (e.g., all Keyframe X nodes), they can run together in parallel
-- If node A & B run in parallel, A finishes first, and another node C only depends on A (but not B), C should be able to run after A finished and before B finishes.
+---
+
+## Who does what (agents)
+
+| Agent | Role | Owns |
+|-------|------|------|
+| **Supervisor** (= Director) | Creative authority | Brief, storyboard (incl. start/end states), shot budget, graph redesign, plan directives |
+| **Manager** (= Producer) | Gates & locks | Approve/edit brief & storyboard, prune dead nodes, stamp locks, **rewrite every leaf video prompt** into concise story form, dual ratings |
+| **Leaf DeepAgent** (`NodeAgentHost`) | Per-node craft | `call_model` / `call_image_model` / `call_video_model` / `ffmpeg_compose` |
+| **Handler** | Deterministic media | Runs when `delegate=handler` or after the agent authors a media spec |
+
+Concurrency: **3** leaf agents. Same-setting clips unlock **together** when storyboard + needed solos + scene are ready. Compose stays hard (on-disk media).
 
 ---
 
-## What changed vs the original `design` description
+## Graph nodes (canvas)
 
-The original branch README (and the earlier Q&A snapshot) described a **handler-default** Play path: bootstrap stamped `delegate: "handler"`, per-node DeepAgents were off, and scheduling was a simple ready-wave over handlers.
+| Node | File(s) | Job |
+|------|---------|-----|
+| `n_brief` | `handlers/text_nodes.py` | Production brief + lock bible |
+| `n_storyboard` | `handlers/text_nodes.py` | Timed windows: start/end state, setting, occupancy, camera, speech |
+| `n_character_*` | `handlers/image_nodes.py` | Solo identity stills (plain backdrop) |
+| `n_scene_*` | `handlers/image_nodes.py` | Empty environment plate per setting |
+| `n_clip_*` | `handlers/clip.py` + `node_agent.py` | R2V shot (Wan / Seedance / MiniMax) |
+| `n_speech` / `n_music` | `handlers/audio_nodes.py` | Optional stems |
+| `n_compose` | `handlers/compose.py` | ffmpeg concat + mux |
 
-**This working tree keeps that canvas / E2A foundation, and upgrades the runtime to an AI-first framework when a Settings chat model (e.g. DeepSeek) is available.** Heuristics remain only the no-LLM fallback.
+Orchestration / graph build: `orchestration.py`, `smart_graph.py`, `executor.py`,
+`script_analysis.py`. Schema: `common/schema/designer_graph.py`.
 
-### Scheduler (ready-queue, not column barriers)
-
-| Topic | Original `design` (handler-centric) | Current framework |
-|-------|--------------------------------------|-------------------|
-| When a node starts | Ready when `data` / `sync` preds complete; wave-style launch | Same readiness rules, but a **continuous ready-queue**: as soon as any in-flight node finishes (`asyncio.wait(..., FIRST_COMPLETED)`), newly ready nodes are started |
-| Wave barriers | Implicit “finish the wave” thinking in docs | **No wave barrier** between independent branches (e.g. Character ∥ Scene ∥ Music-from-Brief) |
-| Concurrency | Task-per-ready-node | Cap **6** concurrent leaf tasks |
-| Orchestration timing | Handlers only | Before the queue: **SupervisorAgent.plan** + **ManagerAgent.validate_plan**; optional one-shot post-keyframe clip adjust; end-of-run ratings |
-
-Edges still gate **scheduling only** (not a payload bus). Handlers / agents still load artifacts by **role / shot_index** from `run.node_states[*].output_ref`.
-
-### AI agents vs heuristics
-
-| Piece | When `llm_available()` (DeepSeek / Settings chat model) | When no chat model |
-|-------|----------------------------------------------------------|--------------------|
-| Script / cast / shots | `analyze_creative_brief(use_llm=True)` → `source=llm` | Domain heuristics |
-| Supervisor / Manager | `use_llm=True` via `model_tools.call_model_tool` | `plan_fast` / `validate_plan_fast` |
-| Leaf creative nodes | `delegate=agent` → **NodeAgentHost** (openjiuwen DeepAgent + Designer tools) | `delegate=handler` |
-| Music / Speech | Usually `force_handler` bed until TTS/music backends exist; omit if not requested | Same |
-| Fallback honesty | Never label `[local-tool-fallback]` / schema-echo as `source=llm` | N/A |
-
-Play stamps `metadata.ai_agent_pipeline` and `metadata.agent_runtime.mode` (`ai` | `heuristic`).
-
-### Other framework additions (beyond original README)
-
-- **Smart graph bootstrap** (`smart_graph.py`): prompt → cast/scenes/shots, solo character sheets, optional audio nodes, short-clip `target_shot_count=1` for ~6s prompts.
-- **Identity + continuity**: costume locks, `identity_refs`, manager `CONTINUITY LOCK`, sequential keyframe edit when cameras compatible.
-- **NodeAgentHost tools**: `designer_*` LocalFunctions accept flat `**kwargs` (openjiuwen style); `patch` may be object or JSON string.
-- **Media materialization**: agents author specs; handlers materialize by **required family** (image vs video). A PNG must not count as a completed clip/compose.
-- **Dotenv**: load `~/.jiuwenswarm/config/.env` before LLM calls so API keys are real.
-- **Skills / catalog / trajectory / feedback** under `designer_catalog_skills_reports_trajectory/` and runtime helpers (`capabilities`, `continuity`, `paths`, `skills_loader`, …).
-- **Eval harness**: `scripts/eval_6s_ai_clip.py` (refuses heuristic creative path when LLM is required).
-- **Designer chat restore**: left Assistant panel keeps the bootstrap prompt per `graph_id` (localStorage + Brief `config.prompt` / `graph.description` when history is empty).
-- **Recent graphs**: custom toolbar dropdown so switching graphs works inside `overflow: hidden`.
-
-Upstream `design` UI/handler improvements that landed on remote (storyboard table UX, graph restore after refresh, later-keyframe anti-clone policy in upstream handlers) are merged for the **frontend / compose** side where they did not conflict; **runtime executor + creative handlers + AI orchestration stay on this framework**.
+Per-node detail: [`docs/BRIEF.md`](./jiuwenswarm/server/runtime/designer/docs/BRIEF.md) ·
+[`STORYBOARD`](./jiuwenswarm/server/runtime/designer/docs/STORYBOARD.md) ·
+[`CHARACTER`](./jiuwenswarm/server/runtime/designer/docs/CHARACTER.md) ·
+[`SCENE`](./jiuwenswarm/server/runtime/designer/docs/SCENE.md) ·
+[`CLIP`](./jiuwenswarm/server/runtime/designer/docs/CLIP.md) ·
+[`ORCHESTRATORS`](./jiuwenswarm/server/runtime/designer/docs/ORCHESTRATORS.md).
 
 ---
 
-## Architecture notes (unchanged intent)
+## Clip prompt contract (story form, positive only)
 
-Implementation is in-tree (not a separate plugin) for now: frontend under `channels/web/frontend` Designer features; shell/orchestration under `server/runtime/designer` + gateway adapter.
+Locks live on the **node**. Continuity lore lives on the **storyboard row**.
+The video API body is a concise narrative rewritten by
+`experiments/video_prompt_practice.py` (Manager / Supervisor gate):
 
-Domain graph truth: `jiuwenswarm/common/schema/designer_graph.py`. Run state in designer runtime store. React Flow is a view projection.
-
-Further pipeline detail: [`a.md`](./a.md) (short) and [`DETAIL.md`](./DETAIL.md) (full quality.v4 reproduction).
+- Open from this shot’s `start_state`; end at `end_state`
+- Scene as Image N; each **on_screen** cast member from Image k, wearing …, is …
+- **Omit exited cast** until the storyboard returns them on_screen
+- No forbid lists, no sit/stand examples, no lock banners, no prior-Wan dump on the call
 
 ---
 
-## Local browser test (before push)
+## Local run
 
-1. Configure chat model + keys in `~/.jiuwenswarm/config/.env` / Settings (`API_KEY`, `API_BASE`, e.g. DeepSeek).
+1. Configure `~/.jiuwenswarm/config/.env` (chat + image + video; e.g. Wan / MiniMax).
 2. `jiuwenswarm-start all` (conda env `new` recommended).
-3. Open the web UI (typically http://localhost:5173 or the printed web port).
-4. Designer → prompt → Play; confirm run metadata `agent_runtime.mode=ai` / `script_analysis_mode=llm` and creative nodes `delegate=agent`.
+3. Open http://127.0.0.1:5173/ → Designer → prompt → **Play**.
+4. Media under `~/.jiuwenswarm/agent/workspace/`.
 
-Do **not** push until you are satisfied with the browser pass.
+Do **not** commit: run videos/stills, `pipeline_*_out/`, workspace media, `.env`, unit-test outputs.
+
+---
+
+## Docs map
+
+| Doc | Purpose |
+|-----|---------|
+| This README | High-level Designer pipeline |
+| [`DETAIL.md`](./DETAIL.md) | Full reproduction (DAG, locks, scheduling, troubleshooting) |
+| [`a.md`](./a.md) | Short frontend↔backend map |
+| [`designer/README.md`](./jiuwenswarm/server/runtime/designer/README.md) | Per-file module guide |
+| [`designer/docs/`](./jiuwenswarm/server/runtime/designer/docs/) | Per-node + orchestrator pipelines |
+| Frontend | [`channels/web/frontend/README_en.md`](./jiuwenswarm/channels/web/frontend/README_en.md) |
