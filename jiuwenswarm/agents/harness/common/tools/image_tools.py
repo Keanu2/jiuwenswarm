@@ -25,6 +25,9 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     _get_model_config,
 )
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
+from jiuwenswarm.agents.harness.common.tools.vllm_omni_gen import (
+    invoke_vllm_omni_image_generation_sync,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -438,15 +441,8 @@ async def _invoke_model_image_generation(
         or os.getenv("API_BASE")
         or "https://dashscope.aliyuncs.com/api/v1"
     ).strip().strip("'\"")
-    if not api_key or api_key.lower() in {"sk-xxxxxxxxx", "your-api-key"}:
-        return {"error": "[ERROR]: IMAGE_GEN_API_KEY or API_KEY is not configured for image generation."}
 
     model = str(mc.get("model_name") or mc.get("model") or os.getenv("IMAGE_GEN_MODEL_NAME") or "").strip()
-    if not model:
-        return {
-            "error": "[ERROR]: IMAGE_GEN_MODEL_NAME is not configured. "
-            "Set models.image_gen in Settings — no hard-coded image model fallback."
-        }
     provider = str(mc.get("client_provider") or mc.get("model_provider")
                    or os.getenv("IMAGE_GEN_PROVIDER") or "DashScope").strip()
     endpoint_profile = str(
@@ -463,6 +459,16 @@ async def _invoke_model_image_generation(
         api_base=api_base,
         model=model,
     )
+    if backend != "vllm-omni":
+        # vLLM-Omni is self-deployed: the API key is optional and the model
+        # name may be omitted (resolved via GET {api_base}/models instead).
+        if not api_key or api_key.lower() in {"sk-xxxxxxxxx", "your-api-key"}:
+            return {"error": "[ERROR]: IMAGE_GEN_API_KEY or API_KEY is not configured for image generation."}
+        if not model:
+            return {
+                "error": "[ERROR]: IMAGE_GEN_MODEL_NAME is not configured. "
+                "Set models.image_gen in Settings — no hard-coded image model fallback."
+            }
     logger.info(
         "[generate_image] backend=%s model=%s provider=%s profile=%s vendor=%s",
         backend,
@@ -480,6 +486,16 @@ async def _invoke_model_image_generation(
         len(api_key),
     )
     try:
+        if backend == "vllm-omni":
+            return await asyncio.to_thread(
+                invoke_vllm_omni_image_generation_sync,
+                prompt,
+                api_key=api_key,
+                api_base=api_base,
+                model=model,
+                size=size,
+                reference_images=reference_images,
+            )
         if backend == "volcengine":
             return await asyncio.to_thread(
                 _invoke_volcengine_image_generation_sync,
@@ -645,12 +661,18 @@ def _resolve_image_gen_backend(
     api_base: str,
     model: str,
 ) -> str:
-    """Pick dashscope / minimax / volcengine for text-to-image."""
+    """Pick a provider for text-to-image."""
     vendor = (vendor_key or "").strip().lower()
     profile = (endpoint_profile or "").strip().lower().replace("_", "-")
     prov = (provider or "").strip().lower().replace("_", "")
     base = (api_base or "").strip().lower()
     model_l = (model or "").strip().lower()
+
+    # Self-deployed vLLM-Omni: identified only by explicit config identity.
+    # The settings UI is a preset dropdown that only ever writes the canonical
+    # vendor_key/endpoint_profile "vllm-omni"; a local api_base carries no heuristic.
+    if vendor == "vllm-omni" or profile == "vllm-omni":
+        return "vllm-omni"
 
     if (
         vendor == "minimax"

@@ -14,13 +14,86 @@ from jiuwenswarm.agents.harness.common.tools import video_tools
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
     [
-        ({"provider": "DashScope", "endpoint_profile": "", "vendor_key": "", "api_base": "", "model": "wan2.6-t2v"}, "dashscope"),
-        ({"provider": "OpenAI", "endpoint_profile": "dashscope", "vendor_key": "alibaba", "api_base": "", "model": "wan2.6-t2v"}, "dashscope"),
-        ({"provider": "OpenAI", "endpoint_profile": "minimax", "vendor_key": "minimax", "api_base": "", "model": "MiniMax-H3"}, "minimax"),
-        ({"provider": "MiniMax", "endpoint_profile": "", "vendor_key": "", "api_base": "", "model": "x"}, "minimax"),
-        ({"provider": "OpenAI", "endpoint_profile": "", "vendor_key": "", "api_base": "", "model": "MiniMax-H3-Max"}, "minimax"),
-        ({"provider": "OpenAI", "endpoint_profile": "volcengine", "vendor_key": "volcengine", "api_base": "", "model": "x"}, "volcengine"),
-        ({"provider": "VolcEngine", "endpoint_profile": "", "vendor_key": "", "api_base": "", "model": "x"}, "volcengine"),
+        (
+            {
+                "provider": "DashScope",
+                "endpoint_profile": "",
+                "vendor_key": "",
+                "api_base": "",
+                "model": "wan2.6-t2v",
+            },
+            "dashscope",
+        ),
+        (
+            {
+                "provider": "OpenAI",
+                "endpoint_profile": "dashscope",
+                "vendor_key": "alibaba",
+                "api_base": "",
+                "model": "wan2.6-t2v",
+            },
+            "dashscope",
+        ),
+        (
+            {
+                "provider": "OpenAI",
+                "endpoint_profile": "minimax",
+                "vendor_key": "minimax",
+                "api_base": "",
+                "model": "MiniMax-H3",
+            },
+            "minimax",
+        ),
+        (
+            {
+                "provider": "MiniMax",
+                "endpoint_profile": "",
+                "vendor_key": "",
+                "api_base": "",
+                "model": "x",
+            },
+            "minimax",
+        ),
+        (
+            {
+                "provider": "OpenAI",
+                "endpoint_profile": "",
+                "vendor_key": "",
+                "api_base": "",
+                "model": "MiniMax-H3-Max",
+            },
+            "minimax",
+        ),
+        (
+            {
+                "provider": "OpenAI",
+                "endpoint_profile": "volcengine",
+                "vendor_key": "volcengine",
+                "api_base": "",
+                "model": "x",
+            },
+            "volcengine",
+        ),
+        (
+            {
+                "provider": "VolcEngine",
+                "endpoint_profile": "",
+                "vendor_key": "",
+                "api_base": "",
+                "model": "x",
+            },
+            "volcengine",
+        ),
+        (
+            {
+                "provider": "OpenAI",
+                "endpoint_profile": "vllm-omni",
+                "vendor_key": "vllm-omni",
+                "api_base": "http://127.0.0.1:8091/v1",
+                "model": "",
+            },
+            "vllm-omni",
+        ),
         (
             {
                 "provider": "OpenAI",
@@ -47,8 +120,14 @@ def test_size_to_ratio_and_resolution_helpers() -> None:
 
 
 def test_minimax_and_ark_api_root_normalization() -> None:
-    assert video_tools._minimax_api_root("https://api.minimaxi.com/v1") == "https://api.minimaxi.com"
-    assert video_tools._minimax_api_root("https://api.minimaxi.com") == "https://api.minimaxi.com"
+    assert (
+        video_tools._minimax_api_root("https://api.minimaxi.com/v1")
+        == "https://api.minimaxi.com"
+    )
+    assert (
+        video_tools._minimax_api_root("https://api.minimaxi.com")
+        == "https://api.minimaxi.com"
+    )
     assert (
         video_tools._ark_api_root("https://ark.cn-beijing.volces.com/api/coding/v3")
         == "https://ark.cn-beijing.volces.com/api/v3"
@@ -59,7 +138,9 @@ def test_minimax_and_ark_api_root_normalization() -> None:
     )
 
 
-def test_invoke_minimax_video_generation_create_and_poll(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_invoke_minimax_video_generation_create_and_poll(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     calls: list[tuple[str, str]] = []
 
     class _Resp:
@@ -121,7 +202,9 @@ def test_invoke_volcengine_video_generation_create_and_poll(
     posts: list[dict] = []
 
     class _Resp:
-        def __init__(self, ok: bool, payload: dict, status_code: int = 200, content: bytes = b""):
+        def __init__(
+            self, ok: bool, payload: dict, status_code: int = 200, content: bytes = b""
+        ):
             self.ok = ok
             self.status_code = status_code
             self._payload = payload
@@ -197,7 +280,9 @@ async def test_invoke_model_video_generation_routes_to_minimax(
     )
     monkeypatch.setattr(video_tools, "_invoke_minimax_video_generation_sync", fake_sync)
 
-    result = await video_tools._invoke_model_video_generation("hello", size="1280*720", duration=5)
+    result = await video_tools._invoke_model_video_generation(
+        "hello", size="1280*720", duration=5
+    )
     assert result["video_path"] == "/tmp/x.mp4"
     assert called["args"][0] == "hello"
 
@@ -226,14 +311,20 @@ async def test_invoke_model_video_generation_routes_to_volcengine(
             "vendor_key": "volcengine",
         },
     )
-    monkeypatch.setattr(video_tools, "_invoke_volcengine_video_generation_sync", fake_sync)
+    monkeypatch.setattr(
+        video_tools, "_invoke_volcengine_video_generation_sync", fake_sync
+    )
 
-    result = await video_tools._invoke_model_video_generation("hello", size="1280*720", duration=5)
+    result = await video_tools._invoke_model_video_generation(
+        "hello", size="1280*720", duration=5
+    )
     assert called.hit is True
     assert result["video_path"] == "/tmp/y.mp4"
 
 
-def test_minimax_and_seedance_send_reference_stills(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_minimax_and_seedance_send_reference_stills(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     plate = tmp_path / "plate.png"
     plate.write_bytes(b"\x89PNG\r\n\x1a\n")
     posts: list[dict] = []
@@ -259,9 +350,21 @@ def test_minimax_and_seedance_send_reference_stills(monkeypatch: pytest.MonkeyPa
                 return _Resp({"task_id": "tid-1"})
             return _Resp({"id": "cgt-1"})
         if method == "GET" and "tid-1" in url:
-            return _Resp({"task": {"status": "succeeded", "content": {"url": "https://cdn.example/out.mp4"}}})
+            return _Resp(
+                {
+                    "task": {
+                        "status": "succeeded",
+                        "content": {"url": "https://cdn.example/out.mp4"},
+                    }
+                }
+            )
         if method == "GET" and "cgt-1" in url:
-            return _Resp({"status": "succeeded", "content": {"video_url": "https://ark.example/out.mp4"}})
+            return _Resp(
+                {
+                    "status": "succeeded",
+                    "content": {"video_url": "https://ark.example/out.mp4"},
+                }
+            )
         if method == "GET":
             return _Resp({})
         raise AssertionError(url)
@@ -295,12 +398,18 @@ def test_minimax_and_seedance_send_reference_stills(monkeypatch: pytest.MonkeyPa
         force_reference_mode=True,
     )
     for body in posts:
-        roles = [item.get("role") for item in body["content"] if item.get("type") == "image_url"]
+        roles = [
+            item.get("role")
+            for item in body["content"]
+            if item.get("type") == "image_url"
+        ]
         assert roles == ["reference_image"]
         assert body["generate_audio"] is True
 
 
-def test_dropped_status_poll_still_saves_finished_video(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_dropped_status_poll_still_saves_finished_video(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     task_id = "00a35677-8280-4e6e-8ec0-23726b5df68c"
 
     class _Resp:
@@ -349,3 +458,66 @@ def test_dropped_status_poll_still_saves_finished_video(monkeypatch: pytest.Monk
     )
     assert Path(saved["video_path"]).read_bytes() == b"mp4-bytes"
     assert saved["original_url"] == "https://cdn.example/saved.mp4"
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_video_generation_routes_to_vllm_omni_without_key_or_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: dict = {}
+
+    def fake_sync(*args, **kwargs):
+        called["args"] = args
+        called["kwargs"] = kwargs
+        return {"video_path": "/tmp/vo.mp4", "revised_prompt": args[0]}
+
+    monkeypatch.setattr(video_tools, "get_config", lambda: {})
+    monkeypatch.setattr(
+        video_tools,
+        "_get_model_config",
+        lambda *_: {
+            # Self-deployed vLLM-Omni: key and model name are both optional.
+            "api_key": "",
+            "api_base": "http://127.0.0.1:8091/v1",
+            "model_name": "",
+            "client_provider": "OpenAI",
+            "endpoint_profile": "vllm-omni",
+            "vendor_key": "vllm-omni",
+        },
+    )
+    monkeypatch.setattr(
+        video_tools, "invoke_vllm_omni_video_generation_sync", fake_sync
+    )
+
+    result = await video_tools._invoke_model_video_generation(
+        "hello", size="1280*720", duration=5, first_frame="/tmp/f.png"
+    )
+    assert result["video_path"] == "/tmp/vo.mp4"
+    assert called["args"][0] == "hello"
+    assert called["kwargs"]["api_key"] == ""
+    assert called["kwargs"]["model"] == ""
+    assert called["kwargs"]["first_frame"] == "/tmp/f.png"
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_video_generation_still_requires_key_for_hosted_vendors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(video_tools, "get_config", lambda: {})
+    monkeypatch.setattr(
+        video_tools,
+        "_get_model_config",
+        lambda *_: {
+            "api_key": "",
+            "api_base": "https://api.minimaxi.com",
+            "model_name": "MiniMax-H3",
+            "client_provider": "OpenAI",
+            "endpoint_profile": "minimax",
+            "vendor_key": "minimax",
+        },
+    )
+
+    result = await video_tools._invoke_model_video_generation(
+        "hello", size="1280*720", duration=5
+    )
+    assert "error" in result

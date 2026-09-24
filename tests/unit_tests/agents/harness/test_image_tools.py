@@ -82,6 +82,16 @@ from jiuwenswarm.agents.harness.common.tools import image_tools
             },
             "minimax",
         ),
+        (
+            {
+                "provider": "OpenAI",
+                "endpoint_profile": "vllm-omni",
+                "vendor_key": "vllm-omni",
+                "api_base": "http://127.0.0.1:8000/v1",
+                "model": "",
+            },
+            "vllm-omni",
+        ),
     ],
 )
 def test_resolve_image_gen_backend(kwargs: dict, expected: str) -> None:
@@ -270,3 +280,61 @@ async def test_invoke_model_image_generation_routes_to_minimax(
     result = await image_tools._invoke_model_image_generation("hello", size="1024x1024")
     assert called.hit is True
     assert result["image_path"] == "/tmp/mm.png"
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_image_generation_routes_to_vllm_omni_without_key_or_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: dict = {}
+
+    def fake_sync(*args, **kwargs):
+        called["args"] = args
+        called["kwargs"] = kwargs
+        return {"image_path": "/tmp/vo.png", "revised_prompt": "p"}
+
+    monkeypatch.setattr("jiuwenswarm.common.config.get_config", lambda: {})
+    monkeypatch.setattr(
+        image_tools,
+        "_get_model_config",
+        lambda *_: {
+            # Self-deployed vLLM-Omni: key and model name are both optional.
+            "api_key": "",
+            "api_base": "http://127.0.0.1:8000/v1",
+            "model_name": "",
+            "client_provider": "OpenAI",
+            "endpoint_profile": "vllm-omni",
+            "vendor_key": "vllm-omni",
+        },
+    )
+    monkeypatch.setattr(image_tools, "invoke_vllm_omni_image_generation_sync", fake_sync)
+
+    result = await image_tools._invoke_model_image_generation(
+        "hello", size="1024x1024", reference_images=["/tmp/r.png"]
+    )
+    assert result["image_path"] == "/tmp/vo.png"
+    assert called["kwargs"]["api_key"] == ""
+    assert called["kwargs"]["model"] == ""
+    assert called["kwargs"]["reference_images"] == ["/tmp/r.png"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_image_generation_still_requires_key_for_hosted_vendors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("jiuwenswarm.common.config.get_config", lambda: {})
+    monkeypatch.setattr(
+        image_tools,
+        "_get_model_config",
+        lambda *_: {
+            "api_key": "",
+            "api_base": "https://api.minimaxi.com",
+            "model_name": "image-01",
+            "client_provider": "OpenAI",
+            "endpoint_profile": "minimax",
+            "vendor_key": "minimax",
+        },
+    )
+
+    result = await image_tools._invoke_model_image_generation("hello", size="1024x1024")
+    assert "error" in result

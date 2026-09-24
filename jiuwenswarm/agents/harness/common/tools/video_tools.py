@@ -28,6 +28,9 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     _get_model_config,
 )
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
+from jiuwenswarm.agents.harness.common.tools.vllm_omni_gen import (
+    invoke_vllm_omni_video_generation_sync,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -394,12 +397,18 @@ def _resolve_video_gen_backend(
     api_base: str,
     model: str,
 ) -> str:
-    """Pick dashscope / minimax / volcengine for text-to-video."""
+    """Pick a model for text-to-video."""
     vendor = (vendor_key or "").strip().lower()
     profile = (endpoint_profile or "").strip().lower().replace("_", "-")
     prov = (provider or "").strip().lower().replace("_", "")
     base = (api_base or "").strip().lower()
     model_l = (model or "").strip().lower()
+
+    # Self-deployed vLLM-Omni: identified only by explicit config identity.
+    # The settings UI is a preset dropdown that only ever writes the canonical
+    # vendor_key/endpoint_profile "vllm-omni"; a local api_base carries no heuristic.
+    if vendor == "vllm-omni" or profile == "vllm-omni":
+        return "vllm-omni"
 
     if (
         vendor == "minimax"
@@ -430,6 +439,20 @@ def _resolve_video_gen_backend(
         return "dashscope"
 
     return "dashscope"
+
+
+def _video_gen_is_vllm_omni() -> bool:
+    """Whether the configured video_gen vendor is a self-deployed vLLM-Omni."""
+    try:
+        mc = _get_model_config(get_config() or {}, "video_gen")
+    except Exception:
+        mc = {}
+    vendor = str(mc.get("vendor_key") or os.getenv("VIDEO_GEN_VENDOR_KEY") or "").strip().lower()
+    profile = str(
+        mc.get("endpoint_profile") or os.getenv("VIDEO_GEN_ENDPOINT_PROFILE") or ""
+    ).strip().lower()
+    # Canonical preset values only (see _resolve_video_gen_backend).
+    return vendor == "vllm-omni" or profile == "vllm-omni"
 
 
 def _video_api_error_message(response: requests.Response) -> str:
@@ -1162,8 +1185,6 @@ async def _invoke_model_video_generation(
         or os.getenv("VIDEO_GEN_API_BASE")
         or _CHINA_DASHSCOPE_API_BASE
     ).strip().strip("'\"")
-    if not api_key:
-        return {"error": "[ERROR]: VIDEO_GEN_API_KEY is not configured for video generation."}
 
     model = str(
         model
@@ -1172,11 +1193,6 @@ async def _invoke_model_video_generation(
         or os.getenv("VIDEO_GEN_MODEL_NAME")
         or ""
     ).strip()
-    if not model:
-        return {
-            "error": "[ERROR]: VIDEO_GEN_MODEL_NAME is not configured. "
-            "Set models.video_gen in Settings — no hard-coded video model fallback."
-        }
     provider = str(
         mc.get("client_provider")
         or mc.get("model_provider")
@@ -1197,6 +1213,16 @@ async def _invoke_model_video_generation(
         api_base=api_base,
         model=model,
     )
+    if backend != "vllm-omni":
+        # vLLM-Omni is self-deployed: the API key is optional and the model
+        # name may be omitted (resolved via GET {api_base}/models instead).
+        if not api_key:
+            return {"error": "[ERROR]: VIDEO_GEN_API_KEY is not configured for video generation."}
+        if not model:
+            return {
+                "error": "[ERROR]: VIDEO_GEN_MODEL_NAME is not configured. "
+                "Set models.video_gen in Settings — no hard-coded video model fallback."
+            }
     if backend == "dashscope":
         api_base = _align_dashscope_video_api_base(api_base, api_key)
         os.environ["VIDEO_GEN_API_BASE"] = api_base
@@ -1211,6 +1237,19 @@ async def _invoke_model_video_generation(
     )
 
     try:
+        if backend == "vllm-omni":
+            return await asyncio.to_thread(
+                invoke_vllm_omni_video_generation_sync,
+                prompt,
+                api_key=api_key,
+                api_base=api_base,
+                model=model,
+                size=size,
+                duration=duration,
+                resolution=resolution,
+                first_frame=first_frame,
+                reference_images=reference_images,
+            )
         if backend == "minimax":
             return await asyncio.to_thread(
                 _invoke_minimax_video_generation_sync,
@@ -1285,7 +1324,9 @@ async def generate_video(
         logger.debug("Failed to apply video_gen model config from yaml", exc_info=True)
 
     model = (os.environ.get("VIDEO_GEN_MODEL_NAME") or "").strip()
-    if not model:
+    if not model and not _video_gen_is_vllm_omni():
+        # vLLM-Omni may leave the model unset: it is resolved from the
+        # server's GET /models at generation time.
         return (
             "[ERROR]: VIDEO_GEN_MODEL_NAME is not configured. "
             "Set models.video_gen in Settings — no hard-coded video model fallback."
