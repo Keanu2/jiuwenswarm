@@ -144,8 +144,8 @@
     },
     "sidebar": {
       "tabsLabel": "侧栏",
-      "assistant": "Assistant",
-      "assets": "Assets"
+      "assistant": "助手",
+      "assets": "素材"
     },
     "assets": {
       "empty": "还没有素材。创建任务时附上图片/视频/音频，或在节点上上传、生成后会显示在这里。",
