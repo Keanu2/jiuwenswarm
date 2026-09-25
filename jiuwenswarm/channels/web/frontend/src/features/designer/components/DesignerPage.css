@@ -1667,6 +1667,12 @@
   min-width: 120px;
 }
 
+.designer-page__canvas .react-flow__edge.designer-edge--highlighted {
+  --xy-edge-stroke: var(--color-border-focus);
+  --xy-edge-stroke-selected: var(--color-border-focus);
+  --xy-edge-stroke-width: 2.5;
+}
+
 .designer-edge-toolbar-portal {
   pointer-events: all;
 }

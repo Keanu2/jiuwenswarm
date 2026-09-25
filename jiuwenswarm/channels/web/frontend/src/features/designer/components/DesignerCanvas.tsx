@@ -125,6 +125,15 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
   const [spacePan, setSpacePan] = useState(false);
   const fittedGraphIdRef = useRef<string | null>(null);
   const handMode = canvasTool === 'hand' || spacePan;
+  // Keep visual emphasis separate from edge selection, which controls edge actions.
+  const highlightedEdges = useMemo(() => {
+    const selectedIds = new Set(nodes.filter((node) => node.selected).map((node) => node.id));
+    return edges.map((edge) =>
+      selectedIds.has(edge.source) || selectedIds.has(edge.target)
+        ? { ...edge, className: 'designer-edge--highlighted' }
+        : edge,
+    );
+  }, [nodes, edges]);
 
   useEffect(() => {
     const isTypingTarget = (target: EventTarget | null) => {
@@ -307,7 +316,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
       <ReactFlow
         className="designer-page__canvas"
         nodes={nodes}
-        edges={edges}
+        edges={highlightedEdges}
         nodeTypes={designerNodeTypes}
         edgeTypes={designerEdgeTypes}
         onNodesChange={onNodesChange}
