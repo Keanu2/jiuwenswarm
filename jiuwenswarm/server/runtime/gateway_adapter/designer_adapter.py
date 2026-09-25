@@ -186,6 +186,10 @@ def hydrate_graph_node_outputs(
         if not isinstance(node, dict):
             nodes.append(node)
             continue
+        config = node.get("config") if isinstance(node.get("config"), dict) else {}
+        if config.get("user_replaced_output"):
+            nodes.append(node)
+            continue
         state = states.get(str(node.get("id") or "")) or {}
         ref = state.get("output_ref") if isinstance(state, dict) else None
         if isinstance(ref, dict) and str(ref.get("uri") or "").strip():
@@ -590,6 +594,8 @@ def _list_graphs(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
         graphs = _store.list_graphs_for_project(project_id)
     else:
         graphs = _store.list_graphs()
+    # Whole-graph bodies blow the WebSocket send budget once the store grows;
+    # callers load the one graph they need through designer.graph.get.
     payload: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     for graph in graphs:
@@ -714,9 +720,23 @@ def _save_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | No
         except Exception:
             logger.debug("Supervisor user-node onboard on save failed", exc_info=True)
         saved = _store.save_graph(graph)
+        _persist_uploaded_outputs(saved)
     except DesignerGraphValidationError as exc:
         return None, str(exc), "BAD_REQUEST"
     return {"graph": dict(saved)}, None, None
+
+
+def _persist_uploaded_outputs(graph: dict[str, Any]) -> None:
+    """Keep the latest run aligned with a still the user uploaded onto a node."""
+    from jiuwenswarm.server.runtime.designer.handlers.common import (
+        apply_uploaded_outputs_to_run,
+    )
+
+    run = _store.get_latest_run_for_graph(str(graph.get("graph_id") or ""))
+    if run is None or not apply_uploaded_outputs_to_run(run, graph):
+        return
+    run["updated_at"] = utc_now_ms()
+    _store.save_run(run)
 
 
 def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -766,6 +786,7 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
         except Exception:
             logger.debug("Supervisor user-node onboard on patch failed", exc_info=True)
         saved = _store.save_graph(next_graph)
+        _persist_uploaded_outputs(saved)
     except DesignerGraphValidationError as exc:
         return None, str(exc), "BAD_REQUEST"
     return {"graph": dict(saved)}, None, None

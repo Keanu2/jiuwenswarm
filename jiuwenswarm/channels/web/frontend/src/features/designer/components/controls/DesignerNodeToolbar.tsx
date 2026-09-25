@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEv
 import { useTranslation } from 'react-i18next';
 import { DesignerTextEditor } from '../../DesignerTextEditor';
 import { useDesignerAssetLibraryStore } from '../../designerAssetLibraryStore';
+import { localPathToFileUri, uploadDesignerAsset } from '../../designerAssetUrl';
 import {
   collectDesignerMaterials,
   hasPendingDesignerRevision,
@@ -24,6 +25,45 @@ type DesignerNodeToolbarProps = {
 };
 
 type ExpandedPanel = 'generate' | 'upload' | 'edit' | null;
+
+function savedFileForFilename(
+  graph: ReturnType<typeof useDesignerStore.getState>['domainGraph'],
+  filename: string,
+): { uri: string; mime_type?: string } | null {
+  const want = filename.trim().toLowerCase();
+  if (!want || !graph) return null;
+  const candidates: Array<{ uri?: string; filename?: string; label?: string; mime_type?: string }> = [];
+  const refs = graph.metadata?.user_references;
+  if (Array.isArray(refs)) {
+    for (const item of refs) {
+      if (item && typeof item === 'object') candidates.push(item as { uri?: string; filename?: string; mime_type?: string });
+    }
+  }
+  for (const node of graph.nodes) {
+    const upload = node.config?.upload;
+    if (upload?.uri) candidates.push(upload);
+    if (node.output_ref?.uri) {
+      candidates.push({
+        uri: node.output_ref.uri,
+        filename: node.output_ref.label,
+        mime_type: node.output_ref.mime_type,
+      });
+    }
+    for (const slot of node.config?.materials ?? []) {
+      if (slot?.uri) candidates.push(slot);
+    }
+  }
+  for (const item of candidates) {
+    const uri = String(item.uri || '').trim();
+    if (!uri.startsWith('file:')) continue;
+    const name = String(item.filename || item.label || '').trim().toLowerCase();
+    const fromUri = decodeURIComponent(uri.split('/').pop() || '').toLowerCase();
+    if (name === want || fromUri === want) {
+      return { uri, mime_type: item.mime_type };
+    }
+  }
+  return null;
+}
 
 export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarProps) {
   const { t } = useTranslation();
@@ -48,6 +88,7 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
   const media = readMediaConfig(config, nodeType);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [expanded, setExpanded] = useState<ExpandedPanel>(null);
 
   useEffect(() => {
@@ -70,50 +111,102 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
     [nodeId, updateNodeConfig],
   );
 
-  const applyUploadFile = useCallback(
-    (file: File | undefined) => {
-      if (!file) return;
+  const persistUploadedFile = useCallback(
+    async (file: File) => {
       const asset = addFromFile(file);
       if (!asset) return;
-      updateNodeConfig(nodeId, (current) =>
-        writeMediaUploadPatch(current, {
-          filename: asset.filename,
-          asset_id: asset.id,
-          mime_type: asset.mime_type,
-        }),
-      );
+      setUploading(true);
+      try {
+        const stored = await uploadDesignerAsset(file);
+        const outputRef = {
+          kind: nodeType,
+          uri: localPathToFileUri(stored.path),
+          mime_type: stored.mime_type || asset.mime_type || file.type,
+          label: stored.filename || asset.filename,
+        };
+        updateNodeConfig(nodeId, (current) => ({
+          ...writeMediaUploadPatch(current, {
+            filename: outputRef.label,
+            asset_id: asset.id,
+            mime_type: outputRef.mime_type,
+            uri: outputRef.uri,
+          }),
+          user_replaced_output: true,
+        }));
+        setNodeOutputRef(nodeId, outputRef);
+        applyUploadedOutput(nodeId, outputRef);
+        await useDesignerStore.getState().flushSave();
+      } catch (error) {
+        useDesignerRunStore.setState({
+          runError: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setUploading(false);
+      }
     },
-    [addFromFile, nodeId, updateNodeConfig],
+    [addFromFile, applyUploadedOutput, nodeId, nodeType, setNodeOutputRef, updateNodeConfig],
   );
 
-  const confirmUpload = useCallback(() => {
+  const confirmUpload = useCallback(async () => {
     const assetId = media.upload?.asset_id?.trim();
     if (!assetId) return;
     const asset = getAsset(assetId);
-    if (!asset) return;
-    const outputRef = {
-      kind: nodeType,
-      uri: asset.objectUrl,
-      mime_type: asset.mime_type,
-      label: asset.filename,
-    };
-    setNodeOutputRef(nodeId, outputRef);
-    applyUploadedOutput(nodeId, outputRef);
+    if (!asset) {
+      const saved = savedFileForFilename(domainGraph, media.upload?.filename || '');
+      if (!saved) {
+        fileInputRef.current?.click();
+        return;
+      }
+      const outputRef = {
+        kind: nodeType,
+        uri: saved.uri,
+        mime_type: saved.mime_type || media.upload?.mime_type,
+        label: media.upload?.filename,
+      };
+      updateNodeConfig(nodeId, (current) => ({
+        ...writeMediaUploadPatch(current, {
+          filename: outputRef.label,
+          asset_id: assetId,
+          mime_type: outputRef.mime_type,
+          uri: outputRef.uri,
+        }),
+        user_replaced_output: true,
+      }));
+      setNodeOutputRef(nodeId, outputRef);
+      applyUploadedOutput(nodeId, outputRef);
+      await useDesignerStore.getState().flushSave();
+      return;
+    }
+    try {
+      const blob = await fetch(asset.objectUrl).then((response) => response.blob());
+      const file = new File([blob], asset.filename, { type: asset.mime_type || blob.type });
+      await persistUploadedFile(file);
+    } catch (error) {
+      useDesignerRunStore.setState({
+        runError: error instanceof Error ? error.message : String(error),
+      });
+    }
   }, [
     applyUploadedOutput,
+    domainGraph,
     getAsset,
     media.upload?.asset_id,
+    media.upload?.filename,
+    media.upload?.mime_type,
     nodeId,
     nodeType,
+    persistUploadedFile,
     setNodeOutputRef,
+    updateNodeConfig,
   ]);
 
   const onFileChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
-      applyUploadFile(event.target.files?.[0]);
+      const file = event.target.files?.[0];
       event.target.value = '';
+      if (file) void persistUploadedFile(file);
     },
-    [applyUploadFile],
+    [persistUploadedFile],
   );
 
   const onDrop = useCallback(
@@ -121,12 +214,13 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
       event.preventDefault();
       event.stopPropagation();
       setDragging(false);
-      applyUploadFile(event.dataTransfer.files?.[0]);
+      const file = event.dataTransfer.files?.[0];
+      if (file) void persistUploadedFile(file);
     },
-    [applyUploadFile],
+    [persistUploadedFile],
   );
 
-  const canConfirmUpload = Boolean(media.upload?.asset_id?.trim());
+  const canConfirmUpload = Boolean(media.upload?.asset_id?.trim()) && !uploading;
 
   const onGenerateNode = useCallback(() => {
     if (!domainGraph || isRunning) return;

@@ -891,6 +891,28 @@ def test_list_graphs_includes_video_summary(
     assert "edges" not in listed
 
 
+def test_list_graphs_omits_graph_bodies(
+    designer_store: DesignerGraphStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiuwenswarm.server.runtime.gateway_adapter import designer_adapter as adapter
+
+    monkeypatch.setattr(adapter, "_store", designer_store)
+    graph = designer_store.save_graph(
+        build_bootstrap_graph(project_id="proj_slim01", prompt="slim listing"),
+    )
+
+    payload, error, code = adapter._list_graphs({})
+
+    assert error is None
+    assert code is None
+    assert payload is not None
+    listed = next(item for item in payload["graphs"] if item["graph_id"] == graph["graph_id"])
+    assert set(listed) <= {"graph_id", "project_id", "title", "updated_at", "schema_version"}
+    assert "nodes" not in listed
+    assert "edges" not in listed
+    assert graph["graph_id"] in {item["graph_id"] for item in payload["summaries"]}
+
+
 def test_get_graph_hydrates_node_outputs_from_latest_run(
     designer_store: DesignerGraphStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1009,15 +1031,21 @@ async def test_independent_keyframes_and_clips_run_as_soon_as_ready(
     assert finished is not None
     assert finished["status"] == RUN_STATUS_COMPLETED
     states = finished["node_states"]
-    frame1_done = int(states["n_frame_1"].get("completed_at") or 0)
     clip2_start = int(states["n_clip_2"].get("started_at") or 0)
     clip3_start = int(states["n_clip_3"].get("started_at") or 0)
-    assert clip2_start and clip3_start and frame1_done
-    assert clip2_start < frame1_done
-    assert clip3_start < frame1_done
-    assert abs(clip2_start - clip3_start) < 120
+    frame2_done = int(states["n_frame_2"].get("completed_at") or 0)
+    frame3_done = int(states["n_frame_3"].get("completed_at") or 0)
+    assert clip2_start and clip3_start and frame2_done and frame3_done
+    # Keyframes do not depend on each other, so the slow shot 1 must not chain
+    # the others behind it.
     frame_starts = [int(states[key].get("started_at") or 0) for key in ("n_frame_1", "n_frame_2", "n_frame_3")]
     assert max(frame_starts) - min(frame_starts) < 120
+    # A clip waits only on its own keyframe. It can still queue behind the
+    # concurrency cap — the film-wide BGM bed holds a slot too — so its start is
+    # not compared against the unrelated shot 1.
+    assert clip2_start > frame2_done
+    assert clip3_start > frame3_done
+    assert abs(clip2_start - clip3_start) < 200
 
 
 @pytest.mark.asyncio

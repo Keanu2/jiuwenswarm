@@ -1,7 +1,7 @@
 import { Headphones, Image as ImageIcon, Plus, Sheet, Video, X } from 'lucide-react';
 import { useCallback, useMemo, useRef, type ChangeEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { designerAssetPreviewUrl } from '../../designerAssetUrl';
+import { designerAssetPreviewUrl, localPathToFileUri, uploadDesignerAsset } from '../../designerAssetUrl';
 import { preferredDesignerPreviewRef } from '../../designerMaterials';
 import { useDesignerAssetLibraryStore } from '../../designerAssetLibraryStore';
 import { useDesignerRunStore } from '../../designerRunStore';
@@ -122,30 +122,42 @@ export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStri
         assetId: slot.asset_id,
         label: slot.filename,
         mimeType: slot.mime_type ?? asset?.mime_type,
-        previewUrl: asset?.objectUrl,
+        previewUrl: asset?.objectUrl || designerAssetPreviewUrl(slot.uri) || undefined,
       };
     });
     return [...linked, ...uploaded];
   }, [libraryAssets, linked, uploads]);
 
   const addFiles = useCallback(
-    (files: FileList | null) => {
+    async (files: FileList | null) => {
       if (!files || files.length === 0) return;
-      const next: MediaMaterialSlot[] = [...uploads];
+      const added: MediaMaterialSlot[] = [];
       for (const file of Array.from(files)) {
         const asset = addFromFile(file);
         if (!asset) continue;
-        next.push({
-          id: newMaterialId(),
-          filename: asset.filename,
-          mime_type: asset.mime_type,
-          asset_id: asset.id,
-        });
+        try {
+          const stored = await uploadDesignerAsset(file);
+          added.push({
+            id: newMaterialId(),
+            filename: stored.filename || asset.filename,
+            mime_type: stored.mime_type || asset.mime_type,
+            asset_id: asset.id,
+            uri: localPathToFileUri(stored.path),
+          });
+        } catch (error) {
+          useDesignerRunStore.setState({
+            runError: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
-      if (next.length === uploads.length) return;
-      updateNodeConfig(nodeId, (current) => writeMediaMaterials(current, next));
+      if (added.length === 0) return;
+      updateNodeConfig(nodeId, (current) => {
+        const existing = readMediaConfig(current, nodeType).materials ?? [];
+        return writeMediaMaterials(current, [...existing, ...added]);
+      });
+      await useDesignerStore.getState().flushSave();
     },
-    [addFromFile, nodeId, updateNodeConfig, uploads],
+    [addFromFile, nodeId, nodeType, updateNodeConfig],
   );
 
   const onFileChange = useCallback(
@@ -162,10 +174,15 @@ export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStri
         removeEdges([item.edgeId]);
         return;
       }
-      const next = uploads.filter((slot) => slot.id !== item.materialId);
-      updateNodeConfig(nodeId, (current) => writeMediaMaterials(current, next));
+      updateNodeConfig(nodeId, (current) => {
+        const existing = readMediaConfig(current, nodeType).materials ?? [];
+        return writeMediaMaterials(
+          current,
+          existing.filter((slot) => slot.id !== item.materialId),
+        );
+      });
     },
-    [nodeId, removeEdges, updateNodeConfig, uploads],
+    [nodeId, nodeType, removeEdges, updateNodeConfig],
   );
 
   return (

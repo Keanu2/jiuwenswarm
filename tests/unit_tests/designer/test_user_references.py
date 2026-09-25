@@ -99,6 +99,135 @@ def test_attach_user_references_stays_on_metadata_not_brief_body(tmp_path: Path)
     assert "火车站短片" in analysis_prompt_with_references("火车站短片", refs)
 
 
+def test_carry_user_references_survives_graph_rebuild(tmp_path: Path) -> None:
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        REFERENCE_NODE_PREFIX,
+        carry_user_references,
+        is_user_reference_node,
+    )
+
+    source = tmp_path / "naiwa.jpg"
+    source.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [{"kind": "image", "path": str(source), "filename": "naiwa.jpg", "mime_type": "image/jpeg"}],
+        dest_dir=tmp_path / "refs",
+    )
+    prior = attach_user_references_to_graph(
+        {
+            "nodes": [{"id": "n_brief", "type": "text", "config": {"role": "brief"}}],
+            "metadata": {},
+        },
+        refs,
+    )
+    # Supervisor rebuilds drop metadata and replace the brief node wholesale.
+    rebuilt = {
+        "nodes": [{"id": "n_brief", "type": "text", "config": {"role": "brief"}}],
+        "edges": [],
+        "metadata": {"script_analysis": {"source": "llm"}},
+    }
+
+    seeded = carry_user_references(prior["metadata"], rebuilt)
+
+    assert seeded == [f"{REFERENCE_NODE_PREFIX}01"]
+    stored = rebuilt["metadata"]["user_references"]
+    assert [item["filename"] for item in stored] == ["naiwa.jpg"]
+    assert user_reference_image_paths(rebuilt)[0].is_file()
+    ref_node = next(node for node in rebuilt["nodes"] if node["id"] == f"{REFERENCE_NODE_PREFIX}01")
+    assert is_user_reference_node(ref_node)
+    assert rebuilt["metadata"]["script_analysis"] == {"source": "llm"}
+
+
+def test_carry_user_references_is_noop_without_attachments() -> None:
+    from jiuwenswarm.server.runtime.designer.user_references import carry_user_references
+
+    rebuilt = {"nodes": [], "metadata": {"scenario": "video"}}
+    assert carry_user_references({}, rebuilt) == []
+    assert carry_user_references(None, rebuilt) == []
+    assert carry_user_references({"user_references": []}, rebuilt) == []
+    assert rebuilt["nodes"] == []
+
+
+def test_user_reference_node_is_immutable_passthrough(tmp_path: Path) -> None:
+    from jiuwenswarm.server.runtime.designer.handlers import resolve_handler_key
+    from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
+    from jiuwenswarm.server.runtime.designer.user_references import REFERENCE_NODE_PREFIX
+
+    source = tmp_path / "naiwa.jpg"
+    source.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [{"kind": "image", "path": str(source), "filename": "naiwa.jpg", "mime_type": "image/jpeg"}],
+        dest_dir=tmp_path / "refs",
+    )
+    graph = attach_user_references_to_graph(
+        {
+            "schema_version": "designer-execution-graph.v1",
+            "graph_id": "graph_refnode01",
+            "project_id": "proj_refnode01",
+            "nodes": [{"id": "n_brief", "type": "text", "config": {"role": "brief"}}],
+            "edges": [],
+            "metadata": {},
+        },
+        refs,
+    )
+    node_id = f"{REFERENCE_NODE_PREFIX}01"
+    assert resolve_handler_key(next(n for n in graph["nodes"] if n["id"] == node_id)) == (
+        "user_reference"
+    )
+
+    # Even with LLM agents enabled, an upload must never be regenerated.
+    applied = apply_runtime_delegate(graph)
+
+    cfg = next(node for node in applied["nodes"] if node["id"] == node_id)["config"]
+    assert cfg["delegate"] == "handler"
+    assert cfg["force_handler"] is True
+    assert cfg["read_only"] is True
+
+
+def test_music_node_survives_without_music_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BGM is one film-wide bed, so the node stays as a silent placeholder."""
+    from jiuwenswarm.server.runtime.designer import orchestration
+    from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.capabilities.detect_audio_backends",
+        lambda: {"can_speech": False, "can_music": False, "can_video_audio": False},
+    )
+    analysis = {
+        "characters": [{"id": "char_1", "name": "Hero", "description": "a hero"}],
+        "scenes": [{"id": "set_1", "name": "Ridge", "description": "snow"}],
+        "shots": [
+            {
+                "shot_index": 1,
+                "title": "Climb",
+                "action": "climbs",
+                "camera": "wide",
+                "character_ids": ["char_1"],
+                "keyframe_prompt": "Hero climbs",
+                "setting_id": "set_1",
+            }
+        ],
+        "audio": {"policy": "optional_music", "include_speech": False, "include_music": True},
+    }
+    graph = build_smart_video_graph(
+        project_id="proj_bgm01",
+        prompt="a hero climbs a ridge",
+        analysis=analysis,
+        optimize_for="quality",
+        ai_mode=True,
+    )
+
+    assert "n_music" in {str(node.get("id")) for node in graph["nodes"]}
+
+    assignment = orchestration.assign_audio_node_agents(graph)
+
+    music = next(node for node in graph["nodes"] if str(node.get("id")) == "n_music")
+    assert "n_music" in {str(node.get("id")) for node in graph["nodes"]}
+    assert music["config"]["force_handler"] is True
+    assert music["config"]["delegate"] == "handler"
+    assert "n_music:music_placeholder" in assignment["assigned"]
+    assert graph["metadata"]["audio_routing"]["music_nodes"] is True
+
+
 def test_bootstrap_graph_registers_user_references(
     designer_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

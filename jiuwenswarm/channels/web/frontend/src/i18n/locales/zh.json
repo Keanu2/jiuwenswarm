@@ -74,6 +74,12 @@
     "toolbarTag": "设计",
     "closeTag": "取消设计",
     "attachmentsBlocked": "设计模式暂不支持附件，请先移除附件后再发送。",
+    "activity": {
+      "thinking": "思考中",
+      "toolCall": "正在调用 {{tool}}",
+      "stage": "执行中",
+      "progress": "节点 Agent 进度"
+    },
     "chat": {
       "title": "设计助手",
       "emptyHint": "需要帮你设计些什么？",
@@ -128,6 +134,7 @@
       "dropHint": "或者拖拽到区域内",
       "generateAction": "生成",
       "uploadAction": "确认上传",
+      "uploadMissing": "选中的文件没有成功上传，请重新选择一次。",
       "editAction": "保存",
       "actionNotImplemented": "该功能尚未实现",
       "inspect": "查看物料",

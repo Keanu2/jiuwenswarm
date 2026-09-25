@@ -204,7 +204,119 @@ def node_output_refs(ctx: NodeExecutionContext, node_id: str) -> list[dict]:
     return collected
 
 
+def _is_image_file(path: Path, ref: dict | None = None) -> bool:
+    kind = str((ref or {}).get("kind") or "").lower()
+    mime = str((ref or {}).get("mime_type") or "").lower()
+    if kind == "image" or mime.startswith("image/"):
+        return True
+    return path.suffix.lower() in _IMAGE_SUFFIXES
+
+
+def uploaded_material_image_paths(node: dict | None) -> list[Path]:
+    """Image files the user attached on this node, ahead of generated upstream stills."""
+    if not isinstance(node, dict):
+        return []
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    materials = config.get("materials") if isinstance(config.get("materials"), list) else []
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for item in materials:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("uri") or item.get("path") or "").strip()
+        path = path_from_uri(raw)
+        if path is None or not path.is_file() or not _is_image_file(path, item):
+            continue
+        resolved = path.resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(resolved)
+    return paths
+
+
+def user_replaced_output_image(graph: dict | None, node_id: str) -> list[Path]:
+    """The file the user uploaded in place of this node's generated still."""
+    if not isinstance(graph, dict) or not node_id:
+        return []
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id") or "") != node_id:
+            continue
+        config = node.get("config") if isinstance(node.get("config"), dict) else {}
+        if not config.get("user_replaced_output"):
+            return []
+        upload = config.get("upload") if isinstance(config.get("upload"), dict) else {}
+        upload_path = path_from_uri(str(upload.get("uri") or ""))
+        if (
+            upload_path is not None
+            and upload_path.is_file()
+            and _is_image_file(upload_path, upload)
+        ):
+            return [upload_path.resolve()]
+        ref = node.get("output_ref") if isinstance(node.get("output_ref"), dict) else {}
+        path = path_from_uri(str(ref.get("uri") or ""))
+        if path is None or not path.is_file() or not _is_image_file(path, ref):
+            return []
+        return [path.resolve()]
+    return []
+
+
+def apply_uploaded_outputs_to_run(run: dict, graph: dict) -> bool:
+    """Copy a user-uploaded still into the run so a rerun does not restore the old file."""
+    from jiuwenswarm.common.schema.designer_graph import NODE_STATUS_COMPLETED
+
+    if not isinstance(run, dict) or not isinstance(graph, dict):
+        return False
+    states = run.setdefault("node_states", {})
+    if not isinstance(states, dict):
+        return False
+    changed = False
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "")
+        replaced = user_replaced_output_image(graph, node_id)
+        if not replaced:
+            continue
+        stored = node.get("output_ref") if isinstance(node.get("output_ref"), dict) else {}
+        ref = dict(stored) if isinstance(stored, dict) else {}
+        replaced_uri = replaced[0].resolve().as_uri()
+        stored_path = path_from_uri(str(ref.get("uri") or ""))
+        same_file = (
+            stored_path is not None
+            and stored_path.is_file()
+            and stored_path.resolve() == replaced[0].resolve()
+        )
+        if not same_file:
+            upload = {}
+            config = node.get("config") if isinstance(node.get("config"), dict) else {}
+            if isinstance(config.get("upload"), dict):
+                upload = config["upload"]
+            ref = {
+                "kind": "image",
+                "uri": replaced_uri,
+                "mime_type": str(upload.get("mime_type") or ref.get("mime_type") or "image/png"),
+            }
+        state = dict(states.get(node_id) or {})
+        current = state.get("output_ref") if isinstance(state.get("output_ref"), dict) else {}
+        if str(current.get("uri") or "") == str(ref.get("uri") or ""):
+            continue
+        state["status"] = NODE_STATUS_COMPLETED
+        state["output_ref"] = dict(ref)
+        state["output_refs"] = [dict(ref)]
+        state["candidate_output_ref"] = None
+        state["candidate_output_refs"] = []
+        state["error"] = None
+        states[node_id] = state
+        changed = True
+    return changed
+
+
 def node_output_image_paths(ctx: NodeExecutionContext, node_id: str) -> list[Path]:
+    replaced = user_replaced_output_image(ctx.graph if isinstance(ctx.graph, dict) else None, node_id)
+    if replaced:
+        return replaced
     paths: list[Path] = []
     seen: set[str] = set()
     for ref in node_output_refs(ctx, node_id):
@@ -258,9 +370,13 @@ def node_ids_output_image_paths(ctx: NodeExecutionContext, node_ids: list[str]) 
 def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
     """Continuity refs for keyframes: on_screen solo sheets only (+ optional user refs).
 
+    A file the user attached on this node replaces those generated stills.
     Scene consistency comes from scene_bible + prompt handoff text — not prior KF images.
     Never attach empty scene plates or off-screen cast sheets.
     """
+    attached = uploaded_material_image_paths(node)
+    if attached:
+        return attached
     cfg = dict(node.get("config") or {})
     identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
     occ = identity.get("occupancy") if isinstance(identity.get("occupancy"), dict) else {}

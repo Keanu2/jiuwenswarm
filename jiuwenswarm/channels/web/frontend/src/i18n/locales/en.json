@@ -74,6 +74,12 @@
     "toolbarTag": "Design",
     "closeTag": "Cancel design",
     "attachmentsBlocked": "Design mode does not support attachments yet. Remove attachments and try again.",
+    "activity": {
+      "thinking": "Thinking",
+      "toolCall": "Using {{tool}}",
+      "stage": "Working",
+      "progress": "Node agent progress"
+    },
     "chat": {
       "title": "Design assistant",
       "emptyHint": "What can I create for you?",
@@ -128,6 +134,7 @@
       "dropHint": "Or drag into this area",
       "generateAction": "Generate",
       "uploadAction": "Confirm upload",
+      "uploadMissing": "That file was not successfully uploaded. Choose the file again.",
       "editAction": "Save",
       "actionNotImplemented": "This feature is not implemented yet",
       "inspect": "Inspect",

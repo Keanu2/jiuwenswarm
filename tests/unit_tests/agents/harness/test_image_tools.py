@@ -102,6 +102,8 @@ def test_normalize_seedream_size_and_ark_root() -> None:
     assert image_tools._normalize_seedream_size("1024*1024") == "1024x1024"
     assert image_tools._normalize_seedream_size("2k") == "2K"
     assert image_tools._normalize_seedream_size("") == "2048x2048"
+    assert image_tools._normalize_seedream_size("1K", 3_686_400) == "2K"
+    assert image_tools._normalize_seedream_size("1024x576") == "1280x720"
     assert (
         image_tools._ark_image_api_root("https://ark.cn-beijing.volces.com/api/coding/v3")
         == "https://ark.cn-beijing.volces.com/api/v3"
@@ -218,6 +220,62 @@ def test_invoke_volcengine_image_generation_sync(monkeypatch: pytest.MonkeyPatch
     assert posts[0]["model"] == "doubao-seedream-5-0-260128"
     assert posts[0]["size"] == "1024x1024"
     assert posts[0]["watermark"] is False
+
+
+def test_volcengine_retries_when_ark_rejects_1k(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    posts: list[dict] = []
+    model = "doubao-seedream-test-1k"
+
+    class _Resp:
+        def __init__(self, ok: bool, payload: dict | None = None, content: bytes = b"", status_code: int = 200):
+            self.ok = ok
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.content = content
+            self.text = str(self._payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise RuntimeError(f"http {self.status_code}")
+
+    def fake_post(url, **kwargs):
+        del url
+        payload = kwargs.get("json") or {}
+        posts.append(payload)
+        if payload.get("size") == "1K":
+            return _Resp(
+                False,
+                {
+                    "error": {
+                        "message": (
+                            "The parameter `size` specified in the request is not valid: "
+                            "image size must be at least 3686400 pixels."
+                        )
+                    }
+                },
+                status_code=400,
+            )
+        return _Resp(True, {"data": [{"url": "https://ark.example/out.png"}]})
+
+    monkeypatch.setattr(image_tools.requests, "post", fake_post)
+    monkeypatch.setattr(image_tools.requests, "get", lambda url, **kw: _Resp(True, content=b"png-bytes"))
+    monkeypatch.setattr(image_tools, "get_agent_workspace_dir", lambda: tmp_path)
+    image_tools._SEEDREAM_LEARNED_MIN_AREA.pop(model, None)
+
+    result = image_tools._invoke_volcengine_image_generation_sync(
+        "a cat",
+        api_key="k",
+        api_base="https://ark.cn-beijing.volces.com/api/v3",
+        model=model,
+        size="1K",
+    )
+    assert "image_path" in result
+    assert [item["size"] for item in posts] == ["1K", "2K"]
 
 
 @pytest.mark.asyncio

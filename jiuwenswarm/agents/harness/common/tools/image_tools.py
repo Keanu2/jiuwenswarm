@@ -2,8 +2,10 @@ import argparse
 import asyncio
 import base64
 import logging
+import math
 import os
 import random
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -706,14 +708,84 @@ def _resolve_image_gen_backend(
     return "dashscope"
 
 
-def _normalize_seedream_size(size: str | None) -> str:
+# Ark rejects stills outside this pixel budget. The floor differs per Seedream
+# generation, so this is only a starting guess — the real minimum is learned
+# from the first rejection.
+_SEEDREAM_MIN_AREA = 921_600
+_SEEDREAM_MAX_AREA = 16_777_216
+_SEEDREAM_MAX_SIDE = 4096
+_SEEDREAM_SIDE_STEP = 8
+_SEEDREAM_SIZE_KEYWORDS: tuple[tuple[str, int], ...] = (
+    ("1K", 1_048_576),
+    ("2K", 4_194_304),
+    ("4K", 16_777_216),
+)
+_SEEDREAM_MIN_PIXELS_RE = re.compile(r"at least\s+([\d,]+)\s*pixels", re.IGNORECASE)
+_SEEDREAM_LEARNED_MIN_AREA: dict[str, int] = {}
+
+
+def _required_seedream_pixels(message: str) -> int:
+    """Read the pixel floor Ark reports in a 400 so the retry can satisfy it."""
+    match = _SEEDREAM_MIN_PIXELS_RE.search(message or "")
+    if not match:
+        return 0
+    try:
+        required = int(match.group(1).replace(",", ""))
+    except ValueError:
+        return 0
+    return required if 0 < required <= _SEEDREAM_MAX_AREA else 0
+
+
+def _seedream_fit_area(width: int, height: int, min_area: int) -> tuple[int, int]:
+    """Scale a size onto Ark's pixel budget while holding the aspect ratio."""
+    area = width * height
+    if area <= 0:
+        return width, height
+    if min_area <= area <= _SEEDREAM_MAX_AREA and max(width, height) <= _SEEDREAM_MAX_SIDE:
+        return width, height
+    if area < min_area:
+        scale = math.sqrt(min_area / area)
+        grow = math.ceil
+    else:
+        scale = math.sqrt(_SEEDREAM_MAX_AREA / area)
+        grow = math.floor
+    scaled_w = int(grow(width * scale / _SEEDREAM_SIDE_STEP)) * _SEEDREAM_SIDE_STEP
+    scaled_h = int(grow(height * scale / _SEEDREAM_SIDE_STEP)) * _SEEDREAM_SIDE_STEP
+    scaled_w = min(max(scaled_w, _SEEDREAM_SIDE_STEP), _SEEDREAM_MAX_SIDE)
+    scaled_h = min(max(scaled_h, _SEEDREAM_SIDE_STEP), _SEEDREAM_MAX_SIDE)
+    return scaled_w, scaled_h
+
+
+def _normalize_seedream_size(size: str | None, min_area: int = _SEEDREAM_MIN_AREA) -> str:
     value = (size or "").strip().replace("*", "x").replace("X", "x")
     if not value:
         return "2048x2048"
     upper = value.upper()
     if upper in {"1K", "2K", "3K", "4K"}:
+        # Keywords cannot be rescaled, so climb the ladder to clear the floor.
+        for keyword, area in _SEEDREAM_SIZE_KEYWORDS:
+            if area >= min_area and area >= dict(_SEEDREAM_SIZE_KEYWORDS).get(upper, 0):
+                return keyword
         return upper
-    return value
+    parts = value.lower().split("x", 1)
+    if len(parts) != 2:
+        return value
+    try:
+        width, height = int(parts[0]), int(parts[1])
+    except ValueError:
+        return value
+    if width <= 0 or height <= 0:
+        return value
+    fitted_w, fitted_h = _seedream_fit_area(width, height, min_area)
+    if (fitted_w, fitted_h) != (width, height):
+        logger.info(
+            "Seedream size %sx%s rescaled to %sx%s for the Ark pixel budget",
+            width,
+            height,
+            fitted_w,
+            fitted_h,
+        )
+    return f"{fitted_w}x{fitted_h}"
 
 
 def _size_to_minimax_aspect_ratio(size: str | None, *, default: str = "1:1") -> str:
@@ -899,24 +971,40 @@ def _invoke_volcengine_image_generation_sync(
     root = _ark_image_api_root(api_base)
     url = f"{root}/images/generations"
     model_name = (model or "doubao-seedream-5-0-260128").strip() or "doubao-seedream-5-0-260128"
-    payload: dict[str, Any] = {
-        "model": model_name,
-        "prompt": prompt,
-        "size": _normalize_seedream_size(size),
-        "response_format": "url",
-        "watermark": False,
-    }
     headers = {
         "User-Agent": _USER_AGENT,
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
-    response = _http_post_json(url, headers=headers, payload=payload, timeout=180)
-    if not response.ok:
-        raise ValueError(
-            f"Volcengine image create failed {response.status_code}: "
-            f"{_image_api_error_message(response)}"
+    min_area = _SEEDREAM_LEARNED_MIN_AREA.get(model_name, _SEEDREAM_MIN_AREA)
+    requested = _normalize_seedream_size(size, min_area)
+    tried: set[str] = set()
+    while True:
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "prompt": prompt,
+            "size": requested,
+            "response_format": "url",
+            "watermark": False,
+        }
+        response = _http_post_json(url, headers=headers, payload=payload, timeout=180)
+        if response.ok:
+            break
+        message = _image_api_error_message(response)
+        tried.add(requested)
+        required = _required_seedream_pixels(message)
+        retry = _normalize_seedream_size(size, required) if required else ""
+        if not retry or retry in tried:
+            raise ValueError(f"Volcengine image create failed {response.status_code}: {message}")
+        _SEEDREAM_LEARNED_MIN_AREA[model_name] = required
+        logger.info(
+            "Seedream %s rejected size %s (needs %s px); retrying at %s",
+            model_name,
+            requested,
+            required,
+            retry,
         )
+        requested = retry
     body = response.json()
     data = body.get("data")
     if not isinstance(data, list) or not data:

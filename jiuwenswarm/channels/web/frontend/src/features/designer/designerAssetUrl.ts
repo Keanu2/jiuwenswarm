@@ -1,5 +1,16 @@
 /** Turn a Designer output_ref.uri into a browser-playable /file-api URL. */
 
+export function localPathToFileUri(path: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    return `file:///${normalized}`;
+  }
+  if (normalized.startsWith('/')) {
+    return `file://${normalized}`;
+  }
+  return `file:///${normalized}`;
+}
+
 export function fileUriToLocalPath(uri: string): string | null {
   const value = (uri || '').trim();
   if (!value) return null;

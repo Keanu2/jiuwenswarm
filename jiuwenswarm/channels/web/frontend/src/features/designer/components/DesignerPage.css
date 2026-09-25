@@ -259,8 +259,81 @@
 
 .designer-node__running-overlay {
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   padding: 10px;
+}
+
+.designer-node-activity {
+  display: flex;
+  width: min(92%, 260px);
+  min-width: 0;
+  max-height: calc(100% - 28px);
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-border-default) 78%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-surface-card) 88%, transparent);
+  box-shadow: 0 6px 18px color-mix(in srgb, #000 10%, transparent);
+  text-align: left;
+}
+
+.designer-node-activity__item {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 6px;
+  opacity: 0.52;
+}
+
+.designer-node-activity__item.is-current {
+  opacity: 1;
+}
+
+.designer-node-activity__icon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--color-text-muted);
+}
+
+.designer-node-activity__item[data-kind='thinking'] .designer-node-activity__icon {
+  color: var(--color-action-primary);
+}
+
+.designer-node-activity__item[data-kind='tool_call'] .designer-node-activity__icon {
+  color: var(--color-feedback-warning);
+}
+
+.designer-node-activity__icon.is-spinning {
+  animation: designer-chat-spin 1s linear infinite;
+}
+
+.designer-node-activity__copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.designer-node-activity__label {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.designer-node-activity__copy strong {
+  overflow: hidden;
+  color: var(--color-text-primary);
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .designer-canvas-shell.is-hand .react-flow__pane {

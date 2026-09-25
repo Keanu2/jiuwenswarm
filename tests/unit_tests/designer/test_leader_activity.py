@@ -2,6 +2,7 @@
 
 from jiuwenswarm.common.schema.designer_graph import (
     ACTIVITY_KIND_STAGE,
+    ACTIVITY_KIND_THINKING,
     ACTIVITY_KIND_TOOL_CALL,
     LEADER_NODE_ID,
     NODE_STATUS_RUNNING,
@@ -39,6 +40,40 @@ def test_apply_node_activity_caps_tail() -> None:
         state = apply_node_activity(state, kind=ACTIVITY_KIND_STAGE, text=f"step {index}")
     assert len(state["activity_tail"]) == 8
     assert state["activity_tail"][-1].endswith("11")
+    assert [item["text"] for item in state["activity_log"]] == [
+        f"step {index}" for index in range(12)
+    ]
+
+
+def test_apply_node_activity_keeps_structured_agent_progress() -> None:
+    state = apply_node_activity(
+        {"status": NODE_STATUS_RUNNING},
+        kind=ACTIVITY_KIND_THINKING,
+        text="planning the keyframe",
+        at=1,
+    )
+    state = apply_node_activity(
+        state,
+        kind=ACTIVITY_KIND_TOOL_CALL,
+        text="calling call_image_model",
+        tool="call_image_model",
+        at=2,
+    )
+
+    normalized = normalize_node_state(state)
+    assert normalized["activity_log"] == [
+        {
+            "kind": ACTIVITY_KIND_THINKING,
+            "text": "planning the keyframe",
+            "at": 1,
+        },
+        {
+            "kind": ACTIVITY_KIND_TOOL_CALL,
+            "text": "calling call_image_model",
+            "tool": "call_image_model",
+            "at": 2,
+        },
+    ]
 
 
 def test_graph_node_states_skips_leader() -> None:
@@ -164,3 +199,25 @@ def test_heuristic_add_node_runs_when_asked() -> None:
     plan = heuristic_leader_plan(graph, "加一个配乐节点并生成")
     assert plan["run_node_ids"]
     assert message_asks_to_run("加一个配乐节点并生成") is True
+
+
+def test_tool_result_activity_text_keeps_progress_lines_readable() -> None:
+    from jiuwenswarm.server.runtime.designer.node_agent import _tool_result_activity_text
+
+    assert (
+        _tool_result_activity_text("read_upstream", '[{"node_id": "n_character"}]')
+        == "read_upstream done"
+    )
+    assert (
+        _tool_result_activity_text("designer_graph_get", '{"graph": {"graph_id": "g1"}}')
+        == "designer_graph_get done"
+    )
+    assert _tool_result_activity_text("call_image_model", "") == "call_image_model done"
+    assert (
+        _tool_result_activity_text("call_image_model", "[ERROR]: Image generation failed")
+        == "[ERROR]: Image generation failed"
+    )
+    assert (
+        _tool_result_activity_text("ffmpeg_compose", "composed 4 clips\ninto final.mp4")
+        == "composed 4 clips into final.mp4"
+    )

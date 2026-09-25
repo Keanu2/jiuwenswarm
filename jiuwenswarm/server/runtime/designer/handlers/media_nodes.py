@@ -26,6 +26,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
     node_generate_prompt,
     node_output_image_paths,
     path_from_uri,
+    uploaded_material_image_paths,
 )
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.image_nodes import _image_or_notes
@@ -70,25 +71,28 @@ def _graph_output_image_paths(ctx: NodeExecutionContext, node_id: str) -> list[P
 
 
 def _upstream_images(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list[Path]:
+    """User stills plus every upstream image. Attachment count is not the input count."""
     seen: set[str] = set()
     paths: list[Path] = []
-    for node_id in _predecessor_ids(ctx, node):
-        for path in [*node_output_image_paths(ctx, node_id), *_graph_output_image_paths(ctx, node_id)]:
-            key = str(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            paths.append(path)
-    for path in user_reference_image_paths(ctx.graph) or []:
-        resolved = Path(path).resolve() if path else None
-        if resolved is None or not resolved.is_file():
-            continue
+
+    def add(path: Path | None) -> None:
+        if path is None or not path.is_file():
+            return
+        resolved = path.resolve()
         key = str(resolved)
         if key in seen:
-            continue
+            return
         seen.add(key)
         paths.append(resolved)
-    return paths[:3]
+
+    for path in uploaded_material_image_paths(node):
+        add(path)
+    for node_id in _predecessor_ids(ctx, node):
+        for path in [*node_output_image_paths(ctx, node_id), *_graph_output_image_paths(ctx, node_id)]:
+            add(path)
+    for path in user_reference_image_paths(ctx.graph) or []:
+        add(Path(path) if path else None)
+    return paths
 
 
 def _image_size_from_ctx(ctx: NodeExecutionContext, node: DesignerGraphNode) -> str:
@@ -125,14 +129,12 @@ class VideoNodeHandler:
         if sources:
             return await ComposeNodeHandler().execute(node, ctx)
         prompt = node_generate_prompt(node) or graph_prompt(ctx.graph, node)
-        refs = _upstream_images(ctx, node)
-        first_frame = str(refs[0]) if refs else None
-        extra = [str(path) for path in refs[1:]]
+        refs = [str(path) for path in _upstream_images(ctx, node)]
         generated = await generate_clip_video(
             prompt,
             save_dir=str(graph_workspace_dir(ctx.graph)),
-            first_frame=first_frame,
-            reference_images=extra or None,
+            reference_images=refs or None,
+            force_reference_mode=bool(refs),
         )
         path = Path(str(generated.get("video_path") or ""))
         if not path.is_file():

@@ -316,6 +316,7 @@ ACTIVITY_KINDS: frozenset[str] = frozenset(
 )
 ACTIVITY_TEXT_MAX = 120
 ACTIVITY_TAIL_LIMIT = 8
+ACTIVITY_LOG_LIMIT = 20
 
 NODE_STATUSES: frozenset[str] = frozenset(
     {
@@ -458,6 +459,7 @@ class DesignerNodeState(TypedDict, total=False):
     blocked_by: list[str]
     activity: DesignerNodeActivity
     activity_tail: list[str]
+    activity_log: list[DesignerNodeActivity]
 
 
 class DesignerExecutionRun(TypedDict, total=False):
@@ -1196,7 +1198,14 @@ def preserve_node_output_refs(
     for node in incoming.get("nodes") or []:
         prev = existing_by_id.get(str(node.get("id") or "")) or {}
         prev_ref = prev.get("output_ref") if isinstance(prev, dict) else None
-        if _asset_ref_uri(prev_ref) and not _asset_ref_uri(node.get("output_ref")):
+        incoming_uri = _asset_ref_uri(node.get("output_ref"))
+        prev_uri = _asset_ref_uri(prev_ref)
+        # A browser blob preview must not replace a file already stored for this node.
+        if incoming_uri.startswith("blob:") and prev_uri.startswith("file:"):
+            nodes.append({**node, "output_ref": dict(prev_ref)})
+            changed = True
+            continue
+        if prev_uri and not incoming_uri:
             nodes.append({**node, "output_ref": dict(prev_ref)})
             changed = True
             continue
@@ -1244,6 +1253,47 @@ def preserve_expanded_shot_nodes(
     ]
     grafted["nodes"] = [dict(node) for node in incoming.get("nodes") or []] + extra_nodes
     return expand_shot_nodes(grafted, existing_count)
+
+
+def preserve_nodes_added_since(
+    incoming: DesignerExecutionGraph,
+    existing: DesignerExecutionGraph | None,
+) -> DesignerExecutionGraph:
+    """Graft back nodes a concurrent writer added, when ``incoming`` is stale.
+
+    Run orchestration reads a graph, awaits an agent, then saves its copy. While
+    it waits, a node worker can rebuild the topology (expanded clips, the audio
+    bed). Writing the older copy verbatim would delete those nodes, so any node
+    the newer stored graph has is carried over along with its edges.
+    """
+    if existing is None:
+        return incoming
+    if int(incoming.get("updated_at") or 0) >= int(existing.get("updated_at") or 0):
+        return incoming
+    incoming_ids = {str(node.get("id") or "") for node in incoming.get("nodes") or []}
+    extra = [
+        dict(node)
+        for node in existing.get("nodes") or []
+        if str(node.get("id") or "") not in incoming_ids
+    ]
+    if not extra:
+        return incoming
+    live = incoming_ids | {str(node.get("id") or "") for node in extra}
+    seen = {
+        (str(edge.get("source") or ""), str(edge.get("target") or ""))
+        for edge in incoming.get("edges") or []
+    }
+    extra_edges = []
+    for edge in existing.get("edges") or []:
+        pair = (str(edge.get("source") or ""), str(edge.get("target") or ""))
+        if pair in seen or pair[0] not in live or pair[1] not in live:
+            continue
+        extra_edges.append(dict(edge))
+        seen.add(pair)
+    grafted = dict(incoming)
+    grafted["nodes"] = [dict(node) for node in incoming.get("nodes") or []] + extra
+    grafted["edges"] = [dict(edge) for edge in incoming.get("edges") or []] + extra_edges
+    return grafted
 
 
 def expand_shot_nodes(
@@ -1522,8 +1572,22 @@ def apply_node_activity(
     tail = [item for item in (current.get("activity_tail") or []) if isinstance(item, str)]
     if line and (not tail or tail[-1] != line):
         tail.append(line)
+    log = [item for item in (current.get("activity_log") or []) if isinstance(item, dict)]
+    signature = (
+        str(activity.get("kind") or ""),
+        str(activity.get("text") or ""),
+        str(activity.get("tool") or ""),
+    )
+    previous_signature = (
+        str(log[-1].get("kind") or ""),
+        str(log[-1].get("text") or ""),
+        str(log[-1].get("tool") or ""),
+    ) if log else None
+    if signature != previous_signature:
+        log.append(activity)
     current["activity"] = activity
     current["activity_tail"] = tail[-ACTIVITY_TAIL_LIMIT:]
+    current["activity_log"] = log[-ACTIVITY_LOG_LIMIT:]
     if "status" not in current:
         current["status"] = NODE_STATUS_RUNNING
     return current  # type: ignore[return-value]
@@ -1584,6 +1648,15 @@ def normalize_node_state(raw: Any) -> DesignerNodeState:
         if not isinstance(tail, list) or not all(isinstance(item, str) for item in tail):
             raise DesignerGraphValidationError("node_state.activity_tail must be a string array")
         state["activity_tail"] = [item for item in tail if item.strip()][:ACTIVITY_TAIL_LIMIT]
+    log = raw.get("activity_log")
+    if log is not None:
+        if not isinstance(log, list):
+            raise DesignerGraphValidationError("node_state.activity_log must be an array")
+        state["activity_log"] = [
+            item
+            for item in (normalize_node_activity(entry) for entry in log)
+            if item is not None
+        ][-ACTIVITY_LOG_LIMIT:]
     return state
 
 
@@ -1653,8 +1726,22 @@ def apply_node_activity(
     tail = [item for item in (current.get("activity_tail") or []) if isinstance(item, str)]
     if line and (not tail or tail[-1] != line):
         tail.append(line)
+    log = [item for item in (current.get("activity_log") or []) if isinstance(item, dict)]
+    signature = (
+        str(activity.get("kind") or ""),
+        str(activity.get("text") or ""),
+        str(activity.get("tool") or ""),
+    )
+    previous_signature = (
+        str(log[-1].get("kind") or ""),
+        str(log[-1].get("text") or ""),
+        str(log[-1].get("tool") or ""),
+    ) if log else None
+    if signature != previous_signature:
+        log.append(activity)
     current["activity"] = activity
     current["activity_tail"] = tail[-ACTIVITY_TAIL_LIMIT:]
+    current["activity_log"] = log[-ACTIVITY_LOG_LIMIT:]
     if "status" not in current:
         current["status"] = NODE_STATUS_RUNNING
     return current  # type: ignore[return-value]
@@ -2008,9 +2095,11 @@ def _node_schedule_priority(node: DesignerGraphNode | dict[str, Any]) -> tuple[i
         "keyframe": 50,
         "speech": 55,
         "tts": 55,
-        "music": 55,
         "audio": 55,
-        "audio_bed": 55,
+        # The BGM bed is mixed after concat, so it must not take a slot from the
+        # clips that the film actually waits on.
+        "music": 65,
+        "audio_bed": 65,
         "clip": 60,
         "video": 60,
         "compose": 70,

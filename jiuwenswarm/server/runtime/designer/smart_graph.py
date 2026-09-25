@@ -102,6 +102,9 @@ def apply_runtime_delegate(graph: DesignerExecutionGraph) -> DesignerExecutionGr
         ensure_chat_model_reachable,
         llm_available,
     )
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        is_user_reference_node,
+    )
 
     ensure_chat_model_reachable()
     use_agents = llm_available()
@@ -111,6 +114,13 @@ def apply_runtime_delegate(graph: DesignerExecutionGraph) -> DesignerExecutionGr
             continue
         config = node.setdefault("config", {})
         if not isinstance(config, dict):
+            continue
+        if is_user_reference_node(node):
+            config["delegate"] = CONFIG_DELEGATE_HANDLER
+            config["force_handler"] = True
+            config["skip_llm"] = True
+            config["read_only"] = True
+            config["immutable_source"] = True
             continue
         if use_agents:
             config.pop("force_handler", None)
@@ -1903,8 +1913,9 @@ def build_smart_video_graph(
             clip_embedded = True
             want_speech = False
         if want_music and not can_music:
+            # BGM is one film-wide bed mixed after concat, so the node survives
+            # and writes a silent placeholder until a music API is configured.
             clip_embedded = True
-            want_music = False
         if want_speech:
             audio_ids.append("n_speech")
             nodes.append(
@@ -1945,7 +1956,11 @@ def build_smart_video_graph(
                         "kind": "agent",
                         "skill_id": "audio_bed",
                         "tools": ["call_music_model", "read_upstream", "call_model"],
-                        "delegate": ("agent" if ai_mode else "handler"),
+                        "delegate": (
+                            ("agent" if ai_mode else "handler") if can_music else "handler"
+                        ),
+                        "force_handler": not can_music,
+                        "placeholder_until_api": not can_music,
                         "film_duration_sec": film_sec,
                     },
                     "layout": {

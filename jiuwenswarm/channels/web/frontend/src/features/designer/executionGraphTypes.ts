@@ -99,6 +99,7 @@ export type DesignerMediaUploadConfig = {
   filename?: string;
   asset_id?: string;
   mime_type?: string;
+  uri?: string;
 };
 
 export type DesignerMediaEditConfig = {
@@ -111,6 +112,7 @@ export type DesignerMediaMaterialSlot = {
   filename?: string;
   mime_type?: string;
   asset_id?: string;
+  uri?: string;
 };
 
 type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
@@ -274,6 +276,7 @@ export type DesignerNodeState = {
   blocked_by?: string[];
   activity?: DesignerNodeActivity | null;
   activity_tail?: string[] | null;
+  activity_log?: DesignerNodeActivity[] | null;
 };
 
 export type DesignerExecutionRun = {

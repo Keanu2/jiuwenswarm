@@ -869,6 +869,14 @@ class DesignerGraphToolkit:
             cfg = {}
             node["config"] = cfg
         refs: list[str] = []
+        try:
+            from jiuwenswarm.server.runtime.designer.handlers.common import (
+                uploaded_material_image_paths,
+            )
+
+            refs = [str(path) for path in uploaded_material_image_paths(node)]
+        except Exception:  # noqa: BLE001
+            refs = []
         role = str(node_pipeline(node) or node_role(node) or "")
         if role == "scene":
             nids = [str(x) for x in (cfg.get("character_node_ids") or []) if str(x).strip()]
@@ -877,7 +885,7 @@ class DesignerGraphToolkit:
                     node_ids_output_image_paths,
                 )
 
-                refs = [str(p) for p in node_ids_output_image_paths(self.ctx, nids)]
+                refs.extend(str(p) for p in node_ids_output_image_paths(self.ctx, nids))
         if role in {
             "scene",
             "character",
@@ -920,6 +928,9 @@ class DesignerGraphToolkit:
             pass
         store_cap = max(6000, int(cfg.get("prompt_char_limit") or 6000))
         cfg["prompt"] = text[:store_cap]
+        beat = asyncio.create_task(
+            _heartbeat_while(self.ctx, "call_image_model", "image model running")
+        )
         try:
             generated = await generate_designer_image(
                 text,
@@ -932,6 +943,8 @@ class DesignerGraphToolkit:
         except Exception as exc:  # noqa: BLE001
             logger.warning("call_image_model failed: %s", exc, exc_info=True)
             return f"call_image_model error: {exc}"
+        finally:
+            beat.cancel()
         path = ""
         for line in str(out or "").splitlines():
             if "Saved to:" in line:
@@ -964,6 +977,7 @@ class DesignerGraphToolkit:
             _looks_like_contaminated_prompt,
             build_clip_prompt,
             clip_wants_reference_mode,
+            collect_clip_first_frame,
             collect_clip_reference_images,
             generate_clip_video,
             parse_shot_duration_seconds,
@@ -1004,6 +1018,13 @@ class DesignerGraphToolkit:
             cfg = stamp_scene_last_frame_chain(cfg, scene_chain)
             node["config"] = cfg
         ref_files = [str(p) for p in ref_paths]
+        if not ref_mode:
+            from jiuwenswarm.server.runtime.designer.handlers.common import (
+                uploaded_material_image_paths,
+            )
+
+            if uploaded_material_image_paths(node):
+                ref_mode = True
 
         # Agent writes P2 (continuation). Structured prompt is fallback / lock scaffold.
         structured = ""
@@ -1166,7 +1187,17 @@ class DesignerGraphToolkit:
             prompt=text,
             reference_paths=ref_files,
         )
-        legacy_ff = None if ref_mode else (str(first_frame or "").strip() or None)
+        if ref_mode:
+            legacy_ff = None
+        else:
+            shot_frame = collect_clip_first_frame(self.ctx, shot_index, node=node)
+            # A replaced still lives on the graph, not in the prompt the model
+            # copied from the previous run. Prefer that file over a stale path.
+            legacy_ff = (
+                str(shot_frame)
+                if shot_frame is not None
+                else (str(first_frame or "").strip() or None)
+            )
         text = apply_wan_call_locks(
             text,
             cfg=cfg,
@@ -1197,6 +1228,15 @@ class DesignerGraphToolkit:
             (shot or {}).get("timeline") or "",
             default=clamp_clip_duration(duration or 5),
         )
+        from jiuwenswarm.server.runtime.designer.audio_locks import video_gen_family_label
+
+        beat = asyncio.create_task(
+            _heartbeat_while(
+                self.ctx,
+                "call_video_model",
+                f"{video_gen_family_label()} running",
+            )
+        )
         try:
             result = await generate_clip_video(
                 prompt=text,
@@ -1217,6 +1257,8 @@ class DesignerGraphToolkit:
         except Exception as exc:  # noqa: BLE001
             logger.warning("call_video_model failed: %s", exc, exc_info=True)
             return f"call_video_model error: {exc}"
+        finally:
+            beat.cancel()
         video_path = str(result.get("video_path") or "").strip()
         if not video_path or not Path(video_path).is_file():
             return f"call_video_model error: no video_path ({result!r})"
@@ -1368,6 +1410,40 @@ def _emit_ctx_activity(
         emit(kind, text, tool)
 
 
+def _tool_result_activity_text(name: str, result: Any) -> str:
+    """Turn a tool return value into one short line for the node peek."""
+    text = " ".join(str(result or "").split())
+    if not text:
+        return f"{name} done"
+    if text.startswith("[ERROR]") or text.startswith("[WARN]"):
+        return text[:80]
+    # Structured payloads (upstream reads, graph dumps) are unreadable as a
+    # progress line, so report completion instead of leaking raw JSON.
+    if text[0] in "{[":
+        return f"{name} done"
+    return text[:80]
+
+
+async def _heartbeat_while(ctx: NodeExecutionContext, tool: str, label: str) -> None:
+    """Keep node peek alive during long video / image_gen waits."""
+    from jiuwenswarm.common.schema.designer_graph import ACTIVITY_KIND_TOOL_CALL
+
+    elapsed = 0
+    try:
+        while True:
+            await asyncio.sleep(20.0)
+            elapsed += 20
+            _emit_ctx_activity(
+                ctx,
+                ACTIVITY_KIND_TOOL_CALL,
+                f"{label} ({elapsed}s)",
+                tool=tool,
+                force=True,
+            )
+    except asyncio.CancelledError:
+        return
+
+
 def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
     from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
@@ -1393,11 +1469,10 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
                 force=True,
             )
             result = await func(**kwargs)
-            preview = str(result or "")
             _emit_ctx_activity(
                 toolkit.ctx,
                 ACTIVITY_KIND_TOOL_CALL,
-                preview[:80] or f"{name} done",
+                _tool_result_activity_text(name, result),
                 tool=name,
             )
             return result

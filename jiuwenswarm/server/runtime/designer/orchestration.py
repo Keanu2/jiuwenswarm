@@ -28,6 +28,7 @@ from jiuwenswarm.server.runtime.designer.model_tools import (
     call_model_tool,
     list_configured_models,
 )
+from jiuwenswarm.server.runtime.designer.user_references import carry_user_references
 
 logger = logging.getLogger(__name__)
 
@@ -691,8 +692,9 @@ def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
 def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
     """Supervisor: promote speech/music to fast LLM agents when backends exist.
 
-    Without TTS/music backends, folds audio into clip leaves (``clip_embedded``)
-    and does not keep decorative speech/music nodes that cannot produce stems.
+    Dialogue folds into clip leaves (``clip_embedded``) without a TTS backend.
+    The Music node always survives: it is the single film-wide BGM mixed after
+    concat, and without a music API its handler writes a silent placeholder.
     """
     from jiuwenswarm.server.runtime.designer.capabilities import detect_audio_backends
     from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
@@ -704,16 +706,20 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
     routing = dict(meta.get("audio_routing") or {})
     clip_embedded = bool(routing.get("clip_embedded")) or (not can_speech and not can_music)
     if clip_embedded:
-        # Drop placeholder audio nodes when backends are missing.
-        drop = {"n_speech", "n_music"}
-        if not can_speech:
-            drop.add("n_speech")
-        else:
-            drop.discard("n_speech")
-        if not can_music:
-            drop.add("n_music")
-        else:
-            drop.discard("n_music")
+        # Only dialogue folds into the clips; the BGM node stays either way.
+        drop = (
+            {
+                str(n.get("id") or "")
+                for n in (graph.get("nodes") or [])
+                if isinstance(n, dict)
+                and (
+                    str(n.get("id") or "") == "n_speech"
+                    or _role_key(n).lower() in {"speech", "tts"}
+                )
+            }
+            if not can_speech
+            else set()
+        )
         if drop:
             graph["nodes"] = [
                 n
@@ -767,9 +773,48 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
             except Exception:  # noqa: BLE001
                 logger.debug("chain_prior_speech_across_clips failed", exc_info=True)
             prune_non_contributing_nodes(graph)
+        embedded_assigned = ["clip_embedded"]
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            nid = str(node.get("id") or "")
+            if nid != "n_music" and _role_key(node).lower() not in {"music", "audio_bed"}:
+                continue
+            cfg = dict(node.get("config") or {})
+            cfg["role"] = "music"
+            cfg["skill_id"] = cfg.get("skill_id") or "audio_bed"
+            cfg["tools"] = ["call_music_model", "read_upstream", "call_model"]
+            if can_music:
+                cfg["force_handler"] = False
+                cfg["delegate"] = "agent"
+                cfg["supervisor_task"] = (
+                    cfg.get("supervisor_task")
+                    or "Compose ONE non-vocal BGM bed from the Brief / bgm_lock for the "
+                    "full concatenated film. call_music_model. Never generate per-clip scores. "
+                    "Keep headroom so clip dialogue stays intelligible."
+                )
+                cfg["placeholder_until_api"] = False
+                embedded_assigned.append(f"{nid}:music_agent")
+            else:
+                cfg["force_handler"] = True
+                cfg["delegate"] = "handler"
+                cfg["placeholder_until_api"] = True
+                cfg["supervisor_task"] = (
+                    "No music API yet. Output a silent/empty placeholder file only. "
+                    "Do not invent a score. When MUSIC_API_KEY / models.music is "
+                    "configured, this node will call_music_model instead."
+                )
+                embedded_assigned.append(f"{nid}:music_placeholder")
+            node["config"] = cfg
         routing["clip_embedded"] = True
         routing["can_speech"] = can_speech
         routing["can_music"] = can_music
+        routing["speech_nodes"] = False
+        routing["music_nodes"] = any(
+            str(n.get("id") or "") == "n_music"
+            for n in (graph.get("nodes") or [])
+            if isinstance(n, dict)
+        )
         routing["can_video_audio"] = bool(backends.get("can_video_audio", True))
         routing["video_audio_model"] = str(backends.get("video_audio_model") or "")
         meta["audio_routing"] = routing
@@ -794,7 +839,7 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
             "can_speech": can_speech,
             "can_music": can_music,
             "can_video_audio": bool(backends.get("can_video_audio", True)),
-            "assigned": ["clip_embedded"],
+            "assigned": embedded_assigned,
             "ensured_nodes": [],
             "backends": backends,
             "clip_embedded": True,
@@ -2276,6 +2321,7 @@ class SupervisorAgent:
             ),
         }
         rebuilt["metadata"] = rmeta
+        carry_user_references(meta, rebuilt)
         rebuilt = apply_runtime_delegate(rebuilt)
         # Replace caller's graph contents in-place-friendly: return rebuilt via ack
         # and let executor assign graph = result.

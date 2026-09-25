@@ -16,6 +16,8 @@ export type MediaUploadConfig = {
   filename?: string;
   asset_id?: string;
   mime_type?: string;
+  /** Server-readable file URI. A library asset id alone is not an input. */
+  uri?: string;
 };
 
 export type MediaEditConfig = {
@@ -28,6 +30,8 @@ export type MediaMaterialSlot = {
   filename: string;
   mime_type?: string;
   asset_id?: string;
+  /** Server-readable file URI. The library object URL is only a local preview. */
+  uri?: string;
 };
 
 export type MediaNodeConfig = {
@@ -76,6 +80,7 @@ function normalizeMaterials(raw: unknown): MediaMaterialSlot[] {
           ? record.label.trim()
           : '';
     if (!id || !filename) continue;
+    const uri = typeof record.uri === 'string' ? record.uri.trim() : '';
     out.push({
       id,
       filename,
@@ -85,6 +90,7 @@ function normalizeMaterials(raw: unknown): MediaMaterialSlot[] {
       ...(typeof record.asset_id === 'string' && record.asset_id
         ? { asset_id: record.asset_id }
         : {}),
+      ...(uri ? { uri } : {}),
     });
   }
   return out;
@@ -144,6 +150,9 @@ export function readMediaConfig(
       filename: raw.upload?.filename ?? '',
       asset_id: raw.upload?.asset_id ?? '',
       mime_type: raw.upload?.mime_type ?? '',
+      ...(typeof raw.upload?.uri === 'string' && raw.upload.uri.trim()
+        ? { uri: raw.upload.uri.trim() }
+        : {}),
     },
     edit: {
       content: raw.edit?.content ?? '',

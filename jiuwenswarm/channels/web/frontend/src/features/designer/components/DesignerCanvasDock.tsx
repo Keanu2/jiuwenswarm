@@ -17,6 +17,7 @@ import {
 } from '../designerCanvasNodes';
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
+import { DESIGNER_FIT_VIEW_PADDING } from '../designerFitView';
 
 export function DesignerCanvasDock() {
   const { t } = useTranslation();
@@ -56,7 +57,7 @@ export function DesignerCanvasDock() {
     closeDock();
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        void fitView({ padding: 0.18, duration: 220 });
+        void fitView({ padding: DESIGNER_FIT_VIEW_PADDING, duration: 220 });
       });
     });
   }, [autoLayout, closeDock, fitView]);

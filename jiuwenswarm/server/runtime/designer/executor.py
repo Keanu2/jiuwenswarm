@@ -66,6 +66,10 @@ from jiuwenswarm.server.runtime.designer.handlers import (
     get_node_handler,
 )
 from jiuwenswarm.server.runtime.designer.node_agent import NodeAgentHost, NodeAgentRunner
+from jiuwenswarm.server.runtime.designer.user_references import (
+    carry_user_references,
+    is_user_reference_node,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +399,13 @@ class GraphExecutor:
         for node in graph.get("nodes") or []:
             cfg = node.setdefault("config", {})
             if not isinstance(cfg, dict):
+                continue
+            if is_user_reference_node(node):
+                cfg["delegate"] = CONFIG_DELEGATE_HANDLER
+                cfg["force_handler"] = True
+                cfg["skip_llm"] = True
+                cfg["read_only"] = True
+                cfg["immutable_source"] = True
                 continue
             if use_agents:
                 cfg.pop("force_handler", None)
@@ -892,6 +903,7 @@ class GraphExecutor:
                             meta_r["supervisor_analyzed"] = True
                             meta_r["supervisor_composed_on_bootstrap"] = True
                             rebuilt["metadata"] = meta_r
+                            carry_user_references(meta0, rebuilt)
                             graph = self._store.save_graph(rebuilt)
                     else:
                         meta0["script_analysis"] = analysis
@@ -1669,6 +1681,7 @@ class GraphExecutor:
             rmeta["freeze_shot_topology"] = False
             rmeta["script_analysis"] = analysis
             rebuilt["metadata"] = rmeta
+            carry_user_references(meta, rebuilt)
             saved = self._store.save_graph(apply_runtime_delegate(rebuilt))
             live_ids = {str(node.get("id") or "") for node in saved.get("nodes") or []}
             states = run.setdefault("node_states", {})
@@ -1761,6 +1774,7 @@ class GraphExecutor:
                 rmeta[key] = meta.get(key)
         rmeta["freeze_shot_topology"] = False
         rebuilt["metadata"] = rmeta
+        carry_user_references(meta, rebuilt)
         saved = self._store.save_graph(
             apply_shot_generate_prompts(apply_runtime_delegate(rebuilt), prompts)
         )
@@ -2119,11 +2133,23 @@ class GraphExecutor:
                     demote_config_to_handler,
                 )
 
+                # Regenerating this node itself retires the uploaded stand-in, so the
+                # new file can become the output. Downstream reads keep the stand-in
+                # until that happens.
+                live_cfg = node.get("config") if isinstance(node.get("config"), dict) else None
+                if isinstance(live_cfg, dict) and live_cfg.pop("user_replaced_output", None):
+                    node["config"] = live_cfg
+                    self._store.save_graph(graph)
                 if chat_model_billing_block():
                     live_cfg = node.setdefault("config", {})
                     if isinstance(live_cfg, dict):
                         demote_config_to_handler(live_cfg)
-                uses_agent = node_uses_agent_runtime(node)
+                # User uploads are immutable source assets. Even if an older saved
+                # graph incorrectly says delegate=agent, never regenerate them.
+                uses_agent = (
+                    node_uses_agent_runtime(node)
+                    and not is_user_reference_node(node)
+                )
                 emit_activity(
                     ACTIVITY_KIND_THINKING,
                     f"starting {node.get('label') or node_id}",

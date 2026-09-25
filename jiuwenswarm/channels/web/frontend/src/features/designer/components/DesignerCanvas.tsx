@@ -35,7 +35,9 @@ import {
   offsetCanvasPosition,
 } from '../designerCanvasNodes';
 import { useDesignerAssetLibraryStore } from '../designerAssetLibraryStore';
+import { localPathToFileUri, uploadDesignerAsset } from '../designerAssetUrl';
 import { useDesignerUiStore } from '../designerUiStore';
+import { DESIGNER_FIT_VIEW_PADDING } from '../designerFitView';
 
 type DesignerCanvasProps = {
   graph: DesignerExecutionGraph;
@@ -170,7 +172,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
     if (fittedGraphIdRef.current !== graph.graph_id) {
       fittedGraphIdRef.current = graph.graph_id;
       requestAnimationFrame(() => {
-        void fitView({ padding: 0.2, duration: 200 });
+        void fitView({ padding: DESIGNER_FIT_VIEW_PADDING, duration: 200 });
       });
     }
   }, [graph.graph_id, reactFlowGraph, selectedNodeId, setNodes, setEdges, fitView]);
@@ -260,13 +262,41 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         screenToFlowPosition({ x: event.clientX, y: event.clientY }),
         graphRef.current.nodes.length,
       );
-      addDomainNode(
-        buildNodeFromLibraryAsset({
-          asset,
-          existing: graphRef.current.nodes,
-          position,
-        }),
-      );
+      void (async () => {
+        try {
+          const blob = await fetch(asset.objectUrl).then((response) => response.blob());
+          const file = new File([blob], asset.filename, { type: asset.mime_type || blob.type });
+          const stored = await uploadDesignerAsset(file);
+          const uri = localPathToFileUri(stored.path);
+          const node = buildNodeFromLibraryAsset({
+            asset,
+            existing: graphRef.current.nodes,
+            position,
+          });
+          node.output_ref = {
+            kind: node.type,
+            uri,
+            mime_type: stored.mime_type || asset.mime_type,
+            label: stored.filename || asset.filename,
+          };
+          node.config = {
+            ...(node.config ?? {}),
+            user_replaced_output: true,
+            upload: {
+              ...(node.config?.upload ?? {}),
+              filename: stored.filename || asset.filename,
+              uri,
+              mime_type: stored.mime_type || asset.mime_type,
+            },
+          } as typeof node.config;
+          addDomainNode(node);
+          await useDesignerStore.getState().flushSave();
+        } catch (error) {
+          useDesignerRunStore.setState({
+            runError: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })();
     },
     [addDomainNode, canvasLocked, getAsset, screenToFlowPosition],
   );
@@ -295,6 +325,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         deleteKeyCode={canvasLocked ? null : ['Backspace', 'Delete']}
         elementsSelectable={!canvasLocked}
         fitView
+        fitViewOptions={{ padding: DESIGNER_FIT_VIEW_PADDING }}
         minZoom={0.2}
         maxZoom={1.5}
         proOptions={{ hideAttribution: true }}

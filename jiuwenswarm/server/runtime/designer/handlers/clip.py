@@ -192,16 +192,19 @@ def collect_clip_reference_images(
     *,
     reference_mode: bool = True,
 ) -> list[Path]:
-    """Wan reference_images: on-screen solos (character1…) then scene card.
+    """Wan reference_images: on-screen solos, then user stills, then the scene card.
 
-    Reference mode (default for clip-as-shot): never use an empty scene as I2V
-    ``img_url`` / first_frame. Order matches Wan R2V labeling — solos first as
-    character1…; scene card last as environment ref (prompt must say so).
+    Reference mode never turns those files into an I2V first frame. Order matches
+    Wan R2V labeling: solos are character1…, extra user stills follow, and the
+    scene card stays last as the environment.
     """
     from jiuwenswarm.server.runtime.designer.handlers.common import (
         node_ids_output_image_paths,
         role_output_image_paths,
+        uploaded_material_image_paths,
     )
+
+    attached = uploaded_material_image_paths(node if isinstance(node, dict) else None)
 
     paths: list[Path] = []
     seen: set[str] = set()
@@ -283,6 +286,9 @@ def collect_clip_reference_images(
     elif not on_screen:
         for path in role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN)[:4]:
             add(path)
+
+    for path in attached:
+        add(path)
 
     scene = collect_clip_scene_image(ctx, shot_index, node=node)
     # Empty scene plate is the last environment reference for every clip.
@@ -931,8 +937,13 @@ class ClipNodeHandler:
                 p.resolve() != (scene_img.resolve() if scene_img is not None else p)
                 for p in ref_files
             )
-            # Prefer R2V when solos + scene plate are available; otherwise I2V from keyframe.
-            if scene_img is not None and has_solo:
+            from jiuwenswarm.server.runtime.designer.handlers.common import (
+                uploaded_material_image_paths,
+            )
+
+            # User stills stay in the R2V reference list. Do not promote one of
+            # them to an I2V first frame.
+            if (scene_img is not None and has_solo) or uploaded_material_image_paths(node):
                 ref_mode = True
             else:
                 first_frame = collect_clip_first_frame(ctx, shot_index, node=node)

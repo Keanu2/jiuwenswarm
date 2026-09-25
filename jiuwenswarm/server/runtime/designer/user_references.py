@@ -231,6 +231,14 @@ def user_reference_node_ids(graph: dict[str, Any] | None) -> list[str]:
     return [nid for nid in out if nid]
 
 
+def is_user_reference_node(node: dict[str, Any] | None) -> bool:
+    """True for immutable canvas nodes backed by a user upload."""
+    if not isinstance(node, dict):
+        return False
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    return bool(str(cfg.get("user_reference_id") or "").strip())
+
+
 def user_reference_node_file(node: dict[str, Any] | None) -> Path | None:
     """Resolve the uploaded file behind a reference node."""
     cfg = (node or {}).get("config") if isinstance(node, dict) else None
@@ -317,6 +325,8 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
                     "delegate": "handler",
                     "force_handler": True,
                     "skip_llm": True,
+                    "read_only": True,
+                    "immutable_source": True,
                     "supervisor_task": (
                         "User-attached reference. Keep the original file as the "
                         "visual/audio authority; never regenerate or restyle it."

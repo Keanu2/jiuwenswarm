@@ -85,7 +85,11 @@ function NodeOutputFrame({
   const activity = useDesignerRunStore((state) => {
     const nodeState = state.nodeStates[nodeId];
     if (!nodeState) return null;
-    return { activity: nodeState.activity, activity_tail: nodeState.activity_tail };
+    return {
+      activity: nodeState.activity,
+      activity_tail: nodeState.activity_tail,
+      activity_log: nodeState.activity_log,
+    };
   });
   return (
     <span className="designer-node__output-frame">

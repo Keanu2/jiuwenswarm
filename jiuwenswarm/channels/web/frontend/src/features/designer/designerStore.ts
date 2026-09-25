@@ -591,18 +591,26 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
         ...(listed.graphs || []).map((item) => item.graph_id),
       ]);
 
+    // 列表只用来找 graph_id，图本体后面单独 get。列表失败不该让画布整体打不开。
+    const listGraphIds = async (scopedProjectId?: string): Promise<string[]> => {
+      try {
+        return collectListedIds(await designerGraphClient.list(scopedProjectId));
+      } catch (error) {
+        console.warn('designer.graph.list failed, falling back to remembered graph', error);
+        return [];
+      }
+    };
+
     try {
-      let listed = await designerGraphClient.list(effectiveProjectId || undefined);
+      let listedIds = await listGraphIds(effectiveProjectId || undefined);
       if (gen !== loadSeq || get().bootstrapInProgress) {
         return;
       }
-      let listedIds = collectListedIds(listed);
       if (effectiveProjectId && listedIds.length === 0) {
-        listed = await designerGraphClient.list();
+        listedIds = await listGraphIds();
         if (gen !== loadSeq || get().bootstrapInProgress) {
           return;
         }
-        listedIds = collectListedIds(listed);
       }
       const targetId = resolveDesignerGraphToLoad({
         currentId: get().graphId,

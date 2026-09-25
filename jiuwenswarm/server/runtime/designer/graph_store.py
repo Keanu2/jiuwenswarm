@@ -24,6 +24,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     normalize_execution_graph,
     normalize_execution_run,
     preserve_expanded_shot_nodes,
+    preserve_nodes_added_since,
     preserve_node_output_refs,
     utc_now_ms,
 )
@@ -88,6 +89,7 @@ class DesignerGraphStore:
                 try:
                     existing = normalize_execution_graph(_read_json(path))
                     normalized = preserve_expanded_shot_nodes(normalized, existing)
+                    normalized = preserve_nodes_added_since(normalized, existing)
                     normalized = preserve_node_output_refs(normalized, existing)
                 except (DesignerGraphValidationError, ValueError, json.JSONDecodeError, OSError):
                     pass
