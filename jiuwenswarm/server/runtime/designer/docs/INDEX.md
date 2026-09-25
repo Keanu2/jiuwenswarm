@@ -2,15 +2,13 @@
 
 Continuity mode: **`scene_card_plus_clip_shots`** (no per-shot keyframes).  
 Empty scene plates + on-screen character solos + R2V clips.  
-Defaults: **IMAGE_GEN** = MiniMax `image-01`; **VIDEO_GEN** = `MiniMax-H3-Max`.
-See [model setup](./MODELS.md) for credentials and existing-instance updates.
+Images = **IMAGE_GEN** (Qwen); clips = **VIDEO_GEN** (Wan / Seedance / MiniMax).
 
 **Continuity authority:** storyboard per-shot `start_state` → action/camera/speech → `end_state`.  
 No prior-clip Wan prose; same-setting clips run **concurrently** once storyboard + needed solos + scene are ready.
 
 | Doc | Covers |
 |-----|--------|
-| [MODELS.md](./MODELS.md) | Default models, credentials, migration and verification |
 | [BRIEF.md](./BRIEF.md) | `n_brief` — creative brief + Production Lock Bible |
 | [STORYBOARD.md](./STORYBOARD.md) | `n_storyboard` — timed windows + start/end state |
 | [CHARACTER.md](./CHARACTER.md) | `n_character_*` — solo identity sheets |

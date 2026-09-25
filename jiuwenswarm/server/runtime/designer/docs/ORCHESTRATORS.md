@@ -122,7 +122,7 @@ UI Play
 
 - Scene plates required; no `n_frame_*`  
 - Continuity = storyboard start/end + occupancy  
-- Default images: MiniMax `image-01`; video: `MiniMax-H3-Max` ([model setup](./MODELS.md))
+- Images: Qwen; video: Wan/Seedance/MiniMax per `VIDEO_GEN_*`  
 - 480p clips; no compose until real media  
 - Domain-agnostic gates — no scene-specific hardcodes  
 

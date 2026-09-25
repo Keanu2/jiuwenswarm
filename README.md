@@ -108,7 +108,7 @@ The video API body is a concise narrative rewritten by
 
 ## Local run
 
-1. Configure chat + image + video using the [model setup guide](./jiuwenswarm/server/runtime/designer/docs/MODELS.md). Defaults: DeepSeek `deepseek-flash`, MiniMax `image-01` and `MiniMax-H3-Max`.
+1. Configure `~/.jiuwenswarm/config/.env` (chat + image + video; e.g. Wan / MiniMax).
 2. `jiuwenswarm-start all` (conda env `new` recommended).
 3. Open http://127.0.0.1:5173/ → Designer → prompt → **Play**.
 4. Media under `~/.jiuwenswarm/agent/workspace/`.

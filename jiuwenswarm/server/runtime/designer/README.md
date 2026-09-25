@@ -116,17 +116,11 @@ designer.graph.bootstrap
 
 ## Config / models
 
-Loaded from `~/.jiuwenswarm/config/.env` and `config.yaml` (never commit credentials).
-See the [model setup guide](./docs/MODELS.md) for initialization and existing-instance updates.
+Loaded from `~/.jiuwenswarm/config/.env` (never commit):
 
-| Role | Current default | Credential source |
-| --- | --- | --- |
-| Chat / planning | `deepseek-flash` (overridden by `DESIGN_DEEPSEEK_NAME`) | `DESIGN_DEEPSEEK_KEY` |
-| Image generation | `image-01` | `DESIGN_MINIMAX_KEY` |
-| Video generation | `MiniMax-H3-Max` | `DESIGN_MINIMAX_KEY` |
-
-MiniMax model names are maintained directly in `config.yaml`. Other supported
-providers remain selectable through Settings.
+- Chat: DeepSeek / etc. (`API_KEY`, `API_BASE`)
+- Image: Qwen / image-01 / … (`IMAGE_GEN_*`)
+- Video: `VIDEO_GEN_*` (Wan, Seedance, or MiniMax)
 
 Clips default **480p**. Image path uses `generate_designer_image` (not the harness
 `call_image_model` LocalFunction path). Assets panel unions media + text tiles from

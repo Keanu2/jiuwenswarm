@@ -323,7 +323,7 @@ jiuwenswarm/agents/harness/common/tools/{image_tools,video_tools,multimodal_conf
 ### Config
 
 1. Conda/venv with project deps (do **not** commit `.venv` / `Lib/` / `pyvenv.cfg`).
-2. Configure `~/.jiuwenswarm/config/.env` and `config.yaml` using the [model setup guide](./jiuwenswarm/server/runtime/designer/docs/MODELS.md): DeepSeek chat, MiniMax `image-01` images and `MiniMax-H3-Max` video. Existing instances need their model settings updated explicitly.
+2. `~/.jiuwenswarm/config/.env` with chat + image + video keys as required by Settings.
 3. `ffmpeg` on PATH (or `imageio-ffmpeg`) for compose / audio beds.
 
 ### UI path

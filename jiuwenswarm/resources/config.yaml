@@ -302,7 +302,7 @@ models:
         #   client_provider=Anthropic 时此字段被忽略。
         #   若用 ${MODEL_PROVIDER}=DeepSeek/SiliconFlow/DashScope/OpenRouter 等旧别名，
         #   core 内部会归一，但方言更稳妥的做法是这里显式填 endpoint_profile。
-        endpoint_profile: ${ENDPOINT_PROFILE:-deepseek}
+        endpoint_profile: ${ENDPOINT_PROFILE:-openai}
         # HTTP 请求超时（秒）。需严格 > stream_first_chunk_timeout，确保先触发应用层流超时（可被 ModelAnomalyDetectionRail 重试）
         timeout: 360
         # 流式：等待首个分片的最大时间（秒）。放宽以兼容 reasoning/思考模型思考期的静默
