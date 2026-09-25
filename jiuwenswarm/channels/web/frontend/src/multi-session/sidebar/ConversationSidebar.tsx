@@ -90,6 +90,8 @@ interface ConversationSidebarProps {
   onNew: (options?: NewConversationOptions) => void;
   onSelect: (session: Session) => void;
   onSelectDesignProject?: (project: ProjectInfo) => void;
+  /** 项目软删除成功后回调；上层可按 workMode 决定是否需要路由回退等 */
+  onProjectRemoved?: (projectId: string, workMode: WorkMode) => void;
   /** 跳转到"定时任务"主面板；该入口原来在最左侧图标栏，现移到工作小窗口的"新建任务"下方 */
   onOpenCron: () => void;
   /** 当前是否正停留在定时任务面板，用于给下面这个入口按钮加选中态 */
@@ -277,6 +279,47 @@ function ConversationListItem({
       </button>
       {itemTooltip}
       {truncationTooltip}
+    </div>
+  );
+}
+
+function DesignProjectRow({
+  project,
+  active,
+  onSelect,
+  onRemoved,
+}: {
+  project: ProjectInfo;
+  active: boolean;
+  onSelect: () => void;
+  onRemoved: (projectId: string) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  return (
+    <div
+      className={`conversation-sidebar__design-project-row${active ? ' is-active' : ''}${menuOpen ? ' is-menu-open' : ''}`}
+      data-testid="design-sidebar-project"
+      data-variant={project.project_id}
+    >
+      <button
+        type="button"
+        className="conversation-sidebar__design-project"
+        onClick={onSelect}
+        title={project.name}
+        data-testid="design-sidebar-project-main"
+      >
+        <Palette size={16} aria-hidden />
+        <span className="conversation-sidebar__design-project-title">{project.name}</span>
+        {project.pinned ? <PinIcon className="conversation-sidebar__design-project-pin" aria-hidden /> : null}
+      </button>
+      <SidebarMenu
+        type="project"
+        project={project}
+        onRemoved={onRemoved}
+        onOpenChange={setMenuOpen}
+        triggerTestId="design-sidebar-project-more"
+      />
     </div>
   );
 }
@@ -635,6 +678,7 @@ export function ConversationSidebar({
   onSelect,
   onOpenCron,
   onSelectDesignProject,
+  onProjectRemoved,
   isCronActive,
   collapsed = false,
   floating = false,
@@ -886,6 +930,21 @@ export function ConversationSidebar({
       const errorKey = projectCreateErrorKey(error);
       setPathDialogError(errorKey ? t(errorKey) : error instanceof Error ? error.message : String(error));
     }
+  }
+
+  function renderDesignProject(project: ProjectInfo) {
+    return (
+      <DesignProjectRow
+        key={project.project_id}
+        project={project}
+        active={project.project_id === selectedProject?.project_id}
+        onSelect={() => {
+          setSelectedProject(project);
+          onSelectDesignProject?.(project);
+        }}
+        onRemoved={(projectId) => onProjectRemoved?.(projectId, workMode)}
+      />
+    );
   }
 
 function renderSession(session: Session, options: { nested?: boolean; projectMenu?: boolean } = {}) {
@@ -1157,30 +1216,28 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
               </button>
             </div>
             <div className="conversation-sidebar__body" data-testid="design-sidebar-projects">
+              {pinnedProjects.length > 0 ? (
+                <div className="conversation-sidebar__group conversation-sidebar__group--pinned" data-testid="design-sidebar-pinned-group">
+                  <div className="conversation-sidebar__section-heading">
+                    <span className="conversation-sidebar__label">{t('multiSession.project.pinned')}</span>
+                  </div>
+                  <div className="conversation-sidebar__group-list">
+                    {pinnedProjects.map((project) => renderDesignProject(project))}
+                  </div>
+                </div>
+              ) : null}
               <div className="conversation-sidebar__group">
                 <div className="conversation-sidebar__section-heading">
                   <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
                 </div>
                 <div className="conversation-sidebar__group-list">
-                  {projects.length === 0 ? (
-                    <div className="conversation-sidebar__empty">{t('multiSession.project.noProjects')}</div>
-                  ) : projects.map((project) => (
-                    <button
-                      key={project.project_id}
-                      type="button"
-                      className={`conversation-sidebar__design-project${project.project_id === selectedProject?.project_id ? ' is-active' : ''}`}
-                      onClick={() => {
-                        setSelectedProject(project);
-                        onSelectDesignProject?.(project);
-                      }}
-                      data-testid="design-sidebar-project"
-                      data-variant={project.project_id}
-                      title={project.name}
-                    >
-                      <Palette size={16} aria-hidden />
-                      <span>{project.name}</span>
-                    </button>
-                  ))}
+                  {regularProjects.length === 0 ? (
+                    pinnedProjects.length === 0 ? (
+                      <div className="conversation-sidebar__empty">{t('multiSession.project.noProjects')}</div>
+                    ) : null
+                  ) : (
+                    regularProjects.map((project) => renderDesignProject(project))
+                  )}
                 </div>
               </div>
             </div>

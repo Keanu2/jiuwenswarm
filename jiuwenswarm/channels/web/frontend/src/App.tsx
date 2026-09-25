@@ -3435,6 +3435,18 @@ function AppContent({
     navigate({ kind: 'design-project', projectId: project.project_id });
   }, [navigate, setSelectedProject]);
 
+  const handleProjectRemoved = useCallback((projectId: string, removedWorkMode: WorkMode) => {
+    // 目前Design功能页是唯一需要处理项目软删除的场景
+    // 打开项目的URL是 `/design/<id>`，但是回到上层是`/chat/new`
+    if (
+      removedWorkMode === 'design'
+      && route.kind === 'design-project'
+      && route.projectId === projectId
+    ) {
+      navigate({ kind: 'chat-new' });
+    }
+  }, [navigate, route]);
+
   const handleDesignWorkspaceCreated = useCallback((projectId: string, createdSessionId: string) => {
     sessionIdRef.current = createdSessionId;
     setSessionId(createdSessionId);
@@ -3692,6 +3704,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onSelectDesignProject={handleSelectDesignProject}
+                onProjectRemoved={handleProjectRemoved}
                 onOpenCron={() => handleNavigate('cron')}
                 isCronActive={false}
                 collapsed={conversationSidebarCollapsed}
