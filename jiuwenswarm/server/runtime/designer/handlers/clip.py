@@ -185,6 +185,204 @@ def collect_clip_scene_image(
     return collect_clip_first_frame(ctx, shot_index, node=node)
 
 
+def incoming_data_sources(
+    ctx: NodeExecutionContext | None,
+    node: DesignerGraphNode | None,
+) -> list[str] | None:
+    """Source ids of incoming data edges, in edge order.
+
+    None when this node has no incoming data edges.
+    """
+    if ctx is None or not isinstance(node, dict) or not isinstance(ctx.graph, dict):
+        return None
+    from jiuwenswarm.common.schema.designer_graph import EDGE_KIND_DATA, edge_kind
+
+    node_id = str(node.get("id") or getattr(ctx, "node_id", "") or "")
+    sources: list[str] = []
+    wired = False
+    for edge in ctx.graph.get("edges") or []:
+        if not isinstance(edge, dict) or edge_kind(edge) != EDGE_KIND_DATA:
+            continue
+        if str(edge.get("target") or "") != node_id:
+            continue
+        wired = True
+        source_id = str(edge.get("source") or "").strip()
+        if source_id and source_id not in sources:
+            sources.append(source_id)
+    if not wired:
+        return None
+    return sources
+
+
+def _edge_source_nodes(
+    ctx: NodeExecutionContext,
+    sources: list[str],
+) -> list[tuple[str, str, str]]:
+    by_id = {
+        str(other.get("id") or ""): other
+        for other in (ctx.graph.get("nodes") or [])
+        if isinstance(other, dict)
+    }
+    rows: list[tuple[str, str, str]] = []
+    for source_id in sources:
+        other = by_id.get(source_id)
+        if not isinstance(other, dict):
+            continue
+        role = node_pipeline(other)
+        label = str(other.get("label") or source_id).strip() or source_id
+        rows.append((source_id, role, label))
+    return rows
+
+
+def edge_image_flow(
+    ctx: NodeExecutionContext | None,
+    node: DesignerGraphNode | None,
+) -> list[tuple[str, str, Path]] | None:
+    """Image outputs that arrive on this node's incoming data edges.
+
+    Returns None when the node has no incoming data edges, so legacy clips that
+    only declare cast and scene in config keep that recipe. Otherwise every
+    connected image output is an input, in edge order. Role is only a label for
+    later ordering; it does not decide whether the value flows.
+    """
+    sources = incoming_data_sources(ctx, node)
+    if sources is None or ctx is None:
+        return None
+    flowed: list[tuple[str, str, Path]] = []
+    for source_id, role, label in _edge_source_nodes(ctx, sources):
+        for path in node_output_image_paths(ctx, source_id):
+            flowed.append((role, label, path))
+    return flowed
+
+
+def edge_text_inputs(
+    ctx: NodeExecutionContext | None,
+    node: DesignerGraphNode | None,
+) -> list[tuple[str, str]]:
+    """Text bodies that arrive on incoming data edges, in edge order."""
+    sources = incoming_data_sources(ctx, node)
+    if not sources or ctx is None:
+        return []
+    from jiuwenswarm.server.runtime.designer.handlers.common import node_output_text
+
+    texts: list[tuple[str, str]] = []
+    for source_id, _role, label in _edge_source_nodes(ctx, sources):
+        body = node_output_text(ctx, source_id).strip()
+        if body:
+            texts.append((label, body[:4000]))
+    return texts
+
+
+def edge_video_inputs(
+    ctx: NodeExecutionContext | None,
+    node: DesignerGraphNode | None,
+) -> list[tuple[str, Path]]:
+    """Video files that arrive on incoming data edges, in edge order."""
+    sources = incoming_data_sources(ctx, node)
+    if not sources or ctx is None:
+        return []
+    from jiuwenswarm.server.runtime.designer.handlers.common import node_output_video_paths
+
+    videos: list[tuple[str, Path]] = []
+    for source_id, _role, label in _edge_source_nodes(ctx, sources):
+        for path in node_output_video_paths(ctx, source_id):
+            videos.append((label, path))
+    return videos
+
+
+def first_connected_video_file(videos: list[tuple[str, Path]]) -> str | None:
+    """Path of the first video that arrived on a data edge.
+
+    The video call accepts a single reference file. Later connected videos stay
+    in the prompt text instead of being attached as extra files.
+    """
+    if not videos:
+        return None
+    _label, path = videos[0]
+    return str(path)
+
+
+def connected_payload_clause(
+    texts: list[tuple[str, str]],
+    videos: list[tuple[str, Path]],
+) -> str:
+    """Name connected text and video inputs so the prompt sees them."""
+    parts: list[str] = []
+    if texts:
+        blocks = [f"{label}:\n{body}" for label, body in texts]
+        parts.append("Connected text inputs:\n" + "\n\n".join(blocks))
+    if videos:
+        named = "; ".join(f"{label} ({path.name})" for label, path in videos)
+        parts.append(
+            "Connected video inputs, in edge order: "
+            f"{named}. Use them as motion references for this shot."
+        )
+    return "\n\n".join(parts)
+
+
+def _flow_role_bucket(role: str) -> str:
+    if role in {NODE_ROLE_CHARACTER_DESIGN, "character"}:
+        return "character"
+    if role == NODE_ROLE_SCENE:
+        return "scene"
+    return "other"
+
+
+def ordered_flow_paths(
+    flow: list[tuple[str, str, Path]],
+    attached: list[Path],
+) -> list[Path]:
+    """Wan order over values that already flowed in: cast, local uploads, other edges, scene last."""
+    characters: list[Path] = []
+    others: list[Path] = []
+    scenes: list[Path] = []
+    for role, _label, path in flow:
+        bucket = _flow_role_bucket(role)
+        if bucket == "character":
+            characters.append(path)
+        elif bucket == "scene":
+            scenes.append(path)
+        else:
+            others.append(path)
+    return [*characters, *attached, *others, *scenes]
+
+
+def connected_clip_extra_images(
+    ctx: NodeExecutionContext | None,
+    node: DesignerGraphNode | None,
+) -> list[tuple[str, Path]]:
+    """Non-cast, non-scene images that arrived on incoming edges."""
+    flow = edge_image_flow(ctx, node)
+    if not flow:
+        return []
+    return [
+        (label, path)
+        for role, label, path in flow
+        if _flow_role_bucket(role) == "other"
+    ]
+
+
+def attach_order_clause(
+    paths: list[Path],
+    flow: list[tuple[str, str, Path]] | None,
+) -> str:
+    """Name each attached file from the edge that delivered it."""
+    if not paths or not flow:
+        return ""
+    labels: dict[str, str] = {}
+    for _role, label, path in flow:
+        labels.setdefault(str(path.resolve()), label)
+    bits = []
+    for index, path in enumerate(paths, start=1):
+        label = labels.get(str(path.resolve()), path.name)
+        bits.append(f"Image {index} = {label} ({path.name})")
+    return (
+        "Connected inputs follow the canvas edges, in this attach order: "
+        + "; ".join(bits)
+        + ". These Image numbers are the inputs. Use them instead of any earlier Image numbers."
+    )
+
+
 def collect_clip_reference_images(
     ctx: NodeExecutionContext | None,
     shot_index: int = 1,
@@ -195,8 +393,8 @@ def collect_clip_reference_images(
     """Wan reference_images: on-screen solos, then user stills, then the scene card.
 
     Reference mode never turns those files into an I2V first frame. Order matches
-    Wan R2V labeling: solos are character1…, extra user stills follow, and the
-    scene card stays last as the environment.
+    Wan R2V labeling: solos are character1…, uploads and user-wired image nodes
+    follow, and the scene card stays last as the environment.
     """
     from jiuwenswarm.server.runtime.designer.handlers.common import (
         node_ids_output_image_paths,
@@ -280,6 +478,13 @@ def collect_clip_reference_images(
             for nid in preferred
             if cid_by_nid.get(nid) not in offscreen
         ]
+    flow = edge_image_flow(ctx, node if isinstance(node, dict) else None)
+    if flow is not None:
+        for path in ordered_flow_paths(flow, attached):
+            add(path)
+        _ = reference_mode
+        return cap_r2v_reference_paths(paths)
+
     if solo_nids:
         for path in node_ids_output_image_paths(ctx, solo_nids):
             add(path)
@@ -592,6 +797,13 @@ def build_clip_prompt(
             binding = build_wan_reference_binding(cfg=cfg, graph=graph if isinstance(graph, dict) else {})
             if binding:
                 parts.append(binding)
+            extras = connected_clip_extra_images(ctx, node if isinstance(node, dict) else None)
+            if extras:
+                named = "; ".join(f'"{label}" ({path.name})' for label, path in extras)
+                parts.append(
+                    "USER IMAGES wired to this clip sit after the character sheets and before the scene plate: "
+                    f"{named}. Put each subject's appearance from those images into this shot. Do not omit them."
+                )
         except Exception:  # noqa: BLE001
             pass
     try:
@@ -820,6 +1032,10 @@ def build_clip_prompt(
             supervisor_approve_video_prompt,
         )
 
+        extra_labels = [
+            f"{label} ({path.name})"
+            for label, path in connected_clip_extra_images(ctx, node if isinstance(node, dict) else None)
+        ]
         approved, _notes = supervisor_approve_video_prompt(
             action or "",
             cfg=cfg,
@@ -827,6 +1043,7 @@ def build_clip_prompt(
             shot_index=shot_index,
             action=action,
             camera=camera,
+            extra_image_labels=extra_labels,
         )
         return approved
     return "\n\n".join(part.strip() for part in parts if part.strip())[:6000]
@@ -971,6 +1188,12 @@ class ClipNodeHandler:
         _, shot = _shot_for_node(ctx.graph, node, ctx)
         duration = parse_shot_duration_seconds((shot or {}).get("timeline") or "", default=5)
         prompt = build_clip_prompt(ctx.graph, node, ctx)
+        payload = connected_payload_clause(
+            edge_text_inputs(ctx, node),
+            edge_video_inputs(ctx, node),
+        )
+        if payload and payload not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{payload}".strip()
         from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
             apply_regenerate_packet,
         )
@@ -1025,11 +1248,16 @@ class ClipNodeHandler:
             user_reference_video_path,
         )
 
+        wired_video = first_connected_video_file(edge_video_inputs(ctx, node))
         user_video = user_reference_video_path(ctx.graph)
         reference_file = (
-            str(user_video.resolve())
-            if user_video is not None and user_video.is_file()
-            else None
+            wired_video
+            if wired_video
+            else (
+                str(user_video.resolve())
+                if user_video is not None and user_video.is_file()
+                else None
+            )
         )
         from jiuwenswarm.server.runtime.designer.audio_locks import resolve_video_audio_request
 

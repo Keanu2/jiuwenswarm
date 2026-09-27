@@ -17,7 +17,7 @@ type DesignerNodeSuccessorControlProps = {
 export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorControlProps) {
   const { t } = useTranslation();
   const domainGraph = useDesignerStore((state) => state.domainGraph);
-  const addConnectedNode = useDesignerStore((state) => state.addConnectedNode);
+  const addNode = useDesignerStore((state) => state.addNode);
   const canvasTool = useDesignerUiStore((state) => state.canvasTool);
   const successorMenuNodeId = useDesignerUiStore((state) => state.successorMenuNodeId);
   const toggleSuccessorMenu = useDesignerUiStore((state) => state.toggleSuccessorMenu);
@@ -42,10 +42,10 @@ export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorCo
         existing: domainGraph.nodes,
         position: positionRightOfNode(source, domainGraph.nodes),
       });
-      addConnectedNode(nodeId, node);
+      addNode(node);
       closeDock();
     },
-    [addConnectedNode, closeDock, domainGraph, nodeId],
+    [addNode, closeDock, domainGraph, nodeId],
   );
 
   if (canvasTool === 'hand') return null;

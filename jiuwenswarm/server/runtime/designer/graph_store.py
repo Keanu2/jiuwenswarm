@@ -78,6 +78,25 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data
 
 
+def reload_graph_inplace(graph: dict[str, Any] | None) -> bool:
+    """Replace ``graph`` with the copy last saved from the canvas.
+
+    Node agents keep the dict they were started with. Canvas edits land in the
+    store file, so tools re-read that file into the same dict before they run.
+    """
+    if not isinstance(graph, dict):
+        return False
+    graph_id = str(graph.get("graph_id") or "").strip()
+    if not graph_id:
+        return False
+    fresh = DesignerGraphStore().get_graph(graph_id)
+    if not isinstance(fresh, dict):
+        return False
+    graph.clear()
+    graph.update(fresh)
+    return True
+
+
 class DesignerGraphStore:
     """File-backed store for Designer graphs and execution runs."""
 

@@ -590,6 +590,59 @@ export function withPredecessorInput(
   };
 }
 
+export type UserCanvasEdit = {
+  op: 'add' | 'remove' | 'connect' | 'disconnect' | 'replace';
+  node_id: string;
+  peer_id?: string;
+  label?: string;
+  role?: string;
+  type?: string;
+  at: number;
+};
+
+export function appendUserCanvasEdit(
+  metadata: Record<string, unknown> | undefined,
+  edit: Omit<UserCanvasEdit, 'at'> & { at?: number },
+): Record<string, unknown> {
+  const previous = Array.isArray(metadata?.user_canvas_edits)
+    ? metadata.user_canvas_edits.filter((item) => item && typeof item === 'object')
+    : [];
+  const next: UserCanvasEdit = {
+    op: edit.op,
+    node_id: edit.node_id,
+    ...(edit.peer_id ? { peer_id: edit.peer_id } : {}),
+    ...(edit.label ? { label: edit.label } : {}),
+    ...(edit.role ? { role: edit.role } : {}),
+    ...(edit.type ? { type: edit.type } : {}),
+    at: edit.at ?? Date.now(),
+  };
+  return {
+    ...(metadata ?? {}),
+    user_topology_edit: true,
+    user_canvas_edits: [...previous, next].slice(-40),
+  };
+}
+
+const CANVAS_EDIT_OPS = new Set<UserCanvasEdit['op']>([
+  'add',
+  'remove',
+  'connect',
+  'disconnect',
+  'replace',
+]);
+
+/** Latest canvas edit op. The visible sentence lives in designer.canvasEdit i18n. */
+export function canvasEditGlance(edits: unknown): string {
+  const list = Array.isArray(edits) ? edits : [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const item = list[index];
+    if (!item || typeof item !== 'object') continue;
+    const op = String((item as Partial<UserCanvasEdit>).op || '') as UserCanvasEdit['op'];
+    if (CANVAS_EDIT_OPS.has(op)) return op;
+  }
+  return '';
+}
+
 export function connectNodeToGraph(
   graph: { nodes: DesignerGraphNode[]; edges: DesignerGraphEdge[] },
   sourceId: string,

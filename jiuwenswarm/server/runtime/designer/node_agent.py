@@ -602,6 +602,11 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "upstream_node_ids": preds,
         "suggested_next_node_ids": [item for item in suggested if isinstance(item, str)],
         "upstream_outputs": _upstream_outputs(ctx, preds),
+        "user_canvas_edits": list(
+            (graph.get("metadata") or {}).get("user_canvas_edits") or []
+        )[-20:]
+        if isinstance(graph.get("metadata"), dict)
+        else [],
         "setting_id": locks["setting_id"],
         "keyframe_strategy": locks["keyframe_strategy"],
         "occupancy": locks["occupancy"],
@@ -651,7 +656,10 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "(action/camera/speech). Continue from structured continuity "
         "(already_done / pose_holds / seat_anchors / forbidden_speech / end_state) — "
         "do not restage finished onsets/exits/dialogue unless THIS row asks. "
-        "Keep character consistency (same faces/costumes) on every clip call.\n\n"
+        "Keep character consistency (same faces/costumes) on every clip call.\n"
+        "CANVAS: user_canvas_edits is what the user just did on the canvas, oldest first. "
+        "Treat it as fact. New edges are inputs. Disconnected nodes are not inputs. "
+        "A replace means use that node's new output file. Do not restore removed nodes or edges.\n\n"
         f"{prior_section}"
         f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n```"
     )
@@ -837,7 +845,13 @@ class DesignerGraphToolkit:
             return f"call_model error: {result.get('error') or 'unknown'}"
         return str(result.get("text") or "")
 
+    def refresh_canvas(self) -> None:
+        from jiuwenswarm.server.runtime.designer.graph_store import reload_graph_inplace
+
+        reload_graph_inplace(self.ctx.graph)
+
     async def read_upstream(self) -> str:
+        self.refresh_canvas()
         node = _node_from_ctx(self.ctx)
         preds = data_predecessors(self.ctx.graph).get(str(node.get("id") or ""), [])
         return json.dumps(_upstream_outputs(self.ctx, preds), ensure_ascii=False)
@@ -857,6 +871,7 @@ class DesignerGraphToolkit:
             generate_designer_image,
         )
 
+        self.refresh_canvas()
         node = _node_from_ctx(self.ctx)
         text = str(prompt or "").strip() or str(
             (node.get("config") or {}).get("prompt") or graph_prompt(self.ctx.graph, node) or ""
@@ -978,7 +993,13 @@ class DesignerGraphToolkit:
             build_clip_prompt,
             clip_wants_reference_mode,
             collect_clip_first_frame,
+            attach_order_clause,
             collect_clip_reference_images,
+            connected_payload_clause,
+            edge_image_flow,
+            edge_text_inputs,
+            edge_video_inputs,
+            first_connected_video_file,
             generate_clip_video,
             parse_shot_duration_seconds,
         )
@@ -991,6 +1012,7 @@ class DesignerGraphToolkit:
             stamp_scene_last_frame_chain,
         )
 
+        self.refresh_canvas()
         node = _node_from_ctx(self.ctx)
         graph = self.ctx.graph if isinstance(self.ctx.graph, dict) else {}
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
@@ -1096,6 +1118,14 @@ class DesignerGraphToolkit:
                 or graph_prompt(self.ctx.graph, node)
                 or ""
             )
+        clause = attach_order_clause(ref_paths, edge_image_flow(self.ctx, node))
+        payload = connected_payload_clause(
+            edge_text_inputs(self.ctx, node),
+            edge_video_inputs(self.ctx, node),
+        )
+        extra = "\n\n".join(part for part in (clause, payload) if part)
+        if extra and extra not in text:
+            text = f"{text.rstrip()}\n\n{extra}".strip()
         if not text:
             return "call_video_model error: prompt required"
         try:
@@ -1238,11 +1268,27 @@ class DesignerGraphToolkit:
             )
         )
         try:
+            wired_video = first_connected_video_file(edge_video_inputs(self.ctx, node))
+            from jiuwenswarm.server.runtime.designer.user_references import (
+                user_reference_video_path,
+            )
+
+            reference_file = (
+                wired_video
+                if wired_video
+                else (
+                    str(user_video.resolve())
+                    if (user_video := user_reference_video_path(graph)) is not None
+                    and user_video.is_file()
+                    else None
+                )
+            )
             result = await generate_clip_video(
                 prompt=text,
                 save_dir=str(self._media_save_dir()),
                 first_frame=legacy_ff,
                 reference_images=ref_files or None,
+                reference_file=reference_file,
                 duration=dur,
                 audio=True if want_audio else False,
                 model=None,
@@ -1896,10 +1942,12 @@ class NodeAgentHost:
 
         from jiuwenswarm.common.config import get_config, get_default_models
 
-        template = load_node_agent_template(node)
+        toolkit.refresh_canvas()
+        live = _node_from_ctx(ctx) or node
+        template = load_node_agent_template(live)
         persona = flatten_template_prompt(template) if template else ""
         system_prompt = persona or "你是设计画布上的节点 Agent。用工具完成任务并提交产物。"
-        query = build_node_user_query(node, ctx)
+        query = build_node_user_query(live, ctx)
         from jiuwenswarm.common.schema.designer_graph import ACTIVITY_KIND_THINKING
 
         _emit_ctx_activity(

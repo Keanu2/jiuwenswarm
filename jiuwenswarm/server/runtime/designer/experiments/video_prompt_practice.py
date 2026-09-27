@@ -838,6 +838,7 @@ def compose_practice_prompt(
     action: str = "",
     camera: str = "",
     model: str | None = None,
+    extra_image_labels: list[str] | None = None,
 ) -> str:
     """Story-form video prompt: only present cast; omit exited until they return."""
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -851,7 +852,8 @@ def compose_practice_prompt(
     ]
     names = [n for n in on_screen_names(cfg, graph) if n.casefold() not in gone_names]
     place = _place_name(cfg)
-    scene_index = max(1, len(tokens) + 1)
+    extra_labels = [str(item).strip() for item in (extra_image_labels or []) if str(item).strip()]
+    scene_index = max(1, len(tokens) + len(extra_labels) + 1)
     scene_word = _image_word(scene_index, family)
     sentences: list[str] = []
 
@@ -894,6 +896,12 @@ def compose_practice_prompt(
                 place=place,
                 visibility="full",
             )
+        )
+
+    for offset, label in enumerate(extra_labels, start=len(tokens) + 1):
+        word = _image_word(offset, family)
+        sentences.append(
+            f"{word} is the connected still {label}, and that subject is visible in this shot."
         )
 
     for who in _partial_names(cfg, graph):
@@ -1118,6 +1126,7 @@ def manager_approve_video_prompt(
     model: str | None = None,
     action: str = "",
     camera: str = "",
+    extra_image_labels: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     """Keep a concise faithful story-form prompt; otherwise rewrite locks into narrative."""
     del shot_index
@@ -1137,6 +1146,8 @@ def manager_approve_video_prompt(
     raw = str(prompt or "").strip()
     if raw and len(raw) > 1600:
         reasons = [*reasons, "not_concise"]
+    if extra_image_labels:
+        reasons = [*reasons, "wired_user_images"]
     if raw and re.search(
         r"(?i)\b(?:costume lock|positioning lock|scene bible|style lock|forbid|already-?done)\b"
         r"|^\s*on screen\s*:",
@@ -1167,6 +1178,7 @@ def manager_approve_video_prompt(
         action=mined_action,
         camera=mined_camera,
         model=model,
+        extra_image_labels=extra_image_labels,
     )
     return composed, ["manager_rewrote", *reasons]
 
@@ -1180,6 +1192,7 @@ def supervisor_approve_video_prompt(
     model: str | None = None,
     action: str = "",
     camera: str = "",
+    extra_image_labels: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     """Supervisor gate: concise story-form that still enforces wardrobe/seat/visibility locks.
 
@@ -1205,16 +1218,27 @@ def supervisor_approve_video_prompt(
         model=model,
         action=beat,
         camera=cam,
+        extra_image_labels=extra_image_labels,
     )
     reasons = list(notes)
     if beat and not _covers_beat(approved, beat):
         approved = compose_practice_prompt(
-            cfg=cfg, graph=graph, action=beat, camera=cam, model=model
+            cfg=cfg,
+            graph=graph,
+            action=beat,
+            camera=cam,
+            model=model,
+            extra_image_labels=extra_image_labels,
         )
         reasons = ["supervisor_rewrote_for_storyboard", *reasons]
     elif beat and not _story_leads_prompt(approved, beat):
         approved = compose_practice_prompt(
-            cfg=cfg, graph=graph, action=beat, camera=cam, model=model
+            cfg=cfg,
+            graph=graph,
+            action=beat,
+            camera=cam,
+            model=model,
+            extra_image_labels=extra_image_labels,
         )
         reasons = ["supervisor_rewrote_story_first", *reasons]
     elif "manager_rewrote" not in notes and "kept_agent_prompt" in notes:

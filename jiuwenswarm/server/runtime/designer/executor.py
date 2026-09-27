@@ -2179,6 +2179,13 @@ class GraphExecutor:
                     emit_activity=emit_activity,
                     on_prompt_artifact=_on_prompt_artifact,
                 )
+                from jiuwenswarm.server.runtime.designer.graph_store import reload_graph_inplace
+
+                if reload_graph_inplace(ctx.graph):
+                    for fresh_node in ctx.graph.get("nodes") or []:
+                        if isinstance(fresh_node, dict) and str(fresh_node.get("id") or "") == node_id:
+                            node = fresh_node
+                            break
                 if uses_agent:
                     result = await self._host.execute(node, ctx)
                     handler_name = "NodeAgentHost"

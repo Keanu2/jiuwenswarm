@@ -80,6 +80,13 @@
       "stage": "执行中",
       "progress": "节点 Agent 进度"
     },
+    "canvasEdit": {
+      "add": "已新增节点",
+      "remove": "已删除节点",
+      "connect": "已新增连线",
+      "disconnect": "已移除连线",
+      "replace": "已替换输出"
+    },
     "chat": {
       "title": "设计助手",
       "emptyHint": "需要帮你设计些什么？",

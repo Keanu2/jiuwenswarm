@@ -1004,13 +1004,81 @@ def validate_plan_occupancy(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def note_user_canvas_edits(graph: DesignerExecutionGraph) -> list[str]:
+    """Record add/remove actions so Manager treats the user's canvas as fact."""
+    meta = dict(graph.get("metadata") or {})
+    raw = meta.get("user_canvas_edits")
+    edits = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    added = [item for item in edits if str(item.get("op") or "") == "add"]
+    removed = [item for item in edits if str(item.get("op") or "") == "remove"]
+    connected = [item for item in edits if str(item.get("op") or "") == "connect"]
+    disconnected = [item for item in edits if str(item.get("op") or "") == "disconnect"]
+    replaced = [item for item in edits if str(item.get("op") or "") == "replace"]
+    if not edits:
+        if "manager_canvas_awareness" in meta:
+            meta.pop("manager_canvas_awareness", None)
+            graph["metadata"] = meta
+        return []
+
+    def _brief(item: dict[str, Any]) -> dict[str, str]:
+        brief = {
+            "node_id": str(item.get("node_id") or ""),
+            "label": str(item.get("label") or ""),
+            "role": str(item.get("role") or ""),
+            "type": str(item.get("type") or ""),
+        }
+        peer = str(item.get("peer_id") or "").strip()
+        if peer:
+            brief["peer_id"] = peer
+        return brief
+
+    meta["manager_canvas_awareness"] = {
+        "added": [_brief(item) for item in added[-20:]],
+        "removed": [_brief(item) for item in removed[-20:]],
+        "connected": [_brief(item) for item in connected[-20:]],
+        "disconnected": [_brief(item) for item in disconnected[-20:]],
+        "replaced": [_brief(item) for item in replaced[-20:]],
+    }
+    graph["metadata"] = meta
+    notes: list[str] = []
+    if added:
+        notes.append(
+            "canvas_added:" + ",".join(str(item.get("node_id") or "") for item in added[-8:])
+        )
+    if removed:
+        notes.append(
+            "canvas_removed:" + ",".join(str(item.get("node_id") or "") for item in removed[-8:])
+        )
+    if connected:
+        notes.append(
+            "canvas_connected:"
+            + ",".join(
+                f"{item.get('node_id') or ''}>{item.get('peer_id') or ''}" for item in connected[-8:]
+            )
+        )
+    if disconnected:
+        notes.append(
+            "canvas_disconnected:"
+            + ",".join(
+                f"{item.get('node_id') or ''}>{item.get('peer_id') or ''}"
+                for item in disconnected[-8:]
+            )
+        )
+    if replaced:
+        notes.append(
+            "canvas_replaced:" + ",".join(str(item.get("node_id") or "") for item in replaced[-8:])
+        )
+    return notes
+
+
 class SupervisorAgent:
     """Assigns tasks / tools / models for every node agent (one-pass, no loop)."""
 
     def onboard_user_added_nodes(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
         """When the user adds canvas nodes: promote to LLM agents (if available),
-        decide tools, try to wire contribution into the final clip/compose path,
-        and let Manager lock-check media prompts. Never deletes user_added orphans.
+        decide tools, and let Manager lock-check media prompts.
+
+        Edges stay as the user drew them. Never deletes user_added orphans.
         """
         from jiuwenswarm.server.runtime.designer.model_tools import llm_available
         from jiuwenswarm.server.runtime.designer.smart_graph import (
@@ -1020,26 +1088,7 @@ class SupervisorAgent:
         use_agents = bool(llm_available())
         notes: list[str] = []
         onboarded: list[str] = []
-        ids = {
-            str(n.get("id") or "")
-            for n in (graph.get("nodes") or [])
-            if isinstance(n, dict) and n.get("id")
-        }
-        compose_id = next(
-            (i for i in ("n_compose", "n_final") if i in ids),
-            next(
-                (
-                    str(n.get("id") or "")
-                    for n in (graph.get("nodes") or [])
-                    if isinstance(n, dict) and _role_key(n) == "compose"
-                ),
-                "",
-            ),
-        )
-        edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
-        edge_pairs = {
-            (str(e.get("source") or ""), str(e.get("target") or "")) for e in edges
-        }
+        notes.extend(note_user_canvas_edits(graph))
 
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
@@ -1067,73 +1116,16 @@ class SupervisorAgent:
                         f"User-added {role or node.get('type') or 'node'} agent. "
                         f"Use tools {', '.join(tools)}. "
                         "Respect film-wide aspect_lock, style_lock, spatial_lock, and "
-                        "costume/identity locks. Contribute usable media toward the "
-                        "final compose/clip pipeline."
+                        "costume/identity locks. Use only the edges the user connected. "
+                        "Do not invent upstream or downstream links."
                     )[:800]
                 notes.append(f"agent:{nid}")
             else:
                 cfg["delegate"] = "handler"
                 notes.append(f"handler_no_llm:{nid}")
-
-            # Soft contribution wiring for media that can feed compose directly.
-            if compose_id and role in {
-                "clip",
-                "speech",
-                "music",
-                "audio",
-                "video",
-                "compose",
-            }:
-                key = (nid, compose_id)
-                if key not in edge_pairs and nid != compose_id:
-                    edges.append(
-                        {
-                            "id": f"e_{nid}_{compose_id}",
-                            "source": nid,
-                            "target": compose_id,
-                            "kind": "data",
-                        }
-                    )
-                    edge_pairs.add(key)
-                    notes.append(f"wire_compose:{nid}")
-            elif compose_id and role in {
-                "frame",
-                "keyframe",
-                "image",
-                "character",
-                "character_design",
-                "scene",
-            }:
-                # Prefer wire into an existing clip that lacks this upstream.
-                clip_targets = [
-                    str(n.get("id") or "")
-                    for n in (graph.get("nodes") or [])
-                    if isinstance(n, dict)
-                    and _role_key(n) in {"clip", "video"}
-                    and str(n.get("id") or "")
-                ]
-                wired = False
-                for clip_id in clip_targets:
-                    key = (nid, clip_id)
-                    if key not in edge_pairs:
-                        edges.append(
-                            {
-                                "id": f"e_{nid}_{clip_id}",
-                                "source": nid,
-                                "target": clip_id,
-                                "kind": "data",
-                            }
-                        )
-                        edge_pairs.add(key)
-                        notes.append(f"wire_clip:{nid}->{clip_id}")
-                        wired = True
-                        break
-                if not wired:
-                    notes.append(f"needs_edge:{nid}")
+            notes.append(f"unwired_until_user:{nid}")
 
             node["config"] = cfg
-
-        graph["edges"] = edges
 
         # Manager lock-gates every user-added media leaf.
         manager = ManagerAgent()
@@ -4277,6 +4269,9 @@ class ManagerAgent:
                 if not isinstance(node, dict):
                     continue
                 nid = str(node.get("id") or "")
+                cfg_node = node.get("config") if isinstance(node.get("config"), dict) else {}
+                if cfg_node.get("user_added"):
+                    continue
                 role = _role_key(node)
                 if role in {"clip", "speech", "music"} or nid.startswith("n_clip"):
                     key = (nid, "n_compose")

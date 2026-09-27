@@ -13,8 +13,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import svgr from 'vite-plugin-svgr';
 import { spawnSync } from 'child_process';
-import { createHash } from 'node:crypto';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import https from 'node:https';
 import path from 'path';
 import fs from 'fs';
@@ -446,6 +445,49 @@ function devWsTrafficLogger() {
             });
         },
     };
+}
+var DESIGNER_UPLOAD_MAX_BYTES = 32 * 1024 * 1024;
+function parseMultipartFiles(contentType, body) {
+    var boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/);
+    var boundary = ((boundaryMatch && (boundaryMatch[1] || boundaryMatch[2])) || '').trim();
+    if (!boundary)
+        return [];
+    var boundaryBuf = Buffer.from("--".concat(boundary));
+    var files = [];
+    var start = body.indexOf(boundaryBuf);
+    if (start < 0)
+        return [];
+    start += boundaryBuf.length;
+    while (start < body.length) {
+        if (body[start] === 45 && body[start + 1] === 45)
+            break;
+        if (body[start] === 13 && body[start + 1] === 10)
+            start += 2;
+        var nextBoundary = body.indexOf(boundaryBuf, start);
+        if (nextBoundary < 0)
+            break;
+        var part = body.subarray(start, nextBoundary);
+        start = nextBoundary + boundaryBuf.length;
+        var headerEnd = part.indexOf('\r\n\r\n');
+        if (headerEnd < 0)
+            continue;
+        var header = part.subarray(0, headerEnd).toString('utf-8');
+        var content = part.subarray(headerEnd + 4);
+        if (content.length >= 2 && content[content.length - 2] === 13 && content[content.length - 1] === 10) {
+            content = content.subarray(0, content.length - 2);
+        }
+        var nameMatch = header.match(/name="([^"]+)"/);
+        var filenameMatch = header.match(/filename="([^"]*)"/);
+        if (!nameMatch || nameMatch[1] !== 'file' || !filenameMatch)
+            continue;
+        var typeMatch = header.match(/Content-Type:\s*([^\r\n]+)/i);
+        files.push({
+            filename: filenameMatch[1] || 'upload.bin',
+            mimeType: (typeMatch && typeMatch[1] && typeMatch[1].trim()) || 'application/octet-stream',
+            data: Buffer.from(content),
+        });
+    }
+    return files;
 }
 /** 将文件读取接口挂到 Vite dev server，避免额外占用 3003 端口 */
 function devFileContentApi() {
@@ -978,6 +1020,56 @@ function devFileContentApi() {
                     if (body.length > 0)
                         proxyReq.write(body);
                     proxyReq.end();
+                });
+            });
+            server.middlewares.use('/file-api/upload', function (req, res) {
+                if (req.method !== 'POST') {
+                    res.statusCode = 405;
+                    res.setHeader('content-type', 'application/json; charset=utf-8');
+                    res.end(JSON.stringify({ error: 'method_not_allowed', files: [], errors: [{ error: 'method_not_allowed' }] }));
+                    return;
+                }
+                var contentType = req.headers['content-type'] || '';
+                var chunks = [];
+                req.on('data', function (chunk) { chunks.push(chunk); });
+                req.on('end', function () {
+                    try {
+                        var body = Buffer.concat(chunks);
+                        if (body.length > DESIGNER_UPLOAD_MAX_BYTES) {
+                            res.statusCode = 413;
+                            res.setHeader('content-type', 'application/json; charset=utf-8');
+                            res.end(JSON.stringify({ error: 'file_too_large', files: [], errors: [{ error: 'file_too_large' }] }));
+                            return;
+                        }
+                        var parts = contentType.includes('multipart/form-data') ? parseMultipartFiles(contentType, body) : [];
+                        if (parts.length === 0) {
+                            res.statusCode = 400;
+                            res.setHeader('content-type', 'application/json; charset=utf-8');
+                            res.end(JSON.stringify({ error: 'missing_file', files: [], errors: [{ error: 'missing_file' }] }));
+                            return;
+                        }
+                        var uploadDir = path.join(workspaceRootDir, 'uploads', 'designer');
+                        fs.mkdirSync(uploadDir, { recursive: true });
+                        var files = parts.map(function (part) {
+                            var safeName = path.basename(part.filename).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 120) || 'upload.bin';
+                            var storedPath = path.join(uploadDir, "".concat(randomUUID(), "_").concat(safeName));
+                            fs.writeFileSync(storedPath, part.data);
+                            return {
+                                path: storedPath,
+                                filename: path.basename(part.filename) || safeName,
+                                mime_type: part.mimeType,
+                                size: part.data.length,
+                            };
+                        });
+                        res.statusCode = 200;
+                        res.setHeader('content-type', 'application/json; charset=utf-8');
+                        res.end(JSON.stringify({ ok: true, files: files, errors: [] }));
+                    }
+                    catch (error) {
+                        res.statusCode = 500;
+                        res.setHeader('content-type', 'application/json; charset=utf-8');
+                        res.end(JSON.stringify({ error: error.message, files: [], errors: [{ error: error.message }] }));
+                    }
                 });
             });
             // 技能上传：接收 multipart 文件，保存到临时目录，返回文件路径

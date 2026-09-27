@@ -80,6 +80,13 @@
       "stage": "Working",
       "progress": "Node agent progress"
     },
+    "canvasEdit": {
+      "add": "Node added",
+      "remove": "Node removed",
+      "connect": "Edge added",
+      "disconnect": "Edge removed",
+      "replace": "Output replaced"
+    },
     "chat": {
       "title": "Design assistant",
       "emptyHint": "What can I create for you?",

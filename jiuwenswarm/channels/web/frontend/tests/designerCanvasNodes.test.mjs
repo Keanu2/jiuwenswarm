@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  canvasEditGlance,
   DESIGNER_ADD_TEMPLATES,
   DESIGNER_LAYOUT_ORIGIN_X,
   DESIGNER_LAYOUT_ORIGIN_Y,
@@ -10,6 +11,7 @@ import {
   autoLayoutDesignerNodes,
   buildManualDesignerNode,
   buildNodeFromLibraryAsset,
+  appendUserCanvasEdit,
   connectNodeToGraph,
   contentAspectFromNodeConfig,
   isDefaultLandscapeNodeSize,
@@ -96,6 +98,49 @@ test('positionRightOfNode stacks below an occupied successor slot', () => {
   ]);
   assert.equal(second.x, first.x);
   assert.equal(second.y, first.y + 160 + DESIGNER_SUCCESSOR_GAP_Y);
+});
+
+test('appendUserCanvasEdit keeps add and remove for the manager', () => {
+  const metadata = appendUserCanvasEdit(undefined, {
+    op: 'add',
+    node_id: 'n_image_2',
+    label: 'Image 2',
+    role: 'image',
+    type: 'image',
+    at: 1,
+  });
+  const next = appendUserCanvasEdit(metadata, {
+    op: 'remove',
+    node_id: 'n_clip_2',
+    label: 'Clip 2',
+    role: 'clip',
+    type: 'video',
+    at: 2,
+  });
+  assert.equal(next.user_topology_edit, true);
+  assert.equal(next.user_canvas_edits.length, 2);
+  assert.equal(next.user_canvas_edits[0].op, 'add');
+  assert.equal(next.user_canvas_edits[1].node_id, 'n_clip_2');
+  const wired = appendUserCanvasEdit(next, {
+    op: 'connect',
+    node_id: 'n_image_5',
+    peer_id: 'n_clip_2',
+    at: 3,
+  });
+  const swapped = appendUserCanvasEdit(wired, {
+    op: 'replace',
+    node_id: 'n_image_5',
+    label: 'officer.png',
+    at: 4,
+  });
+  assert.equal(swapped.user_canvas_edits[2].op, 'connect');
+  assert.equal(swapped.user_canvas_edits[2].peer_id, 'n_clip_2');
+  assert.equal(swapped.user_canvas_edits[3].op, 'replace');
+  assert.equal(swapped.user_canvas_edits[3].label, 'officer.png');
+  assert.equal(canvasEditGlance([{ op: 'add' }]), 'add');
+  assert.equal(canvasEditGlance([{ op: 'connect' }]), 'connect');
+  assert.equal(canvasEditGlance(swapped.user_canvas_edits.slice(2)), 'replace');
+  assert.equal(canvasEditGlance([]), '');
 });
 
 test('connectNodeToGraph adds a data edge and predecessor input', () => {

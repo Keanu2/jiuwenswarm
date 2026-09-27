@@ -48,6 +48,10 @@ Canvas node type and config.role must be one of: text, table, image, video, audi
 Character/Scene/Keyframe/Clip/Film are pipelines, never node kinds.
 Do not rebuild the whole graph. Patch only what the user asked.
 Do not wire a new node into clip/compose unless the user asked to connect it.
+user_canvas_edits is the user's canvas log: add, remove, connect, disconnect, replace.
+Treat that log as fact. Do not recreate a removed node, restore a disconnected edge,
+or undo a replaced output. Do not connect an added node unless the user asked.
+connect and disconnect name node_id and peer_id. replace names the node whose output the user changed.
 
 Schema:
 {
@@ -329,8 +333,10 @@ async def _llm_leader_plan(
 
     if not llm_available():
         return None
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
     snapshot = {
         "selected_node_id": selected_node_id,
+        "user_canvas_edits": list(meta.get("user_canvas_edits") or [])[-20:],
         "nodes": [
             {
                 "id": node.get("id"),

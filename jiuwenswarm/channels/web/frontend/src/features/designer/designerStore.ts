@@ -11,6 +11,7 @@ import {
 } from './designerGraphLoad';
 import type { DesignerReactFlowGraph } from './designerGraphAdapter';
 import {
+  appendUserCanvasEdit,
   autoLayoutDesignerGraph,
   connectNodeToGraph,
   removeNodesFromGraph,
@@ -244,14 +245,27 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
       return { ...node, output_ref: outputRef };
     });
     if (!changed) return;
+    const node = graph.nodes.find((item) => item.id === nodeId);
+    const label = String(outputRef?.label || node?.label || '').trim();
     set({
       domainGraph: {
         ...graph,
         nodes,
         updated_at: Date.now(),
+        ...(outputRef
+          ? {
+              metadata: appendUserCanvasEdit(graph.metadata, {
+                op: 'replace',
+                node_id: nodeId,
+                label,
+                role: String(node?.config?.role || ''),
+                type: node?.type,
+              }),
+            }
+          : {}),
       },
     });
-    get().scheduleSave();
+    void get().flushSave();
   },
 
   clearAssetReferences: (assetId) => {
@@ -311,15 +325,23 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     if (!graph) return;
     const id = String(node.id || '').trim();
     if (!id || graph.nodes.some((item) => item.id === id)) return;
+    const role = String(node.config?.role || '');
     set({
       domainGraph: {
         ...graph,
         nodes: [...graph.nodes, node],
         updated_at: Date.now(),
+        metadata: appendUserCanvasEdit(graph.metadata, {
+          op: 'add',
+          node_id: id,
+          label: node.label,
+          role,
+          type: node.type,
+        }),
       },
       selectedNodeId: id,
     });
-    get().scheduleSave();
+    void get().flushSave();
   },
 
   addConnectedNode: (sourceId, node) => {
@@ -327,16 +349,30 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     if (!graph) return;
     const next = connectNodeToGraph(graph, sourceId, node);
     if (!next) return;
+    const id = String(node.id || '').trim();
+    let metadata = appendUserCanvasEdit(graph.metadata, {
+      op: 'add',
+      node_id: id,
+      label: node.label,
+      role: String(node.config?.role || ''),
+      type: node.type,
+    });
+    metadata = appendUserCanvasEdit(metadata, {
+      op: 'connect',
+      node_id: String(sourceId || '').trim(),
+      peer_id: id,
+    });
     set({
       domainGraph: {
         ...graph,
         nodes: next.nodes,
         edges: next.edges,
         updated_at: Date.now(),
+        metadata,
       },
       selectedNodeId: node.id,
     });
-    get().scheduleSave();
+    void get().flushSave();
   },
 
   addEdge: (connection) => {
@@ -365,25 +401,40 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
         ...graph,
         edges: [...graph.edges, nextEdge],
         updated_at: Date.now(),
+        metadata: appendUserCanvasEdit(graph.metadata, {
+          op: 'connect',
+          node_id: source,
+          peer_id: target,
+        }),
       },
     });
-    get().scheduleSave();
+    void get().flushSave();
   },
 
   removeEdges: (edgeIds) => {
     const graph = get().domainGraph;
     if (!graph || edgeIds.length === 0) return;
     const removeSet = new Set(edgeIds);
+    const dropped = graph.edges.filter((edge) => removeSet.has(edge.id));
     const edges = graph.edges.filter((edge) => !removeSet.has(edge.id));
     if (edges.length === graph.edges.length) return;
+    let metadata = graph.metadata;
+    for (const edge of dropped) {
+      metadata = appendUserCanvasEdit(metadata, {
+        op: 'disconnect',
+        node_id: edge.source,
+        peer_id: edge.target,
+      });
+    }
     set({
       domainGraph: {
         ...graph,
         edges,
         updated_at: Date.now(),
+        metadata,
       },
     });
-    get().scheduleSave();
+    void get().flushSave();
   },
 
   removeNodes: (nodeIds) => {
@@ -397,6 +448,17 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     rememberDeletedNodeIds(removed);
     const selectedNodeId = get().selectedNodeId;
     const removedShot = [...removed].some(isShotPipelineNodeId);
+    let metadata = graph.metadata;
+    for (const node of graph.nodes) {
+      if (!removed.has(node.id)) continue;
+      metadata = appendUserCanvasEdit(metadata, {
+        op: 'remove',
+        node_id: node.id,
+        label: node.label,
+        role: String(node.config?.role || ''),
+        type: node.type,
+      });
+    }
     set({
       domainGraph: {
         ...graph,
@@ -404,10 +466,8 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
         edges: next.edges,
         updated_at: Date.now(),
         metadata: {
-          ...(graph.metadata ?? {}),
-          ...(removedShot
-            ? { freeze_shot_topology: true, user_topology_edit: true }
-            : {}),
+          ...metadata,
+          ...(removedShot ? { freeze_shot_topology: true } : {}),
         },
       },
       selectedNodeId:
@@ -425,7 +485,7 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     if (removed.has(ui.chooserNodeId)) {
       ui.closeRevision();
     }
-    get().scheduleSave();
+    void get().flushSave();
   },
 
   persistReactFlowLayout: (reactFlow) => {

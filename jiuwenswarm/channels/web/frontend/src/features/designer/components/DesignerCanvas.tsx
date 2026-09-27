@@ -20,6 +20,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { DesignerExecutionGraph } from '../executionGraphTypes';
 import { resolvedNodeCanvasSize, toReactFlowGraph, type DesignerReactFlowEdge, type DesignerReactFlowNode } from '../designerGraphAdapter';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
@@ -32,6 +33,7 @@ import { selectLeaderPeek, useDesignerRunStore } from '../designerRunStore';
 import {
   DESIGNER_ASSET_DRAG_MIME,
   buildNodeFromLibraryAsset,
+  canvasEditGlance,
   offsetCanvasPosition,
 } from '../designerCanvasNodes';
 import { useDesignerAssetLibraryStore } from '../designerAssetLibraryStore';
@@ -82,13 +84,62 @@ function toDesignerEdges(edges: Edge[]): DesignerReactFlowEdge[] {
   }));
 }
 
+const CANVAS_GLANCE_HOLD_MS = 2200;
+const CANVAS_GLANCE_FADE_MS = 600;
+
+function useFreshCanvasGlance(): { text: string; fading: boolean } {
+  const graphId = useDesignerStore((state) => state.domainGraph?.graph_id ?? '');
+  const edits = useDesignerStore((state) => state.domainGraph?.metadata?.user_canvas_edits);
+  const baseline = useRef<{ graphId: string; count: number } | null>(null);
+  const list = Array.isArray(edits) ? edits : [];
+  if (!baseline.current || baseline.current.graphId !== graphId) {
+    baseline.current = { graphId, count: list.length };
+  }
+  const { t } = useTranslation();
+  const fresh = list.slice(baseline.current.count);
+  const op = canvasEditGlance(fresh);
+  const text = op ? t(`designer.canvasEdit.${op}`) : '';
+  const token = fresh.length > 0 ? `${graphId}:${fresh.length}:${text}` : '';
+  const [phase, setPhase] = useState<'show' | 'out' | 'gone'>('gone');
+  useEffect(() => {
+    if (!token || !text) {
+      setPhase('gone');
+      return undefined;
+    }
+    setPhase('show');
+    const hold = window.setTimeout(() => setPhase('out'), CANVAS_GLANCE_HOLD_MS);
+    const hide = window.setTimeout(
+      () => setPhase('gone'),
+      CANVAS_GLANCE_HOLD_MS + CANVAS_GLANCE_FADE_MS,
+    );
+    return () => {
+      window.clearTimeout(hold);
+      window.clearTimeout(hide);
+    };
+  }, [token, text]);
+  if (phase === 'gone') return { text: '', fading: false };
+  return { text, fading: phase === 'out' };
+}
+
 function DesignerLeaderStrip() {
   const peek = useDesignerRunStore((state) => selectLeaderPeek(state));
   const bootstrapInProgress = useDesignerStore((state) => state.bootstrapInProgress);
-  if (!peek && !bootstrapInProgress) return null;
+  const glance = useFreshCanvasGlance();
+  if (!glance.text && !peek && !bootstrapInProgress) return null;
   return (
-    <div className="designer-leader-strip" data-testid="designer-leader-strip">
+    <div
+      className={`designer-leader-strip${glance.fading && !peek ? ' is-fading' : ''}`}
+      data-testid="designer-leader-strip"
+    >
       <span className="designer-leader-strip__label">Leader</span>
+      {glance.text ? (
+        <strong
+          className={`designer-leader-strip__glance${glance.fading ? ' is-fading' : ''}`}
+          data-testid="designer-leader-canvas-glance"
+        >
+          {glance.text}
+        </strong>
+      ) : null}
       <DesignerActivityPeek
         state={peek}
         variant="leader"

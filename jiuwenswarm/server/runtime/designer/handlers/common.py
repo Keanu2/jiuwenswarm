@@ -313,6 +313,62 @@ def apply_uploaded_outputs_to_run(run: dict, graph: dict) -> bool:
     return changed
 
 
+_TEXT_SUFFIXES = {".md", ".txt", ".markdown", ".csv"}
+_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+
+
+def node_output_text(ctx: NodeExecutionContext, node_id: str) -> str:
+    """Text body of one node's output, when that output is a text file."""
+    if ctx is None or ctx.run is None or not node_id:
+        return ""
+    for ref in node_output_refs(ctx, node_id):
+        path = path_from_uri(str(ref.get("uri") or ""))
+        if path is None:
+            continue
+        kind = str(ref.get("kind") or "").lower()
+        mime = str(ref.get("mime_type") or "").lower()
+        text_like = (
+            kind in {"text", "markdown", "storyboard", "brief"}
+            or mime.startswith("text/")
+            or path.suffix.lower() in _TEXT_SUFFIXES
+        )
+        candidates = [path] if text_like or path.suffix.lower() in _TEXT_SUFFIXES else []
+        sidecar = path.with_suffix(".md")
+        if sidecar not in candidates and (text_like or kind in {"text", "markdown", "storyboard", "brief"}):
+            candidates.append(sidecar)
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                return candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+    return ""
+
+
+def node_output_video_paths(ctx: NodeExecutionContext, node_id: str) -> list[Path]:
+    """Video files produced by one node."""
+    if ctx is None or not node_id:
+        return []
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for ref in node_output_refs(ctx, node_id):
+        path = path_from_uri(str(ref.get("uri") or ""))
+        if path is None or not path.is_file():
+            continue
+        kind = str(ref.get("kind") or "").lower()
+        mime = str(ref.get("mime_type") or "").lower()
+        if kind != "video" and not mime.startswith("video/") and path.suffix.lower() not in _VIDEO_SUFFIXES:
+            continue
+        resolved = path.resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(resolved)
+    return paths
+
+
 def node_output_image_paths(ctx: NodeExecutionContext, node_id: str) -> list[Path]:
     replaced = user_replaced_output_image(ctx.graph if isinstance(ctx.graph, dict) else None, node_id)
     if replaced:

@@ -174,6 +174,7 @@ export async function chatDesignerGraph(params: {
     at: Date.now(),
   });
   try {
+    await useDesignerStore.getState().flushSave();
     const result = await designerGraphClient.chat({
       graphId: params.graphId,
       message: prompt,

@@ -108,7 +108,16 @@ def _image_size_from_ctx(ctx: NodeExecutionContext, node: DesignerGraphNode) -> 
 
 class ImageNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
+        from jiuwenswarm.server.runtime.designer.handlers.clip import (
+            connected_payload_clause,
+            edge_text_inputs,
+            edge_video_inputs,
+        )
+
         prompt = node_generate_prompt(node) or graph_prompt(ctx.graph, node)
+        payload = connected_payload_clause(edge_text_inputs(ctx, node), edge_video_inputs(ctx, node))
+        if payload:
+            prompt = f"{prompt.rstrip()}\n\n{payload}".strip()
         refs = _upstream_images(ctx, node)
         return await _image_or_notes(
             prompt=prompt,
@@ -128,13 +137,26 @@ class VideoNodeHandler:
         sources = video_concat_source_ids(ctx.graph, str(node.get("id") or ctx.node_id))
         if sources:
             return await ComposeNodeHandler().execute(node, ctx)
+        from jiuwenswarm.server.runtime.designer.handlers.clip import (
+            connected_payload_clause,
+            edge_text_inputs,
+            edge_video_inputs,
+            first_connected_video_file,
+        )
+
         prompt = node_generate_prompt(node) or graph_prompt(ctx.graph, node)
+        texts = edge_text_inputs(ctx, node)
+        videos = edge_video_inputs(ctx, node)
+        payload = connected_payload_clause(texts, videos)
+        if payload:
+            prompt = f"{prompt.rstrip()}\n\n{payload}".strip()
         refs = [str(path) for path in _upstream_images(ctx, node)]
         generated = await generate_clip_video(
             prompt,
             save_dir=str(graph_workspace_dir(ctx.graph)),
             reference_images=refs or None,
-            force_reference_mode=bool(refs),
+            reference_file=first_connected_video_file(videos),
+            force_reference_mode=bool(refs or videos),
         )
         path = Path(str(generated.get("video_path") or ""))
         if not path.is_file():
