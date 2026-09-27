@@ -85,13 +85,13 @@ def test_stamp_handoff_uses_continuity_note_not_full_prior_paste():
 
 
 def test_audio_request_never_overrides_model(monkeypatch):
-    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "wan2.6-t2v")
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "custom-silent-video")
     monkeypatch.delenv("VIDEO_GEN_NATIVE_AUDIO", raising=False)
-    assert not video_model_supports_native_audio("wan2.6-t2v")
+    assert not video_model_supports_native_audio("custom-silent-video")
     want, override = resolve_video_audio_request(
         {"clip_embedded_audio": True, "include_speech": True, "speech_line": "hello"},
         {"prefer_clip_native_audio": True},
-        current_model="wan2.6-t2v",
+        current_model="custom-silent-video",
     )
     assert want is False
     assert override is None

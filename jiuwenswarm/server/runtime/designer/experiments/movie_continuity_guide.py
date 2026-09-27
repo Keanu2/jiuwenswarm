@@ -50,8 +50,8 @@ def build_movie_continuity_guide(
         "do not teleport a landmark to mid-room or invent chairs.\n"
         "8) ASPECT: one ratio for the whole film (see aspect_lock); never square-crop mid-film.\n"
         "9) REFERENCE BINDING: when images are attached, prompt MUST name Image 1, Image 2, … "
-        "matching attach order (identity sheets → environment, or first-frame = Image 1 for I2V).\n"
-        "10) CLIP RULE: I2V animates Image 1 (keyframe) only — motion/camera change, not redesign.\n"
+        "matching attach order (identity sheets → environment).\n"
+        "10) CLIP RULE: R2V animates from attached refs — motion/camera change, not redesign.\n"
         "11) LOCATION CHANGE: only when storyboard setting_id changes; then new compose from solos+scene, "
         "not a morph of the previous room.\n"
         "=== END GUIDE ==="
@@ -80,32 +80,3 @@ def continuity_guide_clause(
         cast_summary="; ".join(bits[:8]),
     )
     return guide[: max(200, int(max_chars))]
-
-
-def style_hold_for_i2v(style_lock: dict[str, Any] | None) -> str:
-    """Extra I2V-first-line hold derived only from style_lock language."""
-    style = style_lock if isinstance(style_lock, dict) else {}
-    look = str(style.get("look") or "").lower()
-    medium = str(style.get("medium") or "").lower()
-    if medium == "stylized_animation" or any(
-        k in look for k in ("cartoon", "pixar", "animat", "stylized", "toon", "anime", "cel")
-    ):
-        return (
-            "STYLE HOLD (line 1, non-negotiable): Image 1 is stylized animation / cartoon. "
-            "Output MUST remain the SAME animation medium as Image 1 "
-            "(3D feature or toon as in Image 1). "
-            "FORBIDDEN: switch to flat 2D cel if Image 1 is soft-3D, live-action photo, "
-            "painterly redesign, or a different character design language."
-        )
-    if medium == "photoreal_cinematic" or any(
-        k in look for k in ("photoreal", "cinematic", "live-action", "documentary")
-    ):
-        return (
-            "STYLE HOLD (line 1, non-negotiable): Image 1 is photoreal/cinematic. "
-            "Output MUST stay photoreal with the same grade and key direction. "
-            "FORBIDDEN: cartoon/anime restyle or painterly redesign."
-        )
-    return (
-        "STYLE HOLD (line 1, non-negotiable): match Image 1's exact art medium and grade; "
-        "do not restyle mid-clip."
-    )

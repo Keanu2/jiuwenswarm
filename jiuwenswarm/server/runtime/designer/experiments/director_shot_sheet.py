@@ -227,7 +227,7 @@ def format_clip_framing_clause(shot: dict[str, Any] | None, analysis: dict[str, 
         parts.append(
             f"OFF CAMERA this beat (exist in set, not framed): {', '.join(off_n)} — "
             "do not invent them into frame; do not erase them from continuity. "
-            "Name them only in text if useful; I2V cannot attach their solos as refs."
+            "Name them only in text if useful; R2V does not attach their solos as refs."
         )
     speech = str(shot.get("speech_line") or "").strip()
     if speech:

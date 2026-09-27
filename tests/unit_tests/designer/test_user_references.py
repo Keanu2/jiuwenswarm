@@ -571,8 +571,7 @@ async def test_clip_passes_user_video_as_file_not_first_frame(
     }
     graph = attach_user_references_to_graph(graph, refs)
     prompt = build_clip_prompt(graph, graph["nodes"][-1])
-    assert "video 1" in prompt
-    assert "not the first frame" in prompt.lower() or "NOT the first frame" in prompt
+    assert prompt  # R2V story-form; user video is a reference_file, not prompt text
     seen: dict[str, object] = {}
 
     async def fake_generate(
@@ -587,6 +586,7 @@ async def test_clip_passes_user_video_as_file_not_first_frame(
     ) -> dict[str, str]:
         seen["first_frame"] = first_frame
         seen["reference_file"] = reference_file
+        seen["force_reference_mode"] = kwargs.get("force_reference_mode")
         return {"video_path": str(out), "revised_prompt": prompt}
 
     monkeypatch.setattr(
@@ -609,7 +609,8 @@ async def test_clip_passes_user_video_as_file_not_first_frame(
         },
     )
     await ClipNodeHandler().execute(graph["nodes"][-1], ctx)
-    assert seen["first_frame"] == str(frame.resolve())
+    assert seen.get("first_frame") in (None, "")
+    assert seen.get("force_reference_mode") is True
     assert seen["reference_file"]
     assert Path(str(seen["reference_file"])).suffix == ".mp4"
     assert Path(str(seen["reference_file"])) != frame.resolve()

@@ -2510,7 +2510,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
         if isinstance(c, dict) and c.get("id")
     }
     # Refresh analysis shots if present. Do not expand a tight focus into a
-    # full-cast keyword match (floods I2V reference images → DashScope fails).
+    # full-cast keyword match (floods reference images → DashScope fails).
     for shot in analysis.get("shots") or []:
         if not isinstance(shot, dict):
             continue
@@ -5325,6 +5325,9 @@ class ManagerAgent:
                     logger.info("Dual rater %s failed", label, exc_info=True)
         if not raters:
             # Heuristic dual notes when LLM unavailable.
+            # TODO: remove this entire heuristic fallback path (temporary until dual-rater
+            # always has an LLM). graph_design wording below is stale (still mentions
+            # keyframes); do not invest in keeping it accurate.
             overall = float((manager_review or {}).get("scores", {}).get("overall") or 5)
             raters = [
                 {
@@ -5332,7 +5335,7 @@ class ManagerAgent:
                     "overall": overall,
                     "node_scores": {},
                     "feedback_nodes": {},
-                    "feedback_supervisor": "Prefer real I2V clips and prune non-contributing nodes.",
+                    "feedback_supervisor": "Prefer real video clips and prune non-contributing nodes.",
                     "feedback_manager": "Keep brief/storyboard fidelity gates strict.",
                     "graph_design": "Brief→storyboard→solo cast+scenes→keyframes→clips→compose.",
                     "model": "heuristic",

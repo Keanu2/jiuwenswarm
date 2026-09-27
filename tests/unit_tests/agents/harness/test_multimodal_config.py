@@ -91,7 +91,7 @@ def test_apply_video_gen_does_not_inherit_image_gen_credentials(
                     "model_client_config": {
                         "api_base": "",
                         "api_key": "",
-                        "model_name": "wan2.6-t2v",
+                        "model_name": "wan3.0-video",
                         "client_provider": "DashScope",
                     }
                 },
@@ -101,5 +101,5 @@ def test_apply_video_gen_does_not_inherit_image_gen_credentials(
 
     assert os.getenv("VIDEO_GEN_API_KEY") in (None, "")
     assert os.getenv("VIDEO_GEN_API_BASE") == "https://dashscope.aliyuncs.com/api/v1"
-    assert os.getenv("VIDEO_GEN_MODEL_NAME") == "wan2.6-t2v"
+    assert os.getenv("VIDEO_GEN_MODEL_NAME") == "wan3.0-video"
     assert os.getenv("IMAGE_GEN_API_KEY") == "sk-image-only"

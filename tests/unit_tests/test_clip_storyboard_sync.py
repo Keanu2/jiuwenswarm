@@ -74,7 +74,7 @@ def test_storyboard_row_wins_over_stale_shot_action(monkeypatch):
         fake_role_output_text,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.handlers.clip.collect_clip_first_frame",
+        "jiuwenswarm.server.runtime.designer.handlers.clip.collect_clip_scene_image",
         lambda *a, **k: None,
     )
     node = graph["nodes"][1]

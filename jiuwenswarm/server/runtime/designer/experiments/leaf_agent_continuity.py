@@ -193,7 +193,7 @@ def merge_supervisor_task(existing: str, planned: str) -> str:
         "STYLE LOCK",
         "environment plate",
         "solo sheet",
-        "I2V",
+        "R2V",
         "keyframe",
     )
     if any(m.lower() in old.lower() for m in markers):

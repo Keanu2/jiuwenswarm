@@ -3,7 +3,7 @@
 
 costume_lock must name garment slots (top/shirt, bottom/trousers, footwear, outerwear,
 accessories) with style + color — not a vague one-liner — and the same lock is injected
-into both still and I2V prompts.
+into both still and video prompts.
 """
 
 from __future__ import annotations

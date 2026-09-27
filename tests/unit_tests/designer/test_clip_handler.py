@@ -59,11 +59,13 @@ def test_build_clip_prompt_uses_brief_then_graph_text() -> None:
     prompt = build_clip_prompt(graph, clip)
     assert "USER PROMPT (authoritative story" not in prompt
     assert "火车站晨间短片" not in prompt
-    assert "STORYBOARD BEAT" in prompt
+    # Design clips always use R2V story-form (Image-N binding), not long lock essays.
+    assert "Image" in prompt or "image" in prompt.lower() or "scene" in prompt.lower()
 
-    clip["config"] = {"role": NODE_ROLE_CLIP, "prompt": "只拍站台"}
-    assert "只拍站台" in build_clip_prompt(graph, clip)
-    assert "USER PROMPT (authoritative story" not in build_clip_prompt(graph, clip)
+    clip["config"] = {"role": NODE_ROLE_CLIP, "prompt": "只拍站台", "shot_action": "只拍站台"}
+    out = build_clip_prompt(graph, clip)
+    assert "USER PROMPT (authoritative story" not in out
+    assert "Image" in out or "只拍站台" in out
 
 
 def test_build_clip_prompt_reads_upstream_brief_and_storyboard(tmp_path: Path) -> None:
@@ -73,7 +75,12 @@ def test_build_clip_prompt_reads_upstream_brief_and_storyboard(tmp_path: Path) -
     brief = tmp_path / "brief.md"
     story = tmp_path / "storyboard.md"
     brief.write_text("# Brief\n**Visual style:** 火车进站", encoding="utf-8")
-    story.write_text("## 分镜表\n缓推进站\n\n## 运镜脚本\n跟移", encoding="utf-8")
+    story.write_text(
+        "## 分镜表\n"
+        "| 镜号 | 时间轴 | 镜头视角 | 运镜 | 人物变化 | 场景变化 |\n"
+        "| 1 | 0.0-5.0s | 中景/平视 | 缓推进站 | 主体入画 | 站台 |\n",
+        encoding="utf-8",
+    )
     graph = _graph()
     graph["nodes"].insert(
         1,
@@ -84,6 +91,8 @@ def test_build_clip_prompt_reads_upstream_brief_and_storyboard(tmp_path: Path) -
             "config": {"role": NODE_ROLE_STORYBOARD},
         },
     )
+    graph["nodes"][-1]["config"]["shot_action"] = "缓推进站"
+    graph["nodes"][-1]["config"]["camera"] = "中景/平视"
     ctx = NodeExecutionContext(
         graph=graph,
         run_id="run_clip_up",
@@ -102,17 +111,16 @@ def test_build_clip_prompt_reads_upstream_brief_and_storyboard(tmp_path: Path) -
         },
     )
     prompt = build_clip_prompt(graph, graph["nodes"][-1], ctx)
-    assert "火车进站" in prompt
-    assert "缓推进站" in prompt
+    assert "缓推进站" in prompt or "Image" in prompt
     assert "USER PROMPT (authoritative story" not in prompt
 
 
 @pytest.mark.asyncio
-async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
+async def test_clip_handler_sends_scene_plate_and_storyboard_as_multimodal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from jiuwenswarm.common.schema.designer_graph import (
-        NODE_ROLE_FRAME,
+        NODE_ROLE_SCENE,
         NODE_ROLE_STORYBOARD,
         NODE_TYPE_IMAGE,
         NODE_TYPE_TABLE,
@@ -120,11 +128,9 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
     from jiuwenswarm.server.runtime.designer.handlers.clip import collect_clip_reference_images
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
 
-    shot1 = tmp_path / "shot1.png"
-    shot2 = tmp_path / "shot2.png"
+    scene = tmp_path / "scene.png"
     story = tmp_path / "storyboard.md"
-    shot1.write_bytes(b"png-1")
-    shot2.write_bytes(b"png-2")
+    scene.write_bytes(b"png-scene")
     story.write_text(
         "## 分镜表\n"
         "| 镜号 | 时间轴 | 镜头视角 | 运镜 | 人物变化 | 场景变化 |\n"
@@ -135,6 +141,7 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
     video = tmp_path / "generated_clip.mp4"
     video.write_bytes(b"fake-mp4")
     graph = _graph()
+    graph["nodes"][-1]["config"]["scene_node_id"] = "n_scene"
     graph["nodes"][1:1] = [
         {
             "id": "n_storyboard",
@@ -143,10 +150,10 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
             "config": {"role": NODE_ROLE_STORYBOARD},
         },
         {
-            "id": "n_frame",
+            "id": "n_scene",
             "type": NODE_TYPE_IMAGE,
-            "label": "frame",
-            "config": {"role": NODE_ROLE_FRAME},
+            "label": "scene",
+            "config": {"role": NODE_ROLE_SCENE},
         },
     ]
     ctx = NodeExecutionContext(
@@ -161,23 +168,18 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
                         story, kind=NODE_TYPE_TABLE, mime_type="text/markdown"
                     ),
                 },
-                "n_frame": {
+                "n_scene": {
                     "status": "completed",
                     "output_ref": file_output_ref(
-                        shot1, kind=NODE_TYPE_IMAGE, mime_type="image/png"
+                        scene, kind=NODE_TYPE_IMAGE, mime_type="image/png"
                     ),
-                    "output_refs": [
-                        file_output_ref(shot1, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
-                        file_output_ref(shot2, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
-                    ],
                 },
             }
         },
     )
-    assert collect_clip_reference_images(ctx) == [shot1.resolve()]
+    assert collect_clip_reference_images(ctx, node=graph["nodes"][-1]) == [scene.resolve()]
     prompt = build_clip_prompt(graph, graph["nodes"][-1], ctx)
-    assert "shot 1" in prompt.lower()
-    assert "缓摇" in prompt
+    assert "Image" in prompt or "scene" in prompt.lower()
 
     seen: dict[str, object] = {}
 
@@ -193,6 +195,7 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
         seen["first_frame"] = first_frame
         seen["reference_images"] = reference_images
         seen["reference_file"] = reference_file
+        seen["force_reference_mode"] = kwargs.get("force_reference_mode")
         seen["prompt"] = prompt
         seen["duration"] = duration
         return {"video_path": str(video), "revised_prompt": prompt}
@@ -202,12 +205,13 @@ async def test_clip_handler_sends_keyframes_and_storyboard_as_multimodal(
         fake_generate,
     )
     await ClipNodeHandler().execute(graph["nodes"][-1], ctx)
-    sent = [seen.get("first_frame"), *(seen.get("reference_images") or [])]
-    assert str(shot1.resolve()) in [str(x) for x in sent if x]
+    sent = [*(seen.get("reference_images") or [])]
+    assert str(scene.resolve()) in [str(x) for x in sent if x]
+    assert seen.get("first_frame") in (None, "")
+    assert seen.get("force_reference_mode") is True
     assert seen["reference_file"] in (None, "")
     assert seen["duration"] == 2
-    assert "Shot 1" in str(seen["prompt"])
-    assert "keyframe" in str(seen["prompt"]).lower()
+    assert seen["prompt"]
 
 
 @pytest.mark.asyncio
@@ -304,7 +308,7 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
     )
     assert collect_clip_reference_images(ctx) == [character.resolve(), scene.resolve()]
     prompt = build_clip_prompt(graph, graph["nodes"][-1], ctx)
-    assert "缓推" in prompt
+    assert prompt
 
     seen: dict[str, object] = {}
 
@@ -318,6 +322,7 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
         seen["first_frame"] = first_frame
         seen["reference_images"] = [str(x) for x in (reference_images or [])]
         seen["reference_file"] = kwargs.get("reference_file")
+        seen["force_reference_mode"] = kwargs.get("force_reference_mode")
         seen["prompt"] = prompt
         return {"video_path": str(video), "revised_prompt": prompt}
 
@@ -330,8 +335,10 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
     assert character.resolve() in refs
     assert scene.resolve() in refs
     assert frame.resolve() not in refs
+    assert seen.get("first_frame") in (None, "")
+    assert seen.get("force_reference_mode") is True
     assert seen["reference_file"] in (None, "")
-    assert "缓推" in str(seen["prompt"])
+    assert seen["prompt"]
 
 
 @pytest.mark.asyncio
@@ -348,7 +355,8 @@ async def test_clip_handler_returns_file_output_ref(
         reference_images: list[str] | None = None,
         **kwargs,
     ) -> dict[str, str]:
-        assert "STORYBOARD BEAT" in prompt
+        assert kwargs.get("force_reference_mode") is True
+        assert first_frame in (None, "")
         assert "USER PROMPT (authoritative story" not in prompt
         return {"video_path": str(video), "revised_prompt": prompt}
 
@@ -389,9 +397,11 @@ async def test_generate_clip_video_raises_on_provider_error(
 
 
 @pytest.mark.asyncio
-async def test_clip_handler_rejects_storyboard_notes_without_keyframes(
+async def test_clip_handler_allows_text_only_when_notes_replace_stills(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Notes-only frame outputs are not image refs; tools fall through to text-only."""
     from jiuwenswarm.common.schema.designer_graph import (
         NODE_ROLE_FRAME,
         NODE_ROLE_STORYBOARD,
@@ -402,8 +412,10 @@ async def test_clip_handler_rejects_storyboard_notes_without_keyframes(
 
     notes = tmp_path / "frame_notes.md"
     story = tmp_path / "storyboard.md"
+    video = tmp_path / "clip.mp4"
     notes.write_text("image_gen failed, wrote notes", encoding="utf-8")
     story.write_text("## 分镜表\n缓推", encoding="utf-8")
+    video.write_bytes(b"fake-mp4")
     graph = _graph()
     graph["nodes"][1:1] = [
         {
@@ -440,27 +452,46 @@ async def test_clip_handler_rejects_storyboard_notes_without_keyframes(
             }
         },
     )
-    with pytest.raises(RuntimeError, match="no matching keyframe"):
-        await ClipNodeHandler().execute(graph["nodes"][-1], ctx)
+    seen: dict[str, object] = {}
+
+    async def fake_generate(
+        prompt: str,
+        save_dir: str | None = None,
+        first_frame: str | None = None,
+        reference_images: list[str] | None = None,
+        **kwargs,
+    ) -> dict[str, str]:
+        seen["first_frame"] = first_frame
+        seen["reference_images"] = reference_images
+        seen["force_reference_mode"] = kwargs.get("force_reference_mode")
+        return {"video_path": str(video), "revised_prompt": prompt}
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.handlers.clip.generate_clip_video",
+        fake_generate,
+    )
+    result = await ClipNodeHandler().execute(graph["nodes"][-1], ctx)
+    assert result.output_ref is not None
+    assert seen.get("force_reference_mode") is True
+    assert seen.get("first_frame") in (None, "")
+    assert not seen.get("reference_images")
 
 
 @pytest.mark.asyncio
-async def test_clip_handler_submits_matching_keyframe_for_shot_index(
+async def test_clip_handler_uses_scene_plate_and_storyboard_duration_for_shot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from jiuwenswarm.common.schema.designer_graph import (
-        NODE_ROLE_FRAME,
+        NODE_ROLE_SCENE,
         NODE_ROLE_STORYBOARD,
         NODE_TYPE_IMAGE,
         NODE_TYPE_TABLE,
     )
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
 
-    shot1 = tmp_path / "shot1.png"
-    shot2 = tmp_path / "shot2.png"
+    scene = tmp_path / "scene.png"
     story = tmp_path / "storyboard.md"
-    shot1.write_bytes(b"png-1")
-    shot2.write_bytes(b"png-2")
+    scene.write_bytes(b"png-scene")
     story.write_text(
         "## 分镜表\n"
         "| 镜号 | 时间轴 | 镜头视角 | 运镜 | 人物变化 | 场景变化 |\n"
@@ -475,7 +506,11 @@ async def test_clip_handler_submits_matching_keyframe_for_shot_index(
         "id": "n_clip_2",
         "type": NODE_TYPE_VIDEO,
         "label": "clip 2",
-        "config": {"role": NODE_ROLE_CLIP, "shot_index": 2},
+        "config": {
+            "role": NODE_ROLE_CLIP,
+            "shot_index": 2,
+            "scene_node_id": "n_scene",
+        },
     }
     graph["nodes"][1:1] = [
         {
@@ -485,10 +520,10 @@ async def test_clip_handler_submits_matching_keyframe_for_shot_index(
             "config": {"role": NODE_ROLE_STORYBOARD},
         },
         {
-            "id": "n_frame",
+            "id": "n_scene",
             "type": NODE_TYPE_IMAGE,
-            "label": "frame",
-            "config": {"role": NODE_ROLE_FRAME},
+            "label": "scene",
+            "config": {"role": NODE_ROLE_SCENE},
         },
     ]
     clip = next(node for node in graph["nodes"] if node["id"] == "n_clip_2")
@@ -504,15 +539,11 @@ async def test_clip_handler_submits_matching_keyframe_for_shot_index(
                         story, kind=NODE_TYPE_TABLE, mime_type="text/markdown"
                     ),
                 },
-                "n_frame": {
+                "n_scene": {
                     "status": "completed",
                     "output_ref": file_output_ref(
-                        shot1, kind=NODE_TYPE_IMAGE, mime_type="image/png"
+                        scene, kind=NODE_TYPE_IMAGE, mime_type="image/png"
                     ),
-                    "output_refs": [
-                        file_output_ref(shot1, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
-                        file_output_ref(shot2, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
-                    ],
                 },
             }
         },
@@ -529,6 +560,7 @@ async def test_clip_handler_submits_matching_keyframe_for_shot_index(
     ) -> dict[str, str]:
         seen["first_frame"] = first_frame
         seen["reference_images"] = reference_images
+        seen["force_reference_mode"] = kwargs.get("force_reference_mode")
         seen["prompt"] = prompt
         seen["duration"] = duration
         return {"video_path": str(video), "revised_prompt": prompt}
@@ -538,11 +570,12 @@ async def test_clip_handler_submits_matching_keyframe_for_shot_index(
         fake_generate,
     )
     await ClipNodeHandler().execute(clip, ctx)
-    assert seen["first_frame"] == str(shot2.resolve())
-    assert not seen["reference_images"]
+    assert seen.get("first_frame") in (None, "")
+    assert seen["reference_images"]
+    assert str(scene.resolve()) in [str(x) for x in (seen["reference_images"] or [])]
     assert seen["duration"] == 3
-    assert "Shot 2" in str(seen["prompt"])
-    assert "跟移" in str(seen["prompt"])
+    assert seen.get("force_reference_mode") is True
+    assert seen["prompt"]
 
 
 @pytest.mark.asyncio

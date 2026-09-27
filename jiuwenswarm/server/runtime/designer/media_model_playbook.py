@@ -96,8 +96,8 @@ Use for solo character sheets and empty scene plates / stills.
 
 WAN3_VIDEO_PLAYBOOK = """
 ## Configured video model (call_video_model) — PRIMARY film path
-First clip of a setting: I2V / R2V from the empty scene plate + solos.
-Later same-setting clips: R2V on-screen solos + previous continuity in agent context.
+Every clip: R2V from the empty scene plate + on-screen solos.
+Same-setting later clips keep prior continuity in agent context (not last-frame pixels).
 Do not attach the peopled master as last environment (clones / people who left).
 Prompt formula: Character + Action + Lines + Scene.
   Name character1… in attach order; speech_line exact or silent.
@@ -145,8 +145,7 @@ Manager one-pass corrections (locks bind ALL agents — leaf rewrites cannot dro
 - BEFORE media calls: gate every frame/keyframe/clip prompt for aspect_lock, style_lock,
   spatial_lock, costume/identity, occupancy, and prior continuity; re-inject missing locks.
 - Stamp image_size from aspect_lock on stills and video_size/video_resolution=480P on clips.
-- Graph = brief→storyboard→solo cast→compose KF per setting→edit KFs→Wan I2V→compose.
-  NO empty multi scene-plate chain.
+- Graph = brief→storyboard→solo cast→empty scene plates→R2V clips→compose.
 - Prune only true orphans; every kept node must reach compose.
 """.strip()
 
@@ -458,26 +457,3 @@ def format_image_ref_bindings(bindings: list[dict[str, Any]] | None) -> str:
     if not lines:
         return ""
     return "[References]: " + " ".join(lines)
-
-
-def build_i2v_first_frame_ref_block(*, style_lock: dict[str, Any] | None = None) -> str:
-    """Wan/Qwen I2V with a single img_url — Image 1 MUST mean that first frame."""
-    style = style_lock_clause(style_lock)
-    hold = ""
-    try:
-        from jiuwenswarm.server.runtime.designer.experiments.movie_continuity_guide import (
-            style_hold_for_i2v,
-        )
-
-        hold = " " + style_hold_for_i2v(style_lock)
-    except Exception:  # noqa: BLE001
-        hold = " STYLE HOLD: match Image 1 art medium exactly; do not restyle."
-    return (
-        format_image_ref_bindings(
-            [{"index": 1, "role": "first_frame", "name": "shot keyframe"}]
-        )
-        + " There is only ONE attached image (Image 1). "
-        "Do not invent other reference slots."
-        + hold
-        + (style or "")
-    )

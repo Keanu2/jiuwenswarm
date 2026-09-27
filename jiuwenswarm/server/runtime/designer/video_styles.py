@@ -75,7 +75,7 @@ VIDEO_STYLES: dict[str, dict[str, Any]] = {
         "min_shots": 0,
         "summary": (
             "Standard storyboarded cinematic short: beat-driven shots, "
-            "continuity locks, I2V from each keyframe."
+            "continuity locks, R2V clips from on-screen solos + scene plates."
         ),
         "cues": (),
     },

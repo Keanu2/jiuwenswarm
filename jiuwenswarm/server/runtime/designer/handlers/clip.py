@@ -14,7 +14,6 @@ from typing import Any
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER_DESIGN,
-    NODE_ROLE_FRAME,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
     NODE_TYPE_VIDEO,
@@ -60,7 +59,7 @@ def still_image_to_mp4(
     duration: int = 5,
     dest: Path | None = None,
 ) -> Path:
-    """Local fallback: hold a still as a real mp4 when remote I2V returns no URL."""
+    """Local fallback: hold a still as a real mp4 when remote video returns no URL."""
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("ffmpeg unavailable for still→mp4 fallback")
@@ -111,12 +110,13 @@ def parse_shot_duration_seconds(timeline: str, default: int = 5) -> int:
     return duration_from_timeline(timeline, default=default)
 
 
-def collect_clip_first_frame(
+def collect_clip_scene_image(
     ctx: NodeExecutionContext | None,
     shot_index: int = 1,
     node: DesignerGraphNode | None = None,
 ) -> Path | None:
-    """Prefer the setting's scene card as Wan first-frame geography lock."""
+    """Resolve the setting's scene-card image (empty environment plate for R2V)."""
+    del shot_index  # scene plates are keyed by setting / scene_node_id, not shot index
     if ctx is None:
         return None
     cfg = (
@@ -133,7 +133,6 @@ def collect_clip_first_frame(
         paths = node_output_image_paths(ctx, scene_nid)
         if paths:
             return paths[0]
-    # Match by setting_id when present.
     setting_id = str(cfg.get("setting_id") or "").strip()
     scenes = [
         n
@@ -157,32 +156,7 @@ def collect_clip_first_frame(
         paths = node_output_image_paths(ctx, str(scenes[0].get("id") or ""))
         if paths:
             return paths[0]
-    # Legacy: per-shot keyframe if an old graph still has frames.
-    frames = [
-        n
-        for n in (ctx.graph.get("nodes") or [])
-        if node_pipeline(n) == NODE_ROLE_FRAME
-    ]
-    matched = next(
-        (n for n in frames if node_shot_index(n) == shot_index),
-        frames[0] if len(frames) == 1 else None,
-    )
-    if matched is not None:
-        paths = node_output_image_paths(ctx, str(matched.get("id") or ""))
-        if paths:
-            if shot_index >= 1 and len(paths) >= shot_index:
-                return paths[shot_index - 1]
-            return paths[0]
     return None
-
-
-def collect_clip_scene_image(
-    ctx: NodeExecutionContext | None,
-    shot_index: int = 1,
-    node: DesignerGraphNode | None = None,
-) -> Path | None:
-    """Resolve the setting's scene-card image (environment plate)."""
-    return collect_clip_first_frame(ctx, shot_index, node=node)
 
 
 def incoming_data_sources(
@@ -387,14 +361,13 @@ def collect_clip_reference_images(
     ctx: NodeExecutionContext | None,
     shot_index: int = 1,
     node: DesignerGraphNode | None = None,
-    *,
-    reference_mode: bool = True,
 ) -> list[Path]:
     """Wan reference_images: on-screen solos, then user stills, then the scene card.
 
-    Reference mode never turns those files into an I2V first frame. Order matches
-    Wan R2V labeling: solos are character1…, uploads and user-wired image nodes
-    follow, and the scene card stays last as the environment.
+    Design clips always attach these as R2V refs — never as a single first-frame
+    still. Order matches Wan R2V labeling: solos are character1…, uploads and
+    user-wired image nodes follow, and the scene card stays last as the
+    environment.
     """
     from jiuwenswarm.server.runtime.designer.handlers.common import (
         node_ids_output_image_paths,
@@ -482,7 +455,6 @@ def collect_clip_reference_images(
     if flow is not None:
         for path in ordered_flow_paths(flow, attached):
             add(path)
-        _ = reference_mode
         return cap_r2v_reference_paths(paths)
 
     if solo_nids:
@@ -498,27 +470,7 @@ def collect_clip_reference_images(
     scene = collect_clip_scene_image(ctx, shot_index, node=node)
     # Empty scene plate is the last environment reference for every clip.
     add(scene)
-    _ = reference_mode
     return cap_r2v_reference_paths(paths)
-
-
-def clip_wants_reference_mode(node: DesignerGraphNode | None, graph: dict | None = None) -> bool:
-    """True when clips should use Wan R2V (solos + empty scene, no first-frame still)."""
-    cfg = node.get("config") if isinstance(node, dict) and isinstance(node.get("config"), dict) else {}
-    graph = graph if isinstance(graph, dict) else {}
-    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-    if str(meta.get("scene_continuity_mode") or "") == "scene_card_plus_clip_shots":
-        return True
-    strategy = str(
-        cfg.get("keyframe_strategy")
-        or ((cfg.get("identity_refs") or {}) if isinstance(cfg.get("identity_refs"), dict) else {}).get(
-            "keyframe_strategy"
-        )
-        or ""
-    )
-    if strategy == "clip_from_scene_and_solos":
-        return True
-    return bool(str(cfg.get("scene_node_id") or "").strip())
 
 
 def _storyboard_narrative_action(shot: dict[str, Any] | None) -> str:
@@ -604,61 +556,34 @@ def _clip_prompt_lead(
     *,
     has_character: bool,
     has_scene: bool,
-    has_frame: bool,
     focus_names: str = "",
     continuity: bool = False,
-    reference_mode: bool = False,
     first_of_setting: bool = False,
 ) -> str:
     attached: list[str] = []
-    if reference_mode or first_of_setting or (has_scene and not has_frame):
-        if has_character:
-            attached.append("on-screen character solo sheets as character1, character2, …")
-        if has_scene:
-            attached.append("empty scene plate last, as the room")
-        extras = (
-            " Explicit visual inputs are attached, in order: " + ", ".join(attached) + "."
-            if attached
-            else ""
-        )
-        focus = f" Feature only: {focus_names}." if focus_names else ""
-        continue_bit = (
-            "CONTINUATION: same room, same faces, same wardrobe. This window's action continues the story. "
-            if continuity or not first_of_setting
-            else "Opening of this setting: place the on-screen people into the empty room. "
-        )
-        return (
-            f"Create shot {shot_index} as a {duration}-second video that plays THIS "
-            "storyboard beat only. "
-            f"{extras}{focus} "
-            f"{continue_bit}"
-            "character1/character2 are the solo sheets (face and wardrobe). "
-            "The last image is the empty scene plate. "
-            "Match the film STYLE LOCK. One instance per person. "
-            "No subtitles, no cutaways.\n\n"
-        )
     if has_character:
-        attached.append("character sheet for this shot's cast")
+        attached.append("on-screen character solo sheets as character1, character2, …")
     if has_scene:
-        attached.append("scene")
-    if continuity:
-        attached.append("previous shot keyframe for continuity")
-    if has_frame:
-        attached.append("this shot's keyframe as the first frame")
+        attached.append("empty scene plate last, as the room")
     extras = (
         " Explicit visual inputs are attached, in order: " + ", ".join(attached) + "."
         if attached
         else ""
     )
     focus = f" Feature only: {focus_names}." if focus_names else ""
+    continue_bit = (
+        "CONTINUATION: same room, same faces, same wardrobe. This window's action continues the story. "
+        if continuity or not first_of_setting
+        else "Opening of this setting: place the on-screen people into the empty room. "
+    )
     return (
         f"Create shot {shot_index} as a {duration}-second video that plays THIS "
-        "storyboard beat only — do not invent a different plot. "
+        "storyboard beat only. "
         f"{extras}{focus} "
-        "Animate ONLY the attached first-frame keyframe. "
-        "ONE instance per person — never clone/duplicate a face in two places at once. "
-        "Do not invent new people or a new crowd; keep the same extras layout as the keyframe. "
-        "Identity and place come from the attached refs; action/camera come from the storyboard beat. "
+        f"{continue_bit}"
+        "character1/character2 are the solo sheets (face and wardrobe). "
+        "The last image is the empty scene plate. "
+        "Match the film STYLE LOCK. One instance per person. "
         "No subtitles, no cutaways.\n\n"
     )
 
@@ -699,7 +624,6 @@ def build_clip_prompt(
     cfg_names = [str(x).strip() for x in (cfg.get("cast_names") or []) if str(x).strip()]
     if cfg_names:
         focus_names = ", ".join(cfg_names)
-    reference_mode = clip_wants_reference_mode(node, graph if isinstance(graph, dict) else {})
     first_of_setting = bool(cfg.get("first_of_setting"))
     try:
         from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
@@ -719,15 +643,6 @@ def build_clip_prompt(
     else:
         has_character = False
         has_scene = bool(str(cfg.get("scene_node_id") or "").strip())
-    # Legacy per-shot keyframe only when graphs still have n_frame_* (not scene-card R2V).
-    has_legacy_frame = False
-    if ctx is not None and not reference_mode:
-        frames = [
-            n
-            for n in (ctx.graph.get("nodes") or [])
-            if node_pipeline(n) == NODE_ROLE_FRAME
-        ]
-        has_legacy_frame = any(node_shot_index(n) == shot_index for n in frames)
     continuity = bool(
         str(cfg.get("continuity_clip_node_id") or cfg.get("continuity_frame_node_id") or "").strip()
     )
@@ -781,31 +696,28 @@ def build_clip_prompt(
             duration,
             has_character=has_character,
             has_scene=has_scene,
-            has_frame=has_legacy_frame,
             focus_names=focus_names,
             continuity=continuity,
-            reference_mode=reference_mode,
             first_of_setting=first_of_setting,
         )
     ]
-    if reference_mode or has_scene:
-        try:
-            from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
-                build_wan_reference_binding,
-            )
+    try:
+        from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
+            build_wan_reference_binding,
+        )
 
-            binding = build_wan_reference_binding(cfg=cfg, graph=graph if isinstance(graph, dict) else {})
-            if binding:
-                parts.append(binding)
-            extras = connected_clip_extra_images(ctx, node if isinstance(node, dict) else None)
-            if extras:
-                named = "; ".join(f'"{label}" ({path.name})' for label, path in extras)
-                parts.append(
-                    "USER IMAGES wired to this clip sit after the character sheets and before the scene plate: "
-                    f"{named}. Put each subject's appearance from those images into this shot. Do not omit them."
-                )
-        except Exception:  # noqa: BLE001
-            pass
+        binding = build_wan_reference_binding(cfg=cfg, graph=graph if isinstance(graph, dict) else {})
+        if binding:
+            parts.append(binding)
+        extras = connected_clip_extra_images(ctx, node if isinstance(node, dict) else None)
+        if extras:
+            named = "; ".join(f'"{label}" ({path.name})' for label, path in extras)
+            parts.append(
+                "USER IMAGES wired to this clip sit after the character sheets and before the scene plate: "
+                f"{named}. Put each subject's appearance from those images into this shot. Do not omit them."
+            )
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
             characters_from_graph,
@@ -908,16 +820,11 @@ def build_clip_prompt(
         parts.append(
             f"ON-SCREEN: {on_screen or 'see cast_actions'}; OFFSCREEN (do not draw): {offscreen or 'none'}."
         )
-    if char_nodes and (reference_mode or not has_legacy_frame):
+    if char_nodes:
         parts.append(
             f"Use character reference sheets from nodes: {', '.join(char_nodes)}. "
             "Match faces and wardrobe exactly. One instance per person — no clones. "
             "Place them into the scene-card geography for this beat."
-        )
-    elif has_legacy_frame:
-        parts.append(
-            "ANTI-CLONE: the keyframe already contains the cast — animate those bodies only; "
-            "do not spawn a second copy of anyone."
         )
     lock = cfg.get("continuity_lock") if isinstance(cfg.get("continuity_lock"), dict) else None
     if not lock and action:
@@ -1027,26 +934,24 @@ def build_clip_prompt(
     )
     if block and "LANGUAGE LOCK" not in "\n".join(parts) and "SPEECH LOCK" not in "\n".join(parts):
         parts.append(block)
-    if reference_mode:
-        from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
-            supervisor_approve_video_prompt,
-        )
+    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+        supervisor_approve_video_prompt,
+    )
 
-        extra_labels = [
-            f"{label} ({path.name})"
-            for label, path in connected_clip_extra_images(ctx, node if isinstance(node, dict) else None)
-        ]
-        approved, _notes = supervisor_approve_video_prompt(
-            action or "",
-            cfg=cfg,
-            graph=graph if isinstance(graph, dict) else {},
-            shot_index=shot_index,
-            action=action,
-            camera=camera,
-            extra_image_labels=extra_labels,
-        )
-        return approved
-    return "\n\n".join(part.strip() for part in parts if part.strip())[:6000]
+    extra_labels = [
+        f"{label} ({path.name})"
+        for label, path in connected_clip_extra_images(ctx, node if isinstance(node, dict) else None)
+    ]
+    approved, _notes = supervisor_approve_video_prompt(
+        action or "",
+        cfg=cfg,
+        graph=graph if isinstance(graph, dict) else {},
+        shot_index=shot_index,
+        action=action,
+        camera=camera,
+        extra_image_labels=extra_labels,
+    )
+    return approved
 
 
 async def generate_clip_video(
@@ -1119,7 +1024,7 @@ async def generate_clip_video(
 
 
 class ClipNodeHandler:
-    """Submit one Wan reference-mode (or legacy I2V) job per storyboard shot."""
+    """Submit one video job per storyboard shot."""
 
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         shot_index = node_shot_index(node)
@@ -1137,9 +1042,8 @@ class ClipNodeHandler:
         cfg = scrub_restated_speech(cfg)
         node["config"] = cfg
 
-        ref_mode = clip_wants_reference_mode(node, graph)
         refs = collect_clip_reference_images(
-            ctx, shot_index, node=node, reference_mode=ref_mode
+            ctx, shot_index, node=node
         )
         _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
         ref_files = [p for p in refs if p.is_file() and p.suffix.lower() in _IMG]
@@ -1147,44 +1051,6 @@ class ClipNodeHandler:
         if scene_chain:
             cfg = stamp_scene_last_frame_chain(cfg, scene_chain)
             node["config"] = cfg
-        first_frame: Path | None = None
-        if not ref_mode:
-            scene_img = collect_clip_scene_image(ctx, shot_index, node=node)
-            has_solo = any(
-                p.resolve() != (scene_img.resolve() if scene_img is not None else p)
-                for p in ref_files
-            )
-            from jiuwenswarm.server.runtime.designer.handlers.common import (
-                uploaded_material_image_paths,
-            )
-
-            # User stills stay in the R2V reference list. Do not promote one of
-            # them to an I2V first frame.
-            if (scene_img is not None and has_solo) or uploaded_material_image_paths(node):
-                ref_mode = True
-            else:
-                first_frame = collect_clip_first_frame(ctx, shot_index, node=node)
-                if first_frame is None:
-                    first_frame = next((p for p in ref_files), None)
-                if first_frame is not None:
-                    ff = first_frame.resolve()
-                    ref_files = [p for p in ref_files if p.resolve() != ff]
-        if not ref_files and first_frame is None:
-            frames = [
-                n
-                for n in (graph.get("nodes") or [])
-                if isinstance(n, dict) and node_pipeline(n) == NODE_ROLE_FRAME
-            ]
-            if frames and not ref_mode:
-                raise RuntimeError(
-                    f"Shot {shot_index} has no matching keyframe image. "
-                    "Regenerate the keyframe node first."
-                )
-            if ref_mode:
-                raise RuntimeError(
-                    f"Shot {shot_index} has no scene card or character stills. "
-                    "Regenerate Scene / cast sheets first."
-                )
         _, shot = _shot_for_node(ctx.graph, node, ctx)
         duration = parse_shot_duration_seconds((shot or {}).get("timeline") or "", default=5)
         prompt = build_clip_prompt(ctx.graph, node, ctx)
@@ -1215,8 +1081,6 @@ class ClipNodeHandler:
             cfg=cfg,
             graph=graph,
             shot_index=shot_index,
-            has_first_frame=first_frame is not None and not ref_mode,
-            reference_mode=ref_mode,
         )
         try:
             from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
@@ -1266,7 +1130,7 @@ class ClipNodeHandler:
         try:
             result = await generate_clip_video(
                 prompt,
-                first_frame=str(first_frame) if first_frame is not None else None,
+                first_frame=None,
                 reference_images=[str(p) for p in ref_files] or None,
                 reference_file=reference_file,
                 duration=duration,
@@ -1274,7 +1138,7 @@ class ClipNodeHandler:
                 resolution=video_res,
                 audio=True if want_audio else False,
                 model=None,
-                force_reference_mode=ref_mode,
+                force_reference_mode=True,
             )
             path = Path(str(result["video_path"]))
             message = f"clip {shot_index} generated" + (" (with audio)" if want_audio else "")
@@ -1345,8 +1209,6 @@ class ClipNodeHandler:
                 return bool(p and p.is_file() and p.suffix.lower() in _IMG)
 
             candidates = [*ref_files]
-            if first_frame is not None:
-                candidates.insert(0, first_frame)
             still = next((p for p in candidates if _is_image(p)), None)
             if still is None:
                 raise

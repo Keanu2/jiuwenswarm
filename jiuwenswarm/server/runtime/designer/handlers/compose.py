@@ -720,7 +720,7 @@ class ComposeNodeHandler:
             for n in (ctx.graph.get("nodes") or [])
             if node_pipeline(n) == NODE_ROLE_CLIP
         ]
-        # Longer wait: I2V can finish after the compose agent already woke up.
+        # Longer wait: video gen can finish after the compose agent already woke up.
         max_attempts = max(40, len(expected_clips) * 12)
         for attempt in range(max_attempts):
             try:

@@ -163,7 +163,7 @@ def clip_is_first_of_setting(
     cfg: dict[str, Any] | None,
     graph: dict[str, Any] | None = None,
 ) -> bool:
-    """True for the first clip of this setting_id (composed master → I2V first_frame)."""
+    """True for the first clip of this setting_id (empty scene plate + solos)."""
     cfg = cfg if isinstance(cfg, dict) else {}
     graph = graph if isinstance(graph, dict) else {}
     flag = cfg.get("first_of_setting")

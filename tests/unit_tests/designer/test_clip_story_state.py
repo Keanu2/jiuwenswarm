@@ -18,17 +18,11 @@ from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
     compact_wan_story_clause,
     extract_finished_events,
     narrative_from_wan_prompt,
-    should_attach_last_frame_refs,
 )
 from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import apply_wan_call_locks
 from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
     build_wan_reference_binding,
 )
-
-
-def test_should_not_attach_last_frame_in_reference_mode() -> None:
-    assert should_attach_last_frame_refs(reference_mode=True) is False
-    assert should_attach_last_frame_refs(reference_mode=False) is True
 
 
 def test_child_walk_away_is_finished_event_not_replayed() -> None:
@@ -136,17 +130,16 @@ def test_wan_api_clause_does_not_paste_prior_prompt_marker() -> None:
         node_id="n_clip_1",
         shot_action="child walked away",
     )
+    c1 = graph["nodes"][0]["config"]
     c2 = graph["nodes"][1]["config"]
-    assert marker in str(c2.get("previous_clip_wan_prompt") or "") or "walked away" in str(
-        c2.get("previous_clip_action") or ""
-    ).lower()
+    # Handoff keeps the Wan prompt on the completed clip only (no next-clip paste).
+    assert marker in str(c1.get("last_wan_prompt") or "")
+    assert marker not in str(c2.get("previous_clip_wan_prompt") or "")
     wan = apply_wan_call_locks(
         "character1 sits with the family at the table in the last reference.",
         cfg=c2,
         graph=graph,
         shot_index=2,
-        has_first_frame=False,
-        reference_mode=True,
     )
     assert marker not in wan
     assert "from Image" in wan or "from image" in wan.lower() or "Image 1 is" in wan
@@ -168,7 +161,6 @@ def test_r2v_occupancy_does_not_use_image1_cast_lock() -> None:
     text = occupancy_clause_for_clip(
         {"occupancy": {"must_appear": ["char_1"], "must_not_appear": ["char_2"]}},
         [{"id": "char_1", "name": "Dad"}, {"id": "char_2", "name": "Child"}],
-        reference_mode=True,
     )
     assert "R2V CAST LOCK" in text
     assert "Image 1" not in text

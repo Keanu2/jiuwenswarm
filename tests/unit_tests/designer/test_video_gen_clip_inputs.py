@@ -8,15 +8,8 @@ from jiuwenswarm.agents.harness.common.tools.video_tools import (
     _as_dashscope_media_url,
     _build_dashscope_video_call,
     _INTL_DASHSCOPE_API_BASE,
-    _switch_wan_task,
     video_generation_message_content,
 )
-
-
-def test_switch_wan_task_keeps_flash_suffix() -> None:
-    assert _switch_wan_task("wan2.6-t2v", "i2v") == "wan2.6-i2v"
-    assert _switch_wan_task("wan2.6-i2v-flash", "i2v") == "wan2.6-i2v-flash"
-    assert _switch_wan_task("wan2.6-t2v", "r2v") == "wan2.6-r2v"
 
 
 def test_local_keyframe_becomes_data_uri(tmp_path: Path) -> None:
@@ -27,34 +20,35 @@ def test_local_keyframe_becomes_data_uri(tmp_path: Path) -> None:
     assert url.startswith("data:image/png;base64,")
 
 
-def test_build_call_uses_r2v_when_identity_references_exist(tmp_path: Path) -> None:
+def test_build_call_uses_reference_urls_when_identity_references_exist(tmp_path: Path) -> None:
     frame = tmp_path / "shot1.png"
     extra = tmp_path / "character.png"
     frame.write_bytes(b"png")
     extra.write_bytes(b"png-extra")
     params = _build_dashscope_video_call(
-        "wan2.6-t2v",
+        "wan3.0-video",
         first_frame=str(frame),
         reference_images=[str(frame), str(extra)],
     )
-    assert params["model"] == "wan2.6-r2v"
+    assert params["model"] == "wan3.0-video"
     assert "img_url" not in params
-    assert params["shot_type"] == "multi"
+    assert "shot_type" not in params
     assert params["size"] == "1280*720"
     assert "resolution" not in params
-    assert len(params.get("reference_urls") or []) == 2
+    media = params.get("media") or []
+    assert len([item for item in media if item.get("type") == "reference_image"]) == 2
 
 
-def test_build_call_uses_single_shot_for_one_keyframe(tmp_path: Path) -> None:
+def test_build_call_uses_img_url_for_lone_first_frame(tmp_path: Path) -> None:
     frame = tmp_path / "shot1.png"
     frame.write_bytes(b"png")
     params = _build_dashscope_video_call(
-        "wan2.6-t2v",
+        "wan3.0-video",
         first_frame=str(frame),
     )
-    assert params["model"] == "wan2.6-i2v"
+    assert params["model"] == "wan3.0-video"
     assert str(params["img_url"]).startswith("data:image/png;base64,")
-    assert params["shot_type"] == "single"
+    assert "shot_type" not in params
 
 
 def test_wan3_keeps_unified_model_without_shot_type(tmp_path: Path) -> None:
@@ -69,11 +63,11 @@ def test_wan3_keeps_unified_model_without_shot_type(tmp_path: Path) -> None:
     assert "shot_type" not in params
     assert params["resolution"] == "720P"
     assert params["audio"] is False
-    assert params["size"] == "1280*720"
-    assert params["ratio"] == "16:9"
+    assert "size" not in params
+    assert "ratio" not in params
 
 
-def test_wan3_i2v_uses_requested_portrait_frame(tmp_path: Path) -> None:
+def test_wan3_img_url_uses_requested_portrait_frame(tmp_path: Path) -> None:
     frame = tmp_path / "shot1.png"
     frame.write_bytes(b"png")
     params = _build_dashscope_video_call(
@@ -82,8 +76,8 @@ def test_wan3_i2v_uses_requested_portrait_frame(tmp_path: Path) -> None:
         resolution="1080P",
         first_frame=str(frame),
     )
-    assert params["size"] == "480*854"
-    assert params["ratio"] == "9:16"
+    assert "size" not in params
+    assert "ratio" not in params
     assert params["resolution"] == "1080P"
 
 
@@ -141,55 +135,58 @@ def test_wan3_compose_score_can_enable_audio() -> None:
     assert "img_url" not in params
 
 
-def test_wan26_keeps_i2v_when_user_video_file_is_attached(tmp_path: Path) -> None:
+def test_legacy_model_keeps_img_url_when_user_video_file_is_attached(tmp_path: Path) -> None:
+    """Non-wan3 models ignore reference_file for mode selection; lone first_frame → img_url."""
     frame = tmp_path / "shot1.png"
     video = tmp_path / "motion.mp4"
     frame.write_bytes(b"png")
     video.write_bytes(b"mp4")
     params = _build_dashscope_video_call(
-        "wan2.6-t2v",
+        "custom-video-model",
         first_frame=str(frame),
         reference_file=str(video),
     )
-    assert params["model"] == "wan2.6-i2v"
+    assert params["model"] == "custom-video-model"
     assert "img_url" in params
     assert "reference_urls" not in params
     assert "media" not in params
 
 
-def test_build_call_stays_text_to_video_without_images() -> None:
-    params = _build_dashscope_video_call("wan2.6-t2v")
-    assert params["model"] == "wan2.6-t2v"
+def test_build_call_stays_text_only_without_images() -> None:
+    params = _build_dashscope_video_call("wan3.0-video")
+    assert params["model"] == "wan3.0-video"
     assert params["size"] == "1280*720"
     assert "img_url" not in params
 
 
-def test_r2v_480p_uses_size_not_resolution(tmp_path: Path) -> None:
+def test_force_reference_480p_uses_size_not_resolution(tmp_path: Path) -> None:
     extra = tmp_path / "character.png"
     extra.write_bytes(b"png-extra")
     params = _build_dashscope_video_call(
-        "wan2.6-t2v",
+        "wan3.0-video",
         size="854*480",
         resolution="480P",
         first_frame=None,
         reference_images=[str(extra)],
         force_reference_mode=True,
     )
-    assert params["model"] == "wan2.6-r2v"
+    assert params["model"] == "wan3.0-video"
     assert params["size"] == "832*480"
     assert "resolution" not in params
+    assert "media" in params
 
 
-def test_t2v_480p_uses_size_not_resolution() -> None:
+def test_text_only_480p_uses_size_not_resolution() -> None:
     params = _build_dashscope_video_call(
-        "wan2.6-t2v",
+        "wan3.0-video",
         size="854*480",
         resolution="480P",
     )
-    assert params["model"] == "wan2.6-t2v"
+    assert params["model"] == "wan3.0-video"
     assert params["size"] == "832*480"
     assert "resolution" not in params
     assert "img_url" not in params
+
 
 def test_align_video_api_base_to_image_gen_intl(monkeypatch) -> None:
     monkeypatch.setenv("IMAGE_GEN_API_BASE", _INTL_DASHSCOPE_API_BASE)

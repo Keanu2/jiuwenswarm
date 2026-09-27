@@ -15,7 +15,7 @@ from jiuwenswarm.server.runtime.designer.audio_locks import (
 def test_seedance_supports_native_audio() -> None:
     assert video_model_supports_native_audio("doubao-seedance-2-5-260628")
     assert video_model_supports_native_audio("wan3.0-video")
-    assert not video_model_supports_native_audio("wan2.6-t2v")
+    assert not video_model_supports_native_audio("custom-silent-video")
 
 
 def test_seedance_does_not_override_to_wan3(monkeypatch) -> None:
@@ -38,7 +38,7 @@ def test_video_gen_family_label_follows_configured_model(monkeypatch) -> None:
 
     monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "doubao-seedance-2-5-260628")
     assert video_gen_family_label() == "Seedance"
-    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "wan2.6-i2v")
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "wan3.0-video")
     assert video_gen_family_label() == "Wan"
     monkeypatch.delenv("VIDEO_GEN_MODEL_NAME", raising=False)
     assert video_gen_family_label("MiniMax-Hailuo-02") == "MiniMax"
@@ -61,14 +61,14 @@ def test_clip_playbook_uses_configured_video_family(monkeypatch) -> None:
     monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "doubao-seedance-2-5-260628")
     monkeypatch.setenv("IMAGE_GEN_MODEL_NAME", "doubao-seedream-4-5-251128")
     text = playbook_for_role("clip")
-    assert "Seedance" in text
+    assert "R2V" in text
     assert "Qwen-Image 3.0" not in text
     assert "Prefer 480P" not in text
-    assert "aspect_lock" in text
+    assert "call_video_model" in text
 
 
-def test_wan2_does_not_swap_model_for_dialogue(monkeypatch) -> None:
-    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "wan2.6-t2v")
+def test_non_native_audio_model_does_not_swap_for_dialogue(monkeypatch) -> None:
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "custom-silent-video")
     want, override = resolve_video_audio_request(
         {"clip_embedded_audio": True, "speech_line": "hello"},
         {"prefer_wan3_clip_audio": True},

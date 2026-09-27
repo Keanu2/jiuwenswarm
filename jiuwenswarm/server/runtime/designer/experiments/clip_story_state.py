@@ -660,11 +660,6 @@ def stamp_continuity_story_fields(
 
 
 
-def should_attach_last_frame_refs(*, reference_mode: bool = True) -> bool:
-    """R2V never uses last-frame pixels as character/layout refs (Wan 2.6/3.0)."""
-    return not bool(reference_mode)
-
-
 def cap_r2v_reference_paths(paths: list[Path], *, max_refs: int = 5) -> list[Path]:
     """Keep on-screen solos + last scene plate within Wan's 5-ref cap."""
     unique: list[Path] = []

@@ -81,8 +81,6 @@ def apply_wan_call_locks(
     cfg: dict[str, Any] | None = None,
     graph: dict[str, Any] | None = None,
     shot_index: int = 0,
-    has_first_frame: bool = True,
-    reference_mode: bool = False,
 ) -> str:
     """Rewrite the video call into a short image-binding prompt.
 
@@ -99,9 +97,6 @@ def apply_wan_call_locks(
             cfg_map = ensure_prior_clip_story_on_cfg(cfg_map, graph)
         except Exception:  # noqa: BLE001
             pass
-    rewrite = bool(reference_mode or cfg_map.get("force_reference_mode"))
-    if not rewrite:
-        return str(prompt or "").strip()[:6000]
     from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
         supervisor_approve_video_prompt,
     )

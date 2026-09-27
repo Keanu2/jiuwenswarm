@@ -1062,18 +1062,6 @@ def _align_dashscope_video_api_base(api_base: str, api_key: str) -> str:
     return base or _CHINA_DASHSCOPE_API_BASE
 
 
-def _switch_wan_task(model: str, task: str) -> str:
-    """wan2.6-t2v → wan2.6-i2v / wan2.6-r2v while keeping flash suffixes."""
-    text = (model or "").strip()
-    if not text or task not in {"t2v", "i2v", "r2v"}:
-        return text
-    for kind in ("t2v", "i2v", "r2v"):
-        needle = f"-{kind}"
-        if needle in text:
-            return text.replace(needle, f"-{task}", 1)
-    return text
-
-
 def _build_dashscope_video_call(
     model: str,
     *,
@@ -1086,10 +1074,15 @@ def _build_dashscope_video_call(
     audio: bool | None = None,
     force_reference_mode: bool = False,
 ) -> dict[str, Any]:
-    """Map Designer clip inputs onto DashScope T2V / I2V / R2V / wan3 media."""
+    """Map clip inputs onto DashScope media (refs / first frame / text-only).
+
+    Keeps the model id as configured — no task-suffix rewriting. Mode is chosen
+    by inputs: reference images → reference call; lone first_frame → img_url;
+    neither → text-only.
+    """
     refs = _unique_dashscope_image_urls(reference_images)
     img_url = _as_dashscope_media_url(first_frame)
-    # Reference-mode clips: fold any accidental first_frame into refs; never I2V empty plates.
+    # Reference-mode clips: fold any accidental first_frame into refs.
     if force_reference_mode and img_url and img_url not in refs:
         refs = [*refs, img_url]
         img_url = None
@@ -1108,7 +1101,7 @@ def _build_dashscope_video_call(
         or (file_url and wan3)
     )
     if force_reference_mode and not refs and not file_url:
-        # Nothing to reference — fall through to T2V rather than empty I2V.
+        # Nothing to reference — fall through to text-only rather than empty img_url.
         use_reference_mode = False
 
     if _is_wan3_video(chosen):
@@ -1142,7 +1135,6 @@ def _build_dashscope_video_call(
         all_refs = list(refs)
         if img_url and img_url not in all_refs:
             all_refs.append(img_url)
-        chosen = _switch_wan_task(chosen, "r2v")
         params["model"] = chosen
         params["reference_urls"] = all_refs[:5]
         params["size"] = locked_size or "1280*720"
@@ -1150,7 +1142,6 @@ def _build_dashscope_video_call(
             params["shot_type"] = "multi"
         return params
     if img_url:
-        chosen = _switch_wan_task(chosen, "i2v")
         params["model"] = chosen
         params["img_url"] = img_url
         params["resolution"] = (locked_res or resolution or "720P").strip() or "720P"

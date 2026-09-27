@@ -1300,7 +1300,7 @@ def expand_shot_nodes(
     graph: DesignerExecutionGraph,
     shot_count: int,
 ) -> DesignerExecutionGraph:
-    """One clip node per storyboard shot (scene-card I2V), plus compose."""
+    """One clip node per storyboard shot (scene-card R2V), plus compose."""
     count = max(1, min(int(shot_count or 1), MAX_SHOT_CLIP_NODES))
     raw = dict(graph)
     existing_by_id = {
@@ -2417,7 +2417,7 @@ def is_soft_artifact_dependency(
         }
         return str(pred_id) in soft_ids and bool(str(pred_id))
 
-    # Scene card → clip: always hard (first_frame media). Prompt handoff alone is not enough.
+    # Scene card → clip: always hard (R2V reference media). Prompt handoff alone is not enough.
     if nrole == "clip" and prole == "scene":
         return False
 

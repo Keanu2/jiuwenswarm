@@ -986,13 +986,12 @@ class DesignerGraphToolkit:
         *,
         prompt: str = "",
         duration: int = 5,
-        first_frame: str = "",
+        first_frame: str = "",  # kept for tool schema; Design always uses R2V refs
     ) -> str:
+        _ = first_frame
         from jiuwenswarm.server.runtime.designer.handlers.clip import (
             _looks_like_contaminated_prompt,
             build_clip_prompt,
-            clip_wants_reference_mode,
-            collect_clip_first_frame,
             attach_order_clause,
             collect_clip_reference_images,
             connected_payload_clause,
@@ -1029,9 +1028,8 @@ class DesignerGraphToolkit:
 
         # Gated same-scene last-frame chain before prompt so Wan binding matches attach order.
         shot_index = node_shot_index(node)
-        ref_mode = clip_wants_reference_mode(node, graph)
         refs = collect_clip_reference_images(
-            self.ctx, shot_index, node=node, reference_mode=ref_mode
+            self.ctx, shot_index, node=node
         )
         _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
         ref_paths = [p for p in refs if p.is_file() and p.suffix.lower() in _IMG]
@@ -1040,13 +1038,6 @@ class DesignerGraphToolkit:
             cfg = stamp_scene_last_frame_chain(cfg, scene_chain)
             node["config"] = cfg
         ref_files = [str(p) for p in ref_paths]
-        if not ref_mode:
-            from jiuwenswarm.server.runtime.designer.handlers.common import (
-                uploaded_material_image_paths,
-            )
-
-            if uploaded_material_image_paths(node):
-                ref_mode = True
 
         # Agent writes P2 (continuation). Structured prompt is fallback / lock scaffold.
         structured = ""
@@ -1165,8 +1156,6 @@ class DesignerGraphToolkit:
         node["config"] = cfg
         cfg["prompt"] = text
         from jiuwenswarm.server.runtime.designer.audio_locks import (
-            audio_lock_prompt_block,
-            resolve_audio_intent_flags,
             resolve_video_audio_request,
         )
         from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
@@ -1174,38 +1163,8 @@ class DesignerGraphToolkit:
         )
 
         meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-        flags = resolve_audio_intent_flags(meta, cfg)
-        speech_line_now = str(cfg.get("speech_line") or flags.get("speech_line") or "").strip()
-        by_char_now = (
-            cfg.get("speech_by_character")
-            if isinstance(cfg.get("speech_by_character"), dict)
-            else {}
-        )
-        if not by_char_now:
-            by_char_now = flags.get("speech_by_character") or {}
-        include_speech = bool(speech_line_now or by_char_now) and not bool(
-            cfg.get("speech_continuation_only") and not speech_line_now and not by_char_now
-        )
-        block = audio_lock_prompt_block(
-            language_lock=str(flags.get("language_lock") or ""),
-            speech_by_character=by_char_now if include_speech else {},
-            speech_line=speech_line_now if include_speech else "",
-            bgm_lock=flags.get("bgm_lock") or {},
-            include_speech=include_speech,
-            include_music=bool(flags.get("include_music")),
-            clip_embedded=bool(flags.get("clip_embedded")),
-        )
         # Clip calls are rewritten to the short image-binding form. Speech and
         # score stay on cfg and are spoken as positive lines, not lock essays.
-        rewrite_video = bool(ref_mode or cfg.get("force_reference_mode"))
-        if (
-            block
-            and not rewrite_video
-            and "LANGUAGE LOCK" not in text
-            and "SPEECH LOCK" not in text
-        ):
-            text = (text + "\n" + block).strip()
-            cfg["prompt"] = text
         from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
             apply_regenerate_packet,
         )
@@ -1217,24 +1176,11 @@ class DesignerGraphToolkit:
             prompt=text,
             reference_paths=ref_files,
         )
-        if ref_mode:
-            legacy_ff = None
-        else:
-            shot_frame = collect_clip_first_frame(self.ctx, shot_index, node=node)
-            # A replaced still lives on the graph, not in the prompt the model
-            # copied from the previous run. Prefer that file over a stale path.
-            legacy_ff = (
-                str(shot_frame)
-                if shot_frame is not None
-                else (str(first_frame or "").strip() or None)
-            )
         text = apply_wan_call_locks(
             text,
             cfg=cfg,
             graph=graph,
             shot_index=shot_index,
-            has_first_frame=bool(legacy_ff) and not ref_mode,
-            reference_mode=ref_mode,
         )
         cfg["prompt"] = text
         want_audio, _model_override = resolve_video_audio_request(cfg, meta)
@@ -1286,13 +1232,13 @@ class DesignerGraphToolkit:
             result = await generate_clip_video(
                 prompt=text,
                 save_dir=str(self._media_save_dir()),
-                first_frame=legacy_ff,
+                first_frame=None,
                 reference_images=ref_files or None,
                 reference_file=reference_file,
                 duration=dur,
                 audio=True if want_audio else False,
                 model=None,
-                force_reference_mode=ref_mode,
+                force_reference_mode=True,
                 size=str(cfg.get("video_size") or (meta.get("aspect_lock") or {}).get("video_size") or ""),
                 resolution=str(
                     cfg.get("video_resolution")
