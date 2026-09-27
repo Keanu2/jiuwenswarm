@@ -7,9 +7,11 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import unquote, urlparse
 
 from jiuwenswarm.common.schema.designer_graph import (
+    EDGE_KIND_DATA,
     NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER_DESIGN,
     NODE_ROLE_CLIP,
@@ -17,6 +19,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     AssetRef,
     DesignerExecutionGraph,
     DesignerGraphNode,
+    edge_kind,
     node_pipeline,
 )
 from jiuwenswarm.common.utils import get_agent_root_dir, get_agent_workspace_dir
@@ -315,34 +318,140 @@ def apply_uploaded_outputs_to_run(run: dict, graph: dict) -> bool:
 
 _TEXT_SUFFIXES = {".md", ".txt", ".markdown", ".csv"}
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+_TEXT_KINDS = {"text", "markdown", "storyboard", "brief"}
+
+
+class PredecessorOutput(NamedTuple):
+    """One file or text body that arrived from a predecessor node."""
+
+    node_id: str
+    role: str
+    label: str
+    kind: str
+    path: Path | None
+    text: str
+
+
+def _file_kind(path: Path, ref: dict | None = None) -> str:
+    kind = str((ref or {}).get("kind") or "").lower()
+    mime = str((ref or {}).get("mime_type") or "").lower()
+    suffix = path.suffix.lower()
+    if kind == "image" or mime.startswith("image/") or suffix in _IMAGE_SUFFIXES:
+        return "image"
+    if kind == "video" or mime.startswith("video/") or suffix in _VIDEO_SUFFIXES:
+        return "video"
+    if kind in _TEXT_KINDS or mime.startswith("text/") or suffix in _TEXT_SUFFIXES:
+        return "text"
+    return ""
+
+
+def _graph_node(ctx: NodeExecutionContext | None, node_id: str) -> dict | None:
+    graph = ctx.graph if ctx is not None and isinstance(getattr(ctx, "graph", None), dict) else None
+    if graph is None:
+        return None
+    for other in graph.get("nodes") or []:
+        if isinstance(other, dict) and str(other.get("id") or "") == node_id:
+            return other
+    return None
+
+
+def _locked_replacement_refs(graph: dict | None, node_id: str) -> list[dict] | None:
+    """Upload that replaced this node's output.
+
+    None when the node was not replaced. An empty list means the flag is set
+    and the file is gone, so the old generated file must not come back.
+    """
+    node = None
+    if isinstance(graph, dict):
+        for other in graph.get("nodes") or []:
+            if isinstance(other, dict) and str(other.get("id") or "") == node_id:
+                node = other
+                break
+    if not isinstance(node, dict):
+        return None
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    if not config.get("user_replaced_output"):
+        return None
+    upload = config.get("upload") if isinstance(config.get("upload"), dict) else {}
+    upload_path = path_from_uri(str(upload.get("uri") or ""))
+    if upload_path is not None and upload_path.is_file():
+        return [
+            {
+                "kind": "",
+                "uri": upload_path.resolve().as_uri(),
+                "mime_type": str(upload.get("mime_type") or ""),
+            }
+        ]
+    ref = node.get("output_ref") if isinstance(node.get("output_ref"), dict) else {}
+    path = path_from_uri(str(ref.get("uri") or ""))
+    if path is not None and path.is_file():
+        return [dict(ref)]
+    return []
+
+
+def _graph_saved_refs(node: dict | None) -> list[dict]:
+    if not isinstance(node, dict):
+        return []
+    many = node.get("output_refs")
+    if isinstance(many, list):
+        refs = [
+            item
+            for item in many
+            if isinstance(item, dict) and str(item.get("uri") or "").strip()
+        ]
+        if refs:
+            return refs
+    ref = node.get("output_ref")
+    if isinstance(ref, dict) and str(ref.get("uri") or "").strip():
+        return [ref]
+    return []
+
+
+def _output_refs_for_node(ctx: NodeExecutionContext | None, node_id: str) -> list[dict]:
+    """The node's current output: upload replacement, else this run, else the saved graph."""
+    if ctx is None or not node_id:
+        return []
+    graph = ctx.graph if isinstance(getattr(ctx, "graph", None), dict) else None
+    locked = _locked_replacement_refs(graph, node_id)
+    if locked is not None:
+        return locked
+    run_refs = node_output_refs(ctx, node_id)
+    if run_refs:
+        return run_refs
+    return _graph_saved_refs(_graph_node(ctx, node_id))
+
+
+def _text_body(ref: dict) -> str:
+    path = path_from_uri(str(ref.get("uri") or ""))
+    if path is None:
+        return ""
+    kind = str(ref.get("kind") or "").lower()
+    mime = str(ref.get("mime_type") or "").lower()
+    text_like = kind in _TEXT_KINDS or mime.startswith("text/") or path.suffix.lower() in _TEXT_SUFFIXES
+    if not text_like:
+        return ""
+    candidates = [path]
+    sidecar = path.with_suffix(".md")
+    if sidecar not in candidates:
+        candidates.append(sidecar)
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return ""
 
 
 def node_output_text(ctx: NodeExecutionContext, node_id: str) -> str:
     """Text body of one node's output, when that output is a text file."""
-    if ctx is None or ctx.run is None or not node_id:
+    if ctx is None or not node_id:
         return ""
-    for ref in node_output_refs(ctx, node_id):
-        path = path_from_uri(str(ref.get("uri") or ""))
-        if path is None:
-            continue
-        kind = str(ref.get("kind") or "").lower()
-        mime = str(ref.get("mime_type") or "").lower()
-        text_like = (
-            kind in {"text", "markdown", "storyboard", "brief"}
-            or mime.startswith("text/")
-            or path.suffix.lower() in _TEXT_SUFFIXES
-        )
-        candidates = [path] if text_like or path.suffix.lower() in _TEXT_SUFFIXES else []
-        sidecar = path.with_suffix(".md")
-        if sidecar not in candidates and (text_like or kind in {"text", "markdown", "storyboard", "brief"}):
-            candidates.append(sidecar)
-        for candidate in candidates:
-            if not candidate.is_file():
-                continue
-            try:
-                return candidate.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
+    for ref in _output_refs_for_node(ctx, node_id):
+        body = _text_body(ref).strip()
+        if body:
+            return body
     return ""
 
 
@@ -352,13 +461,9 @@ def node_output_video_paths(ctx: NodeExecutionContext, node_id: str) -> list[Pat
         return []
     paths: list[Path] = []
     seen: set[str] = set()
-    for ref in node_output_refs(ctx, node_id):
+    for ref in _output_refs_for_node(ctx, node_id):
         path = path_from_uri(str(ref.get("uri") or ""))
-        if path is None or not path.is_file():
-            continue
-        kind = str(ref.get("kind") or "").lower()
-        mime = str(ref.get("mime_type") or "").lower()
-        if kind != "video" and not mime.startswith("video/") and path.suffix.lower() not in _VIDEO_SUFFIXES:
+        if path is None or not path.is_file() or _file_kind(path, ref) != "video":
             continue
         resolved = path.resolve()
         key = str(resolved)
@@ -370,18 +475,14 @@ def node_output_video_paths(ctx: NodeExecutionContext, node_id: str) -> list[Pat
 
 
 def node_output_image_paths(ctx: NodeExecutionContext, node_id: str) -> list[Path]:
-    replaced = user_replaced_output_image(ctx.graph if isinstance(ctx.graph, dict) else None, node_id)
-    if replaced:
-        return replaced
+    """Image files for one node. A user replacement, this run, and the saved graph are one lookup."""
+    if ctx is None or not node_id:
+        return []
     paths: list[Path] = []
     seen: set[str] = set()
-    for ref in node_output_refs(ctx, node_id):
+    for ref in _output_refs_for_node(ctx, node_id):
         path = path_from_uri(str(ref.get("uri") or ""))
-        if path is None or not path.is_file():
-            continue
-        kind = str(ref.get("kind") or "").lower()
-        mime = str(ref.get("mime_type") or "").lower()
-        if kind != "image" and not mime.startswith("image/") and path.suffix.lower() not in _IMAGE_SUFFIXES:
+        if path is None or not path.is_file() or _file_kind(path, ref) != "image":
             continue
         resolved = path.resolve()
         key = str(resolved)
@@ -390,6 +491,59 @@ def node_output_image_paths(ctx: NodeExecutionContext, node_id: str) -> list[Pat
         seen.add(key)
         paths.append(resolved)
     return paths
+
+
+def predecessor_outputs(
+    ctx: NodeExecutionContext | None,
+    node: dict | None,
+) -> list[PredecessorOutput] | None:
+    """Outputs of incoming data-edge sources, in edge order.
+
+    None when this node has no incoming data edges. Each predecessor is resolved
+    once, whether its file was uploaded over the output or generated.
+    """
+    if ctx is None or not isinstance(getattr(ctx, "graph", None), dict) or not isinstance(node, dict):
+        return None
+    node_id = str(node.get("id") or getattr(ctx, "node_id", "") or "")
+    sources: list[str] = []
+    wired = False
+    for edge in ctx.graph.get("edges") or []:
+        if not isinstance(edge, dict) or edge_kind(edge) != EDGE_KIND_DATA:
+            continue
+        if str(edge.get("target") or "") != node_id:
+            continue
+        wired = True
+        source_id = str(edge.get("source") or "").strip()
+        if source_id and source_id not in sources:
+            sources.append(source_id)
+    if not wired:
+        return None
+    by_id = {
+        str(other.get("id") or ""): other
+        for other in (ctx.graph.get("nodes") or [])
+        if isinstance(other, dict)
+    }
+    items: list[PredecessorOutput] = []
+    for source_id in sources:
+        other = by_id.get(source_id)
+        if not isinstance(other, dict):
+            continue
+        role = node_pipeline(other)
+        label = str(other.get("label") or source_id).strip() or source_id
+        for ref in _output_refs_for_node(ctx, source_id):
+            path = path_from_uri(str(ref.get("uri") or ""))
+            if path is None or not path.is_file():
+                continue
+            kind = _file_kind(path, ref)
+            resolved = path.resolve()
+            if kind == "text":
+                body = _text_body(ref).strip()
+                if body:
+                    items.append(PredecessorOutput(source_id, role, label, "text", resolved, body))
+                continue
+            if kind in {"image", "video"}:
+                items.append(PredecessorOutput(source_id, role, label, kind, resolved, ""))
+    return items
 
 
 def role_output_refs(ctx: NodeExecutionContext, role: str) -> list[dict]:
@@ -525,20 +679,16 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
 def role_output_image_paths(ctx: NodeExecutionContext, role: str) -> list[Path]:
     paths: list[Path] = []
     seen: set[str] = set()
-    for ref in role_output_refs(ctx, role):
-        path = path_from_uri(str(ref.get("uri") or ""))
-        if path is None or not path.is_file():
+    graph = ctx.graph if isinstance(getattr(ctx, "graph", None), dict) else {}
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or node_pipeline(node) != role:
             continue
-        kind = str(ref.get("kind") or "").lower()
-        mime = str(ref.get("mime_type") or "").lower()
-        if kind != "image" and not mime.startswith("image/") and path.suffix.lower() not in _IMAGE_SUFFIXES:
-            continue
-        resolved = path.resolve()
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
-        paths.append(resolved)
+        for path in node_output_image_paths(ctx, str(node.get("id") or "")):
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path)
     return paths
 
 

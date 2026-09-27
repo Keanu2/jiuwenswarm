@@ -1527,8 +1527,7 @@
   text-overflow: ellipsis;
 }
 
-.designer-node-toolbar__material-tile,
-.designer-node-toolbar__material-add {
+.designer-node-toolbar__material-tile {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -1537,25 +1536,9 @@
   height: 56px;
   border-radius: 8px;
   box-sizing: border-box;
-}
-
-.designer-node-toolbar__material-tile {
   border: 1px solid var(--color-border-default);
   background: var(--color-surface-card);
   color: var(--color-text-secondary);
-}
-
-.designer-node-toolbar__material-add {
-  border: 1.5px dashed color-mix(in srgb, var(--color-text-secondary) 55%, transparent);
-  background: color-mix(in srgb, var(--color-surface-card) 70%, transparent);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-
-.designer-node-toolbar__material-add:hover {
-  border-color: var(--color-text-primary);
-  color: var(--color-text-primary);
-  background: var(--color-surface-card);
 }
 
 .designer-node-toolbar__material-remove {

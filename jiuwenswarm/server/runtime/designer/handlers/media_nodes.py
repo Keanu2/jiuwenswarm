@@ -14,7 +14,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_IMAGE,
     NODE_TYPE_VIDEO,
     DesignerGraphNode,
-    data_predecessors,
     video_concat_source_ids,
 )
 from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import MusicNodeHandler
@@ -24,8 +23,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
     graph_prompt,
     graph_workspace_dir,
     node_generate_prompt,
-    node_output_image_paths,
-    path_from_uri,
+    predecessor_outputs,
     uploaded_material_image_paths,
 )
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
@@ -36,42 +34,8 @@ from jiuwenswarm.server.runtime.designer.user_references import (
     user_reference_node_file,
 )
 
-_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-
-
-def _predecessor_ids(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list[str]:
-    node_id = str(node.get("id") or ctx.node_id)
-    config = node.get("config") if isinstance(node.get("config"), dict) else {}
-    declared = [str(item).strip() for item in (config.get("inputs") or []) if str(item).strip()]
-    incoming = data_predecessors(ctx.graph).get(node_id, [])
-    ordered: list[str] = []
-    for item in [*declared, *incoming]:
-        if item and item not in ordered:
-            ordered.append(item)
-    return ordered
-
-
-def _graph_output_image_paths(ctx: NodeExecutionContext, node_id: str) -> list[Path]:
-    paths: list[Path] = []
-    for other in ctx.graph.get("nodes") or []:
-        if not isinstance(other, dict) or str(other.get("id") or "") != node_id:
-            continue
-        ref = other.get("output_ref")
-        if not isinstance(ref, dict):
-            continue
-        path = path_from_uri(str(ref.get("uri") or ""))
-        if path is None or not path.is_file():
-            continue
-        kind = str(ref.get("kind") or "").lower()
-        mime = str(ref.get("mime_type") or "").lower()
-        if kind != "image" and not mime.startswith("image/") and path.suffix.lower() not in _IMAGE_SUFFIXES:
-            continue
-        paths.append(path.resolve())
-    return paths
-
-
 def _upstream_images(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list[Path]:
-    """User stills plus every upstream image. Attachment count is not the input count."""
+    """Old stills on this node, then images from incoming data edges, in edge order."""
     seen: set[str] = set()
     paths: list[Path] = []
 
@@ -87,9 +51,9 @@ def _upstream_images(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list
 
     for path in uploaded_material_image_paths(node):
         add(path)
-    for node_id in _predecessor_ids(ctx, node):
-        for path in [*node_output_image_paths(ctx, node_id), *_graph_output_image_paths(ctx, node_id)]:
-            add(path)
+    for item in predecessor_outputs(ctx, node) or []:
+        if item.kind == "image":
+            add(item.path)
     for path in user_reference_image_paths(ctx.graph) or []:
         add(Path(path) if path else None)
     return paths

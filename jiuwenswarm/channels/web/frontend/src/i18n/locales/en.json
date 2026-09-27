@@ -128,7 +128,6 @@
       "edit": "Edit",
       "generate": "Generate",
       "material": "Asset",
-      "addMaterial": "Add asset",
       "removeMaterial": "Remove asset",
       "promptPlaceholder": "This shot's prompt; sent to the model with the reference images above",
       "editPlaceholder": "Edit text content…",

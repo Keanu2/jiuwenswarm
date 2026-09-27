@@ -1,7 +1,7 @@
-import { Headphones, Image as ImageIcon, Plus, Sheet, Video, X } from 'lucide-react';
-import { useCallback, useMemo, useRef, type ChangeEvent, type ReactNode } from 'react';
+import { Headphones, Image as ImageIcon, Sheet, Video, X } from 'lucide-react';
+import { useCallback, useMemo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { designerAssetPreviewUrl, localPathToFileUri, uploadDesignerAsset } from '../../designerAssetUrl';
+import { designerAssetPreviewUrl } from '../../designerAssetUrl';
 import { preferredDesignerPreviewRef } from '../../designerMaterials';
 import { useDesignerAssetLibraryStore } from '../../designerAssetLibraryStore';
 import { useDesignerRunStore } from '../../designerRunStore';
@@ -17,7 +17,6 @@ import {
   isTextLikeNodeType,
   readMediaConfig,
   writeMediaMaterials,
-  type MediaMaterialSlot,
 } from '../../mediaNodeConfig';
 
 type DesignerMaterialStripProps = {
@@ -61,17 +60,11 @@ function mediaIcon(mediaTypeOrMime: string | undefined): ReactNode {
   return <ImageIcon size={20} aria-hidden />;
 }
 
-function newMaterialId(): string {
-  return `mat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
 export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStripProps) {
   const { t } = useTranslation();
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const updateNodeConfig = useDesignerStore((state) => state.updateNodeConfig);
   const removeEdges = useDesignerStore((state) => state.removeEdges);
-  const addFromFile = useDesignerAssetLibraryStore((state) => state.addFromFile);
   const libraryAssets = useDesignerAssetLibraryStore((state) => state.assets);
   const nodeStates = useDesignerRunStore((state) => state.nodeStates);
 
@@ -128,46 +121,6 @@ export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStri
     return [...linked, ...uploaded];
   }, [libraryAssets, linked, uploads]);
 
-  const addFiles = useCallback(
-    async (files: FileList | null) => {
-      if (!files || files.length === 0) return;
-      const added: MediaMaterialSlot[] = [];
-      for (const file of Array.from(files)) {
-        const asset = addFromFile(file);
-        if (!asset) continue;
-        try {
-          const stored = await uploadDesignerAsset(file);
-          added.push({
-            id: newMaterialId(),
-            filename: stored.filename || asset.filename,
-            mime_type: stored.mime_type || asset.mime_type,
-            asset_id: asset.id,
-            uri: localPathToFileUri(stored.path),
-          });
-        } catch (error) {
-          useDesignerRunStore.setState({
-            runError: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-      if (added.length === 0) return;
-      updateNodeConfig(nodeId, (current) => {
-        const existing = readMediaConfig(current, nodeType).materials ?? [];
-        return writeMediaMaterials(current, [...existing, ...added]);
-      });
-      await useDesignerStore.getState().flushSave();
-    },
-    [addFromFile, nodeId, nodeType, updateNodeConfig],
-  );
-
-  const onFileChange = useCallback(
-    (event: ChangeEvent<HTMLInputElement>) => {
-      addFiles(event.target.files);
-      event.target.value = '';
-    },
-    [addFiles],
-  );
-
   const onRemove = useCallback(
     (item: DisplayMaterial) => {
       if (item.kind === 'linked') {
@@ -185,18 +138,10 @@ export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStri
     [nodeId, nodeType, removeEdges, updateNodeConfig],
   );
 
+  if (materials.length === 0) return null;
+
   return (
     <div className="designer-node-toolbar__materials" data-testid="designer-node-toolbar-materials">
-      <input
-        ref={fileInputRef}
-        type="file"
-        className="designer-node-toolbar__file-input"
-        accept="image/*,video/*,audio/*"
-        multiple
-        data-testid="designer-node-toolbar-material-file-input"
-        onChange={onFileChange}
-      />
-
       {materials.map((item) => (
         <div
           key={item.key}
@@ -237,22 +182,6 @@ export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStri
           </div>
         </div>
       ))}
-
-      <div className="designer-node-toolbar__material-item designer-node-toolbar__material-item--add">
-        <span className="designer-node-toolbar__material-label" aria-hidden>
-          {'\u00a0'}
-        </span>
-        <button
-          type="button"
-          className="designer-node-toolbar__material-add"
-          aria-label={t('designer.toolbar.addMaterial')}
-          title={t('designer.toolbar.addMaterial')}
-          data-testid="designer-node-toolbar-material-add"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <Plus size={18} strokeWidth={2.25} aria-hidden />
-        </button>
-      </div>
     </div>
   );
 }

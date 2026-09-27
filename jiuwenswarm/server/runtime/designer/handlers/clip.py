@@ -159,55 +159,6 @@ def collect_clip_scene_image(
     return None
 
 
-def incoming_data_sources(
-    ctx: NodeExecutionContext | None,
-    node: DesignerGraphNode | None,
-) -> list[str] | None:
-    """Source ids of incoming data edges, in edge order.
-
-    None when this node has no incoming data edges.
-    """
-    if ctx is None or not isinstance(node, dict) or not isinstance(ctx.graph, dict):
-        return None
-    from jiuwenswarm.common.schema.designer_graph import EDGE_KIND_DATA, edge_kind
-
-    node_id = str(node.get("id") or getattr(ctx, "node_id", "") or "")
-    sources: list[str] = []
-    wired = False
-    for edge in ctx.graph.get("edges") or []:
-        if not isinstance(edge, dict) or edge_kind(edge) != EDGE_KIND_DATA:
-            continue
-        if str(edge.get("target") or "") != node_id:
-            continue
-        wired = True
-        source_id = str(edge.get("source") or "").strip()
-        if source_id and source_id not in sources:
-            sources.append(source_id)
-    if not wired:
-        return None
-    return sources
-
-
-def _edge_source_nodes(
-    ctx: NodeExecutionContext,
-    sources: list[str],
-) -> list[tuple[str, str, str]]:
-    by_id = {
-        str(other.get("id") or ""): other
-        for other in (ctx.graph.get("nodes") or [])
-        if isinstance(other, dict)
-    }
-    rows: list[tuple[str, str, str]] = []
-    for source_id in sources:
-        other = by_id.get(source_id)
-        if not isinstance(other, dict):
-            continue
-        role = node_pipeline(other)
-        label = str(other.get("label") or source_id).strip() or source_id
-        rows.append((source_id, role, label))
-    return rows
-
-
 def edge_image_flow(
     ctx: NodeExecutionContext | None,
     node: DesignerGraphNode | None,
@@ -219,14 +170,16 @@ def edge_image_flow(
     connected image output is an input, in edge order. Role is only a label for
     later ordering; it does not decide whether the value flows.
     """
-    sources = incoming_data_sources(ctx, node)
-    if sources is None or ctx is None:
+    from jiuwenswarm.server.runtime.designer.handlers.common import predecessor_outputs
+
+    outputs = predecessor_outputs(ctx, node if isinstance(node, dict) else None)
+    if outputs is None:
         return None
-    flowed: list[tuple[str, str, Path]] = []
-    for source_id, role, label in _edge_source_nodes(ctx, sources):
-        for path in node_output_image_paths(ctx, source_id):
-            flowed.append((role, label, path))
-    return flowed
+    return [
+        (item.role, item.label, item.path)
+        for item in outputs
+        if item.kind == "image" and item.path is not None
+    ]
 
 
 def edge_text_inputs(
@@ -234,16 +187,16 @@ def edge_text_inputs(
     node: DesignerGraphNode | None,
 ) -> list[tuple[str, str]]:
     """Text bodies that arrive on incoming data edges, in edge order."""
-    sources = incoming_data_sources(ctx, node)
-    if not sources or ctx is None:
-        return []
-    from jiuwenswarm.server.runtime.designer.handlers.common import node_output_text
+    from jiuwenswarm.server.runtime.designer.handlers.common import predecessor_outputs
 
+    outputs = predecessor_outputs(ctx, node if isinstance(node, dict) else None) or []
     texts: list[tuple[str, str]] = []
-    for source_id, _role, label in _edge_source_nodes(ctx, sources):
-        body = node_output_text(ctx, source_id).strip()
+    for item in outputs:
+        if item.kind != "text":
+            continue
+        body = item.text.strip()
         if body:
-            texts.append((label, body[:4000]))
+            texts.append((item.label, body[:4000]))
     return texts
 
 
@@ -252,16 +205,14 @@ def edge_video_inputs(
     node: DesignerGraphNode | None,
 ) -> list[tuple[str, Path]]:
     """Video files that arrive on incoming data edges, in edge order."""
-    sources = incoming_data_sources(ctx, node)
-    if not sources or ctx is None:
-        return []
-    from jiuwenswarm.server.runtime.designer.handlers.common import node_output_video_paths
+    from jiuwenswarm.server.runtime.designer.handlers.common import predecessor_outputs
 
-    videos: list[tuple[str, Path]] = []
-    for source_id, _role, label in _edge_source_nodes(ctx, sources):
-        for path in node_output_video_paths(ctx, source_id):
-            videos.append((label, path))
-    return videos
+    outputs = predecessor_outputs(ctx, node if isinstance(node, dict) else None) or []
+    return [
+        (item.label, item.path)
+        for item in outputs
+        if item.kind == "video" and item.path is not None
+    ]
 
 
 def first_connected_video_file(videos: list[tuple[str, Path]]) -> str | None:
