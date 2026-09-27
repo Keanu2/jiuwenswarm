@@ -23,7 +23,7 @@ _STOP = frozenset(
     a an the and or of to in on at for with from into over after before
     this that these those then while still also just as by is are was were
     be been being it its they them their he she his her we our you your
-    video film clip shot scene camera cinematic photoreal please create make
+    video film Shot scene camera cinematic photoreal please create make
     generate want need 的 了 在 和 与 并 将 把 是 一段 视频 镜头 分镜
     """.split()
 )
@@ -152,11 +152,11 @@ def clear_unrequested_angle_view(shot: dict[str, Any], *, coverage: bool) -> Non
     vk = str(shot.get("view_key") or "").strip().lower()
     if vk in ANGLE_VIEWS:
         shot["view_key"] = ""
-    bible = shot.get("scene_bible")
+    bible = shot.get("scene_specs")
     if isinstance(bible, dict) and str(bible.get("active_view") or "").strip().lower() in ANGLE_VIEWS:
         bible = dict(bible)
         bible["active_view"] = "sequence"
-        shot["scene_bible"] = bible
+        shot["scene_specs"] = bible
 
 
 def action_covers_whole_prompt(action: str, user_prompt: str) -> bool:
@@ -290,7 +290,7 @@ def clip_assignment_text(
     if str(camera or "").strip():
         lines.append(f"- Camera: {str(camera).strip()[:160]}")
     if str(speech_line or "").strip():
-        lines.append(f"- Speech this beat: {str(speech_line).strip()[:200]}")
+        lines.append(f"- Speech this shot: {str(speech_line).strip()[:200]}")
     names = [str(x).strip() for x in (on_screen or []) if str(x).strip()]
     if names:
         lines.append(f"- On-screen: {', '.join(names[:8])}")

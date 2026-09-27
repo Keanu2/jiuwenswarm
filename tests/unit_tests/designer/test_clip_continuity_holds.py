@@ -84,7 +84,7 @@ def test_compose_weaves_holds_and_crowd_not_lock_banner() -> None:
             "present": False,
             "hold": "The area is clear of the earlier crowd — they already left.",
         },
-        "scene_bible": {"place": "open office", "lighting": "evening light"},
+        "scene_specs": {"scene_name": "open office", "lighting": "evening light"},
         "style_lock": {"look": "photoreal cinematic"},
     }
     text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["shot_action"])
@@ -93,5 +93,5 @@ def test_compose_weaves_holds_and_crowd_not_lock_banner() -> None:
     assert "clear of the earlier crowd" in low or "already left" in low
     assert "CROWD LOCK" not in text
     assert "do not" not in low
-    # This beat is speech, not a restaged turn.
+    # This shot is speech, not a restaged turn.
     assert "valentine" in low or "speaks" in low or "oh no" in low

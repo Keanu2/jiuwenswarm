@@ -70,23 +70,23 @@ ANGLE_PRESETS: list[dict[str, Any]] = [
 STYLE_LOCK_DEFAULT = {
     "look": "photoreal cinematic, coherent color grade across all sheets/frames/clips",
     "lens": "35mm cinematic, soft background when close; no comic/grid UI",
-    "palette": "match scene plate color temperature and wardrobe dyes — never restyle mid-film",
+    "palette": "match scene specs color temperature and wardrobe dyes — never restyle mid-film",
     "medium": "photoreal_cinematic",
     "forbid": "no style drift, no outfit redesign, no new architecture, no subtitles/watermarks",
 }
 
 QWEN_IMAGE_PLAYBOOK = """
 ## Configured image model (call_image_model)
-Use for solo character sheets and empty scene plates / stills.
+Use for solo character sheets and scene specs / stills.
 - PROMPT LENGTH: obey the IMAGE PROMPT LIMIT stamped from the configured IMAGE_GEN
   backend (Manager / leaf context). Prefer dense shot-ready prose; do not pad.
 - COST: Prefer ~1K resolution (size 1K / 1024x1024 or aspect-matched ~1K). Do not request 2K/4K.
 - EVERY named character gets a solo identity sheet before any keyframe.
 - First KF of a setting_id: compose_from_solo_refs — GENERATE the setting AND place ONLY
-  storyboard on_screen cast with cast_actions. Author a detailed SCENE BIBLE (objects,
+  storyboard on_screen cast with cast_actions. Author a detailed SCENE SPECS (objects,
   lighting, crowd, hierarchical views: front/left/right/side/top/bottom).
 - Later KF same setting_id: ALSO compose_from_solo_refs from character solos, but reuse the
-  SCENE PROMPT HANDOFF / scene bible so architecture stays deterministic. Change only view +
+  SCENE PROMPT HANDOFF / scene specs so architecture stays deterministic. Change only view +
   on_screen/doing. Never edit a prior keyframe image as the primary ref.
 - Multi-ref prompting: name each slot ("Image 1 is Pastor… Image 2 is Young Man…").
   State placements (screen-left/right), gaze targets, and what must NOT change.
@@ -96,7 +96,7 @@ Use for solo character sheets and empty scene plates / stills.
 
 WAN3_VIDEO_PLAYBOOK = """
 ## Configured video model (call_video_model) — PRIMARY film path
-Every clip: R2V from the empty scene plate + on-screen solos.
+Every clip: R2V from the scene specs + on-screen solos.
 Same-setting later clips keep prior continuity in agent context (not last-frame pixels).
 Do not attach the peopled master as last environment (clones / people who left).
 Prompt formula: Character + Action + Lines + Scene.
@@ -110,15 +110,15 @@ configured VIDEO_GEN backend.
 
 STORYBOARD_DETAIL_RULES = """
 ## Storyboard detail (Supervisor authors — hierarchical by SCENE then keyframes)
-Group shots by setting_id / place. For EACH scene block author a SCENE BIBLE:
+Group shots by setting_id / place. For EACH scene block author a SCENE SPECS:
 objects + locations, lighting, crowd size/positions, and hierarchical views
 (front/left/right/side/top/bottom) so coverage is coherent and things do not appear
 from nowhere. For EACH scene:
 1. First keyframe = compose_from_solo_refs: Qwen generates the setting AND places cast
-   from solo identity sheets (NO empty scene-plate node). Include scene bible in the brief.
+   from solo identity sheets (NO scene specs node). Include scene specs in the brief.
 2. Later keyframes in the SAME scene = compose_from_solo_refs again with SCENE PROMPT
    HANDOFF from the master (reuse architecture; change view/cast only).
-3. New setting_id → new scene bible + compose master, then handoffs again.
+3. New setting_id → new scene specs + compose master, then handoffs again.
 Per shot also list: timeline, camera/view_key, placements, motion, speech_line,
 character_ids, continuity_lock, style_lock, shot_relation, keyframe_strategy,
 keyframe_prompt. Diversify angles within a locked geography/style.
@@ -127,7 +127,7 @@ Node labels should read like: character: [Name]; scene [n]: keyframe [n]; scene 
 
 SUPERVISOR_CORRECTION_HINTS = """
 When correcting leaf agents / drafting node prompts:
-- Character solos = identity only. Every KF composes cast INTO the locked scene bible
+- Character solos = identity only. Every KF composes cast INTO the locked scene specs
   (style_lock + setting text + hierarchical views). Same-setting later KFs: reuse master
   scene prompt handoff — do not edit prior keyframe images as the primary ref.
 - Clip: DETAILED Wan R2V prompt with STYLE LOCK (photoreal default) + CONTACT lock
@@ -145,7 +145,7 @@ Manager one-pass corrections (locks bind ALL agents — leaf rewrites cannot dro
 - BEFORE media calls: gate every frame/keyframe/clip prompt for aspect_lock, style_lock,
   spatial_lock, costume/identity, occupancy, and prior continuity; re-inject missing locks.
 - Stamp image_size from aspect_lock on stills and video_size/video_resolution=480P on clips.
-- Graph = brief→storyboard→solo cast→empty scene plates→R2V clips→compose.
+- Graph = brief→storyboard→solo cast→scene specs→R2V shots→compose.
 - Prune only true orphans; every kept node must reach compose.
 """.strip()
 
@@ -195,7 +195,7 @@ def default_style_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]
         lock["medium"] = "stylized_animation"
         lock["forbid"] = (
             "no style drift between shots, no outfit redesign, no new architecture, "
-            "no subtitles/watermarks, no labeled infographic character cards, "
+            "no subtitles/watermarks, no labeled infographic character specs, "
             "no medium switch (cartoon<->photoreal or 3D<->2D) mid-film"
         )
     elif any(k in blob for k in ("photoreal", "photorealistic", "live-action", "documentary")):
@@ -308,7 +308,7 @@ def wan3_clip_prompt_prefix(
     brief_locks: str = "",
     ref_bindings: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build Wan Omni prompt; scene plate is the last reference image when scene_ref_index set."""
+    """Build Wan Omni prompt; scene specs is the last reference image when scene_ref_index set."""
     names = [str(n).strip() for n in cast_names if str(n).strip()]
     if ref_bindings:
         ref_line = format_image_ref_bindings(ref_bindings)
@@ -320,7 +320,7 @@ def wan3_clip_prompt_prefix(
             refs.append("Image 1 is the sole identity reference for the on-screen subject.")
         scene_i = int(scene_ref_index) if scene_ref_index else (len(names[:5]) + 1)
         refs.append(
-            f"Image {scene_i} is the SINGLE environment/scene plate — lock geography, props, and lighting."
+            f"Image {scene_i} is the SINGLE environment/scene specs — lock geography, props, and lighting."
         )
         ref_line = f"[References]: {' '.join(refs)}"
     style = style_lock if isinstance(style_lock, dict) else {}
@@ -438,7 +438,7 @@ def format_image_ref_bindings(bindings: list[dict[str, Any]] | None) -> str:
         elif role == "prior_keyframe":
             lines.append(
                 f"Image {idx} is the PRIOR keyframe to EDIT — keep the same room geometry "
-                "and style; only update pose/action/blocking for this beat."
+                "and style; only update pose/action/blocking for this shot."
             )
         elif role == "identity":
             who = name or "this cast member"
@@ -448,7 +448,7 @@ def format_image_ref_bindings(bindings: list[dict[str, Any]] | None) -> str:
             )
         elif role == "environment":
             lines.append(
-                f"Image {idx} is the environment/scene plate — lock geography, furniture, "
+                f"Image {idx} is the environment/scene specs — lock geography, furniture, "
                 "windows/walls, props, and lighting."
             )
         else:

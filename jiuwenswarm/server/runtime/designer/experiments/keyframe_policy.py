@@ -4,7 +4,7 @@
 Plan A commercial path (ensemble_master / setting-master):
   Per setting_id, the FIRST keyframe is a MASTER still that GENERATES the environment
   together with ALL named cast who appear in that setting (clearly visible, blocked).
-  No empty scene-plate template. Solo sheets = identity locks only (few Image-N slots).
+  No scene specs template. Solo sheets = identity locks only (few Image-N slots).
   Later same-set keyframes EDIT the prior/master (reframe / zoom / pose / exits).
   New setting_id → new master with that setting's ensemble, then edit again.
 
@@ -156,7 +156,7 @@ def _cid_list(raw: Any, *, exclude: set[str] | None = None) -> list[str]:
 
 
 def _cast_actions_map(shot: dict[str, Any]) -> dict[str, str]:
-    """Per-character doing-what for this beat (composer / storyboard authority)."""
+    """Per-character doing-what for this shot (composer / storyboard authority)."""
     raw = shot.get("cast_actions") or shot.get("doing") or shot.get("character_actions")
     out: dict[str, str] = {}
     if isinstance(raw, dict):
@@ -186,7 +186,7 @@ def resolve_shot_cast_roles(
     """Per-shot visible / offscreen / absent — not every film character in every frame.
 
     - visible (on_screen): drawn in this keyframe
-    - offscreen: in this setting but not in frame this beat
+    - offscreen: in this setting but not in frame this shot
     - absent: film cast not in this setting at all (never drawn here)
     """
     ban = set(prop_ids)
@@ -264,8 +264,8 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     ensembles = compute_setting_ensembles(shots, characters)
     # Do NOT force orphan cast into scene 1 visuals — solo cards still come from characters[].
     out["setting_ensembles"] = ensembles
-    # Empty scene plates are the geography lock for clip R2V (Qwen stills).
-    out["skip_scene_plate"] = False
+    # Scene specs are the geography lock for clip R2V (Qwen stills).
+    out["skip_scene_specs"] = False
     out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
 
     # Distinct place text per setting_id (from scenes[] or first compose action).
@@ -318,7 +318,7 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
         shot["featured_cast_ids"] = featured
         shot["character_ids"] = list(visible)
         shot["cast_actions"] = actions
-        # Compose places ONLY visible people; identity refs = visible (+ offscreen solos optional).
+        # Compose scenes ONLY visible people; identity refs = visible (+ offscreen solos optional).
         shot["compose_cast_ids"] = list(visible)
         shot["identity_ref_ids"] = identity_ref_priority(
             ensemble=list(dict.fromkeys(visible + offscreen)),
@@ -354,46 +354,46 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
             shot["ensemble_master"] = False
             shot["compose_setting_master"] = True
             shot["is_scene_master"] = True
-            shot["skip_scene_plate"] = True
+            shot["skip_scene_specs"] = True
             compose_actions_by_set[sid] = dict(actions)
             shot["scene_compose_authority"] = True
             other_sets = [s for s in setting_place if s != sid]
             distinct = (
-                f"NEW SCENE `{sid}` — different place from {', '.join(other_sets)}. "
+                f"NEW SCENE `{sid}` — different scene from {', '.join(other_sets)}. "
                 if other_sets
                 else f"ESTABLISH SCENE `{sid}`. "
             )
             shot["scene_distinctness"] = (
                 distinct
-                + (f"Place: {place}. " if place else "")
+                + (f"Scene: {place}. " if place else "")
                 + "Do not reuse architecture/landmarks from other setting_ids. "
                 "This keyframe IS the scene master (setting + visible cast) — not an empty plate."
             )
         else:
             # Same setting: still compose from character solos (not edit prior image).
-            # Consistency comes from shared scene_bible + prompt handoff from master KF.
+            # Consistency comes from shared scene_specs + prompt handoff from master KF.
             shot["keyframe_strategy"] = "compose_from_solo_refs"
             shot["same_setting_prior_edit"] = False
             shot["ensemble_master"] = False
             shot["compose_setting_master"] = False
             shot["is_scene_master"] = False
-            shot["skip_scene_plate"] = True
+            shot["skip_scene_specs"] = True
             shot["scene_compose_authority"] = False
             prior_actions = compose_actions_by_set.get(sid) or {}
             shot["setting_lock"] = {
                 "setting_id": sid,
-                "place": place or setting_place.get(sid) or "",
+                "scene_name": place or setting_place.get(sid) or "",
                 "rule": (
                     (
                         "SAME SCENE LOCK: compose again from solo character sheets using the "
-                        "scene bible + master scene prompt (handoff). Keep architecture, lighting, "
+                        "scene specs + master scene prompt (handoff). Keep architecture, lighting, "
                         "landmarks, crowd, and fixed props identical. Change ONLY camera view + "
                         "on_screen + cast_actions. Never invent new set dressing; never borrow "
                         "another setting_id."
                     )
                     if coverage
                     else (
-                        "SAME SCENE LOCK: same place, lighting, landmarks, and wardrobe. "
+                        "SAME SCENE LOCK: same scene, lighting, landmarks, and wardrobe. "
                         "This clip is the NEXT time window — film THIS shot's action only. "
                         "Do not restage the previous window from a new angle. Never borrow "
                         "another setting_id."
@@ -416,9 +416,9 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
         else:
             view_key = "sequence"
             shot["view_key"] = ""
-        shot["scene_bible"] = build_scene_bible_for_setting(
+        shot["scene_specs"] = build_scene_specs_for_setting(
             setting_id=sid,
-            place=place or setting_place.get(sid) or "",
+            scene_name=place or setting_place.get(sid) or "",
             crowd=crowd,
             shot=shot,
             view_key=view_key,
@@ -440,11 +440,11 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
             "crowd_lock": crowd,
             "rule": (
                 (
-                    "SCENE COMPOSE: generate THIS setting only; place ONLY on_screen/"
+                    "SCENE COMPOSE: generate THIS setting only; include ONLY on_screen/"
                     "must_appear people doing cast_actions. Offscreen cast stay out of "
                     "frame. Absent cast (other scenes) must not appear. "
                     if is_first_of_set
-                    else "SAME-SCENE COMPOSE: reuse scene bible + master prompt; place ONLY "
+                    else "SAME-SCENE COMPOSE: reuse scene specs + master prompt; include ONLY "
                     "this shot's on_screen + cast_actions from solo sheets. Do not erase "
                     "must_appear; do not draw offscreen/absent; do not invent new props. "
                 )
@@ -457,7 +457,7 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     scene_locks: dict[str, dict[str, Any]] = {}
     for shot in shots:
         sid = str(shot.get("setting_id") or "set_1")
-        bible = shot.get("scene_bible") if isinstance(shot.get("scene_bible"), dict) else None
+        bible = shot.get("scene_specs") if isinstance(shot.get("scene_specs"), dict) else None
         if bible and sid not in scene_locks:
             scene_locks[sid] = dict(bible)
         elif bible and sid in scene_locks:
@@ -470,13 +470,13 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     out["crowd_locks_by_setting"] = crowd_by_set
     out["setting_places"] = setting_place
     out["scene_locks"] = scene_locks
-    out["skip_scene_plate"] = False
+    out["skip_scene_specs"] = False
     out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
     out["keyframe_policy"] = "scene_card_plus_clip_shots"
     out["keyframe_policy_notes"] = {
         "version": "plan_a.scene_card_clip.v17_time_lock",
         "rule": (
-            "Empty scene plate per setting_id (Qwen image) + solo sheets. "
+            "Scene specs per setting_id (Qwen image) + solo sheets. "
             "Clips use R2V: on-screen solos + empty scene. Same-setting clips "
             "continue from previous_clip_wan_prompt. Lock time-of-day / lighting / "
             "language / style across every same-setting shot."
@@ -485,17 +485,17 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     return out
 
 
-def build_scene_bible_for_setting(
+def build_scene_specs_for_setting(
     *,
     setting_id: str,
-    place: str,
+    scene_name: str,
     crowd: dict[str, Any] | None,
     shot: dict[str, Any],
     view_key: str,
 ) -> dict[str, Any]:
-    """Deterministic scene lock with hierarchical view coverage."""
+    """Deterministic scene specs with hierarchical view coverage."""
     crowd = crowd if isinstance(crowd, dict) else {}
-    place_bit = (place or str(shot.get("setting_description") or "") or "coherent place").strip()
+    place_bit = (scene_name or str(shot.get("setting_description") or "") or "coherent scene").strip()
     lighting_raw = shot.get("lighting")
     if not lighting_raw and isinstance(shot.get("setting_lock"), dict):
         lighting_raw = (shot.get("setting_lock") or {}).get("lighting")
@@ -520,13 +520,13 @@ def build_scene_bible_for_setting(
     if not objects:
         objects = [
             "primary landmark / architecture massing",
-            "secondary props that define the place",
+            "secondary props that define the scene",
             "floor/ground plane continuity",
             "background depth cues (walls/trees/skyline as appropriate)",
         ]
     view_defs = {
         "front": f"VIEW front: facing primary landmark of `{setting_id}`; show full width of locked props.",
-        "left": f"VIEW left: 90° left of front; same objects must remain in place — no new props.",
+        "left": f"VIEW left: 90° left of front; same objects must remain fixed — no new props.",
         "right": f"VIEW right: 90° right of front; mirrored coverage of the same locked set.",
         "side": f"VIEW side: oblique ~45°; reveal depth while keeping object L/R continuity.",
         "top": f"VIEW top/high: elevated angle; floor plan of props matches other views.",
@@ -541,7 +541,7 @@ def build_scene_bible_for_setting(
         active = "sequence"
     return {
         "setting_id": setting_id,
-        "place": place_bit[:400],
+        "scene_name": place_bit[:400],
         "architecture": place_bit[:400],
         "lighting": lighting[:320],
         "time_of_day": (tod_raw or "unspecified")[:40],
@@ -554,7 +554,7 @@ def build_scene_bible_for_setting(
         "views": view_defs,
         "active_view": active,
         "coherence_rule": (
-            "All views of this setting describe ONE place at ONE time of day. "
+            "All views of this setting describe ONE scene at ONE time of day. "
             "Objects/lighting/crowd exist in every view even if off-camera; nothing "
             "pops into existence when the camera moves; no day↔night jump mid-scene."
         ),
@@ -595,7 +595,7 @@ def _expand_blocking_to_visible(
                 "facing": "toward_primary_action_focus",
             }
         )
-    # Drop blocking entries for people not visible this beat.
+    # Drop blocking entries for people not visible this shot.
     positions = [
         p
         for p in positions
@@ -607,7 +607,7 @@ def _expand_blocking_to_visible(
         "positions": positions,
         "rule": (
             "Place ONLY on_screen / visible cast. Offscreen characters must not appear. "
-            "Pose = cast_actions / doing for this beat. Same-scene edits keep landmark "
+            "Pose = cast_actions / doing for this shot. Same-scene edits keep landmark "
             "and seats unless storyboard moves someone."
         ),
     }

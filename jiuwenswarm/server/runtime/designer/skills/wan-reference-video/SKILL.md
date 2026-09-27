@@ -43,7 +43,7 @@ When placing people from studio solos into an empty environment:
 
 - **CONTACT / ANTI-PENETRATION:** bodies never intersect solid furniture, walls, props, or each other.
 - Seated / kneeling / reclining / leaning → visible weight on the support surface — **on**, not **through**, not floating.
-- Solo sheets are often standing portraits — **repose** for the beat; do not paste standing legs into chairs/desks/floors as if fused.
+- Solo sheets are often standing portraits — **repose** for the shot; do not paste standing legs into chairs/desks/floors as if fused.
 - Hands grasp prop exteriors; limbs are not buried inside objects.
 - Depth order matches storyboard (in front of / behind props) — never merged into prop volume.
 

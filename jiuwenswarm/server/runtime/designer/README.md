@@ -3,7 +3,7 @@
 Package: `jiuwenswarm/server/runtime/designer/`
 
 AI-first **prompt → film** path with **no per-shot keyframes**. Clips are the shots.
-Empty scene plates + on-screen character solos + R2V (Wan / Seedance / MiniMax).
+Scene specs + on-screen character solos + R2V (Wan / Seedance / MiniMax).
 **Continuity authority:** storyboard per-shot `start_state` → beat → `end_state`.
 Same-setting clips run **concurrently** once storyboard + needed solos + scene are ready.
 
@@ -47,7 +47,7 @@ designer.graph.bootstrap
 | `orchestration.py` | Supervisor / Manager; storyboard start/end authoring; leaf prompt rewrite; ratings |
 | `executor.py` | Ready-queue scheduler (concurrency ≤3); storyboard→clip sync; compose hard-wait |
 | `node_agent.py` | Leaf DeepAgent tools (`call_image_model` → `generate_designer_image`, `call_video_model`, `ffmpeg_compose`) |
-| `node_labels.py` | Canvas titles (`Brief:…`, `Scene N:…`, `Scene S: Clip K:…`) |
+| `node_labels.py` | Canvas titles (`Brief:…`, `Scene N:…`, `Scene S: Shot K:…`) |
 | `model_tools.py` | Shared LLM / media tool wrappers |
 | `media_model_playbook.py` | Model family rules (image vs video) |
 | `audio_locks.py` | Language / speech / BGM locks |
@@ -57,7 +57,7 @@ designer.graph.bootstrap
 | File | Nodes |
 |------|-------|
 | `handlers/text_nodes.py` | Brief, storyboard |
-| `handlers/image_nodes.py` | Character solos, empty scene plates |
+| `handlers/image_nodes.py` | Character solos, scene specs |
 | `handlers/clip.py` | Clip R2V (refs = **on-screen** solos + scene; story-form prompt) |
 | `handlers/compose.py` | Final film; waits for real clip/audio files |
 | `handlers/audio_nodes.py` | Speech / music beds |
@@ -79,7 +79,7 @@ designer.graph.bootstrap
 | `clip_story_state.py` | Self Wan stamp / exit helpers (prior-clip ensure is no-op when start_state present) |
 | `clip_prompt_handoff.py` | Save `last_wan_prompt` on **self** only (no next-clip Wan lore) |
 | `clip_shot_scope.py` | Per-window beat filling from storyboard time |
-| `keyframe_policy.py` | Scene bible / setting ensembles (legacy name; no `n_frame_*`) |
+| `keyframe_policy.py` | Scene specs / setting ensembles (legacy name; no `n_frame_*`) |
 | `production_bible.py` | Lock bible stamped into brief/storyboard |
 | `leaf_agent_continuity.py` | Domain-agnostic leaf instructions |
 | `clothing_lock.py` / `shot_staging_lock.py` / `axis_locks.py` / `cast_prop_locks.py` | Wardrobe, staging, screen axis, cast vs props |

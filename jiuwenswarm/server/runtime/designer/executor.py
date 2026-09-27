@@ -175,7 +175,7 @@ class GraphExecutor:
                     architecture_clause_from_bible,
                 )
 
-                bible_m = c.get("scene_bible") if isinstance(c.get("scene_bible"), dict) else None
+                bible_m = c.get("scene_specs") if isinstance(c.get("scene_specs"), dict) else None
                 arch_m = architecture_clause_from_bible(bible_m)
                 c["scene_architecture_clause"] = arch_m or text[:900]
                 c["scene_master_prompt"] = (arch_m or text)[:900]
@@ -186,7 +186,7 @@ class GraphExecutor:
                     architecture_clause_from_bible,
                 )
 
-                bible_m = c.get("scene_bible") if isinstance(c.get("scene_bible"), dict) else None
+                bible_m = c.get("scene_specs") if isinstance(c.get("scene_specs"), dict) else None
                 arch_m = architecture_clause_from_bible(bible_m)
                 c["scene_architecture_clause"] = arch_m or text[:900]
                 c["scene_master_prompt"] = (arch_m or text)[:900]
@@ -212,7 +212,7 @@ class GraphExecutor:
                 architecture_clause_from_bible,
             )
 
-            bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+            bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
             if not bible:
                 meta0 = live.get("metadata") if isinstance(live.get("metadata"), dict) else {}
                 locks0 = meta0.get("scene_locks") if isinstance(meta0.get("scene_locks"), dict) else {}
@@ -1247,7 +1247,7 @@ class GraphExecutor:
                     in _TERMINAL_NODE_STATUSES
                     for n in scene_nodes
                 )
-                # Scene-card path: adjust once all scene plates finish (no n_frame_*).
+                # Scene-card path: adjust once all scene specs finish (no n_frame_*).
                 # Legacy path: adjust once all keyframes finish.
                 ready_gate = (
                     (scenes_done and not frame_nodes)
@@ -1801,7 +1801,7 @@ class GraphExecutor:
         graph: DesignerExecutionGraph,
         completed_id: str,
     ) -> None:
-        """Forward scene bible / master prompt after a scene card or scene-master frame completes."""
+        """Forward scene specs / master prompt after a scene card or scene-master frame completes."""
         by_id = {
             str(n.get("id") or ""): n
             for n in (graph.get("nodes") or [])
@@ -1822,7 +1822,7 @@ class GraphExecutor:
         setting_id = str(scfg.get("setting_id") or "").strip()
         if not setting_id:
             return
-        bible = scfg.get("scene_bible") if isinstance(scfg.get("scene_bible"), dict) else None
+        bible = scfg.get("scene_specs") if isinstance(scfg.get("scene_specs"), dict) else None
         if not bible:
             meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             locks = meta.get("scene_locks") if isinstance(meta.get("scene_locks"), dict) else {}
@@ -1858,7 +1858,7 @@ class GraphExecutor:
                 cfg["master_scene_node_id"] = src_id
                 cfg["scene_node_id"] = cfg.get("scene_node_id") or src_id
             if bible:
-                cfg["scene_bible"] = dict(bible)
+                cfg["scene_specs"] = dict(bible)
             if arch or master_prompt:
                 cfg["scene_architecture_clause"] = arch or master_prompt[:900]
                 cfg["scene_master_prompt"] = master_prompt or (arch[:900] if arch else "")
@@ -1869,7 +1869,7 @@ class GraphExecutor:
             if marker not in prompt and handoff_arch:
                 handoff_bit = (
                     f"{marker} from {src_id} (same setting `{setting_id}`): "
-                    f"{handoff_arch} Change ONLY camera view + on-screen cast/actions for THIS beat."
+                    f"{handoff_arch} Change ONLY camera view + on-screen cast/actions for This shot."
                 )
                 gen2["prompt"] = (prompt + "\n" + handoff_bit).strip()[:2200]
                 cfg["generate"] = gen2
@@ -1879,7 +1879,7 @@ class GraphExecutor:
                 irefs["master_scene_node_id"] = src_id
                 irefs["scene_node_id"] = irefs.get("scene_node_id") or src_id
                 if bible:
-                    irefs["scene_bible"] = dict(bible)
+                    irefs["scene_specs"] = dict(bible)
             else:
                 irefs["keyframe_strategy"] = "compose_from_solo_refs"
                 cfg["keyframe_strategy"] = "compose_from_solo_refs"
@@ -2674,12 +2674,12 @@ def _is_ready(
             if member_status == NODE_STATUS_COMPLETED:
                 continue
             # Soft artifact deps (another clip's beat): unlock while that clip
-            # is still generating, once the storyboard beat is already known.
+            # is still generating, once the storyboard shot is already known.
             if graph is not None and is_soft_artifact_dependency(graph, member, node_id):
                 if artifact_dependency_satisfied(graph, node_id, member):
                     continue
                 return False
-            # Hard inputs (character sheet, empty scene plate): proceed as soon
+            # Hard inputs (character sheet, scene specs): proceed as soon
             # as the file exists, even if that node is still finishing.
             if member_status == NODE_STATUS_RUNNING and _published_media_output(member_state):
                 continue

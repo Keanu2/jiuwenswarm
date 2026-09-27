@@ -466,7 +466,7 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
     assert scfg.get("composed_scene") is False
     assert not scfg.get("character_node_ids")
     assert scfg.get("style_lock")
-    assert scfg.get("skip_scene_plate") is False
+    assert scfg.get("skip_scene_specs") is False
     clip1 = next(n for n in graph["nodes"] if n.get("id") == "n_clip_1")
     clip2 = next(n for n in graph["nodes"] if n.get("id") == "n_clip_2")
     assert (clip1.get("config") or {}).get("first_of_setting") is True
@@ -588,7 +588,7 @@ def test_manager_rewrites_lock_essay_into_image_binding() -> None:
             "Mother": {"pose": "seated", "landmark": "table", "screen": "screen-left"},
             "Young Child": {"pose": "seated", "landmark": "table", "screen": "screen-right"},
         },
-        "scene_bible": {
+        "scene_specs": {
             "place": "the warm dining room",
             "lighting": "warm golden-hour from the window",
             "objects": ["wooden table", "Bible"],
@@ -633,7 +633,7 @@ def test_compose_weaves_language_and_time_of_day() -> None:
             "time_of_day": "night",
             "lighting": "cool night practicals with stable key direction",
         },
-        "scene_bible": {"place": "empty room", "objects": ["lamp"]},
+        "scene_specs": {"scene_name": "empty room", "objects": ["lamp"]},
         "style_lock": {"look": "photoreal cinematic"},
     }
     text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["shot_action"])
@@ -672,7 +672,7 @@ def test_compose_keeps_prior_prompt_continuity() -> None:
         ),
         "previous_clip_action": "Dad walks to the door",
         "seat_anchors": {"Dad": {"pose": "seated", "screen": "screen-left"}},
-        "scene_bible": {
+        "scene_specs": {
             "place": "kitchen",
             "lighting": "soft morning light",
             "objects": ["table"],
@@ -705,7 +705,7 @@ def test_exited_cast_omitted_until_returned() -> None:
         "exited_ids": ["char_child"],
         "shot_action": "Mum pours tea.",
         "costume_lock": "Mum: red dress",
-        "scene_bible": {"place": "kitchen", "lighting": "soft light"},
+        "scene_specs": {"scene_name": "kitchen", "lighting": "soft light"},
         "style_lock": {"look": "photoreal cinematic"},
     }
     graph = {

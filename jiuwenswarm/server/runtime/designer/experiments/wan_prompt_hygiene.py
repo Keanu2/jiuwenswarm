@@ -40,7 +40,7 @@ _NEGATIVE_LINE = re.compile(
 
 _BLOCK_START = re.compile(
     r"(?i)^(already[_\s-]?done|prior speech|previous clip had|previous wan|"
-    r"continuity card|same-scene continuity gate)\b"
+    r"character consistency|same-scene consistency gate)\b"
 )
 
 
@@ -128,7 +128,7 @@ def positive_continuity_clause(
         lines.append("This window has no new spoken line.")
     lines.append(
         "Same faces and wardrobe as the character sheets. "
-        "Same room as the empty scene plate. Match the film STYLE LOCK."
+        "Same room as the scene specs. Match the film STYLE LOCK."
     )
     return "\n".join(lines)
 

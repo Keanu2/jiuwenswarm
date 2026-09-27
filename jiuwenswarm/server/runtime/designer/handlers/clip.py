@@ -116,7 +116,7 @@ def collect_clip_scene_image(
     node: DesignerGraphNode | None = None,
 ) -> Path | None:
     """Resolve the setting's scene-card image (empty environment plate for R2V)."""
-    del shot_index  # scene plates are keyed by setting / scene_node_id, not shot index
+    del shot_index  # scene specs are keyed by setting / scene_node_id, not shot index
     if ctx is None:
         return None
     cfg = (
@@ -468,7 +468,7 @@ def collect_clip_reference_images(
         add(path)
 
     scene = collect_clip_scene_image(ctx, shot_index, node=node)
-    # Empty scene plate is the last environment reference for every clip.
+    # Scene specs is the last environment reference for every clip.
     add(scene)
     return cap_r2v_reference_paths(paths)
 
@@ -519,16 +519,16 @@ def _shot_for_node(
 
 
 def _looks_like_contaminated_prompt(text: str) -> bool:
-    """True only for pasted handoff/assignment dumps — not normal SCENE BIBLE / staging."""
+    """True only for pasted handoff/assignment dumps — not normal SCENE SPECS / staging."""
     raw = (text or "").upper()
     needles = (
         "PRIOR KEYFRAME PROMPT",
         "PREVIOUS KEYFRAME HAD",
-        "PRIOR CLIP CONTINUITY",
+        "PRIOR SHOT CONSISTENCY",
         "PREVIOUS CLIP HAD",
         "YOUR ASSIGNMENT",
         "MASTER SCENE PROMPT",
-        "CONTINUITY CARD (MANAGER)",
+        "CHARACTER CONSISTENCY (MANAGER)",
         "PRIOR CLIP WAN",
         "PREVIOUS WAN PROMPT",
     )
@@ -564,7 +564,7 @@ def _clip_prompt_lead(
     if has_character:
         attached.append("on-screen character solo sheets as character1, character2, …")
     if has_scene:
-        attached.append("empty scene plate last, as the room")
+        attached.append("scene specs last, as the room")
     extras = (
         " Explicit visual inputs are attached, in order: " + ", ".join(attached) + "."
         if attached
@@ -578,11 +578,11 @@ def _clip_prompt_lead(
     )
     return (
         f"Create shot {shot_index} as a {duration}-second video that plays THIS "
-        "storyboard beat only. "
+        "storyboard shot only. "
         f"{extras}{focus} "
         f"{continue_bit}"
         "character1/character2 are the solo sheets (face and wardrobe). "
-        "The last image is the empty scene plate. "
+        "The last image is the scene specs. "
         "Match the film STYLE LOCK. One instance per person. "
         "No subtitles, no cutaways.\n\n"
     )
@@ -681,7 +681,7 @@ def build_clip_prompt(
         or ""
     ).strip()
     story_lines: list[str] = [
-        f"STORYBOARD BEAT (authoritative plot for shot {shot_index} — play this window only, "
+        f"STORYBOARD SHOT (authoritative plot for shot {shot_index} — play this window only, "
         f"do not restage the full user prompt or other shots): "
         f"{action or 'this shot row only'}."
     ]
@@ -713,7 +713,7 @@ def build_clip_prompt(
         if extras:
             named = "; ".join(f'"{label}" ({path.name})' for label, path in extras)
             parts.append(
-                "USER IMAGES wired to this clip sit after the character sheets and before the scene plate: "
+                "USER IMAGES wired to this clip sit after the character sheets and before the scene specs: "
                 f"{named}. Put each subject's appearance from those images into this shot. Do not omit them."
             )
     except Exception:  # noqa: BLE001
@@ -748,13 +748,13 @@ def build_clip_prompt(
     setting_id = str(cfg.get("setting_id") or (shot or {}).get("setting_id") or "").strip()
     if setting_id:
         parts.append(f"Setting lock for this clip only: {setting_id}.")
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
-    if not bible and isinstance(identity.get("scene_bible"), dict):
-        bible = identity["scene_bible"]
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
+    if not bible and isinstance(identity.get("scene_specs"), dict):
+        bible = identity["scene_specs"]
     if bible:
         parts.append(
-            "SCENE BIBLE (architecture/objects/light — keep; only animate this beat): "
-            f"place={bible.get('place')}; lighting={bible.get('lighting')}; "
+            "SCENE SPECS (architecture/objects/light — keep; only animate this shot): "
+            f"scene={bible.get('scene_name') or bible.get('place')}; lighting={bible.get('lighting')}; "
             f"objects={', '.join(str(x) for x in (bible.get('objects') or [])[:6])}; "
             f"crowd={bible.get('crowd')}."
         )
@@ -824,7 +824,7 @@ def build_clip_prompt(
         parts.append(
             f"Use character reference sheets from nodes: {', '.join(char_nodes)}. "
             "Match faces and wardrobe exactly. One instance per person — no clones. "
-            "Place them into the scene-card geography for this beat."
+            "Place them into the scene-card geography for this shot."
         )
     lock = cfg.get("continuity_lock") if isinstance(cfg.get("continuity_lock"), dict) else None
     if not lock and action:
@@ -842,11 +842,11 @@ def build_clip_prompt(
         parts.append(_format_shot_block(shot, shot_index))
     else:
         parts.append(
-            f"Storyboard beat for shot {shot_index} only "
+            f"Storyboard shot for shot {shot_index} only "
             f"(action={action or 'see keyframe'}; camera={camera or 'match keyframe'})."
         )
     override = str((cfg.get("generate") or {}).get("prompt") or "").strip() if isinstance(cfg.get("generate"), dict) else ""
-    # When live storyboard already provided the beat, skip stale generate.prompt narratives.
+    # When live storyboard already provided the shot, skip stale generate.prompt narratives.
     if override and not sb_action:
         extracted = _extract_action_from_generate_prompt(override)
         if extracted and extracted.casefold() not in (action or "").casefold():

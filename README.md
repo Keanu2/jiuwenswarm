@@ -34,8 +34,8 @@ flowchart TD
 
 1. **Storyboard** per-shot `start_state` → action/camera/speech → `end_state` (sole plot authority)
 2. **Solo identity sheets** (face + wardrobe) — only **on-screen** solos wire into each clip
-3. **Empty scene plate** per `setting_id` (room only — no people)
-4. **R2V** clip: attach on-screen solos + scene plate; **story-form** prompt
+3. **Scene specs** per `setting_id` (room only — no people)
+4. **R2V** clip: attach on-screen solos + scene specs; **story-form** prompt
 5. **Same-setting clips run concurrently** once shared deps are ready (no clip→clip edges)
 6. **Compose** hard-waits real on-disk clip/audio media
 
@@ -43,7 +43,7 @@ flowchart TD
 flowchart LR
   Brief --> SB[Storyboard]
   SB --> CD[Character solos]
-  SB --> Scene[Empty scene plates]
+  SB --> Scene[Scene specs]
   SB --> Clip1[Clip 1 R2V]
   SB --> Clip2[Clip 2 R2V]
   CD --> Clip1

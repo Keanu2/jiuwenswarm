@@ -54,9 +54,9 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
                     return False
                 markers = (
                     "YOUR ASSIGNMENT",
-                    "STORYBOARD BEAT",
+                    "STORYBOARD SHOT",
                     "STAGING LOCK",
-                    "SAME-SCENE CONTINUITY GATE",
+                    "SAME-SCENE CONSISTENCY GATE",
                     "Film shot",
                     "CLOTHING LOCK",
                     "LANGUAGE LOCK",
@@ -427,8 +427,8 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
     """Continuity refs for keyframes: on_screen solo sheets only (+ optional user refs).
 
     A file the user attached on this node replaces those generated stills.
-    Scene consistency comes from scene_bible + prompt handoff text — not prior KF images.
-    Never attach empty scene plates or off-screen cast sheets.
+    Scene consistency comes from scene_specs + prompt handoff text — not prior KF images.
+    Never attach scene specs or off-screen cast sheets.
     """
     attached = uploaded_material_image_paths(node)
     if attached:
@@ -498,14 +498,14 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
             master_prompt = str(mgen.get("prompt") or mcfg.get("prompt") or "").strip()
             if master_prompt:
                 cfg["scene_master_prompt"] = master_prompt[:2400]
-                if isinstance(mcfg.get("scene_bible"), dict):
-                    cfg["scene_bible"] = dict(mcfg["scene_bible"])
+                if isinstance(mcfg.get("scene_specs"), dict):
+                    cfg["scene_specs"] = dict(mcfg["scene_specs"])
                 node["config"] = cfg
 
     user_paths = user_reference_image_paths(ctx.graph if isinstance(ctx.graph, dict) else None)
 
-    # Do NOT pull empty NODE_ROLE_SCENE plates or prior keyframe images into refs.
-    # Continuity is scene_bible + prompt handoff; visual identity is on_screen solos only.
+    # Do NOT pull empty NODE_ROLE_Scene specs or prior keyframe images into refs.
+    # Continuity is scene_specs + prompt handoff; visual identity is on_screen solos only.
     ordered = [*user_paths, *paths]
 
     merged: list[Path] = []

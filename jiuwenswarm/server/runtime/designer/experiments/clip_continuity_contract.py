@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Domain-agnostic clip continuity contract (storyboard + Manager).
+"""Domain-agnostic shot consistency contract (storyboard + Manager).
 
 No scene/genre/prompt hardcodes. Continuity comes from:
   - prior same-setting storyboard rows (action / camera / speech)
@@ -83,7 +83,7 @@ def collect_same_setting_prior_beats(
 
 
 def storyboard_already_done_notes(priors: list[dict[str, Any]] | None) -> list[str]:
-    """Compact already_done notes from prior storyboard beats (not Wan prose)."""
+    """Compact already_done notes from prior storyboard shots (not Wan prose)."""
     notes: list[str] = []
     for p in priors or []:
         if not isinstance(p, dict):

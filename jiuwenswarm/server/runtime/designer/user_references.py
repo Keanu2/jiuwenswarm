@@ -258,7 +258,7 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
     """Show each upload as its own canvas node feeding Brief (and cast cards).
 
     The node is a passthrough asset: the original file is the authority, so the
-    runner must never regenerate it. Images also reach character cards, which
+    runner must never regenerate it. Images also reach character specs, which
     lets the cast be derived from the upload instead of invented.
     """
     refs = graph_user_references(graph)

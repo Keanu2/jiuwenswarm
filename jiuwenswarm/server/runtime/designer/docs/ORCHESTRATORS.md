@@ -78,7 +78,7 @@ UI Play
 | Clip deps | Storyboard + **on-screen** solos + scene (hard) |
 | Same-setting clips | **Concurrent** — no prior-clip soft wait |
 | Compose | Hard wait for real on-disk mp4s |
-| Storyboard sync | After storyboard completes, refresh clip shot fields |
+| Storyboard sync | After storyboard completes, refresh Shot fields |
 
 ---
 
@@ -120,7 +120,7 @@ UI Play
 
 ## 8. Design rules (current)
 
-- Scene plates required; no `n_frame_*`  
+- Scene specs required; no `n_frame_*`  
 - Continuity = storyboard start/end + occupancy  
 - Images: Qwen; video: Wan/Seedance/MiniMax per `VIDEO_GEN_*`  
 - 480p clips; no compose until real media  

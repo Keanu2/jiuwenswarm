@@ -277,7 +277,7 @@ def stamp_axis_locks(analysis: dict[str, Any]) -> dict[str, Any]:
         if prior.get("time_of_day") and prior.get("time_of_day") != "unspecified":
             tod = {**tod, **{k: v for k, v in prior.items() if str(v).strip()}}
         shot["time_of_day_lock"] = tod
-        bible = shot.get("scene_bible") if isinstance(shot.get("scene_bible"), dict) else None
+        bible = shot.get("scene_specs") if isinstance(shot.get("scene_specs"), dict) else None
         if bible is not None:
             bible = dict(bible)
             bible.setdefault("time_of_day", tod.get("time_of_day"))
@@ -286,12 +286,12 @@ def stamp_axis_locks(analysis: dict[str, Any]) -> dict[str, Any]:
                 or "motivated key light" in str(bible.get("lighting") or "").lower()
             ):
                 bible["lighting"] = tod.get("lighting")
-            shot["scene_bible"] = bible
+            shot["scene_specs"] = bible
     # Keep existing spatial merge below.
     if landmarks:
         spatial["landmarks"] = landmarks[:8]
         spatial["landmark_rule"] = (
-            "Each named landmark keeps its place vs the scene plate "
+            "Each named landmark keeps its place vs the scene specs "
             "(front/back/left/right). Camera move reframes — it does not teleport furniture."
         )
     out["spatial_lock"] = spatial
@@ -300,7 +300,7 @@ def stamp_axis_locks(analysis: dict[str, Any]) -> dict[str, Any]:
         "landmarks": landmarks[:8],
         "rule": (
             "180-degree: a person on screen_left stays screen_left across pans/cuts "
-            "unless the beat says they cross. Occupancy: no random appear/disappear."
+            "unless the shot says they cross. Occupancy: no random appear/disappear."
         ),
     }
     out["characters"] = characters
@@ -365,7 +365,7 @@ def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | N
     lms = spatial.get("landmarks") or []
     if lms:
         bits.append(
-            "LANDMARKS frozen vs scene plate: "
+            "LANDMARKS frozen vs scene specs: "
             + ", ".join(str(x) for x in lms[:6])
             + ". "
             + str(spatial.get("landmark_rule") or "")
@@ -627,7 +627,7 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
         )
         if tod_node:
             cfg["time_of_day_lock"] = tod_node
-            bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+            bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
             if bible is not None and role in {"scene", "clip", "frame", "keyframe"}:
                 bible = dict(bible)
                 bible.setdefault("time_of_day", tod_node.get("time_of_day"))
@@ -636,7 +636,7 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
                     or "motivated key light" in str(bible.get("lighting") or "").lower()
                 ):
                     bible["lighting"] = tod_node.get("lighting")
-                cfg["scene_bible"] = bible
+                cfg["scene_specs"] = bible
         node["config"] = cfg
     meta["script_analysis"] = analysis
     meta["aspect_lock"] = aspect

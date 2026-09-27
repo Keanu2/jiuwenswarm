@@ -1,4 +1,4 @@
-"""Clip prompts must follow the live storyboard beat."""
+"""Clip prompts must follow the live storyboard shot."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class _FakeCtx:
 
 def test_contaminated_filter_allows_scene_bible_and_long_text():
     assert not _looks_like_contaminated_prompt(
-        "Film shot 1. Action: pastor speaks. SCENE BIBLE place=church; STAGING LOCK: left."
+        "Film shot 1. Action: pastor speaks. SCENE SPECS scene=church; STAGING LOCK: left."
     )
     long_ok = "Action: pastor speaks from the pulpit while the congregation listens attentively. " * 20
     assert not _looks_like_contaminated_prompt(long_ok)
@@ -57,7 +57,7 @@ def test_storyboard_row_wins_over_stale_shot_action(monkeypatch):
                     "generate": {
                         "prompt": (
                             "Film shot 1. Action: STALE unrelated beach sunset. "
-                            "SCENE BIBLE place=beach."
+                            "SCENE SPECS scene=beach."
                         )
                     },
                 },
@@ -180,7 +180,7 @@ def test_clip_prompt_leads_with_storyboard_beat(monkeypatch):
     )
     prompt = build_clip_prompt(graph, graph["nodes"][1], _FakeCtx(graph))
     head = prompt[:500].lower()
-    assert "STORYBOARD BEAT" in prompt
+    assert "STORYBOARD SHOT" in prompt
     assert "pastor" in head or "sermon" in head or "church" in head
     assert "continue from here" not in prompt.lower()
     assert "primary start blocking" not in prompt.lower()
@@ -198,7 +198,7 @@ def test_last_frame_clause_does_not_override_storyboard_plot():
         ],
     )
     low = text.lower()
-    assert "storyboard beat" in low
+    assert "storyboard shot" in low
     assert "continue from this pose" not in low
     assert "primary start blocking" not in low
 

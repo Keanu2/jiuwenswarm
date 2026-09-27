@@ -334,11 +334,11 @@ def audio_lock_prompt_block(
             )
         elif include_speech:
             lines.append(
-                "SPEECH LOCK: include natural diegetic speech for on-screen cast this beat "
+                "SPEECH LOCK: include natural diegetic speech for on-screen cast this shot "
                 f"in {language_display_name(lang or 'en')}; keep lines short."
             )
     else:
-        lines.append("SPEECH LOCK: intentional silence this beat — no invented dialogue.")
+        lines.append("SPEECH LOCK: intentional silence this shot — no invented dialogue.")
     bgm = bgm_lock if isinstance(bgm_lock, dict) else {}
     if include_music or bgm:
         lines.append(

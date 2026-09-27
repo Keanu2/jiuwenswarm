@@ -62,7 +62,7 @@ def stamp_director_shot_sheets(
         focus = [str(x) for x in (shot.get("character_ids") or shot.get("on_screen") or []) if str(x)]
         all_ids = [str(c.get("id")) for c in characters if c.get("id")]
         off = [c for c in all_ids if c not in set(focus)]
-        # Same-setting others who exist in the world but should be off-camera this beat.
+        # Same-setting others who exist in the world but should be off-camera this shot.
         shot["off_camera_cast_ids"] = off
         shot["on_camera_cast_ids"] = list(focus)
 
@@ -132,7 +132,7 @@ def stamp_director_shot_sheets(
                 shot["camera_framing_rule"] = (
                     f"CAMERA FRAMING: frame so ONLY {', '.join(on_names)} are visible on camera. "
                     f"Keep {', '.join(off_names)} OFF-CAMERA (outside frame / behind camera / "
-                    f"occluded by set) for this beat — they still exist in the same setting, "
+                    f"occluded by set) for this shot — they still exist in the same setting, "
                     f"do not delete them from the world, just do not show them."
                 )[:420]
             else:
@@ -225,7 +225,7 @@ def format_clip_framing_clause(shot: dict[str, Any] | None, analysis: dict[str, 
         parts.append(f"ON CAMERA (must stay readable): {', '.join(on_n)}.")
     if off_n:
         parts.append(
-            f"OFF CAMERA this beat (exist in set, not framed): {', '.join(off_n)} — "
+            f"OFF CAMERA this shot (exist in set, not framed): {', '.join(off_n)} — "
             "do not invent them into frame; do not erase them from continuity. "
             "Name them only in text if useful; R2V does not attach their solos as refs."
         )

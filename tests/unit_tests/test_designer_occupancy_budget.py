@@ -141,7 +141,7 @@ def test_normalize_llm_owns_shot_count_not_heuristic_ceiling():
         "shots": [
             {
                 "shot_index": i,
-                "title": f"Beat {i}",
+                "title": f"Shot {i}",
                 "action": f"action {i}",
                 "camera": "medium / eye-level",
                 "on_screen": ["char_1", "char_2"],
@@ -151,7 +151,7 @@ def test_normalize_llm_owns_shot_count_not_heuristic_ceiling():
             }
             for i in range(1, 6)
         ],
-        "skip_scene_plate": True,
+        "skip_scene_specs": True,
     }
     out = _normalize_llm_analysis(parsed, base)
     assert out is not None

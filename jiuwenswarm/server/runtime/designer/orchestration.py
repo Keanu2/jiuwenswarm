@@ -187,7 +187,7 @@ def _spatial_geography_lock_patch(graph: DesignerExecutionGraph) -> list[str]:
             "architecture": str(scene0.get("description") or "one coherent interior"),
             "static_rule": (
                 "STATIC OBJECTS LOCKED across shots: landmarks, terrain, buildings, props, and "
-                "light direction must match the master scene plate — only camera may change."
+                "light direction must match the master scene specs — only camera may change."
             ),
             "crowd_rule": (
                 "Empty environment plates; keyframes keep the SAME extras layout "
@@ -261,7 +261,7 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
 
     notes: list[str] = []
     meta0 = dict(graph.get("metadata") or {})
-    skip_scene_plate = bool(meta0.get("skip_scene_plate"))
+    skip_scene_specs = bool(meta0.get("skip_scene_specs"))
     # Drop unused combined cast sheets that never feed a frame/clip.
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
     edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
@@ -304,7 +304,7 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
         for e in (graph.get("edges") or [])
         if isinstance(e, dict)
     }
-    master_id = "n_scene" if "n_scene" in ids and not skip_scene_plate else ""
+    master_id = "n_scene" if "n_scene" in ids and not skip_scene_specs else ""
     if master_id:
         for n in list(graph.get("nodes") or []):
             if not isinstance(n, dict):
@@ -1324,7 +1324,7 @@ class SupervisorAgent:
             gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             lock = cfg.get("continuity_lock") if isinstance(cfg.get("continuity_lock"), dict) else {}
             clause = _continuity_prompt_clause(lock if isinstance(lock, dict) else None)
-            beat = action or "match storyboard beat for this shot"
+            beat = action or "match storyboard shot for this shot"
             if scene_card_mode:
                 scene_nid = str(cfg.get("scene_node_id") or "").strip()
                 scene_msg = str((feedback.get(scene_nid) or {}).get("message") or "") if scene_nid else ""
@@ -1544,7 +1544,7 @@ class SupervisorAgent:
             "Per shot REQUIRED: on_screen (visible only), offscreen, cast_actions, "
             "featured_cast_ids, setting_id, action, camera, timeline, keyframe_prompt, view_key. "
             "NEVER put later-meet cast into earlier on_screen. "
-            "Include scene_locks[setting_id]={place,lighting,objects,crowd,coherence_rule,views}. "
+            "Include scene_locks[setting_id]={scene_name,lighting,objects,crowd,coherence_rule,views}. "
             "Include brief_markdown and storyboard_markdown for UI. "
             "Max 8 shots. Output ONLY one JSON object. Schema: "
             '{"schema":"plan.v1","characters":[{"id":"char_1","name":"...","description":"..."}],'
@@ -1553,7 +1553,7 @@ class SupervisorAgent:
             '"on_screen":["char_1"],"offscreen":[],"cast_actions":{"char_1":"..."},'
             '"featured_cast_ids":["char_1"],"setting_id":"set_1","view_key":"front",'
             '"keyframe_prompt":"..."}],'
-            '"scene_locks":{"set_1":{"place":"...","lighting":"...","objects":[],'
+            '"scene_locks":{"set_1":{"scene_name":"...","lighting":"...","objects":[],'
             '"crowd":"...","coherence_rule":"...","views":{"front":"..."}}},'
             '"audio":{"include_speech":false,"include_music":false},'
             '"brief_markdown":"...","storyboard_markdown":"...","notes":"..."}'
@@ -1750,13 +1750,13 @@ class SupervisorAgent:
                     "storyboard updates on_screen / offscreen / cast_actions. "
                     "offscreen = in this scene but not in frame; never draw them. "
                     "Cast absent from a setting must not appear there. "
-                    "NO empty scene plates. Crowd/extras persist across same-setting shots "
+                    "NO scene specs. Crowd/extras persist across same-setting shots "
                     "unless they exit. Each shot needs timeline, camera, action, "
                     "on_screen, offscreen, cast_actions, featured_cast_ids, setting_id, "
                     "start_state {pose,seats,facing,on_screen,offscreen}, "
                     "end_state {pose,seats,facing,exited,speech_done,on_screen}, "
                     "continuity_lock, keyframe_prompt, exiting_character_ids, "
-                    "speech_by_character (map character_id→exact spoken line for THIS beat; "
+                    "speech_by_character (map character_id→exact spoken line for This shot; "
                     "empty {} if silent), speech_line (joined fallback). "
                     "Same setting_id: next shot start_state MUST match prior end_state. "
                     "Shots are self-contained continuity windows — do not rely on prior "
@@ -1780,7 +1780,7 @@ class SupervisorAgent:
                     '"continuity":"same bed","rule":"non-vocal underscore"},'
                     '"include_speech":true,"include_music":true,'
                     '"storyboard_markdown":"...","notes":"...","target_shot_count":N,'
-                    '"skip_scene_plate":false}'
+                    '"skip_scene_specs":false}'
                 )
                 result = await call_model_tool(
                     prompt=json.dumps(
@@ -2049,15 +2049,15 @@ class SupervisorAgent:
                     "First KF of each setting: compose_from_solo_refs with on_screen + "
                     "cast_actions (composer decides who appears and what they are doing). "
                     "Later same setting: edit_prior_keyframe (architecture locked). "
-                    "offscreen stay out of frame. skip_scene_plate=false "
-                    "(empty scene plates ARE required — environment-only Qwen stills). "
+                    "offscreen stay out of frame. skip_scene_specs=false "
+                    "(scene specs ARE required — environment-only Qwen stills). "
                     "Each shot: shot_index, timeline, camera, action, on_screen, offscreen, "
                     "cast_actions, featured_cast_ids, ensemble_cast_ids, setting_id, "
                     "keyframe_prompt, exiting_character_ids, keyframe_strategy. "
                     "Schema: "
                     '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
                     '"shots":[...],"target_shot_count":N,"include_speech":bool,'
-                    '"include_music":bool,"skip_scene_plate":false,"notes":"..."}'
+                    '"include_music":bool,"skip_scene_specs":false,"notes":"..."}'
                 )
                 from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
                     infer_shot_budget,
@@ -2075,7 +2075,7 @@ class SupervisorAgent:
                             "target_shot_count": shot_ceiling or analysis.get("target_shot_count"),
                             "rule": (
                                 "Decide shot count wisely: prefer fewer; merge same-cast "
-                                "continuous motion into one beat. Explicit N-shot / "
+                                "continuous motion into one shot. Explicit N-shot / "
                                 "target_shot_count from the user is a hard ceiling. Soft prefer "
                                 "≤8 shots. All solo cast cards before keyframes; compose "
                                 "first KF per setting_id; edit_prior only within the same "
@@ -2163,9 +2163,9 @@ class SupervisorAgent:
                     if audio.get("include_speech") and audio.get("include_music"):
                         audio["policy"] = "speech_and_music"
                     analysis["audio"] = audio
-                    if parsed.get("skip_scene_plate") is not None:
+                    if parsed.get("skip_scene_specs") is not None:
                         # Scene cards are required (empty plates + R2V). Ignore LLM skips.
-                        analysis["skip_scene_plate"] = False
+                        analysis["skip_scene_specs"] = False
                         analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
             except Exception:  # noqa: BLE001
                 logger.info("Supervisor design_execution_graph LLM failed; using storyboard shots", exc_info=True)
@@ -2647,7 +2647,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
 def _ensure_all_solos_precede_keyframes(graph: DesignerExecutionGraph) -> list[str]:
     """Every identity solo sheet is a data predecessor of every keyframe node.
 
-    Guarantees all character cards finish before any compose/edit keyframe runs.
+    Guarantees all character specs finish before any compose/edit keyframe runs.
     """
     notes: list[str] = []
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
@@ -2853,10 +2853,10 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             if nid:
                 prev_frame_by_setting[setting_id] = nid
 
-        bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+        bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
         if not bible and isinstance(scene_locks.get(setting_id), dict):
             bible = dict(scene_locks[setting_id])
-            cfg["scene_bible"] = bible
+            cfg["scene_specs"] = bible
 
         shot_spatial = (
             spatial_by_setting.get(setting_id)
@@ -2889,13 +2889,13 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             "view_key": cfg.get("view_key"),
             "spatial_lock": cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else None,
             "occupancy": cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else None,
-            "skip_scene_plate": False,
+            "skip_scene_specs": False,
             "scene_continuity_mode": "scene_card_plus_clip_shots",
-            "scene_bible": bible,
+            "scene_specs": bible,
             "all_solo_node_ids": list(all_solo_ids),
         }
         cfg["identity_refs"] = identity_refs
-        cfg["skip_scene_plate"] = False
+        cfg["skip_scene_specs"] = False
         if names:
             cfg["cast_names"] = identity_refs["cast_names"]
         # Sensible LLM-style node names (Brief: … / Scene N: Shot M: …).
@@ -2951,7 +2951,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             f"(all solos ready: {all_solo_ids}). Costume lock: {costume_lock}. "
             f"Strategy=compose_from_solo_refs for setting {setting_id}. "
             f"Scene master/handoff={master_frame}. "
-            "Respect scene_bible hierarchical views; no empty plates; no cross-setting."
+            "Respect scene_specs hierarchical views; no empty plates; no cross-setting."
         )
         gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
         prompt = str(gen.get("prompt") or "")
@@ -2963,9 +2963,9 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             )
         if "STRATEGY=" not in prompt:
             lock_bits.append(f"STRATEGY=compose_from_solo_refs setting={setting_id}.")
-        if bible and "SCENE BIBLE" not in prompt:
+        if bible and "SCENE SPECS" not in prompt:
             lock_bits.append(
-                f"SCENE BIBLE: place={bible.get('place')}; lighting={bible.get('lighting')}; "
+                f"SCENE SPECS: scene={bible.get('scene_name') or bible.get('place')}; lighting={bible.get('lighting')}; "
                 f"objects={', '.join(str(x) for x in (bible.get('objects') or [])[:5])}; "
                 f"views={list((bible.get('views') or {}).keys())}."
             )
@@ -3052,7 +3052,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         }
     )
     meta["consistency_plan"] = plan
-    meta["skip_scene_plate"] = False
+    meta["skip_scene_specs"] = False
     meta["scene_continuity_mode"] = "scene_card_plus_clip_shots"
     meta["scene_masters"] = dict(scene_master_by_setting)
     meta["scene_locks"] = dict(scene_locks)
@@ -3132,17 +3132,17 @@ class ManagerAgent:
             cfg.get("prior_keyframe_node_id") or identity.get("prior_keyframe_node_id") or ""
         ).strip()
 
-        # Enforce setting-locked compose + scene bible before any media tool call.
+        # Enforce setting-locked compose + scene specs before any media tool call.
         if role in {"frame", "keyframe"}:
             strategy = "compose_from_solo_refs"
             cfg["keyframe_strategy"] = strategy
-            bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+            bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
             if not bible:
                 meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
                 locks = meta.get("scene_locks") if isinstance(meta.get("scene_locks"), dict) else {}
                 if isinstance(locks.get(setting_id), dict):
                     bible = dict(locks[setting_id])
-                    cfg["scene_bible"] = bible
+                    cfg["scene_specs"] = bible
             handoff = str(
                 cfg.get("scene_prompt_handoff_from")
                 or identity.get("scene_prompt_handoff_from")
@@ -3154,14 +3154,14 @@ class ManagerAgent:
                     prompt
                     + f"\nLOCK: STRATEGY=compose_from_solo_refs setting={setting_id}. "
                     f"Compose solo sheets {', '.join(solo_ids) or 'all cast solos'} "
-                    "INTO the locked scene bible — keep architecture across views."
+                    "INTO the locked scene specs — keep architecture across views."
                 )
                 notes.append("enforce_compose_solos_lock")
                 changed = True
-            if bible and "SCENE BIBLE" not in prompt:
+            if bible and "SCENE SPECS" not in prompt:
                 prompt = (
                     prompt
-                    + f"\nSCENE BIBLE: place={bible.get('place')}; lighting={bible.get('lighting')}; "
+                    + f"\nSCENE SPECS: scene={bible.get('scene_name') or bible.get('place')}; lighting={bible.get('lighting')}; "
                     f"objects={', '.join(str(x) for x in (bible.get('objects') or [])[:6])}; "
                     f"crowd={bible.get('crowd')}; coherence={bible.get('coherence_rule')}; "
                     f"active_view={cfg.get('view_key') or bible.get('active_view')}."
@@ -3199,7 +3199,7 @@ class ManagerAgent:
                 changed = True
             elif master_prompt and "SCENE ARCHITECTURE LOCK" not in prompt and "MASTER SCENE PROMPT" not in prompt:
                 # Only allow if it already looks like an architecture clause.
-                if master_prompt.startswith("SCENE ARCHITECTURE") or "place=" in master_prompt[:80]:
+                if master_prompt.startswith("SCENE ARCHITECTURE") or "scene=" in master_prompt[:80]:
                     prompt = prompt + "\n" + master_prompt[:900]
                     notes.append("inject_scene_architecture_from_master")
                     changed = True
@@ -3446,7 +3446,7 @@ class ManagerAgent:
             prompt = (
                 prompt
                 + "\nDETAIL LOCK: specify motion direction, who each person looks at, "
-                "relative screen L/R positioning, and prop/landmark anchors for this beat."
+                "relative screen L/R positioning, and prop/landmark anchors for this shot."
             )
             notes.append("inject_detail_lock")
             changed = True
@@ -3605,15 +3605,15 @@ class ManagerAgent:
                 pass
 
         if role == "clip":
-            # Scene bible + setting isolation for clips (same locks as keyframes).
-            bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else None
+            # Scene specs + setting isolation for clips (same locks as keyframes).
+            bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
             if not bible:
                 meta_b = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
                 locks_b = meta_b.get("scene_locks") if isinstance(meta_b.get("scene_locks"), dict) else {}
                 if isinstance(locks_b.get(setting_id), dict):
                     bible = dict(locks_b[setting_id])
-                    cfg["scene_bible"] = bible
-            if bible and "SCENE BIBLE" not in prompt:
+                    cfg["scene_specs"] = bible
+            if bible and "SCENE SPECS" not in prompt:
                 tod_b = (
                     cfg.get("time_of_day_lock")
                     if isinstance(cfg.get("time_of_day_lock"), dict)
@@ -3627,7 +3627,7 @@ class ManagerAgent:
                     )
                 prompt = (
                     prompt
-                    + f"\nSCENE BIBLE: place={bible.get('place')}; "
+                    + f"\nSCENE SPECS: scene={bible.get('scene_name') or bible.get('place')}; "
                     f"lighting={bible.get('lighting')}; "
                     f"objects={', '.join(str(x) for x in (bible.get('objects') or [])[:6])}; "
                     f"crowd={bible.get('crowd')}; coherence={bible.get('coherence_rule')}"
@@ -3789,7 +3789,7 @@ class ManagerAgent:
                     prompt = prompt + "\n" + cloth
                     notes.append("inject_clip_clothing_lock")
                     changed = True
-            # Storyboard beat for THIS shot only (avoid full-board mix).
+            # Storyboard shot for THIS shot only (avoid full-board mix).
             action = str(cfg.get("shot_action") or "").strip()
             if action and f"Primary action for shot {shot_index}" not in prompt:
                 prompt = prompt + f"\nPrimary action for shot {shot_index}: {action}"
@@ -3914,7 +3914,7 @@ class ManagerAgent:
                     tod = infer_time_of_day_lock(
                         str(graph.get("description") or meta_tod.get("user_prompt") or ""),
                         str(
-                            (cfg.get("scene_bible") or {}).get("place")
+                            (cfg.get("scene_specs") or {}).get("scene_name") or (cfg.get("scene_specs") or {}).get("place")
                             or cfg.get("shot_action")
                             or ""
                         ),
@@ -3941,8 +3941,8 @@ class ManagerAgent:
                             },
                         }
                     bible = (
-                        cfg.get("scene_bible")
-                        if isinstance(cfg.get("scene_bible"), dict)
+                        cfg.get("scene_specs")
+                        if isinstance(cfg.get("scene_specs"), dict)
                         else {}
                     )
                     if bible.get("time_of_day") and (
@@ -4017,7 +4017,7 @@ class ManagerAgent:
 
                     tod = infer_time_of_day_lock(
                         str(graph.get("description") or meta_l.get("user_prompt") or ""),
-                        str((cfg.get("scene_bible") or {}).get("place") or cfg.get("shot_action") or ""),
+                        str((cfg.get("scene_specs") or {}).get("scene_name") or (cfg.get("scene_specs") or {}).get("place") or cfg.get("shot_action") or ""),
                     )
                 except Exception:  # noqa: BLE001
                     tod = {}
@@ -4652,7 +4652,7 @@ class ManagerAgent:
                     "forbid",
                     "do not reseat or re-show a character who already stood and left earlier",
                 )
-                lock.setdefault("time", "forward-only continuity with prior beats")
+                lock.setdefault("time", "forward-only continuity with prior shots")
                 shot["continuity_lock"] = lock
                 patched.append(f"continuity:shot{idx}")
             # Never paste the full user_prompt into short actions — that injects
@@ -4856,7 +4856,7 @@ class ManagerAgent:
             "(3) enough shots cover every major character and prompt beat, "
             "(4) brief/storyboard are comprehensive enough for keyframe and clip prompting, "
             "(5) SPATIAL CONTINUITY: motion + geography — landmarks/layout/light must "
-            "match the master scene plate across shot views (edit/ref, not new buildings), "
+            "match the master scene specs across shot views (edit/ref, not new buildings), "
             "(6) IDENTITY CONSISTENCY: every frame/clip must reference canonical SOLO character "
             "sheets (identity_refs.character_node_ids), not reinvent costumes, "
             "(7) GRAPH USEFULNESS: every node must be useful for the final compose clip — "

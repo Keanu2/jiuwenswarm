@@ -27,7 +27,7 @@ _EXIT_RE = re.compile(
     r"storms?\s+out|departs?)\b",
     re.I,
 )
-# Anticipatory / schedule language — not an on-screen exit this beat.
+# Anticipatory / schedule language — not an on-screen exit this shot.
 _FALSE_EXIT_RE = re.compile(
     r"\b(?:"
     r"(?:just\s+)?before\s+(?:leaving|exiting|departing)|"
@@ -494,7 +494,7 @@ def _ensure_stay_on_leave_beats(
     characters: list[dict[str, Any]],
     shots: list[dict[str, Any]],
 ) -> None:
-    """If a beat has an exit while someone keeps speaking/reading, keep both on screen."""
+    """If a shot has an exit while someone keeps speaking/reading, keep both on screen."""
     blob = (prompt or "").lower()
     needs_dual = bool(_STAY_SPEAK_RE.search(blob) or _action_has_exit(blob))
     if not needs_dual:
@@ -557,7 +557,7 @@ def _split_prompt_into_beats(prompt: str, budget: int) -> list[str]:
     )
     if timed:
         return [t.strip()[:400] for t in timed[:budget] if t.strip()]
-    # Prefer the storyboard beat splitter (drops style/logo meta; keeps booking≠dinner).
+    # Prefer the storyboard shot splitter (drops style/logo meta; keeps booking≠dinner).
     try:
         from jiuwenswarm.server.runtime.designer.script_analysis import (
             _is_non_story_beat,
@@ -612,7 +612,7 @@ def _expand_shots_to_budget(
         shot["title"] = f"Shot {i + 1}"
         shot["action"] = action[:500]
         shot["keyframe_prompt"] = action[:500]
-        # Focus cast: score against this beat
+        # Focus cast: score against this shot
         if characters:
             ranked = sorted(
                 ((_score_in_text(ch, action), str(ch.get("id"))) for ch in characters),
@@ -806,14 +806,14 @@ async def enrich_analysis_with_llm(
             "For EACH shot provide: shot_index, title, action (full detail for THIS window: "
             "blocking, posture, gaze, speech — not a one-liner, not the entire remaining plot), "
             "on_screen (character ids featured ON CAMERA now), "
-            "off_camera (other cast ids who exist in the setting but must stay OFF FRAME this beat), "
-            "exiting (ids leaving THIS beat), staying, "
+            "off_camera (other cast ids who exist in the setting but must stay OFF FRAME this shot), "
+            "exiting (ids leaving This shot), staying, "
             "shot_relation (hard_cut|continuation; angle_variant only if the user asked "
             "for same-moment multi-cam coverage), "
             "blocking={landmark, positions:[{character_id, zone, pose, facing}]}, "
             "motion_detail (second-by-second acting beats for THIS timeline window only — "
             "pose, gaze, hands, weight shifts like a movie shot sheet), "
-            "speech_line (exact dialogue spoken in this beat, or empty string if silent — "
+            "speech_line (exact dialogue spoken in this shot, or empty string if silent — "
             "never invent lines for mute beats), "
             "wardrobe_lock (dress/outfit color, hair, facial features for EACH on_screen id), "
             "camera_framing_rule (how to frame so off_camera people are not visible). "

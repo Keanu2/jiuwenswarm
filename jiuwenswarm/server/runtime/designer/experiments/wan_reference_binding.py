@@ -1,10 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Wan reference-mode binding labels (empty scene plate + character solos).
+"""Wan reference-mode binding labels (scene specs + character solos).
 
 Alibaba Wan R2V maps ``reference_urls`` order → ``character1``, ``character2``, …
 (each person ref = one subject). Every clip, including the first of a setting:
 
-  On-screen solo sheets first (character1…), then the empty scene plate last
+  On-screen solo sheets first (character1…), then the scene specs last
   as the room. No composed still and no keyframe as first_frame.
   Prior-clip last frames are not attached.
 """
@@ -40,7 +40,7 @@ def _scene_label_from_graph(
             cfg_n.get("setting_id")
             or setting_id
             or cfg.get("shot_title")
-            or f"Place {num}"
+            or f"Scene {num}"
         ).strip()
         return f"Scene {num}: {name}"
     num = 1
@@ -54,7 +54,7 @@ def _scene_label_from_graph(
         if str(nid) == scene_nid:
             setting_id = str(sid)
             break
-    place = str(setting_id or "Place").replace("set_", "Place ").replace("scene_", "Place ")
+    place = str(setting_id or "Scene").replace("set_", "Scene ").replace("scene_", "Scene ")
     return f"Scene {num}: {place}"
 
 
@@ -103,15 +103,15 @@ def build_wan_reference_binding(
     lines = [
         "[REFERENCE MODE — character sheets, then empty scene]:",
         "Attach order: on-screen solo sheets as character1, character2, … "
-        "then the empty scene plate last as the room.",
-        "The scene plate has no people. Place character1… into that room for this beat. "
+        "then the scene specs last as the room.",
+        "The scene specs has no people. Place character1… into that room for this shot. "
         "Match faces, wardrobe, and the film STYLE LOCK.",
     ]
     ref_i = 1
     if prior_last_frame and n_hist > 0:
         lines.append(
             f"- Prior ending stills are not attached ({n_hist} kept as story state only). "
-            "This beat continues in the same room."
+            "This shot continues in the same room."
         )
 
     names = cast_names or char_ids
@@ -163,7 +163,7 @@ def clip_is_first_of_setting(
     cfg: dict[str, Any] | None,
     graph: dict[str, Any] | None = None,
 ) -> bool:
-    """True for the first clip of this setting_id (empty scene plate + solos)."""
+    """True for the first clip of this setting_id (scene specs + solos)."""
     cfg = cfg if isinstance(cfg, dict) else {}
     graph = graph if isinstance(graph, dict) else {}
     flag = cfg.get("first_of_setting")

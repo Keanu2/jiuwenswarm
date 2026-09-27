@@ -390,7 +390,7 @@ def _score_character_in_text(ch: dict[str, Any], text: str) -> int:
 
 
 def _focus_character_ids(chunk: str, characters: list[dict[str, Any]]) -> list[str]:
-    """Assign only characters this beat is actually about (no shared 'man' leak)."""
+    """Assign only characters this shot is actually about (no shared 'man' leak)."""
     cl = chunk.lower()
     scored: list[tuple[int, str]] = []
     for ch in characters:
@@ -566,7 +566,7 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
         from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
 
         shot["title"] = derive_shot_name(shot, fallback_index=i)
-        # If a beat still has no cast, pick the single best character — not a round-robin leak.
+        # If a shot still has no cast, pick the single best character — not a round-robin leak.
         if not shot.get("character_ids") and characters:
             ranked = sorted(
                 (
@@ -886,7 +886,7 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         "scenes": scenes,
         "shots": shots,
         "audio": audio,
-        "skip_scene_plate": False,
+        "skip_scene_specs": False,
         "scene_continuity_mode": "scene_card_plus_clip_shots",
         "summary": (
             f"{len(characters)} characters, {len(scenes)} scenes, {len(shots)} shots, "
@@ -1079,7 +1079,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
                     cast_actions[cid] = str(v).strip()[:240]
         strategy = str(sh.get("keyframe_strategy") or "").strip()
         setting_id = str(sh.get("setting_id") or sh.get("scene_id") or f"set_{i}").strip()
-        # Prefer on_screen as the drawn cast for this beat.
+        # Prefer on_screen as the drawn cast for this shot.
         cids = list(on_screen) or cids
         entry: dict[str, Any] = {
             "shot_index": i,
@@ -1191,7 +1191,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         "scenes": norm_scenes,
         "shots": norm_shots,
         "audio": audio,
-        "skip_scene_plate": False,
+        "skip_scene_specs": False,
         "scene_continuity_mode": "scene_card_plus_clip_shots",
         "summary": str(parsed.get("summary") or "")[:500]
         or f"{len(norm_chars)} characters, {len(norm_shots)} shots",
@@ -1238,7 +1238,7 @@ async def analyze_creative_brief(
             "New setting_id / hard cut / wardrobe / on-screen cast change → new shot. "
             "Qwen KF: lock identity+wardrobe; first setting KF = compose_from_solo_refs, "
             "later same setting = edit_prior_keyframe; prefer ≤2–3 people with refs. "
-            "Wan prompt = THIS beat's motion+camera only. "
+            "Wan prompt = This shot's motion+camera only. "
             "Explicit user N-shot / N分镜 is a HARD ceiling unless requested runtime "
             f"exceeds {WAN_MAX_CLIP_SEC}s, then use ceil(duration/{WAN_MAX_CLIP_SEC}) "
             "sequential clips (hard max 16). "
@@ -1279,7 +1279,7 @@ async def analyze_creative_brief(
             '"action":"...","camera":"...","on_screen":["char_1"],'
             '"offscreen":[],"cast_actions":{"char_1":"..."},"featured_cast_ids":["char_1"],'
             '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s"}],'
-            '"skip_scene_plate":false,"target_shot_count":N'
+            '"skip_scene_specs":false,"target_shot_count":N'
             + (f',"target_duration_sec":{duration_sec}' if target_duration_sec else "")
             + "}"
         )
@@ -1291,7 +1291,7 @@ async def analyze_creative_brief(
                 "Each action is THAT window in full detail (blocking, speech, wardrobe). "
                 "Do not paste the entire user_prompt into every action. "
                 "Set target_shot_count = len(shots). "
-                "Each shot title MUST be a 2–4 word description of the beat "
+                "Each shot title MUST be a 2–4 word description of the shot "
                 "(any language; e.g. 'Open Door', 'Quiet Glance', '离开房间') — never 'Shot 1'."
             ),
         }
@@ -1310,7 +1310,7 @@ async def analyze_creative_brief(
                     '"shots":[{"shot_index":1,"action":"...","camera":"...",'
                     '"character_ids":["char_1"],"ensemble_cast_ids":["char_1"],'
                     '"featured_cast_ids":["char_1"],"setting_id":"set_1",'
-                    '"keyframe_prompt":"...","timeline":"0-5s"}],"skip_scene_plate":false}'
+                    '"keyframe_prompt":"...","timeline":"0-5s"}],"skip_scene_specs":false}'
                 )
                 payload["retry"] = True
             result = await call_model_tool(

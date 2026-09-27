@@ -53,7 +53,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         "Non-negotiables:\n"
         "1) STORYBOARD + PRODUCTION LOCK BIBLE first — call read_upstream on "
         "n_storyboard BEFORE any image/video tool. Clips and stills do not re-read the full "
-        "brief; the storyboard already carries the beat. Obey style, landmarks, "
+        "brief; the storyboard already carries the shot. Obey style, landmarks, "
         "lighting, crowd, speech_line, on_screen cast, setting_id.\n"
         "2) CAST IDENTITY: one body per character id; match wardrobe/face from the FEW attached "
         "solo sheets only. Never swap heroes; never clone one face onto two bodies. "
@@ -67,7 +67,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         "through furniture/props); featured subjects face the landmark/action focus. "
         "Pose/placement come from THIS storyboard row — never invent sit/stand defaults.\n"
         "6) SCREEN AXIS: keep L/R placement stable under pans (180-degree). Do not flip who is left/right.\n"
-        "7) SETTING MASTER: empty scene plate + identity solos. First clip of the setting "
+        "7) SETTING MASTER: scene specs + identity solos. First clip of the setting "
         "plays the storyboard open; later same-setting clips continue from structured "
         "continuity (already_done / pose_holds / seat_anchors / forbidden_speech / end_state) "
         "— never from raw prior Wan paragraphs. "
@@ -93,7 +93,7 @@ def hollywood_leaf_instructions(role: str) -> str:
     if r == "scene":
         return (
             shared
-            + "ROLE=empty scene plate. Write ONE positive Qwen-ready environment prompt "
+            + "ROLE=scene specs. Write ONE positive Qwen-ready environment prompt "
             "from the locks (place, lighting/time-of-day, style, aspect, props). "
             "Furniture, walls, windows, light, and props as a clear empty room. "
             "No LOCK banners, no forbid lists, no examples. "
@@ -121,11 +121,11 @@ def hollywood_leaf_instructions(role: str) -> str:
             "FORM (locks folded into narrative — faithful, general, no examples):\n"
             "The scene is as in Image N: <place>. Scene description: <lighting/props from bible>.\n"
             "<Name> from Image k, wearing <wardrobe lock>, <placement from seat_anchors>, "
-            "in the scene from Image N, is <cast_action / storyboard beat>. "
+            "in the scene from Image N, is <cast_action / storyboard shot>. "
             "Name only people who are on_screen or partially visible this shot. "
             "Omit exited cast entirely until the storyboard returns them. "
             "The camera <one move>. <Speaker> says: \"<this shot's line>\".\n"
-            "PRIORITY: (1) this storyboard beat + camera visibility from occupancy, "
+            "PRIORITY: (1) this storyboard shot + camera visibility from occupancy, "
             "(2) wardrobe + placement folded into those sentences, (3) same-setting continue "
             "from structured continuity fields only — never paste prior Wan text "
             "into call_video_model; never restage finished speech/action.\n"
@@ -149,8 +149,8 @@ def _wan_leaf_extra() -> str:
         return wan_leaf_skill_block(role="clip")
     except Exception:  # noqa: BLE001
         return (
-            "CONTACT: bodies never intersect furniture/props; when the beat uses a support "
-            "surface, weight rests ON it. Solo sheets are identity — repose for the beat."
+            "CONTACT: bodies never intersect furniture/props; when the shot uses a support "
+            "surface, weight rests ON it. Solo sheets are identity — repose for the shot."
         )
 
 

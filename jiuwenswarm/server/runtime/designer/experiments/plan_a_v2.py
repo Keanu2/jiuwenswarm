@@ -146,7 +146,7 @@ def infer_style_lock(prompt: str, scene_desc: str = "") -> dict[str, str]:
             "never cartoon/anime restyle mid-film"
         )
         lens = "35mm cinematic, soft background when close; no comic/grid UI"
-        palette = "match scene plate color temperature and wardrobe dyes — never restyle mid-film"
+        palette = "match scene specs color temperature and wardrobe dyes — never restyle mid-film"
         medium = "photoreal_cinematic"
     else:
         look = (
@@ -154,7 +154,7 @@ def infer_style_lock(prompt: str, scene_desc: str = "") -> dict[str, str]:
             "SAME medium whole film"
         )
         lens = "35mm cinematic, soft background when close; no comic/grid UI"
-        palette = "match scene plate color temperature and wardrobe dyes — never restyle mid-film"
+        palette = "match scene specs color temperature and wardrobe dyes — never restyle mid-film"
         medium = "photoreal_cinematic"
     return {
         "look": look[:360],
@@ -163,7 +163,7 @@ def infer_style_lock(prompt: str, scene_desc: str = "") -> dict[str, str]:
         "medium": medium,
         "forbid": (
             "no style drift between shots, no outfit redesign, no new architecture, "
-            "no subtitles/watermarks, no labeled infographic character cards, "
+            "no subtitles/watermarks, no labeled infographic character specs, "
             "no medium switch (cartoon<->photoreal or 3D<->2D) mid-film"
         )[:300],
     }
@@ -559,7 +559,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     out["experiment_plan"] = "A"
     out["plan_a_version"] = "v12"
     out["skip_domain_role_locks"] = True
-    out["skip_scene_plate"] = False
+    out["skip_scene_specs"] = False
     out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
     # Repair cast/props BEFORE compose policy so human leads stay heroes
     # and brand mascots stay on-device UI (not free-flying characters).
@@ -576,7 +576,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         out["shots"] = shots
     except Exception:  # noqa: BLE001
         pass
-    # Per setting: compose ALL human cast solos into the scene plate, then edit-prior.
+    # Per setting: compose ALL human cast solos into the scene specs, then edit-prior.
     try:
         from jiuwenswarm.server.runtime.designer.experiments.keyframe_policy import (
             apply_compose_solos_setting_policy,
@@ -591,7 +591,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         enforce_setting_transitions(out)
     except Exception:  # noqa: BLE001
         out["keyframe_policy"] = "scene_card_plus_clip_shots"
-        out["skip_scene_plate"] = False
+        out["skip_scene_specs"] = False
         out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
 
     # Identity / bleed clauses on featured (camera-focus) cast after ensemble stamp.
@@ -666,7 +666,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         "aspect": (out.get("aspect_lock") or {}).get("ratio"),
         "has_axis_lock": bool(out.get("axis_lock")),
         "keyframe_policy": out.get("keyframe_policy"),
-        "skip_scene_plate": bool(out.get("skip_scene_plate")),
+        "skip_scene_specs": bool(out.get("skip_scene_specs")),
         "has_production_bible": bool(out.get("production_bible")),
         "cast_prop_repair": list(
             (out.get("director_contract") or {}).get("cast_prop_repair") or []

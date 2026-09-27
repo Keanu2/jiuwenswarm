@@ -81,9 +81,9 @@ def on_screen_names(cfg: dict[str, Any], graph: dict[str, Any] | None) -> list[s
     return out
 
 
-def _place_name(cfg: dict[str, Any]) -> str:
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else {}
-    place = str(bible.get("place") or "").strip()
+def _scene_name(cfg: dict[str, Any]) -> str:
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
+    place = str(bible.get("scene_name") or bible.get("place") or "").strip()
     if place:
         place = place.split(".")[0].strip()[:80]
         if len(place.split()) <= 6:
@@ -292,7 +292,7 @@ def _language_sentence(cfg: dict[str, Any]) -> str:
 
 def _time_of_day_payload(cfg: dict[str, Any]) -> dict[str, str]:
     tod = cfg.get("time_of_day_lock") if isinstance(cfg.get("time_of_day_lock"), dict) else {}
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else {}
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
     label = str((tod or {}).get("time_of_day") or bible.get("time_of_day") or "").strip()
     lighting = _scrub_lock_phrase(
         str((tod or {}).get("lighting") or bible.get("lighting") or "")
@@ -419,7 +419,7 @@ def ensure_story_lock_coverage(
             additions.append(hold if hold.endswith(".") else hold + ".")
             notes.append("story_cover_crowd_state")
 
-    # Opening holds when prior beats exist but prose omitted them.
+    # Opening holds when prior shots exist but prose omitted them.
     for hold_line in (cfg.get("pose_holds") or [])[:3]:
         text_h = str(hold_line or "").strip()
         if not text_h or _BAD_DIRECTIVE.search(text_h):
@@ -545,8 +545,8 @@ def _cast_presence_lines(cfg: dict[str, Any], graph: dict[str, Any] | None, name
 
 
 def _scene_bible_lines(cfg: dict[str, Any]) -> list[str]:
-    """Positive room details from the scene bible — no lock banner."""
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else {}
+    """Positive room details from the scene specs — no lock banner."""
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
     if not bible:
         return []
     lines: list[str] = []
@@ -804,7 +804,7 @@ def _story_cast_sentence(
     seat: str,
     doing: str,
     scene_word: str,
-    place: str,
+    scene: str,
     visibility: str = "full",
 ) -> str:
     """One cast member in positive story form (no negatives, no genre examples)."""
@@ -815,7 +815,7 @@ def _story_cast_sentence(
         if seat:
             bits.append(f"{seat} in the scene from {scene_word}")
         else:
-            bits.append(f"in the scene from {scene_word} ({place})")
+            bits.append(f"in the scene from {scene_word} ({scene})")
         if doing:
             bits.append(f"is {doing[:1].lower() + doing[1:] if doing[:1].isupper() else doing}")
     elif visibility == "partial":
@@ -851,14 +851,14 @@ def compose_practice_prompt(
         if t.casefold() not in gone and _name_for_id(t, graph).casefold() not in gone_names
     ]
     names = [n for n in on_screen_names(cfg, graph) if n.casefold() not in gone_names]
-    place = _place_name(cfg)
+    place = _scene_name(cfg)
     extra_labels = [str(item).strip() for item in (extra_image_labels or []) if str(item).strip()]
     scene_index = max(1, len(tokens) + len(extra_labels) + 1)
     scene_word = _image_word(scene_index, family)
     sentences: list[str] = []
 
     sentences.append(f"The scene is as in {scene_word}: {place}.")
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else {}
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
     objects = bible.get("objects") if isinstance(bible.get("objects"), list) else []
     props = [
         _scrub_lock_phrase(str(x))
@@ -893,7 +893,7 @@ def compose_practice_prompt(
                 seat=_seat_for(token, cfg, graph),
                 doing=_action_for(token, cfg, graph, action),
                 scene_word=scene_word,
-                place=place,
+                scene=place,
                 visibility="full",
             )
         )
@@ -915,7 +915,7 @@ def compose_practice_prompt(
                 seat=_seat_for(who, cfg, graph),
                 doing=_action_for(who, cfg, graph, ""),
                 scene_word=scene_word,
-                place=place,
+                scene=place,
                 visibility="partial",
             )
         )
@@ -990,7 +990,7 @@ def _covers_beat(prompt: str, action: str) -> bool:
 
 
 def _story_leads_prompt(prompt: str, action: str) -> bool:
-    """Storyboard beat must appear in the narrative body, not only in a trailer line."""
+    """Storyboard shot must appear in the narrative body, not only in a trailer line."""
     text = str(prompt or "").strip()
     beat = str(action or "").strip()
     if not beat or len(beat.split()) < 3:
@@ -1149,7 +1149,7 @@ def manager_approve_video_prompt(
     if extra_image_labels:
         reasons = [*reasons, "wired_user_images"]
     if raw and re.search(
-        r"(?i)\b(?:costume lock|positioning lock|scene bible|style lock|forbid|already-?done)\b"
+        r"(?i)\b(?:costume lock|positioning lock|scene specs|style lock|forbid|already-?done)\b"
         r"|^\s*on screen\s*:",
         raw,
         flags=re.M,
@@ -1160,7 +1160,7 @@ def manager_approve_video_prompt(
     mined_action = (
         action
         or str(cfg.get("shot_action") or "")
-        or _pull_labeled(prompt, ("primary action", "character action", "storyboard beat", "action"))
+        or _pull_labeled(prompt, ("primary action", "character action", "storyboard shot", "storyboard beat", "action"))
     )
     move = _pull_labeled(prompt, ("camera move",))
     angle = (
@@ -1203,7 +1203,7 @@ def supervisor_approve_video_prompt(
     beat = (
         action
         or str(cfg.get("shot_action") or "")
-        or _pull_labeled(prompt, ("primary action", "character action", "storyboard beat", "action"))
+        or _pull_labeled(prompt, ("primary action", "character action", "storyboard shot", "storyboard beat", "action"))
     )
     cam = (
         camera

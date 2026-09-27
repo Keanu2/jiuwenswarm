@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Domain-agnostic clip continuity contract tests."""
+"""Domain-agnostic shot consistency contract tests."""
 
 from __future__ import annotations
 

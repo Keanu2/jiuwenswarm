@@ -13,19 +13,19 @@ def test_looks_like_lock_essay() -> None:
     assert looks_like_lock_essay("STYLE LOCK: photoreal. FORBID: no people.")
     assert looks_like_lock_essay("Empty room. No faces, no bodies.")
     assert not looks_like_lock_essay(
-        "Empty environment plate of the warm kitchen: furniture, walls, windows, light."
+        "Empty scene specs of the warm kitchen: furniture, walls, windows, light."
     )
 
 
 def test_compose_scene_plate_positive() -> None:
     from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
-        compose_scene_plate_prompt,
+        compose_scene_specs_prompt,
     )
 
     cfg = {
         "role": "scene",
         "style_lock": {"look": "photoreal cinematic"},
-        "scene_bible": {
+        "scene_specs": {
             "place": "a quiet office at dusk",
             "lighting": "soft dusk through the window",
             "objects": ["desk", "chair"],
@@ -33,7 +33,7 @@ def test_compose_scene_plate_positive() -> None:
         "time_of_day_lock": {"time_of_day": "dusk", "lighting": "soft dusk through the window"},
         "image_size": "1K",
     }
-    text = compose_scene_plate_prompt(cfg=cfg, seed="")
+    text = compose_scene_specs_prompt(cfg=cfg, seed="")
     low = text.lower()
     assert "empty environment" in low or "furniture" in low
     assert "dusk" in low or "soft dusk" in low
@@ -70,13 +70,13 @@ def test_ensure_rewrites_lock_essay_scene() -> None:
     )
 
     essay = (
-        "EMPTY SCENE PLATE — environment only. No people, no faces. "
+        "SCENE SPECS — environment only. No people, no faces. "
         "STYLE LOCK: photoreal. TIME OF DAY LOCK=night: candlelight."
     )
     cfg = {
         "role": "scene",
         "style_lock": {"look": "photoreal cinematic"},
-        "scene_bible": {"place": "candlelit restaurant", "objects": ["table"]},
+        "scene_specs": {"scene_name": "candlelit restaurant", "objects": ["table"]},
         "time_of_day_lock": {"time_of_day": "night", "lighting": "warm candlelight"},
     }
     text, notes = ensure_still_tool_prompt(essay, role="scene", cfg=cfg)
@@ -123,7 +123,7 @@ def test_continue_line_does_not_paste_prior_wan() -> None:
         "costume_lock": "Mother: dusty rose blouse",
         "previous_clip_wan_prompt": prior,
         "previous_clip_action": "Mother listens",
-        "scene_bible": {"place": "the warm dining room", "lighting": "warm light"},
+        "scene_specs": {"scene_name": "the warm dining room", "lighting": "warm light"},
         "style_lock": {"look": "photoreal cinematic"},
     }
     cue = _continue_line(cfg)

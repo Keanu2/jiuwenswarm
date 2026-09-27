@@ -334,7 +334,14 @@ function nodeColumnKind(node: DesignerGraphNode): 'scene' | 'clip' | null {
   const pipeline = String(config.pipeline ?? '');
   const role = String(config.role ?? '');
   const label = String(node.label ?? '');
-  if (pipeline === 'clip' || role === 'clip' || (node.type === 'video' && /clip/i.test(label) && pipeline !== 'compose' && role !== 'compose')) {
+  const shotLabel = /\b(clip|shot)\b/i.test(label);
+  if (
+    pipeline === 'clip' ||
+    pipeline === 'shot' ||
+    role === 'clip' ||
+    role === 'shot' ||
+    (node.type === 'video' && shotLabel && pipeline !== 'compose' && role !== 'compose')
+  ) {
     return 'clip';
   }
   if (

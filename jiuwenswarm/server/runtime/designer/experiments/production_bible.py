@@ -138,7 +138,7 @@ def build_production_bible(
         _spatial_block(spatial),
         _speech_table(shots, characters),
         "LANDMARK RULE: named landmarks keep the SAME screen-side "
-        "and place vs the scene plate across all same-setting keyframes and clips — "
+        "and place vs the scene specs across all same-setting keyframes and clips — "
         "never teleport a landmark mid-film.",
         "CROWD RULE: if extras exist, keep the SAME silhouette layout across "
         "same-setting shots (do not empty then reinvent a new crowd).",
@@ -274,7 +274,7 @@ def enforce_locks_on_generate_prompt(
     if landmark_clause and landmark_clause[:40] not in p:
         additions.append(landmark_clause[:280])
     elif sp.get("landmarks") or sp.get("landmark_placements"):
-        clause = "LANDMARK LOCK: keep named landmarks fixed vs scene plate (no teleport)."
+        clause = "LANDMARK LOCK: keep named landmarks fixed vs scene specs (no teleport)."
         if "LANDMARK" not in p:
             additions.append(clause)
 

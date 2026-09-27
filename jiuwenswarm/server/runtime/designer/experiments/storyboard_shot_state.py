@@ -115,7 +115,7 @@ def _infer_end_from_shot(shot: dict[str, Any]) -> dict[str, Any]:
     ]
     out: dict[str, Any] = {}
     if action:
-        out["pose"] = f"After this beat: {action}"
+        out["pose"] = f"After this shot: {action}"
     if speech:
         out["speech_done"] = speech
     if exiting:

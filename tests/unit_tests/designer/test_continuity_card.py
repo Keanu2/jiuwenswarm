@@ -31,7 +31,7 @@ def test_continuity_card_clause_optional_helper_still_works():
         node_id="n_clip_1",
     )
     clause = continuity_card_clause(card)
-    assert "CONTINUITY CARD" in clause
+    assert "CHARACTER CONSISTENCY" in clause
     assert "ALREADY_DONE" in clause
 
 

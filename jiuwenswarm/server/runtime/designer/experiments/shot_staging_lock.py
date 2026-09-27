@@ -94,7 +94,7 @@ def build_positioning_lock(
     if not bits:
         action = str(shot.get("action") or shot.get("shot_action") or "")[:160]
         return (
-            f"place cast for this beat only"
+            f"place cast for this shot only"
             + (f" — {action}" if action else "")
         )[:480]
     return "; ".join(bits)[:720]
@@ -165,7 +165,7 @@ def build_action_lock(
     existing = str(shot.get("action_lock") or "").strip()
     if existing and not bits:
         return existing[:720]
-    return "; ".join(bits)[:720] if bits else "hold storyboard beat posture for this shot only"
+    return "; ".join(bits)[:720] if bits else "hold storyboard shot posture for this shot only"
 
 
 def build_relationship_lock(
@@ -248,7 +248,7 @@ def build_relationship_lock(
         ]
         if len(on_screen) >= 2:
             return (
-                f"keep spatial relations among {', '.join(on_screen)} for this beat; "
+                f"keep spatial relations among {', '.join(on_screen)} for this shot; "
                 "preserve who faces whom and who stands next to whom"
             )[:480]
         return "keep this shot's gaze/adjacency/dialogue relations"[:240]

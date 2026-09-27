@@ -2348,7 +2348,7 @@ def is_soft_artifact_dependency(
 ) -> bool:
     """True when the dependent only needs an early artifact (e.g. Wan prompt), not full completion.
 
-    Clip→clip continuity and same-setting scene-prompt handoffs are soft: once the
+    Clip→shot consistency and same-setting scene-prompt handoffs are soft: once the
     upstream node has published its prompt, the downstream node may start even while
     upstream media generation is still running.
 
@@ -2533,8 +2533,8 @@ def filter_ready_by_dependency_order(
 ) -> list[str]:
     """Start a node once its inputs exist, even if a dependency is still running.
 
-    Another clip may start in the same batch when its storyboard beat is already
-    known. A character or scene plate unlocks its clip once the image file is
+    Another clip may start in the same batch when its storyboard shot is already
+    known. A character or scene specs unlocks its clip once the image file is
     stored. The composer never joins while any dependency is still in flight.
     """
     if not ready_ids:

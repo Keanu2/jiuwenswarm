@@ -256,7 +256,7 @@ def _normalize_speech(text: str) -> str:
 
 
 def speech_already_delivered(this_speech: str, prior_speech: str) -> bool:
-    """True when this beat would restate prior dialogue (exact or contained)."""
+    """True when this shot would restate prior dialogue (exact or contained)."""
     a = _normalize_speech(this_speech)
     b = _normalize_speech(prior_speech)
     if not a or not b:
@@ -331,7 +331,7 @@ def prior_speech_lock_clause(cfg: dict[str, Any] | None) -> str:
     if prior:
         lines.append(
             f"PRIOR SPEECH ALREADY DELIVERED (do NOT restate / restart): \"{prior[:220]}\". "
-            "Continue only if this beat has NEW words; otherwise keep mouths matching "
+            "Continue only if this shot has NEW words; otherwise keep mouths matching "
             "ambient / silent continuation — never repeat the previous line."
         )
     elif forbid:
@@ -341,7 +341,7 @@ def prior_speech_lock_clause(cfg: dict[str, Any] | None) -> str:
         )
     if bool(cfg.get("speech_continuation_only")) and not str(cfg.get("speech_line") or "").strip():
         lines.append(
-            "SPEECH LOCK this beat: no new dialogue line — prior line is finished; "
+            "SPEECH LOCK this shot: no new dialogue line — prior line is finished; "
             "do not invent a repeat."
         )
     return "\n".join(lines)
@@ -362,13 +362,13 @@ def last_frame_continuity_clause(
             "CONTINUITY FIRST FRAME = last frame of the previous clip "
             f"({path or 'prior ending still'}). "
             "Use it only to localize last-seen people and place. "
-            "THIS clip's action/camera come from the storyboard beat — "
+            "THIS clip's action/camera come from the storyboard shot — "
             "do not replace that beat with a different plot from the still. "
             "Face/wardrobe authority remains character solo reference images."
         )
 
     lines: list[str] = [
-        "SAME-SCENE CONTINUITY CHAIN (ending stills localize last-seen people/place; "
+        "SAME-SCENE CONSISTENCY CHAIN (ending stills localize last-seen people/place; "
         "they are NOT the plot for THIS clip):",
     ]
     for i, item in enumerate(items):
@@ -388,7 +388,7 @@ def last_frame_continuity_clause(
         lines.append(f"Beat progression in this setting: {arrow} → THIS shot.")
     lines.append(
         "Do NOT attach these stills as Wan refs (they steal character1 and restage a crop). "
-        "Identity = on-screen solos; geography = scene card LAST; plot = THIS storyboard beat "
+        "Identity = on-screen solos; geography = scene card LAST; plot = THIS storyboard shot "
         "continuing the previous Wan prompt. People who left stay off-screen — "
         "do not teleport them back or restage walking away unless the storyboard asks."
     )

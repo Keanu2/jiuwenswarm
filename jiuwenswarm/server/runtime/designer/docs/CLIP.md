@@ -10,7 +10,7 @@
 ## 1. Purpose
 
 Each clip is **one storyboard time window** filmed with R2V:  
-**on-screen solo sheets** as character refs + **empty scene plate** as the room.  
+**on-screen solo sheets** as character refs + **scene specs** as the room.  
 Prompt is **story-form** from this row’s `start_state` → beat → `end_state`.  
 No peopled keyframes; no prior-clip edge.
 

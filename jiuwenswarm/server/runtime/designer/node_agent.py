@@ -616,7 +616,7 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "seat_anchors": cfg.get("seat_anchors"),
         "forbidden_speech": cfg.get("forbidden_speech"),
         "end_state": cfg.get("end_state"),
-        "scene_bible": cfg.get("scene_bible"),
+        "scene_specs": cfg.get("scene_specs"),
         "previous_keyframe_prompt": str(cfg.get("previous_keyframe_prompt") or "")[:800],
         "previous_keyframe_action": str(cfg.get("previous_keyframe_action") or "")[:300],
         # Do NOT pass raw previous_clip_wan_prompt to the leaf — contamination source.
@@ -634,7 +634,7 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
             prior_lead
             + "\n\nFilm ONLY this storyboard row. Continue seats / exits / opening holds "
             "from CONTINUITY STATE above. Never restate forbidden_speech or restage "
-            "already_done beats unless THIS row asks.\n\n"
+            "already_done shots unless THIS row asks.\n\n"
         )
     return (
         "执行当前设计节点。先看 JSON 上下文，用工具完成本节点产物，最后 "
@@ -651,7 +651,7 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "obey PRODUCTION LOCK BIBLE + costume_lock, positioning_lock, language_lock, "
         "speech_line, occupancy, spatial_lock, and solo identity sheets — never invent "
         "new faces/wardrobe/architecture. Every clip uses character sheets plus the "
-        "empty scene plate, and keeps the film STYLE LOCK.\n"
+        "scene specs, and keeps the film STYLE LOCK.\n"
         "SAME-SCENE PROMPT GATE: the video prompt MUST agree with THIS storyboard shot "
         "(action/camera/speech). Continue from structured continuity "
         "(already_done / pose_holds / seat_anchors / forbidden_speech / end_state) — "

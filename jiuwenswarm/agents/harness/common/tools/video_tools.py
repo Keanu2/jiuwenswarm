@@ -560,7 +560,7 @@ def _split_reference_media(
     reference_images: list[str] | None,
     force_reference_mode: bool,
 ) -> tuple[str | None, list[str]]:
-    """Character sheets and the empty scene plate, shared by every video backend."""
+    """Character sheets and the scene specs, shared by every video backend."""
     refs = _unique_dashscope_image_urls(reference_images)
     frame = _as_dashscope_media_url(first_frame)
     if force_reference_mode and frame and frame not in refs:

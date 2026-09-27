@@ -46,7 +46,7 @@ def _aspect_phrase(cfg: dict[str, Any], graph: dict[str, Any] | None) -> str:
 
 def _tod_phrase(cfg: dict[str, Any]) -> str:
     tod = cfg.get("time_of_day_lock") if isinstance(cfg.get("time_of_day_lock"), dict) else {}
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else {}
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
     label = str((tod or {}).get("time_of_day") or bible.get("time_of_day") or "").strip()
     lighting = str((tod or {}).get("lighting") or bible.get("lighting") or "").strip()
     lighting = re.split(r"(?i)\b(?:do not|don't|never|forbid)\b", lighting, maxsplit=1)[0]
@@ -62,9 +62,9 @@ def _tod_phrase(cfg: dict[str, Any]) -> str:
     return ""
 
 
-def _place_phrase(cfg: dict[str, Any]) -> str:
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else {}
-    place = str(bible.get("place") or "").strip()
+def _scene_phrase(cfg: dict[str, Any]) -> str:
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
+    place = str(bible.get("scene_name") or bible.get("place") or "").strip()
     if place:
         return place.split(".")[0].strip()[:120]
     spatial = cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else {}
@@ -76,7 +76,7 @@ def _place_phrase(cfg: dict[str, Any]) -> str:
 
 
 def _props_phrase(cfg: dict[str, Any]) -> str:
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else {}
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
     objects = bible.get("objects") if isinstance(bible.get("objects"), list) else []
     props = [str(x).strip() for x in objects[:6] if str(x).strip() and not _BAD.search(str(x))]
     return ", ".join(props)
@@ -93,7 +93,7 @@ def looks_like_lock_essay(prompt: str) -> bool:
     return False
 
 
-def compose_scene_plate_prompt(
+def compose_scene_specs_prompt(
     *,
     cfg: dict[str, Any] | None,
     graph: dict[str, Any] | None = None,
@@ -101,13 +101,13 @@ def compose_scene_plate_prompt(
 ) -> str:
     """Positive empty-environment plate for the image model."""
     cfg = _cfg(cfg)
-    place = _place_phrase(cfg)
+    place = _scene_phrase(cfg)
     tod = _tod_phrase(cfg)
     props = _props_phrase(cfg)
     look = _style_look(cfg)
     aspect = _aspect_phrase(cfg, graph)
     bits = [
-        f"Empty environment plate of {place}: furniture, walls, windows, light, and props only.",
+        f"Empty scene specs of {place}: furniture, walls, windows, light, and props only.",
         "Clear establishing view of the room as a single photograph.",
     ]
     if tod:
@@ -186,7 +186,7 @@ def ensure_still_tool_prompt(
     text = str(prompt or "").strip()
     if role_l in {"scene"} or "scene" in role_l:
         if looks_like_lock_essay(text) or not text:
-            text = compose_scene_plate_prompt(cfg=cfg, graph=graph, seed="")
+            text = compose_scene_specs_prompt(cfg=cfg, graph=graph, seed="")
             notes.append("still_rewrote_scene_plate")
         else:
             # Soft fill missing ToD / style as positive prose.

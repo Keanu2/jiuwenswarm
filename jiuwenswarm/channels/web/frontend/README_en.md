@@ -8,7 +8,7 @@ AI coding assistant web UI built with React + TypeScript + Tailwind CSS, with de
 
 #### 🎬 Designer (short film)
 - **AI-first Play path**: user prompt → Brief → Storyboard → character solos →
-  empty scene plates → R2V clips (no keyframes) → ffmpeg compose
+  scene specs → R2V shots (no keyframes) → ffmpeg compose
 - **Agents**: Supervisor (Director), Manager (Producer), leaf DeepAgents per node
 - **Docs**: repo `README.md`, `DETAIL.md`, `a.md`,
   `jiuwenswarm/server/runtime/designer/README.md`

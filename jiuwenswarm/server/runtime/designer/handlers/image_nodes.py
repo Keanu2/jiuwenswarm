@@ -62,16 +62,16 @@ def _frame_prompt_looks_contaminated(text: str) -> bool:
     needles = (
         "PRIOR KEYFRAME PROMPT",
         "PREVIOUS KEYFRAME HAD",
-        "PRIOR CLIP CONTINUITY",
+        "PRIOR SHOT CONSISTENCY",
         "PREVIOUS CLIP HAD",
         "YOUR ASSIGNMENT",
         "STAGING LOCK",
         "MASTER SCENE PROMPT",
-        "CONTINUITY CARD (MANAGER)",
+        "CHARACTER CONSISTENCY (MANAGER)",
         "LANGUAGE LOCK",
         "ASPECT LOCK",
         "STYLE LOCK",
-        "SCENE BIBLE",
+        "SCENE SPECS",
         "SPEECH LOCK",
         "BGM LOCK",
     )
@@ -119,14 +119,14 @@ def _scene_prompt(source: str, *, derive_from_master: bool = False, composed: bo
         )
     if composed:
         return (
-            "COMPOSED SCENE MASTER: generate the SETTING and place ALL listed characters "
+            "COMPOSED SCENE MASTER: generate the SETTING and put ALL listed characters "
             "into it at opening blocking. Identity from attached solo sheets "
-            "(Image 1, Image 2, …). People are IN the place — not an empty room and "
+            "(Image 1, Image 2, …). People are IN the scene — not an empty room and "
             "not a studio lineup. One instance per person. One clear image.\n"
             f"{source}"
         )
     return (
-        "Empty environment plate: furniture, walls, windows, light, and props only. "
+        "Empty scene specs: furniture, walls, windows, light, and props only. "
         "Clear establishing view of the room as a single photograph. One clear image.\n"
         f"{source}"
     )
@@ -193,7 +193,7 @@ def _shot_frame_prompt(
                 " This is image-to-image EDIT of the prior keyframe of the SAME setting "
                 "(first reference). Keep architecture, lighting, landmarks, faces, and costumes "
                 f"{f' for {who}' if who else ''}; only change camera/pose/blocking/who is "
-                "on-screen for this beat. Additional refs may include the scene-master compose "
+                "on-screen for this shot. Additional refs may include the scene-master compose "
                 "still (architecture lock) and solo cast sheets (identity only). "
                 "Never regenerate the set; never jump to another setting."
             )
@@ -201,32 +201,32 @@ def _shot_frame_prompt(
             lead += (
                 " This is image-to-image. The first reference is a combined cast postcard "
                 f"(all of {who or 'the cast'} on one sheet); the second is the scene. "
-                "Place ALL of those people into that scene together, matching each identity "
+                "Put ALL of those people into that scene together, matching each identity "
                 "and costume from the postcard, plus location, lighting, and weather."
             )
         elif n_refs > 1:
             lead += (
                 f" This is image-to-image. The first {n_refs} references are CANONICAL solo "
                 f"cast sheets{f' for {who}' if who else ''}. COMPOSE a new SCENE MASTER still: "
-                "generate the place AND place every listed on-screen character into it. "
+                "generate the scene AND put every listed on-screen character into it. "
                 "IDENTITY LOCK: same face, hair, body, and costume as each sheet — "
-                "never redesign wardrobe between shots. No empty environment plate."
+                "never redesign wardrobe between shots. No empty scene specs."
             )
         else:
             lead += (
                 " This is image-to-image. The first reference is the canonical character sheet. "
-                "Compose a SCENE MASTER still: generate the place and place that character. "
+                "Compose a SCENE MASTER still: generate the scene and put that character in it. "
                 "Keep identity and costume from the sheet."
             )
     elif has_character:
         if prior_edit:
             lead += (
-                " Edit the prior same-setting keyframe (first ref). Keep the place and identity; "
-                "only update this beat's action/framing."
+                " Edit the prior same-setting keyframe (first ref). Keep the scene and identity; "
+                "only update this shot's action/framing."
             )
         else:
             lead += (
-                " Compose SCENE MASTER from solo sheet(s): generate the setting and place "
+                " Compose SCENE MASTER from solo sheet(s): generate the setting and put "
                 "the listed on-screen cast. Character look and costume must match the sheet(s)."
             )
     elif has_scene:
@@ -562,9 +562,9 @@ class FrameNodeHandler:
             identity.get("keyframe_strategy") or cfg.get("keyframe_strategy") or ""
         )
         meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
-        skip_scene_plate = bool(meta.get("skip_scene_plate"))
-        # Quality v5 compose-first: no empty Scene plates; KF generates setting+cast.
-        allow_without_scene = skip_scene_plate or keyframe_strategy in {
+        skip_scene_specs = bool(meta.get("skip_scene_specs"))
+        # Quality v5 compose-first: no scene specs; KF generates setting+cast.
+        allow_without_scene = skip_scene_specs or keyframe_strategy in {
             "compose_from_solo_refs",
             "edit_prior_keyframe",
         }
@@ -612,7 +612,7 @@ class FrameNodeHandler:
 
             refs = [str(p) for p in node_ids_output_image_paths(ctx, preferred_char_nodes)]
         else:
-            # Fail closed: no occupancy → no cast refs (scene plate only if present).
+            # Fail closed: no occupancy → no cast refs (scene specs only if present).
             refs = [str(p) for p in (all_scenes[:1] if all_scenes else [])]
         shots = storyboard_shots_or_default(storyboard, visual)
         planned_action = str(cfg.get("shot_action") or generate.get("prompt") or "").strip()

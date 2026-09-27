@@ -133,7 +133,7 @@ def derive_story_name(
 
 
 def derive_shot_name(shot: dict[str, Any] | None, *, fallback_index: int = 1) -> str:
-    """2–4 word shot/clip display name from title or action (any language)."""
+    """2–4 word shot display name from title or action (any language)."""
     sh = shot if isinstance(shot, dict) else {}
     for key in ("title", "shot_title", "clip_name", "name"):
         hit = short_shot_phrase(sh.get(key), max_words=4)
@@ -145,7 +145,7 @@ def derive_shot_name(shot: dict[str, Any] | None, *, fallback_index: int = 1) ->
     )
     if action:
         return action
-    return f"Beat {max(1, int(fallback_index or 1))}"
+    return f"Shot {max(1, int(fallback_index or 1))}"
 
 
 def label_brief(story_name: str) -> str:
@@ -162,11 +162,11 @@ def label_character(index: int, name: str) -> str:
 
 
 def label_scene(*, scene_number: int, scene_name: str) -> str:
-    """Canvas label: Scene N: two-to-three-word place name."""
+    """Canvas label: Scene N: two-to-three-word scene name."""
     sn = max(1, int(scene_number or 1))
     desc = short_shot_phrase(scene_name, max_words=3) or _clean(scene_name, limit=40)
     if not desc or _is_generic_shot_title(desc):
-        desc = f"Place {sn}"
+        return f"Scene {sn}"
     return f"Scene {sn}: {desc}"
 
 
@@ -180,7 +180,7 @@ def label_shot(
     shn = max(1, int(shot_number or 1))
     desc = short_shot_phrase(shot_name, max_words=4) or _clean(shot_name, limit=40)
     if not desc or _is_generic_shot_title(desc):
-        desc = f"Beat {shn}"
+        return f"Scene {sn}: Shot {shn}"
     return f"Scene {sn}: Shot {shn}: {desc}"
 
 
@@ -190,13 +190,12 @@ def label_clip(
     clip_number: int,
     clip_name: str,
 ) -> str:
-    """Clips are the shots — Scene N: Clip K: beat name."""
-    sn = max(1, int(scene_number or 1))
-    cn = max(1, int(clip_number or 1))
-    desc = short_shot_phrase(clip_name, max_words=4) or _clean(clip_name, limit=40)
-    if not desc or _is_generic_shot_title(desc):
-        desc = f"Beat {cn}"
-    return f"Scene {sn}: Clip {cn}: {desc}"
+    """Shot label. The stored node id may still contain clip; the name is shot."""
+    return label_shot(
+        scene_number=scene_number,
+        shot_number=clip_number,
+        shot_name=clip_name,
+    )
 
 
 def label_compose(story_name: str) -> str:

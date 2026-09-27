@@ -40,19 +40,19 @@ Write English Markdown with these sections:
 - Cast (solo identity locks — face, hair, body, FULL costume for EACH character; never concatenate)
 - Setting / scene geography, lighting, landmarks, opening blocking (who sits/stands where)
 - Language / speech lock (film language; exact lines if the user gave them)
-- Consistency gates: character, scene, motion/continuity, camera views covering every beat
+- Consistency gates: character consistency, scene consistency, shot consistency, camera views covering every shot
 - Shot-view coverage list (distinct cameras/angles needed)
 - Duration target and per-shot timing budget
 - Audio policy (speech vs music)
-- Production lock bible (style, axis, occupancy, wardrobe) — copy locks, do not drop them
+- Production specs (style, axis, occupancy, wardrobe) — copy locks, do not drop them
 - What to avoid
-Preserve every named character and beat from the user prompt in FULL DETAIL. Output Markdown only.
+Preserve every named character and shot from the user prompt in FULL DETAIL. Output Markdown only.
 
 Request:
 """
 
-# Keep Continuity as a first-class column so time-coherent forbids survive parsing.
-_STORYBOARD_COLUMNS = "Shot | Timeline | Camera | Move | Character action | Continuity | Comment"
+# Shot consistency is the storyboard column. Continuity remains an alias for older tables.
+_STORYBOARD_COLUMNS = "Shot | Timeline | Camera | Move | Character action | Shot consistency | Comment"
 
 _STORYBOARD_INSTRUCTION = """Write a time-coherent storyboard from the Brief. This is a camera script table, not a drawing.
 Use English Markdown. Include this heading and one table:
@@ -60,10 +60,10 @@ Use English Markdown. Include this heading and one table:
 ## Storyboard
 
 Use a Markdown table whose columns MUST be:
-Shot | Timeline | Camera | Move | Character action | Continuity | Comment
+Shot | Timeline | Camera | Move | Character action | Shot consistency | Comment
 
 Rules:
-- Cover every major beat from the user prompt (typically 3-5 shots; duration ~12-24s total unless brief says shorter)
+- Cover every major shot from the user prompt (typically 3-5 shots; duration ~12-24s total unless brief says shorter)
 - Timeline as start-end seconds, e.g. 0.0-4.0s — durations must sum coherently
 - Camera is shot size + angle, e.g. wide/establishing, medium/eye-level, close-up/eye-level, medium/slow pan
 - Move is push/pull/pan/dolly/static and speed
@@ -71,10 +71,10 @@ Rules:
   what they do, wardrobe hold. Match cast identity locks. Consecutive windows concatenate;
   do not restage the whole user prompt from a new camera, and do not strip the row to a
   one-liner that drops blocking/speech.
-- Continuity: explicit forbids from prior shots (do not undo a completed beat unless this
+- Shot consistency: explicit forbids from prior shots (do not undo a completed shot unless this
   row or the user prompt asks to repeat it; posture/facing/location locks)
-- Comment is the keyframe/composed-scene prompt: subjects, composition, light, action instant,
-  environment — ready for image gen (composed scene with all opening-cast characters in place)
+- Comment is the composed-scene prompt: subjects, composition, light, action instant,
+  environment — ready for image gen (composed scene with all opening-cast characters in the scene)
 - Language: keep speech_line exact; empty = silent
 - Enhance sparse prompts: crowd, atmosphere, lighting, wardrobe detail — without inventing new lead characters
 - Do not invent a new world that contradicts the brief
@@ -104,8 +104,10 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "camera": ("Camera", "镜头视角", "景别"),
     "move": ("Move", "运镜"),
     "character_action": ("Character action", "Character", "人物变化"),
-    # Continuity is preferred; Scene change kept as alias for older tables.
+    # Shot consistency is preferred. Older tables may still say Continuity.
     "scene_change": (
+        "Shot consistency",
+        "Character consistency",
         "Continuity",
         "Scene change",
         "Scene",
@@ -314,7 +316,7 @@ def sync_shot_nodes_from_storyboard_markdown(
     graph: dict[str, Any],
     markdown: str,
 ) -> list[str]:
-    """Refresh frame/clip shot_action + camera from the authored storyboard table.
+    """Refresh frame/Shot_action + camera from the authored storyboard table.
 
     Only updates beat text — does not touch identity/occupancy wiring.
     """
@@ -357,7 +359,7 @@ def sync_shot_nodes_from_storyboard_markdown(
             if "Action:" not in existing or narrative[:80] not in existing:
                 if existing and any(
                     m in existing.upper()
-                    for m in ("SCENE BIBLE", "STAGING LOCK", "OCCUPANCY", "COSTUME")
+                    for m in ("SCENE SPECS", "STAGING LOCK", "OCCUPANCY", "COSTUME")
                 ):
                     gen["prompt"] = f"{lead}\n{existing}"[:2000]
                 else:
@@ -446,7 +448,7 @@ def fallback_brief(prompt: str) -> str:
         f"**Logline:** {focus[:280]}\n\n"
         "- Cast: lock face/hair/body/costume per named character (solo sheets)\n"
         "- Setting: follow the user description; keep architecture/lighting consistent\n"
-        "- Continuity: time-coherent actions (no reseating someone who already left)\n"
+        "- Shot consistency: time-coherent actions (no reseating someone who already left)\n"
         f"- Duration: {duration} seconds\n"
         "- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
     )

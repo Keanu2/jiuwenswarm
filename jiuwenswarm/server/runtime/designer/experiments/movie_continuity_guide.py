@@ -24,7 +24,7 @@ def build_movie_continuity_guide(
     setting = str(spatial.get("setting") or spatial.get("setting_type") or "per brief").strip()
     static = str(
         spatial.get("static_rule")
-        or "landmarks, furniture, windows/walls, and light direction stay fixed unless the beat changes location"
+        or "landmarks, furniture, windows/walls, and light direction stay fixed unless the shot changes location"
     ).strip()
     cast = cast_summary.strip() or "use storyboard cast ids only"
 
@@ -38,13 +38,13 @@ def build_movie_continuity_guide(
         f"3) SET ANCHOR: setting={setting}. {static}. "
         "Same-setting edits must not morph windows<->cabinets<->walls.\n"
         "4) BLOCKING ANCHOR: honor storyboard zones (left/center/right/fg/bg) and landmark. "
-        "Featured subjects face the landmark / action focus unless the beat says otherwise.\n"
+        "Featured subjects face the landmark / action focus unless the shot says otherwise.\n"
         "5) SCREEN AXIS (180-degree): people on screen_left stay screen_left across pans/cuts "
-        "unless the beat says they cross. Camera move reframes — it does not flip L/R seats.\n"
+        "unless the shot says they cross. Camera move reframes — it does not flip L/R seats.\n"
         "6) SETTING MASTER: first keyframe of a setting_id places ALL named cast for that "
         "setting clearly visible (bake seats/crowd now). Later same-setting keyframes EDIT "
         "that master (reframe/zoom/pose/exit) — do not erase people still in must_appear. "
-        "New setting_id → new master. Solos = identity only (few Image-N); no empty scene plate. "
+        "New setting_id → new master. Solos = identity only (few Image-N); no scene specs. "
         "Partial occlusion of a placed person still = SAME identity (sex/age/hair/wardrobe).\n"
         "7) LANDMARKS: furniture/landmarks keep place vs the setting master still; "
         "do not teleport a landmark to mid-room or invent chairs.\n"

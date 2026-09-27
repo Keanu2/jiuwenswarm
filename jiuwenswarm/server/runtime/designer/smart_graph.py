@@ -3,7 +3,7 @@
 
 Quality layout (default, forward-only):
   Brief → Storyboard → solo cast sheets
-  → Empty scene plate per setting_id (room only, no people)
+  → Scene specs per setting_id (room only, no people)
   → Clips-as-shots: every clip is Wan R2V from on-screen solos plus that empty plate
   → optional Speech/Music → Film (ffmpeg assemble)
 
@@ -64,14 +64,14 @@ def default_spatial_lock(scene: dict[str, Any] | None = None) -> dict[str, str]:
         "setting": str(scene.get("name") or "Primary setting"),
         "architecture": str(scene.get("description") or "keep one coherent place"),
         "static_rule": (
-            "STATIC OBJECTS LOCKED to the scene bible: landmarks, terrain, buildings, "
+            "STATIC OBJECTS LOCKED to the scene specs: landmarks, terrain, buildings, "
             "props, and light direction stay fixed across hierarchical views "
             "(front/left/right/side/top/bottom). Only camera/framing and on-screen cast change. "
             "Never invent an empty environment plate; never borrow architecture from another setting_id."
         ),
         "crowd_rule": (
-            "No empty scene plates. Scene master prompt + solos define the place. Later "
-            "same-setting keyframes reuse the scene bible; keep extras silhouette unless "
+            "No scene specs. Scene master prompt + solos define the scene. Later "
+            "same-setting keyframes reuse the scene specs; keep extras silhouette unless "
             "storyboard exits them. Featured cast are distinct people — never clone faces."
         ),
     }
@@ -333,7 +333,7 @@ def _write_storyboard_markdown(shots: list[dict[str, Any]], characters: list[dic
         "",
         "Hierarchy: **Scene (setting_id)** → **Keyframes/shots**.",
         "Different scenes = different places. First keyframe of each scene authors the "
-        "**scene bible + master prompt** (compose place + only on-screen cast) — not an "
+        "**scene specs + master prompt** (compose scene + only on-screen cast) — not an "
         "empty plate. Later same-scene keyframes **compose again from character solos** "
         "using that shared scene prompt/view locks (architecture locked). "
         "Never borrow another setting_id. Not every cast member is in every scene.",
@@ -375,7 +375,7 @@ def _write_storyboard_markdown(shots: list[dict[str, Any]], characters: list[dic
                 if str(act).strip()
             ]
             crowd = shot.get("crowd_lock") if isinstance(shot.get("crowd_lock"), dict) else {}
-            lines.append(f"### Shot {idx} — {shot.get('title') or f'Beat {idx}'}")
+            lines.append(f"### Shot {idx} — {shot.get('title') or f'Shot {idx}'}")
             lines.append(f"- Timeline: {shot.get('timeline') or ''}")
             lines.append(f"- Strategy: `{strategy}`")
             lines.append(f"- Camera: {shot.get('camera') or ''}")
@@ -840,7 +840,7 @@ def _ensure_setting_ids(
     """Stamp setting_id on every shot.
 
     Prefer explicit setting_id / scene_id. Only inherit the previous setting when
-    the beat clearly stays in the same place; meet/leave/exterior language gets a
+    the shot clearly stays in the same place; meet/leave/exterior language gets a
     new setting id so later cast is not folded into the office ensemble.
     """
     default = "set_1"
@@ -992,9 +992,9 @@ def build_smart_video_graph(
         analysis["shots"] = shots
     except Exception:  # noqa: BLE001
         pass
-    # Continuity: empty scene plates + on-screen solos; storyboard start/end owns continuity.
-    skip_scene_plate = False
-    analysis["skip_scene_plate"] = False
+    # Continuity: scene specs + on-screen solos; storyboard start/end owns continuity.
+    skip_scene_specs = False
+    analysis["skip_scene_specs"] = False
     analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
 
     # Quality path: solo identity sheets only — keyframes compose multi-person.
@@ -1257,7 +1257,7 @@ def build_smart_video_graph(
 
     def _scene_name_for_setting(sid: str) -> str:
         sc = scene_by_id.get(sid) or {}
-        name = str(sc.get("name") or sc.get("place") or "").strip()
+        name = str(sc.get("scene_name") or sc.get("name") or sc.get("place") or "").strip()
         if name:
             return name
         place = str(setting_places.get(sid) or "").strip()
@@ -1269,7 +1269,7 @@ def build_smart_video_graph(
             title = str(sh.get("title") or "").strip()
             if title:
                 return title
-        return f"Place {setting_num.get(sid, 1)}"
+        return f"Scene {setting_num.get(sid, 1)}"
 
     from jiuwenswarm.server.runtime.designer.script_analysis import (
         _cast_id_maps,
@@ -1317,7 +1317,7 @@ def build_smart_video_graph(
         scene_nid = f"n_scene_{scene_num}"
         scene_id_by_setting[sid] = scene_nid
         scene_master_by_setting[sid] = scene_nid
-        scene_bible_setting = (
+        scene_specs_setting = (
             scene_locks_meta.get(sid)
             if isinstance(scene_locks_meta.get(sid), dict)
             else {}
@@ -1358,34 +1358,34 @@ def build_smart_video_graph(
                 infer_time_of_day_lock,
             )
             from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
-                compose_scene_plate_prompt,
+                compose_scene_specs_prompt,
             )
 
             tod = infer_time_of_day_lock(
                 prompt_text,
                 str(
-                    (scene_bible_setting or {}).get("place")
+                    (scene_specs_setting or {}).get("scene_name")
                     or env_desc
                     or ""
                 ),
             )
-            if isinstance(scene_bible_setting, dict) and scene_bible_setting.get("time_of_day"):
-                tod["time_of_day"] = str(scene_bible_setting.get("time_of_day"))
-            if isinstance(scene_bible_setting, dict) and scene_bible_setting.get("lighting"):
-                tod["lighting"] = str(scene_bible_setting.get("lighting"))
+            if isinstance(scene_specs_setting, dict) and scene_specs_setting.get("time_of_day"):
+                tod["time_of_day"] = str(scene_specs_setting.get("time_of_day"))
+            if isinstance(scene_specs_setting, dict) and scene_specs_setting.get("lighting"):
+                tod["lighting"] = str(scene_specs_setting.get("lighting"))
             seed_cfg = {
                 "role": NODE_ROLE_SCENE,
                 "setting_id": sid,
                 "style_lock": dict(film_style),
-                "scene_bible": {
-                    **(scene_bible_setting or {}),
-                    "place": (scene_bible_setting or {}).get("place") or env_desc,
+                "scene_specs": {
+                    **(scene_specs_setting or {}),
+                    "scene_name": (scene_specs_setting or {}).get("scene_name") or env_desc,
                 },
                 "spatial_lock": shot_spatial_scene,
                 "time_of_day_lock": tod,
                 "image_size": _IMAGE_SIZE,
             }
-            scene_prompt = compose_scene_plate_prompt(cfg=seed_cfg, graph=None, seed="")
+            scene_prompt = compose_scene_specs_prompt(cfg=seed_cfg, graph=None, seed="")
         except Exception:  # noqa: BLE001
             tod = {}
             scene_prompt = (
@@ -1410,11 +1410,11 @@ def build_smart_video_graph(
                     "character_ids": [],
                     "character_node_ids": [],
                     "cast_names": [],
-                    "scene_bible": scene_bible_setting or None,
+                    "scene_specs": scene_specs_setting or None,
                     "spatial_lock": shot_spatial_scene,
                     "time_of_day_lock": tod if isinstance(tod, dict) else None,
                     "is_scene_master": True,
-                    "skip_scene_plate": False,
+                    "skip_scene_specs": False,
                     "generate": {"prompt": scene_prompt},
                     "prompt": scene_prompt,
                     "image_size": _IMAGE_SIZE,
@@ -1585,9 +1585,9 @@ def build_smart_video_graph(
                     continue
                 filtered.append(note)
             already_done = filtered
-        scene_bible = (
-            shot.get("scene_bible")
-            if isinstance(shot.get("scene_bible"), dict)
+        scene_specs = (
+            shot.get("scene_specs")
+            if isinstance(shot.get("scene_specs"), dict)
             else (scene_locks_meta.get(setting_id) if isinstance(scene_locks_meta.get(setting_id), dict) else {})
         )
         from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
@@ -1604,17 +1604,17 @@ def build_smart_video_graph(
         shot["view_key"] = view_key
         timeline = str(shot.get("timeline") or "").strip() or f"{(idx - 1) * 5:.1f}-{idx * 5:.1f}s"
         bible_line = ""
-        if scene_bible:
-            views = scene_bible.get("views") if isinstance(scene_bible.get("views"), dict) else {}
+        if scene_specs:
+            views = scene_specs.get("views") if isinstance(scene_specs.get("views"), dict) else {}
             view_line = ""
             if show_angle:
                 view_line = str(views.get(view_key) or "")[:220]
             bible_line = (
-                f"SCENE BIBLE `{setting_id}`: place={scene_bible.get('place')}; "
-                f"lighting={scene_bible.get('lighting')}; "
-                f"objects={', '.join(str(x) for x in (scene_bible.get('objects') or [])[:6])}; "
-                f"crowd={scene_bible.get('crowd')}; "
-                f"{scene_bible.get('coherence_rule')}; "
+                f"SCENE SPECS `{setting_id}`: scene={scene_specs.get('scene_name') or scene_specs.get('place')}; "
+                f"lighting={scene_specs.get('lighting')}; "
+                f"objects={', '.join(str(x) for x in (scene_specs.get('objects') or [])[:6])}; "
+                f"crowd={scene_specs.get('crowd')}; "
+                f"{scene_specs.get('coherence_rule')}; "
                 + (f"ACTIVE {view_line}. " if view_line else "")
             )
         continuity = shot.get("continuity_lock") if isinstance(shot.get("continuity_lock"), dict) else {}
@@ -1658,8 +1658,8 @@ def build_smart_video_graph(
         first_of_setting = int(shot_ord_by_setting.get(setting_id) or 0) == 0
         layout_bits = (
             f"Reference clip, setting {setting_id}: character sheets {solo_ref_list} "
-            f"for {cast_who}, then empty scene plate {scene_nid or 'scene'} as the room. "
-            "Place those people into that empty room for THIS storyboard beat. "
+            f"for {cast_who}, then scene specs {scene_nid or 'scene'} as the room. "
+            "Place those people into that empty room for THIS storyboard shot. "
             "Keep the film STYLE LOCK. "
         )
         if not first_of_setting:
@@ -1694,7 +1694,7 @@ def build_smart_video_graph(
             + f"STRATEGY={keyframe_strategy}. first_of_setting={first_of_setting}. "
             + "Keep clothing / language / occupancy / position locks. "
             + "Keep this Wan prompt ≤4000 characters. "
-            + "Real motion — animate this beat only."
+            + "Real motion — animate this shot only."
         )
         identity_refs = {
             "character_ids": focus_cids,
@@ -1713,7 +1713,7 @@ def build_smart_video_graph(
             "spatial_lock": shot_spatial,
             "occupancy": occupancy or None,
             "crowd_lock": crowd or None,
-            "skip_scene_plate": False,
+            "skip_scene_specs": False,
             "on_screen": list(focus_cids),
             "offscreen": list(shot.get("offscreen") or []),
             "cast_actions": cast_actions or None,
@@ -1722,7 +1722,7 @@ def build_smart_video_graph(
             else None,
             "scene_distinctness": shot.get("scene_distinctness"),
             "scene_continuity_mode": "scene_card_plus_clip_shots",
-            "scene_bible": scene_bible or None,
+            "scene_specs": scene_specs or None,
             "first_of_setting": first_of_setting,
             "composed_scene": False,
             "style_lock": dict(film_style),
@@ -1753,7 +1753,7 @@ def build_smart_video_graph(
             tod_clip = infer_time_of_day_lock(
                 prompt_text,
                 str(
-                    (scene_bible or {}).get("place")
+                    (scene_specs or {}).get("scene_name")
                     or shot.get("setting_description")
                     or action
                     or ""
@@ -1768,24 +1768,24 @@ def build_smart_video_graph(
                         if str(v).strip()
                     },
                 }
-            if isinstance(scene_bible, dict):
-                if scene_bible.get("time_of_day") and (
+            if isinstance(scene_specs, dict):
+                if scene_specs.get("time_of_day") and (
                     not tod_clip.get("time_of_day")
                     or tod_clip.get("time_of_day") == "unspecified"
                 ):
-                    tod_clip["time_of_day"] = str(scene_bible.get("time_of_day"))
-                if scene_bible.get("lighting") and not tod_clip.get("lighting"):
-                    tod_clip["lighting"] = str(scene_bible.get("lighting"))
+                    tod_clip["time_of_day"] = str(scene_specs.get("time_of_day"))
+                if scene_specs.get("lighting") and not tod_clip.get("lighting"):
+                    tod_clip["lighting"] = str(scene_specs.get("lighting"))
                 # Keep bible lighting aligned with ToD when still generic.
                 if tod_clip.get("lighting") and (
-                    not scene_bible.get("lighting")
+                    not scene_specs.get("lighting")
                     or "motivated key light"
-                    in str(scene_bible.get("lighting") or "").lower()
+                    in str(scene_specs.get("lighting") or "").lower()
                 ):
-                    scene_bible = dict(scene_bible)
-                    scene_bible["lighting"] = tod_clip["lighting"]
+                    scene_specs = dict(scene_specs)
+                    scene_specs["lighting"] = tod_clip["lighting"]
                     if tod_clip.get("time_of_day"):
-                        scene_bible.setdefault("time_of_day", tod_clip["time_of_day"])
+                        scene_specs.setdefault("time_of_day", tod_clip["time_of_day"])
         except Exception:  # noqa: BLE001
             tod_clip = {}
         clip_cfg: dict[str, Any] = {
@@ -1798,7 +1798,7 @@ def build_smart_video_graph(
             "setting_id": setting_id,
             "view_key": view_key,
             "scene_node_id": scene_nid or None,
-            "scene_bible": scene_bible or None,
+            "scene_specs": scene_specs or None,
             "character_ids": focus_cids,
             "on_screen": list(focus_cids),
             "offscreen": list(shot.get("offscreen") or []),
@@ -1850,7 +1850,7 @@ def build_smart_video_graph(
             "tools": ["call_video_model", "read_upstream"],
             "delegate": ("agent" if ai_mode else "handler"),
             "supervisor_task": (
-                f"Clip shot {idx}: on-screen character sheets plus empty scene plate {scene_nid}. "
+                f"Shot {idx}: on-screen character sheets plus scene specs {scene_nid}. "
                 "Write ONE positive story-form video prompt from THIS storyboard row "
                 "(start_state → action/camera/speech → end_state). "
                 "No LOCK banners, no negatives, no prior-clip paste. "
@@ -2075,7 +2075,7 @@ def build_smart_video_graph(
             ),
             "prefer_clip_native_audio": bool(clip_embedded),
             "prefer_wan3_clip_audio": bool(clip_embedded),  # legacy alias
-            "skip_scene_plate": False,
+            "skip_scene_specs": False,
             "scene_continuity_mode": "scene_card_plus_clip_shots",
             "scene_masters": dict(scene_master_by_setting),
             "scene_locks": dict(scene_locks_meta),
@@ -2104,7 +2104,7 @@ def build_smart_video_graph(
                 "empty_scene_plates": True,
                 "prior_prompt_handoff": True,
                 "notes": (
-                    "Continuity: Brief+LOCK BIBLE→Storyboard→solo sheets→empty scene plate→"
+                    "Continuity: Brief+LOCK BIBLE→Storyboard→solo sheets→scene specs→"
                     "every clip is R2V (character sheets + empty room) with STYLE LOCK. "
                     "Later clips continue who is in the room and this window's action."
                 ),

@@ -13,14 +13,14 @@ from typing import Any
 
 _LOCK_MARKERS = (
     "PRIOR KEYFRAME PROMPT",
-    "PRIOR CLIP CONTINUITY",
+    "PRIOR SHOT CONSISTENCY",
     "PREVIOUS CLIP HAD",
     "YOUR ASSIGNMENT",
     "MASTER SCENE PROMPT",
     "LANGUAGE LOCK",
     "SPEECH LOCK",
     "BGM LOCK",
-    "SCENE BIBLE",
+    "SCENE SPECS",
     "ASPECT LOCK",
     "STYLE LOCK",
     "STYLE HOLD",
@@ -36,8 +36,8 @@ _LOCK_MARKERS = (
     "[WAN REFERENCE MODE",
     "KEYFRAME CAST LOCK",
     "R2V CAST LOCK",
-    "CONTINUITY CARD",
-    "SAME-SCENE CONTINUITY GATE",
+    "CHARACTER CONSISTENCY",
+    "SAME-SCENE CONSISTENCY GATE",
     "COMPOSED SCENE MASTER",
 )
 
@@ -542,7 +542,7 @@ def infer_crowd_state(
     if not crowd:
         occ = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
         crowd = occ.get("crowd_lock") if isinstance(occ.get("crowd_lock"), dict) else {}
-    bible = cfg.get("scene_bible") if isinstance(cfg.get("scene_bible"), dict) else {}
+    bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
     prior_crowd = prior.get("crowd_state") if isinstance(prior.get("crowd_state"), dict) else {}
     prior_lock = prior.get("crowd_lock") if isinstance(prior.get("crowd_lock"), dict) else {}
 
@@ -661,7 +661,7 @@ def stamp_continuity_story_fields(
 
 
 def cap_r2v_reference_paths(paths: list[Path], *, max_refs: int = 5) -> list[Path]:
-    """Keep on-screen solos + last scene plate within Wan's 5-ref cap."""
+    """Keep on-screen solos + last scene specs within Wan's 5-ref cap."""
     unique: list[Path] = []
     seen: set[str] = set()
     for path in paths or []:

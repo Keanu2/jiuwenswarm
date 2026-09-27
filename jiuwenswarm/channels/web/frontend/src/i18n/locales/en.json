@@ -102,10 +102,10 @@
       "send": "Send",
       "attach": "Add reference media",
       "removeAttachment": "Remove reference",
-      "attachHint": "Images, video, or audio. Up to 3 images, 1 video, and 1 audio clip.",
+      "attachHint": "Images, video, or audio. Up to 3 images, 1 video, and 1 audio file.",
       "limitImages": "You can attach at most 3 reference images.",
       "limitVideo": "You can attach at most 1 reference video.",
-      "limitAudio": "You can attach at most 1 reference audio clip.",
+      "limitAudio": "You can attach at most 1 reference audio file.",
       "tooLarge": "File is larger than 6MB. Use a smaller file or a local path.",
       "unsupported": "Only image, video, or audio files can be used as references."
     },
@@ -200,7 +200,7 @@
       "generate": "Generate target node"
     },
     "recentGraphs": "Recent graphs",
-    "hasVideo": "Has clip",
+    "hasVideo": "Has shot",
     "revision": {
       "title": "Choose which version to keep",
       "hint": "{{label}} was regenerated. The original is still here — pick which one to keep.",

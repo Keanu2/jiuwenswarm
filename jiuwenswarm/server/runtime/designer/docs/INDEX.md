@@ -1,7 +1,7 @@
 # Designer pipeline docs
 
 Continuity mode: **`scene_card_plus_clip_shots`** (no per-shot keyframes).  
-Empty scene plates + on-screen character solos + R2V clips.  
+Scene specs + on-screen character solos + R2V shots.  
 Images = **IMAGE_GEN** (Qwen); clips = **VIDEO_GEN** (Wan / Seedance / MiniMax).
 
 **Continuity authority:** storyboard per-shot `start_state` → action/camera/speech → `end_state`.  

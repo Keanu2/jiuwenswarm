@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1] / "designer_catalog_skills_reports_tr
 SCENARIOS = {
     "video": """---
 name: designer-scenario-video
-description: Guide video graph composition and shot pipeline (R2V clips, optional speech/music/silence).
+description: Guide video graph composition and shot pipeline (R2V shots, optional speech/music/silence).
 ---
 
 # Designer Video Scenario Skill
@@ -23,7 +23,7 @@ Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard
 1. Always keep a Brief agent first.
 2. Character and Scene sheets before Storyboard when subjects/places matter.
 3. Storyboard must emit timed shots with camera, action, and shot prompts.
-4. Each shot is an R2V clip from on-screen solos + empty scene plate (no per-shot keyframe required).
+4. Each shot is an R2V shot from on-screen solos + scene specs (no per-shot keyframe required).
 5. Compose/final stitches clips; honor audio policy from the brief.
 6. Named director styles live in `metadata.video_style` (e.g. `final_frame_reverse` = reference still is the LAST 1s endpoint; reverse-form the action; see `skills/styles/`).
 
@@ -35,7 +35,7 @@ Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard
 
 ## Model capabilities to exploit
 - Image: t2i and i2i/editing (character consistency).
-- Video: reference-to-video (solos + scene plates).
+- Video: reference-to-video (solos + scene specs).
 - Audio/speech: TTS when speech is requested.
 
 ## Quality bar
@@ -101,7 +101,7 @@ You coordinate Designer agents.
 - Read scenario skill + prior feedback/trajectory.
 - For each node set optimize_for, preferred_model, and a concrete task.
 - Enforce audio policy (silent / speech / music).
-- Prefer R2V clips (on-screen solos + scene plate).
+- Prefer R2V shots (on-screen solos + scene specs).
 
 ## Rerun / redesign
 - When prior ratings are low, redesign weak nodes or reorder edges.
@@ -140,11 +140,11 @@ Establish place, weather, lighting, props. Keep continuity with brief. Provide r
 Emit a timed camera table. Each shot needs: timeline, camera, move, action, scene change, and a clip prompt. Align actions to character sheet and place to scene sheet.
 """,
     "frame": """# Keyframe / Still Agent Skill
-Optional still for continuity debug. Match storyboard comment + character/scene continuity. Prefer readable silhouette and strong composition.
+Optional still for continuity debug. Match storyboard comment + character/scene consistency. Prefer readable silhouette and strong composition.
 """,
     "clip": """# Clip Agent Skill
 Generate shot video via **R2V** (on-screen solos + empty scene). Keep duration short. Honor silent policy (no implied dialogue) or leave room for later speech mix.
-When `metadata.video_style=final_frame_reverse`: this beat sits on an arc that ENDS on the user reference / classic still — decisive motion early, settle late, motif-motivated continuity; never turntable a finished pose.
+When `metadata.video_style=final_frame_reverse`: this shot sits on an arc that ENDS on the user reference / classic still — decisive motion early, settle late, motif-motivated continuity; never turntable a finished pose.
 """,
     "compose": """# Compose / Final Agent Skill
 Stitch clips, normalize resolution, apply audio mix policy: silent → no tracks; speech → voiceover; music → bed; both → duck music under speech.

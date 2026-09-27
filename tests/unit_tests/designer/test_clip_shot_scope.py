@@ -155,7 +155,7 @@ def test_same_scene_gate_in_handoff_and_graph_prompt_keeps_locks() -> None:
         this_shot_index=2,
         this_action="family sits together",
     )
-    assert "SAME-SCENE CONTINUITY GATE" in clause
+    assert "SAME-SCENE CONSISTENCY GATE" in clause
     assert "AGREES" in clause.upper() or "agree" in clause.lower()
     assert "repeat" in clause.lower()
     assert agent_replays_finished_events(

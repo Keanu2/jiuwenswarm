@@ -5,7 +5,7 @@ Reproduce the AI-first **prompt → film** Play path (quality graph
 `design-no-keyframes-2.0`.
 
 This file documents architecture, **pipeline roles**, **agent spawning**,
-**scene bible / hierarchical views**, locks, audio routing, scheduling, LLM
+**scene specs / hierarchical views**, locks, audio routing, scheduling, LLM
 shot budgeting, compose readiness, and how to run the stack.
 
 Short companion notes: `a.md`. Per-node docs:
@@ -43,9 +43,9 @@ flowchart TD
 ```
 
 **Continuity (code truth):** the **storyboard** owns each shot’s closed window
-(`start_state` → action/camera/speech → `end_state`). One **empty scene plate**
+(`start_state` → action/camera/speech → `end_state`). One **scene specs**
 per `setting_id` (no people). Each **clip is the shot**: R2V with
-`reference_images` = **on-screen** character solos + the scene plate
+`reference_images` = **on-screen** character solos + the scene specs
 (`scene_card_plus_clip_shots` / R2V). Prompts are **story-form**. Same-setting clips do **not**
 depend on prior Wan text or prior clip nodes — they run **concurrently** once
 storyboard + needed solos + scene are ready. Exited cast is omitted until the
@@ -72,7 +72,7 @@ User prompt (natural language) → Designer execution graph → **one forward Pl
    artifacts, reviews **every leaf media prompt**, and enforces the storyboard
    continuity contract so completed beats / speech are not restaged.
 3. **Leaf workers** (`NodeAgentHost` DeepAgents) and/or **handlers** produce
-   solo cast sheets, empty scene plates, clips-as-shots, optional speech/music,
+   solo cast sheets, scene specs, clips-as-shots, optional speech/music,
    then **compose** a real `.mp4` only after every clip is completed and usable.
 4. **Dual rater agents** score the run; feedback JSON is write-only and applied
    only on an explicit **Run again** (`use_prior_feedback`).
@@ -95,7 +95,7 @@ Heuristics run **only** when no configured chat model is available.
 | `n_compose` | `compose` | video | ffmpeg concat of **all** clips (+ mux speech/music); hard-waits media |
 
 **Canvas labels** (`node_labels.py`): `Brief: …`, `Story Board: …`,
-`Character N: …`, `Scene N: <2–3 word place>`, `Scene S: Clip K: <beat>`,
+`Character N: …`, `Scene N: <2–3 word place>`, `Scene S: Shot K: <beat>`,
 `Final Composed: …` — never generic `Image N` / `Video N`. Shot cards are gone;
 clips are the shots.
 
@@ -163,21 +163,21 @@ n_brief (text)
 ```
 
 Bootstrap stamp: `metadata.bootstrap = designer.graph.smart_video.quality.v5`.  
-`metadata.skip_scene_plate = False` — **scene cards are required**.  
+`metadata.skip_scene_specs = False` — **scene cards are required**.  
 `metadata.scene_continuity_mode = scene_card_plus_clip_shots`.  
 `metadata.freeze_shot_topology = False` — Supervisor owns a **flexible**
 multi-shot graph; storyboard / LLM `target_shot_count` drives `n_clip_*`
 (and one `n_scene_*` per unique setting).  
 `metadata.all_nodes_agents = True` when LLM is configured.
 
-### Scene plate + clip-as-shot policy
+### Scene specs + clip-as-shot policy
 
 - **Solo gate:** every named character gets a solo identity card. Only
   **on-screen** solos for that shot become clip `reference_images`.
-- **Scene plates:** one `n_scene_N` per `setting_id`, labeled
+- **Scene specs:** one `n_scene_N` per `setting_id`, labeled
   `Scene N: <2–3 word place>`. **Empty** — furniture/light/props only, no cast.
 - **Clips are shots:** each `n_clip_*` depends on **storyboard**, **on-screen**
-  solos, and its setting’s scene plate — **not** brief, not prior clips.
+  solos, and its setting’s scene specs — **not** brief, not prior clips.
   Config carries `start_state` / `end_state`, `scene_node_id`, occupancy,
   `on_screen` / `offscreen`, costume / spatial / staging locks, speech locks,
   and R2V reference mode (`keyframe_strategy = clip_from_scene_and_solos`).
@@ -194,7 +194,7 @@ multi-shot graph; storyboard / LLM `target_shot_count` drives `n_clip_*`
 - **Lock gate:** Manager `review_leaf_media_prompt` + continuity contract then
   `supervisor_approve_video_prompt` before every clip tool call.
 
-### Hierarchical scene bible (per setting)
+### Hierarchical scene specs (per setting)
 
 | Field | Purpose |
 |-------|---------|
@@ -281,7 +281,7 @@ Shot count is LLM-owned (with soft/hard caps above).
 ```
 jiuwenswarm/server/runtime/designer/
   README.md                 # this package's module map
-  smart_graph.py            # build_smart_video_graph (v5 empty plates + clip shots)
+  smart_graph.py            # build_smart_video_graph (v5 empty plates + Shots)
   script_analysis.py        # LLM / heuristic creative brief + shot budget
   orchestration.py          # Supervisor / Manager, prune+reedit, leaf prompt gate
   executor.py               # ready-queue (≤3), storyboard sync, compose hard-wait
@@ -301,7 +301,7 @@ jiuwenswarm/server/runtime/designer/
     clip_story_state.py        # self Wan stamp; prior-clip ensure no-op w/ start_state
     clip_prompt_handoff.py     # last_wan_prompt on self only
     clip_shot_scope.py
-    keyframe_policy.py         # scene bible / ensembles (no n_frame_*)
+    keyframe_policy.py         # scene specs / ensembles (no n_frame_*)
     production_bible.py
     leaf_agent_continuity.py
     clothing_lock.py / shot_staging_lock.py / axis_locks.py / cast_prop_locks.py
@@ -331,7 +331,7 @@ jiuwenswarm/agents/harness/common/tools/{image_tools,video_tools,multimodal_conf
 1. `jiuwenswarm-start all` (or stop then `jiuwenswarm-start all`).
 2. Open http://127.0.0.1:5173/ → Designer → bootstrap a video prompt → **Play**.
 3. Inspect `~/.jiuwenswarm/agent/workspace/` for compose mp4.
-4. Canvas labels: `Brief:…`, `Character N:…`, `Scene N:…`, `Scene S: Clip K:…`,
+4. Canvas labels: `Brief:…`, `Character N:…`, `Scene N:…`, `Scene S: Shot K:…`,
    `Final Composed:…`.
 
 ### Import-level check (no media cost)
@@ -376,7 +376,7 @@ print('topology_ok', ids)
   `https://github.com/AI-Framework-leibniz/DesignSwarm`
 - Docs: `README.md`, `DETAIL.md`, `a.md`, `jiuwenswarm/server/runtime/designer/README.md`
 - Quality milestone stamp: **`designer.graph.smart_video.quality.v5`**
-- Continuity stamp: **`scene_card_plus_clip_shots`** (empty plates + R2V clips)
+- Continuity stamp: **`scene_card_plus_clip_shots`** (empty plates + R2V shots)
 
 Do not commit: videos, PNGs/JPEGs from runs, workspace media, `pipeline_*_out/`,
 `results_eval/`, trajectory dumps, `_smoke_*` / `_tmp_*` / `_patch_*` scripts,
@@ -392,8 +392,8 @@ Do not commit: videos, PNGs/JPEGs from runs, workspace media, `pipeline_*_out/`,
 | Too many / too few shots | LLM `target_shot_count`; explicit N-shot; soft ≤8 hard 16 |
 | `LocalFunction` not callable on image | Leaf must use `generate_designer_image` (fixed in `node_agent`) |
 | Run stops; UI shows Continue | Ready-queue path; pending nodes auto-resume |
-| Missing scene plates | `skip_scene_plate=false` / `n_scene_*` present |
-| Architecture drifts | `scene_bible` + storyboard start/end chain + Manager leaf gate |
+| Missing scene specs | `skip_scene_specs=false` / `n_scene_*` present |
+| Architecture drifts | `scene_specs` + storyboard start/end chain + Manager leaf gate |
 | Clip redo / resay | continuity contract + start_state; no prior-Wan dump |
 | Clips stuck serial | no clip→clip edges; check on-screen-only deps |
 | Wrong people / lost identity | solos as refs + `on_screen` / occupancy; omit exited |

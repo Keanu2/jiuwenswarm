@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Prior-clip continuity as storyboard notes — never paste full Wan prompts.
+"""Prior-shot consistency as storyboard notes — never paste full Wan prompts.
 
 Format injected into leaves:
   PREVIOUS CLIP HAD … (context only — do not film again)
@@ -47,8 +47,8 @@ def _short_action(text: str, *, limit: int = 220) -> str:
         "PREVIOUS CLIP HAD",
         "LANGUAGE LOCK",
         "STYLE LOCK",
-        "SCENE BIBLE",
-        "CONTINUITY CARD",
+        "SCENE SPECS",
+        "CHARACTER CONSISTENCY",
         "MASTER SCENE",
     ):
         if marker in raw.upper():
@@ -84,7 +84,7 @@ def collect_prior_clip_prompts(
     max_chars_each: int = 1600,
     max_clips: int = 6,
 ) -> list[dict[str, Any]]:
-    """Earlier clips as short storyboard beats (oldest → newest)."""
+    """Earlier clips as short storyboard shots (oldest → newest)."""
     del max_chars_each
     out: list[dict[str, Any]] = []
     for node in _clip_nodes(graph):
@@ -171,7 +171,7 @@ def same_scene_prompt_gate_clause(
 ) -> str:
     """LLM instruction: agree with this storyboard row; continue; do not unasked-repeat."""
     lines = [
-        "SAME-SCENE CONTINUITY GATE (write the Wan prompt to this contract):",
+        "SAME-SCENE CONSISTENCY GATE (write the Wan prompt to this contract):",
         f"1) THIS storyboard shot {int(shot_index or 0) or 'N'} is the plot authority "
         f"— action: {_short_action(this_action) or '(this row)'}"
         + (f"; camera: {str(this_camera).strip()[:120]}" if str(this_camera or "").strip() else "")
@@ -314,17 +314,17 @@ def this_shot_assignment_clause(
 ) -> str:
     lines = [
         f"YOUR ASSIGNMENT (storyboard shot {int(shot_index or 0)} — film ONLY this part):",
-        f"- Action: {_short_action(action) or '(follow this shot keyframe + storyboard beat)'}",
+        f"- Action: {_short_action(action) or '(follow this shot keyframe + storyboard shot)'}",
     ]
     if str(camera or "").strip():
         lines.append(f"- Camera: {str(camera).strip()[:160]}")
     if str(speech_line or "").strip():
-        lines.append(f"- Speech this beat: {str(speech_line).strip()[:200]}")
+        lines.append(f"- Speech this shot: {str(speech_line).strip()[:200]}")
     done = [str(x) for x in (already_done or []) if str(x).strip()]
     if done:
         lines.append("- Already finished earlier (do not redo): " + "; ".join(done[:8]))
     lines.append(
-        "Use the storyboard beat assigned to you above. Do not invent another shot's action."
+        "Use the storyboard shot assigned to you above. Do not invent another shot's action."
     )
     return "\n".join(lines)
 
@@ -345,8 +345,8 @@ def previous_clip_had_clause(prior: list[dict[str, Any]] | None) -> str:
             f"\"{str(latest.get('speech_line'))[:160]}\""
         )
         lines.append(
-            "Dialogue continuity: do not restart that line; only speak NEW words for THIS beat "
-            "(or stay silent if this beat has no new speech_line)."
+            "Dialogue continuity: do not restart that line; only speak NEW words for This shot "
+            "(or stay silent if this shot has no new speech_line)."
         )
     if len(items) > 1:
         earlier = "; ".join(

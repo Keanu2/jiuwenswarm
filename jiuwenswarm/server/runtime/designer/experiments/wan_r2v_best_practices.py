@@ -51,8 +51,8 @@ def contact_anti_penetration_clause(*, for_clip: bool = True) -> str:
         "If posture is seated/kneeling/reclining/leaning: visible contact with the "
         "support surface (seat, floor, edge, rail) — weight rests ON the surface, "
         "not floating and not sunk THROUGH it. "
-        "Solo identity sheets may show standing studio poses; when the beat requires "
-        "contact with set geometry, REPOSE the body for THIS beat (do not paste the "
+        "Solo identity sheets may show standing studio poses; when the shot requires "
+        "contact with set geometry, REPOSE the body for This shot (do not paste the "
         "standing sheet pose into the room). "
         "Hands/props: grasp exteriors; do not bury limbs inside objects. "
         "Depth order: people in front of or behind props as storyboarded — never "
@@ -87,12 +87,12 @@ def wan_reference_media_rules(*, prior_ending_count: int = 0) -> str:
     if int(prior_ending_count or 0) > 0:
         lines.append(
             "- Prior ending stills are not attached. "
-            "This clip plays the current storyboard beat in the same setting, with the same placement."
+            "This clip plays the current storyboard shot in the same setting, with the same placement."
         )
     else:
         lines.append(
-            "- First clip of a setting: no prior ending still — play the storyboard beat "
-            "using identity solos + scene plate."
+            "- First clip of a setting: no prior ending still — play the storyboard shot "
+            "using identity solos + scene specs."
         )
     return "\n".join(lines)
 
@@ -151,7 +151,7 @@ def ensure_photoreal_style_lock(
                 "SAME medium whole film"
             ),
             "lens": "35mm cinematic, soft background when close; no comic/grid UI",
-            "palette": "match scene plate color temperature and wardrobe dyes — never restyle mid-film",
+            "palette": "match scene specs color temperature and wardrobe dyes — never restyle mid-film",
             "medium": "photoreal_cinematic",
             "forbid": (
                 "no style drift between shots, no outfit redesign, no new architecture, "

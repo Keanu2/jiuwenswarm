@@ -25,8 +25,8 @@ Heuristics run **only** when `llm_available()` is false.
 Brief (Supervisor + Manager gate)
   → Storyboard (Supervisor + Manager gate; start_state → beat → end_state)
   → Solo character sheets (identity / wardrobe)
-  → Empty scene plate per setting_id (environment only)
-  → Clips as shots (R2V: on-screen solos + scene plate;
+  → Scene specs per setting_id (environment only)
+  → Clips as shots (R2V: on-screen solos + scene specs;
        story-form prompt from this row’s start/end;
        same-setting clips concurrent when deps ready)
   → Optional speech / music

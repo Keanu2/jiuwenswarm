@@ -6,7 +6,7 @@ General rules (no scene-genre branches):
   2. Props appear only as on-device UI (phone/laptop/app), not free-flying bodies.
   3. setting_id change ⇒ compose_from_solo_refs; same setting ⇒ edit_prior_keyframe.
   4. Within a setting, humans who did not exit stay in occupancy.must_appear.
-  5. New setting starts from this beat's storyboard cast (no cross-set occupancy leak).
+  5. New setting starts from this shot's storyboard cast (no cross-set occupancy leak).
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ _STOPWORDS = frozenset(
 
 
 def _score_human(ch: dict[str, Any], blob: str) -> int:
-    """Score how strongly this human is named/described in the beat text."""
+    """Score how strongly this human is named/described in the shot text."""
     text = (blob or "").lower()
     name = str(ch.get("name") or "").strip().lower()
     desc = str(ch.get("description") or "").lower()
@@ -153,7 +153,7 @@ def _score_human(ch: dict[str, Any], blob: str) -> int:
     for term in re.findall(r"[a-z]{3,}", name):
         if term not in _STOPWORDS and re.search(rf"\b{re.escape(term)}\b", text):
             score += 2
-    # Weak cue from description tokens that also appear in the beat.
+    # Weak cue from description tokens that also appear in the shot.
     for term in re.findall(r"[a-z]{3,}", desc)[:16]:
         if term not in _STOPWORDS and re.search(rf"\b{re.escape(term)}\b", text):
             score += 1
@@ -161,7 +161,7 @@ def _score_human(ch: dict[str, Any], blob: str) -> int:
 
 
 def _beat_text_for_scoring(action: str) -> str:
-    """Strip supervisor lock suffixes so scoring uses the storyboard beat only."""
+    """Strip supervisor lock suffixes so scoring uses the storyboard shot only."""
     text = str(action or "")
     for marker in (
         "IDENTITY LOCK:",
@@ -183,7 +183,7 @@ def _co_present_ids(
     by_id: dict[str, dict[str, Any]],
     fallback_lead: str,
 ) -> list[str]:
-    """Humans named in the beat, including co-presence ('with X' ⇒ subject stays)."""
+    """Humans named in the shot, including co-presence ('with X' ⇒ subject stays)."""
     beat = _beat_text_for_scoring(action)
     mentioned = [
         c for c in humans if _score_human(by_id.get(c) or {}, beat) > 0
@@ -195,7 +195,7 @@ def _co_present_ids(
         mentioned = [fallback_lead]
     if not mentioned:
         return []
-    # "with <name/role>" ⇒ keep a subject if the beat has one; else film lead.
+    # "with <name/role>" ⇒ keep a subject if the shot has one; else film lead.
     if re.search(r"\bwith\b", beat, re.I) and len(mentioned) == 1 and fallback_lead:
         if fallback_lead in humans and fallback_lead not in mentioned:
             if re.search(r"\b(?:he|him|his|she|her|they|them|their)\b", beat, re.I):
@@ -236,7 +236,7 @@ def repair_shot_cast(
         listed = [c for c in old if c in human_set]
         had_prop_in_cast = any(c in props for c in old)
 
-        # Score humans against THIS beat (action first, then brief as weak tiebreak).
+        # Score humans against This shot (action first, then brief as weak tiebreak).
         ranked = sorted(
             humans,
             key=lambda cid: (
@@ -260,7 +260,7 @@ def repair_shot_cast(
         def _resolve_focus(base: list[str]) -> list[str]:
             """Prefer storyboard humans; if cast listed a prop, trust beat mentions more."""
             if had_prop_in_cast:
-                # Prop-as-hero is untrusted — rebuild from who the beat actually names.
+                # Prop-as-hero is untrusted — rebuild from who the shot actually names.
                 pick = [c for c in mentioned if c not in exited] or [
                     c for c in base if c not in exited
                 ]
@@ -363,7 +363,7 @@ def _stamp_props_and_occupancy(
     # or when any prop was wrongly listed in the original cast (caller already stripped).
     device_beat = bool(_DEVICE_UI_RE.search(action) or _DEVICE_UI_RE.search(prompt_l))
     prop_mentions = list(props) if (props and device_beat) else []
-    # Also lock props if the beat text names them (logo/mascot words).
+    # Also lock props if the shot text names them (logo/mascot words).
     if props and (_MASCOT_RE.search(action) or _CREATURE_PROP_RE.search(action)):
         prop_mentions = list(props)
     shot["prop_ids"] = list(dict.fromkeys(prop_mentions))
@@ -371,7 +371,7 @@ def _stamp_props_and_occupancy(
         names = [str((by_id.get(p) or {}).get("name") or p) for p in shot["prop_ids"]]
         shot["prop_presentation"] = (
             f"PROP/UI LOCK: {', '.join(names)} appear ONLY as logo/icon on phone/app UI "
-            "in this beat — FORBIDDEN as free-flying or walking characters."
+            "in this shot — FORBIDDEN as free-flying or walking characters."
         )
         if shot["prop_presentation"] not in str(shot.get("action") or ""):
             shot["action"] = (
@@ -444,7 +444,7 @@ def occupancy_clause_for_clip(
     ]
     if must:
         bits.append(
-            f"MUST STILL BE PRESENT (unless this beat's exit list says otherwise): {', '.join(must)}."
+            f"MUST STILL BE PRESENT (unless this shot's exit list says otherwise): {', '.join(must)}."
         )
     if gone:
         bits.append(f"ALREADY EXITED (keep off-screen): {', '.join(gone)}.")

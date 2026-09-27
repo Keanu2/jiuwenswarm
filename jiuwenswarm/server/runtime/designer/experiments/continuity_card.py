@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Slim continuity cards — what already happened, without pasting prior prompts."""
+"""Slim character consistency — what already happened, without pasting prior prompts."""
 
 from __future__ import annotations
 
@@ -28,12 +28,12 @@ def _clean_action_snippet(text: str, *, limit: int = 160) -> str:
     # Drop lock banners / prior paste markers if a full prompt was passed by mistake.
     for marker in (
         "PRIOR KEYFRAME PROMPT",
-        "PRIOR CLIP CONTINUITY",
+        "PRIOR SHOT CONSISTENCY",
         "MASTER SCENE PROMPT",
         "LANGUAGE LOCK",
         "SPEECH LOCK",
         "BGM LOCK",
-        "SCENE BIBLE",
+        "SCENE SPECS",
         "ASPECT LOCK",
         "STYLE LOCK",
         "AUDIO ROUTE",
@@ -65,7 +65,7 @@ def extract_already_done_beats(
     Storyboard may opt into a repeat via allow_repeat_hints containing \"repeat\" / \"again\" / \"loop\".
     """
     allow = (allow_repeat_hints or "").lower()
-    if any(w in allow for w in ("repeat this beat", "do again", "loop the action", "replay")):
+    if any(w in allow for w in ("repeat this shot", "do again", "loop the action", "replay")):
         return []
 
     text = _clean_action_snippet(action_or_prompt, limit=280)
@@ -129,7 +129,7 @@ def architecture_clause_from_bible(bible: dict[str, Any] | None) -> str:
         return ""
     objects = ", ".join(str(x) for x in (bible.get("objects") or [])[:6] if str(x).strip())
     parts = [
-        f"place={bible.get('place')}" if bible.get("place") else "",
+        f"scene={bible.get('scene_name') or bible.get('place')}" if (bible.get("scene_name") or bible.get("place")) else "",
         f"lighting={bible.get('lighting')}" if bible.get("lighting") else "",
         f"objects={objects}" if objects else "",
         f"crowd={bible.get('crowd')}" if bible.get("crowd") else "",
@@ -140,7 +140,7 @@ def architecture_clause_from_bible(bible: dict[str, Any] | None) -> str:
         return ""
     return (
         "SCENE ARCHITECTURE LOCK (keep place/light/props/crowd; change ONLY camera view + "
-        f"this beat's on-screen cast/actions): {body}"
+        f"this shot's on-screen cast/actions): {body}"
     )
 
 
@@ -154,7 +154,7 @@ def continuity_card_from_prior(
     bible: dict[str, Any] | None = None,
     storyboard_hints: str = "",
 ) -> dict[str, Any]:
-    """Build a slim continuity card Manager/leaves can inject (never the full prior prompt)."""
+    """Build a slim character consistency Manager/leaves can inject (never the full prior prompt)."""
     seed = prior_action or _clean_action_snippet(prior_prompt, limit=240)
     done = extract_already_done_beats(
         seed,
@@ -179,7 +179,7 @@ def continuity_card_clause(card: dict[str, Any] | None) -> str:
     if not isinstance(card, dict) or not card:
         return ""
     lines: list[str] = [
-        "CONTINUITY CARD (Manager): use this to avoid repeats — do NOT copy a prior shot prompt."
+        "CHARACTER CONSISTENCY (Manager): use this to avoid repeats — do NOT copy a prior shot prompt."
     ]
     src = card.get("from_shot_index") or card.get("from_node_id")
     if src:
@@ -221,9 +221,9 @@ def strip_prior_prompt_pastes(prompt: str) -> str:
         return ""
     patterns = (
         r"\n*PRIOR KEYFRAME PROMPT \(do not redo the same beat; advance time\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
-        r"\n*PRIOR CLIP CONTINUITY \(do NOT redo these beats; continue the film forward\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
+        r"\n*PRIOR SHOT CONSISTENCY \(do NOT redo these beats; continue the film forward\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
         r"\n*MASTER SCENE PROMPT:\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
-        r"\n*CONTINUITY CARD \(Manager\):[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
+        r"\n*CHARACTER CONSISTENCY \(Manager\):[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
     )
     out = text
     for pat in patterns:

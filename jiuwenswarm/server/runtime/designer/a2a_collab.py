@@ -57,7 +57,7 @@ _SPECIALISTS: dict[str, tuple[str, str]] = {
     ),
     NODE_ROLE_STORYBOARD: (
         "storyboard director",
-        "You are a storyboard director. Keep character continuity and scene geography. "
+        "You are a storyboard director. Keep character consistency and scene geography. "
         "Shots must cover the duration stated in the Brief or user request.",
     ),
 }
@@ -296,7 +296,7 @@ async def review_storyboard_with_peers(
             NODE_ROLE_CHARACTER_DESIGN,
             "Review the Character action column of this storyboard. Flag costume changes, swapped people, or look mismatches. "
             "Reply OK if none.\n\n"
-            f"Your character card:\n{character}\n\nStoryboard:\n{table}\n",
+            f"Your character specs:\n{character}\n\nStoryboard:\n{table}\n",
             max_tokens=4096,
         )
         if reply and reply.strip().upper() != "OK":
