@@ -139,7 +139,7 @@ def build_action_lock(
     if beat and not any(beat[:40] in b for b in bits):
         bits.append(f"beat={beat[:220]}")
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
             infer_pose_from_action,
         )
 
@@ -307,7 +307,7 @@ def staging_lock_clause(
     if len(lines) == 1:
         return ""
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
             contact_anti_penetration_clause,
         )
 

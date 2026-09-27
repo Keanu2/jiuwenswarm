@@ -42,7 +42,7 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
         if node_pipeline(node) == NODE_ROLE_CLIP:
             user = str(graph.get("description") or "")
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                     clip_assignment_text,
                     duration_from_timeline,
                     looks_like_full_story_restatement,

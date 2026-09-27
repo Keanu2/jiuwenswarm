@@ -47,7 +47,7 @@ _IMAGE_SIZE = "1K"  # cost-save: ~1024 class, not 2K/4K
 
 
 def _duration_sec_for_graph(prompt: str, analysis: dict[str, Any], characters: list[dict[str, Any]]) -> int:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
         film_duration_for_graph,
     )
 
@@ -418,7 +418,7 @@ def _shot_budget(analysis: dict[str, Any], shots: list[dict[str, Any]]) -> int:
         target = 0
     # Also honor user-prompt N-shot / N分镜 language stamped on analysis.
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
             _explicit_shot_count_from_prompt,
         )
 
@@ -533,7 +533,7 @@ def _plan_cast_sheets(
             break
         name = _character_display_name(ch, prompt) or cid
         desc = str(ch.get("description") or "").strip()
-        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
             enrich_character_clothing,
         )
 
@@ -566,7 +566,7 @@ def _plan_cast_sheets(
             if not members:
                 continue
             names = [str(m.get("name") or m.get("id")) for m in members]
-            from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
                 costume_lock_for_ids,
                 enrich_character_clothing,
             )
@@ -810,7 +810,7 @@ def _cameras_compatible(a: str, b: str) -> bool:
 def _costume_lock_for_ids(
     characters: list[dict[str, Any]], character_ids: list[str]
 ) -> str:
-    from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
         costume_lock_for_ids,
         enrich_character_clothing,
     )
@@ -900,7 +900,7 @@ def build_smart_video_graph(
     When ``ai_mode`` is True (LLM available), Brief/Storyboard are authored by
     node agents (no skip_llm). Heuristic prewrites are only used as drafts/fallback.
     """
-    from jiuwenswarm.server.runtime.designer.experiments.keyframe_policy import (
+    from jiuwenswarm.server.runtime.designer.pipeline.keyframe_policy import (
         apply_compose_solos_setting_policy,
     )
     from jiuwenswarm.server.runtime.designer.model_tools import (
@@ -918,7 +918,7 @@ def build_smart_video_graph(
     analysis = ensure_audio_locks_on_analysis(dict(analysis or {}), prompt_text)
     analysis["user_prompt"] = prompt_text
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             apply_shot_scope,
         )
 
@@ -984,7 +984,7 @@ def build_smart_video_graph(
     scenes = list(analysis.get("scenes") or scenes)
     shots = list(analysis.get("shots") or shots)
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
             ensure_shot_start_end_states,
         )
 
@@ -1014,7 +1014,7 @@ def build_smart_video_graph(
     )
     storyboard_md = _write_storyboard_markdown(shots, characters)
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.production_bible import (
+        from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
             append_bible_to_markdown,
             build_production_bible,
         )
@@ -1099,7 +1099,7 @@ def build_smart_video_graph(
     )
     edges.append(_edge("e_brief_storyboard", "n_brief", "n_storyboard"))
 
-    from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+    from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
         ensure_photoreal_style_lock,
     )
     from jiuwenswarm.server.runtime.designer.media_model_playbook import style_lock_clause
@@ -1120,7 +1120,7 @@ def build_smart_video_graph(
         # Namecard: character display name (Manager-approved via analysis cast).
         display = (names[0] if names else str(sheet.get("label") or f"Character {i}")).strip()
         label = label_character(i, display)
-        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
             extract_clothing_parts,
         )
 
@@ -1131,7 +1131,7 @@ def build_smart_video_graph(
             str(v).strip() for v in wardrobe_parts.values() if str(v).strip()
         )
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+            from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
                 compose_character_sheet_prompt,
             )
 
@@ -1354,10 +1354,10 @@ def build_smart_video_graph(
         opening_cast = ", ".join(ensemble_names) or "named cast"
         tod: dict[str, str] = {}
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+            from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                 infer_time_of_day_lock,
             )
-            from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+            from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
                 compose_scene_specs_prompt,
             )
 
@@ -1535,7 +1535,7 @@ def build_smart_video_graph(
         shot["camera"] = camera
         action = str(shot.get("action") or shot.get("keyframe_prompt") or "").strip()
         if not action:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                 window_beat,
             )
 
@@ -1543,7 +1543,7 @@ def build_smart_video_graph(
             shot["action"] = action
         action = action[:800]
         costume_lock = _costume_lock_for_ids(characters, focus_cids)
-        from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
             enrich_shot_staging,
             staging_lock_clause,
         )
@@ -1590,7 +1590,7 @@ def build_smart_video_graph(
             if isinstance(shot.get("scene_specs"), dict)
             else (scene_locks_meta.get(setting_id) if isinstance(scene_locks_meta.get(setting_id), dict) else {})
         )
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             ANGLE_VIEWS,
             user_asked_coverage,
         )
@@ -1746,7 +1746,7 @@ def build_smart_video_graph(
         # Film-wide / shot time-of-day on every clip config (story weave reads this).
         tod_clip: dict[str, str] = {}
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+            from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                 infer_time_of_day_lock,
             )
 
@@ -1861,14 +1861,14 @@ def build_smart_video_graph(
         clip_cfg.pop("continuity_clip_node_id", None)
         clip_cfg["previous_clip_handoff_ready"] = False
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+            from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
                 stamp_shot_states_on_clip_cfg,
             )
 
             clip_cfg = stamp_shot_states_on_clip_cfg(clip_cfg, shot=shot)
         except Exception:  # noqa: BLE001
             pass
-        from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+        from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
             compose_practice_prompt,
         )
 
@@ -2000,7 +2000,7 @@ def build_smart_video_graph(
                 )
                 n["config"] = cfg
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
                     chain_prior_speech_across_clips,
                 )
 

@@ -59,7 +59,7 @@ def image_gen_is_minimax() -> bool:
 def image_prompt_limit_guidance() -> str:
     """LLM-facing stills prompt length rule from the configured IMAGE_GEN backend."""
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+        from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
             image_prompt_limit_guidance as _guide,
         )
 
@@ -74,7 +74,7 @@ def image_prompt_limit_guidance() -> str:
 def video_prompt_limit_guidance() -> str:
     """LLM-facing video prompt length rule from the configured VIDEO_GEN backend."""
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+        from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
             video_prompt_limit_guidance as _guide,
         )
 
@@ -604,7 +604,7 @@ def stamp_audio_fields_on_clip_config(
         gen["prompt"] = (prompt + "\n" + block).strip()
         cfg["generate"] = gen
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
             scrub_restated_speech,
         )
 

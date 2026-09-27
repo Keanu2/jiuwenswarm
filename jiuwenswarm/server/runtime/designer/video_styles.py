@@ -212,7 +212,7 @@ def enforce_style_shot_floor(
     if floor < 2:
         return data
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
             _explicit_shot_count_from_prompt,
         )
 

@@ -97,7 +97,7 @@ Per-node detail: [`docs/BRIEF.md`](./jiuwenswarm/server/runtime/designer/docs/BR
 
 Locks live on the **node**. Continuity lore lives on the **storyboard row**.
 The video API body is a concise narrative rewritten by
-`experiments/video_prompt_practice.py` (Manager / Supervisor gate):
+`pipeline/video_prompt_practice.py` (Manager / Supervisor gate):
 
 - Open from this shot’s `start_state`; end at `end_state`
 - Scene as Image N; each **on_screen** cast member from Image k, wearing …, is …

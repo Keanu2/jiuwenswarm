@@ -3,7 +3,7 @@
 **Builder:** `smart_graph.build_smart_video_graph`  
 **Handler:** `handlers/text_nodes.StoryboardNodeHandler`  
 **Type:** `table` (markdown storyboard)  
-**Continuity module:** `experiments/storyboard_shot_state.py`
+**Continuity module:** `pipeline/storyboard_shot_state.py`
 
 ---
 

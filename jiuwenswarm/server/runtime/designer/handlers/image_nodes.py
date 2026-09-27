@@ -233,7 +233,7 @@ def _shot_frame_prompt(
         lead += " Location, lighting, and weather must match the scene reference."
     if costume_lock:
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
                 clothing_lock_clause,
             )
 
@@ -340,7 +340,7 @@ async def _image_or_notes(
             emit("stage", "calling image model", "image_gen")
 
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+        from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
             resolve_prompt_limit,
             trim_prompt_to_limit,
         )
@@ -433,7 +433,7 @@ class CharacterDesignNodeHandler:
         roster = prompt_slot_roster(graph_user_references(ctx.graph))
         prompt = _character_prompt(f"{name}\n{source}", combined_cast=combined)
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+            from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
                 ensure_still_tool_prompt,
             )
 
@@ -510,7 +510,7 @@ class SceneNodeHandler:
         composed = bool(cfg.get("composed_scene", False)) and not derive
         scene_prompt = _scene_prompt(source, derive_from_master=derive, composed=composed)
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+            from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
                 ensure_still_tool_prompt,
             )
 
@@ -522,7 +522,7 @@ class SceneNodeHandler:
             )
         except Exception:  # noqa: BLE001
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+                from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import (
                     apply_keyframe_call_locks,
                 )
 
@@ -623,7 +623,7 @@ class FrameNodeHandler:
         ]
         costume_lock = str(identity.get("costume_lock") or cfg.get("costume_lock") or "")
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+            from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
                 ensure_cfg_staging_locks,
             )
 
@@ -696,7 +696,7 @@ class FrameNodeHandler:
             costume_lock=costume_lock,
             staging_lock=staging_lock,
         )
-        from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import (
             apply_keyframe_call_locks,
         )
 

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
     count_narrative_beats,
     infer_shot_budget,
 )
@@ -40,7 +40,7 @@ def test_explicit_shot_count_still_caps_heuristic():
 
 def test_keyframe_count_is_an_explicit_contract():
     """One shot == one keyframe + one clip, so "N 个关键帧" must be honored as N."""
-    from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+    from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
         _explicit_shot_count_from_prompt,
     )
 

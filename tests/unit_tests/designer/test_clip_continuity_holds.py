@@ -5,7 +5,7 @@ from __future__ import annotations
 
 
 def test_extract_finished_events_catches_turn_and_crowd_exit() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
         extract_finished_events,
     )
 
@@ -25,7 +25,7 @@ def test_extract_finished_events_catches_turn_and_crowd_exit() -> None:
 
 
 def test_pose_holds_and_crowd_state_stamped() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
         apply_story_state_to_next_cfg,
     )
 
@@ -65,7 +65,7 @@ def test_pose_holds_and_crowd_state_stamped() -> None:
 
 
 def test_compose_weaves_holds_and_crowd_not_lock_banner() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
         compose_practice_prompt,
     )
 

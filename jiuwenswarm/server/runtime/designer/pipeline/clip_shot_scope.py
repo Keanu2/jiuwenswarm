@@ -391,7 +391,7 @@ def apply_shot_scope(
         n = sequential_shot_count(int(asked), wan_max=wan_max)
         explicit = 0
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+            from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
                 _explicit_shot_count_from_prompt,
             )
 

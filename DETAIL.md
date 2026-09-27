@@ -137,12 +137,12 @@ DesignerPage
 | Executor | `jiuwenswarm/server/runtime/designer/executor.py` |
 | Graph build | `…/smart_graph.py` |
 | Orch | `…/orchestration.py` |
-| Script / shot budget | `…/script_analysis.py`, `…/experiments/director_contract.py` |
+| Script / shot budget | `…/script_analysis.py`, `…/pipeline/director_contract.py` |
 | Leaf DeepAgent | `…/node_agent.py` (`NodeAgentHost`) |
 | Compose | `…/handlers/compose.py` |
 | Schema / roles | `jiuwenswarm/common/schema/designer_graph.py` |
 | Playbook | `…/media_model_playbook.py` |
-| Scene policy | `…/experiments/keyframe_policy.py` |
+| Scene policy | `…/pipeline/keyframe_policy.py` |
 
 Media and run state live under `JIUWENSWARM_DATA_DIR` or `~/.jiuwenswarm`
 (`agent/workspace/`, `agent/designer/graphs|runs|feedback/`).
@@ -290,7 +290,7 @@ jiuwenswarm/server/runtime/designer/
   model_tools.py            # call_model / image / video tools
   media_model_playbook.py   # Qwen / Wan / MiniMax lock clauses
   audio_locks.py
-  experiments/
+  pipeline/
     storyboard_shot_state.py   # start_state / end_state normalize + stamp
     clip_continuity_contract.py # already_done / speech uniqueness / reject redo
     video_prompt_practice.py   # story-form compose + manager/supervisor approve
@@ -344,7 +344,7 @@ Topology smoke (scene cards + clip-as-shot; no `n_frame_*`):
 
 ```bash
 conda run -n new --no-capture-output python -c "
-from jiuwenswarm.server.runtime.designer.experiments.keyframe_policy import apply_compose_solos_setting_policy
+from jiuwenswarm.server.runtime.designer.pipeline.keyframe_policy import apply_compose_solos_setting_policy
 from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
 a=apply_compose_solos_setting_policy({
   'characters':[{'id':'char_1','name':'Alex'},{'id':'char_2','name':'Sam'}],

@@ -82,7 +82,7 @@ def positive_continuity_clause(
     """Who is in frame, where they sit, and what this window does. No prior quotes."""
     cfg = cfg if isinstance(cfg, dict) else {}
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
             character_name_map,
             on_screen_ids,
         )

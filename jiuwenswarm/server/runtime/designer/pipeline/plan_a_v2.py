@@ -375,7 +375,7 @@ def infer_identity_attrs(ch: dict[str, Any]) -> dict[str, str]:
     attrs["glasses"] = "yes" if _GLASSES_RE.search(blob) else "no"
     desc = str(ch.get("description") or "").strip()
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
             extract_clothing_parts,
             format_clothing_slots,
         )
@@ -402,7 +402,7 @@ def identity_lock_clause(ch: dict[str, Any]) -> str:
         hair_bit = f"facial_hair={hair} (keep exactly; do not change)"
     glasses = str(attrs.get("glasses") or "no")
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
             detailed_costume_lock_for_character,
         )
 
@@ -425,8 +425,8 @@ def identity_lock_clause(ch: dict[str, Any]) -> str:
 
 
 def stamp_identity_attrs(characters: list[dict[str, Any]]) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.axis_locks import infer_demographics
-    from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import infer_demographics
+    from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
         enrich_character_clothing,
     )
 
@@ -564,7 +564,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     # Repair cast/props BEFORE compose policy so human leads stay heroes
     # and brand mascots stay on-device UI (not free-flying characters).
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.cast_prop_locks import (
+        from jiuwenswarm.server.runtime.designer.pipeline.cast_prop_locks import (
             apply_cast_prop_and_setting_locks,
         )
 
@@ -578,13 +578,13 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         pass
     # Per setting: compose ALL human cast solos into the scene specs, then edit-prior.
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.keyframe_policy import (
+        from jiuwenswarm.server.runtime.designer.pipeline.keyframe_policy import (
             apply_compose_solos_setting_policy,
         )
 
         out = apply_compose_solos_setting_policy(out)
         # One-pass setting lock only (cast already repaired above — do not re-repair).
-        from jiuwenswarm.server.runtime.designer.experiments.cast_prop_locks import (
+        from jiuwenswarm.server.runtime.designer.pipeline.cast_prop_locks import (
             enforce_setting_transitions,
         )
 
@@ -622,7 +622,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
             shot["action"] = (str(shot.get("action") or "") + " " + bleed)[:700]
 
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
             infer_aspect_lock,
             stamp_axis_locks,
         )
@@ -632,7 +632,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         out.setdefault("aspect_lock", {})
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.director_shot_sheet import (
+        from jiuwenswarm.server.runtime.designer.pipeline.director_shot_sheet import (
             stamp_director_shot_sheets,
         )
 
@@ -640,7 +640,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.movie_continuity_guide import (
+        from jiuwenswarm.server.runtime.designer.pipeline.movie_continuity_guide import (
             continuity_guide_clause,
         )
 
@@ -648,7 +648,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         out["continuity_guide"] = ""
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.production_bible import (
+        from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
             build_production_bible,
         )
 

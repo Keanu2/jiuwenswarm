@@ -5,7 +5,7 @@ from __future__ import annotations
 
 
 def test_ensure_shot_start_end_chains_same_setting() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+    from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
         ensure_shot_start_end_states,
         validate_storyboard_state_chain,
     )
@@ -39,7 +39,7 @@ def test_ensure_shot_start_end_chains_same_setting() -> None:
 
 
 def test_stamp_clears_continuity_clip_node() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+    from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
         stamp_shot_states_on_clip_cfg,
     )
 

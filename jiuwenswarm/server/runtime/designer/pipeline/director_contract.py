@@ -187,7 +187,7 @@ def count_narrative_beats(prompt: str) -> int:
 
 def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
     """Domain-agnostic shot budget. Explicit N wins; C slices when runtime > Wan max."""
-    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
         WAN_MAX_CLIP_SEC,
         needs_duration_slicing,
         requested_film_duration_sec,
@@ -325,7 +325,7 @@ def _blocking_for_shot(
             pose = "engaged_in_beat"
             facing = "toward_camera_or_scene_focus"
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+                from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
                     infer_pose_from_action,
                 )
 
@@ -775,7 +775,7 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
     out["keyframe_policy"] = "compose_solos"
     out["skip_domain_role_locks"] = True
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import apply_shot_scope
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import apply_shot_scope
 
         out = apply_shot_scope(out, prompt)
     except Exception:  # noqa: BLE001
@@ -975,7 +975,7 @@ async def enrich_analysis_with_llm(
         out["keyframe_policy"] = "compose_solos"
         out["skip_domain_role_locks"] = True
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                 apply_shot_scope,
             )
 
@@ -1001,7 +1001,7 @@ async def apply_director_contract(
         )
     else:
         out = enrich_analysis_heuristically(prompt, analysis)
-    from jiuwenswarm.server.runtime.designer.experiments.plan_a_v2 import (
+    from jiuwenswarm.server.runtime.designer.pipeline.plan_a_v2 import (
         apply_plan_a_v2,
     )
 

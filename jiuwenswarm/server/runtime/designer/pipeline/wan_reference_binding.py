@@ -145,7 +145,7 @@ def build_wan_reference_binding(
         "Keep the full prompt ≤4000 characters."
     )
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
             contact_anti_penetration_clause,
             wan_r2v_prompt_formula,
             wan_reference_media_rules,

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
     clothing_lock_clause,
     costume_lock_for_ids,
     enrich_character_clothing,

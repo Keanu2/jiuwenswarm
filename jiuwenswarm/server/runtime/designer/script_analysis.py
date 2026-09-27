@@ -515,7 +515,7 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
     # dumping them onto an unrelated establishing shot.
     # Respect explicit N-shot / N分镜 ceiling when present.
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
             _explicit_shot_count_from_prompt,
         )
 
@@ -699,7 +699,7 @@ def _supervisor_pipeline_decisions(
         budget = max(budget, min(4, n_shots, max(3, n_chars - 1)))
     # Explicit N-shot / N分镜 language is a HARD ceiling (and floor when larger).
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
             _explicit_shot_count_from_prompt,
         )
 
@@ -837,7 +837,7 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
     story_name = derive_story_name(prompt=prompt)
     explicit = 0
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
             _explicit_shot_count_from_prompt,
         )
 
@@ -972,7 +972,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
 def _prompt_mentions_duration(prompt: str) -> tuple[bool, int | None]:
     """Detect duration cues; return (fits_in_one_wan_clip, target_duration_sec)."""
-    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
         WAN_MAX_CLIP_SEC,
         requested_film_duration_sec,
     )
@@ -1128,7 +1128,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
     heuristic_budget = int(decisions["target_shot_count"])
     explicit = 0
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
             _explicit_shot_count_from_prompt,
         )
 
@@ -1223,7 +1223,7 @@ async def analyze_creative_brief(
     try:
         from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool
 
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             WAN_MAX_CLIP_SEC,
             needs_duration_slicing,
             sequential_shot_count,

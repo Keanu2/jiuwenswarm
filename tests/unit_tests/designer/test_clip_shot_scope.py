@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
     WAN_MAX_CLIP_SEC,
     apply_shot_scope,
     looks_like_full_story_restatement,
@@ -11,7 +11,7 @@ from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
     sequential_shot_count,
     sequential_windows,
 )
-from jiuwenswarm.server.runtime.designer.experiments.director_contract import infer_shot_budget
+from jiuwenswarm.server.runtime.designer.pipeline.director_contract import infer_shot_budget
 from jiuwenswarm.server.runtime.designer.handlers.clip import build_clip_prompt
 from jiuwenswarm.server.runtime.designer.handlers.common import graph_prompt
 
@@ -145,7 +145,7 @@ def test_detailed_beat_is_not_full_story_restatement() -> None:
 
 
 def test_same_scene_gate_in_handoff_and_graph_prompt_keeps_locks() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
         agent_replays_finished_events,
         handoff_clause_for_prompt,
     )

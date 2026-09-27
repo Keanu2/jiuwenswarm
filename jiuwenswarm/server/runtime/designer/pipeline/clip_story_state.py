@@ -312,7 +312,7 @@ def compact_wan_story_clause(
     characters: list[dict[str, Any]] | None = None,
 ) -> str:
     """Positive continuity for the Wan API — seats and this window, no prior quotes."""
-    from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+    from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
         positive_continuity_clause,
     )
 
@@ -326,7 +326,7 @@ def agent_prior_story_block(cfg: dict[str, Any] | None) -> str:
     mining only; leaf context uses storyboard-derived end_state fields.
     """
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
             agent_structured_continuity_block,
         )
 
@@ -375,7 +375,7 @@ def apply_story_state_to_next_cfg(
     cfg = dict(next_cfg or {})
     src = from_cfg if isinstance(from_cfg, dict) else {}
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
             _same_setting,
         )
 

@@ -1,10 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
     handoff_clause_for_prompt,
     stamp_wan_prompt_handoff,
 )
-from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
     continuity_card_clause,
     continuity_card_from_prior,
     extract_already_done_beats,

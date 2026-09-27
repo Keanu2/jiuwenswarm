@@ -172,7 +172,7 @@ def stamp_director_shot_sheets(
                 )[:900]
 
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+            from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
                 enrich_shot_staging,
             )
 

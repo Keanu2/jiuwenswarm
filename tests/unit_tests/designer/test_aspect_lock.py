@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from jiuwenswarm.server.runtime.designer.experiments.axis_locks import infer_aspect_lock
+from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import infer_aspect_lock
 
 
 def test_infer_aspect_lock_defaults_landscape_480():

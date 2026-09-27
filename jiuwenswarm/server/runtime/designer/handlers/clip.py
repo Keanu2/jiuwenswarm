@@ -65,7 +65,7 @@ def still_image_to_mp4(
         raise RuntimeError("ffmpeg unavailable for still→mp4 fallback")
     if not image.is_file():
         raise RuntimeError(f"still image missing: {image}")
-    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
         clamp_clip_duration,
     )
 
@@ -103,7 +103,7 @@ def still_image_to_mp4(
     return out.resolve()
 
 def parse_shot_duration_seconds(timeline: str, default: int = 5) -> int:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
         duration_from_timeline,
     )
 
@@ -364,7 +364,7 @@ def collect_clip_reference_images(
             else cfg
         )
 
-    from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
         cap_r2v_reference_paths,
         offscreen_ids,
         on_screen_ids,
@@ -549,7 +549,7 @@ def build_clip_prompt(
     cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
     cfg = dict(cfg)
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
             ensure_prior_clip_story_on_cfg,
         )
 
@@ -561,7 +561,7 @@ def build_clip_prompt(
     except Exception:  # noqa: BLE001
         pass
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
             scrub_restated_speech,
         )
 
@@ -577,7 +577,7 @@ def build_clip_prompt(
         focus_names = ", ".join(cfg_names)
     first_of_setting = bool(cfg.get("first_of_setting"))
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_reference_binding import (
             clip_is_first_of_setting,
         )
 
@@ -609,7 +609,7 @@ def build_clip_prompt(
         local = str(cfg.get("prompt") or "").strip()
         user = str(graph.get("description") or "")
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                 looks_like_full_story_restatement,
                 storyboard_fallback_beat,
             )
@@ -653,7 +653,7 @@ def build_clip_prompt(
         )
     ]
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_reference_binding import (
             build_wan_reference_binding,
         )
 
@@ -670,7 +670,7 @@ def build_clip_prompt(
     except Exception:  # noqa: BLE001
         pass
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
             characters_from_graph,
             compact_wan_story_clause,
         )
@@ -715,7 +715,7 @@ def build_clip_prompt(
     costume_lock = str(identity.get("costume_lock") or cfg.get("costume_lock") or "").strip()
     if not costume_lock:
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
                 ensure_cfg_clothing_lock,
             )
 
@@ -727,14 +727,14 @@ def build_clip_prompt(
         except Exception:  # noqa: BLE001
             costume_lock = ""
     if costume_lock:
-        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
             clothing_lock_clause,
         )
 
         cloth = clothing_lock_clause(costume_lock, for_clip=True)
         parts.append(cloth if cloth else f"Costume / identity lock (do not redesign): {costume_lock}")
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
             ensure_cfg_staging_locks,
             staging_locks_from_cfg,
         )
@@ -821,7 +821,7 @@ def build_clip_prompt(
     joined = "\n".join(parts)
     if "CONTINUITY STATE" not in joined:
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
                 characters_from_graph,
                 compact_wan_story_clause,
             )
@@ -885,7 +885,7 @@ def build_clip_prompt(
     )
     if block and "LANGUAGE LOCK" not in "\n".join(parts) and "SPEECH LOCK" not in "\n".join(parts):
         parts.append(block)
-    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
         supervisor_approve_video_prompt,
     )
 
@@ -940,8 +940,8 @@ async def generate_clip_video(
         logger.debug("Failed to apply video_gen model config from yaml", exc_info=True)
 
     # Cost-save default: documented Wan 480P (832*480). Unofficial 854*480 is ignored by the API.
-    from jiuwenswarm.server.runtime.designer.experiments.axis_locks import lock_clip_480p
-    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import clamp_clip_duration
+    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import lock_clip_480p
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import clamp_clip_duration
 
     video_size, video_res = lock_clip_480p(size, resolution)
 
@@ -982,7 +982,7 @@ class ClipNodeHandler:
         graph = ctx.graph if isinstance(ctx.graph, dict) else {}
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         cfg = dict(cfg)
-        from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
             extract_last_frame,
             resolve_gated_last_frame_chain,
             scrub_restated_speech,
@@ -1011,7 +1011,7 @@ class ClipNodeHandler:
         )
         if payload and payload not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{payload}".strip()
-        from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
             apply_regenerate_packet,
         )
 
@@ -1023,7 +1023,7 @@ class ClipNodeHandler:
             reference_paths=[str(p) for p in ref_files],
         )
         ref_files = [Path(p) for p in ref_files]
-        from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import (
             apply_wan_call_locks,
         )
 
@@ -1034,7 +1034,7 @@ class ClipNodeHandler:
             shot_index=shot_index,
         )
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
                 trim_prompt_to_limit,
             )
@@ -1053,7 +1053,7 @@ class ClipNodeHandler:
         if not aspect:
             meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
-        from jiuwenswarm.server.runtime.designer.experiments.axis_locks import lock_clip_480p
+        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import lock_clip_480p
 
         video_size, video_res = lock_clip_480p(
             cfg.get("video_size") or (aspect or {}).get("video_size"),
@@ -1098,7 +1098,7 @@ class ClipNodeHandler:
             cfg["clip_prompt_preview"] = str(prompt)[:1200]
             node["config"] = cfg
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+                from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
                     remember_generation,
                 )
 
@@ -1112,7 +1112,7 @@ class ClipNodeHandler:
             except Exception:  # noqa: BLE001
                 logger.debug("regenerate packet stamp failed", exc_info=True)
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                     stamp_wan_prompt_handoff,
                 )
 

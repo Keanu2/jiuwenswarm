@@ -133,7 +133,7 @@ def enforce_speech_uniqueness(
 
     Domain-agnostic: uses fuzzy speech match only — no content rules.
     """
-    from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
         scrub_restated_speech,
         speech_already_delivered,
     )
@@ -338,7 +338,7 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
 
 def prompt_restates_forbidden_speech(prompt: str, cfg: dict[str, Any] | None) -> bool:
     """True when free-form prompt embeds dialogue already marked forbidden."""
-    from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
         speech_already_delivered,
     )
 
@@ -388,7 +388,7 @@ def prompt_violates_continuity(
 
     prior_bias = False
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             overlap_ratio,
         )
 
@@ -409,7 +409,7 @@ def prompt_violates_continuity(
     # Replay heuristic alone is noisy (shared names/verbs). Require speech or
     # prior-action bias before hard-rejecting.
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
             agent_replays_finished_events,
         )
 

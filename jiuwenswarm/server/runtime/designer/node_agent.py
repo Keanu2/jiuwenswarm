@@ -524,23 +524,23 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
     }
     extra: dict[str, Any] = {}
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.leaf_agent_continuity import (
+        from jiuwenswarm.server.runtime.designer.pipeline.leaf_agent_continuity import (
             hollywood_leaf_instructions,
         )
-        from jiuwenswarm.server.runtime.designer.experiments.production_bible import (
+        from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
             leaf_lock_packet,
         )
-        from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
             same_scene_prompt_gate_clause,
         )
-        from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
             agent_prior_story_block,
             ensure_prior_clip_story_on_cfg,
         )
-        from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
             merge_storyboard_continuity,
         )
-        from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+        from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
             media_prompt_limit_packet,
             resolve_prompt_limit,
         )
@@ -909,7 +909,7 @@ class DesignerGraphToolkit:
             "keyframe",
         }:
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+                from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import (
                     apply_keyframe_call_locks,
                 )
 
@@ -917,7 +917,7 @@ class DesignerGraphToolkit:
             except Exception:  # noqa: BLE001
                 pass
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
                 trim_prompt_to_limit,
             )
@@ -1003,7 +1003,7 @@ class DesignerGraphToolkit:
             parse_shot_duration_seconds,
         )
         from jiuwenswarm.common.schema.designer_graph import node_shot_index
-        from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
             extract_last_frame,
             resolve_gated_last_frame_chain,
             scrub_restated_speech,
@@ -1017,7 +1017,7 @@ class DesignerGraphToolkit:
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         cfg = scrub_restated_speech(dict(cfg))
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
                 ensure_prior_clip_story_on_cfg,
             )
 
@@ -1050,7 +1050,7 @@ class DesignerGraphToolkit:
         meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
         user_prompt = str(graph.get("description") or meta.get("user_prompt") or "")
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
                 merge_storyboard_continuity,
                 prompt_violates_continuity,
             )
@@ -1061,14 +1061,14 @@ class DesignerGraphToolkit:
             pass
         if agent_text:
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                     looks_like_full_story_restatement,
                     looks_like_prior_copy,
                 )
-                from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
                     narrative_from_wan_prompt,
                 )
-                from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                     agent_replays_finished_events,
                 )
 
@@ -1120,7 +1120,7 @@ class DesignerGraphToolkit:
         if not text:
             return "call_video_model error: prompt required"
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
                 trim_prompt_to_limit,
             )
@@ -1158,14 +1158,14 @@ class DesignerGraphToolkit:
         from jiuwenswarm.server.runtime.designer.audio_locks import (
             resolve_video_audio_request,
         )
-        from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import (
             apply_wan_call_locks,
         )
 
         meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
         # Clip calls are rewritten to the short image-binding form. Speech and
         # score stay on cfg and are spoken as positive lines, not lock essays.
-        from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
             apply_regenerate_packet,
         )
 
@@ -1196,7 +1196,7 @@ class DesignerGraphToolkit:
             _, shot = _shot_for_node(self.ctx.graph, node, self.ctx)
         except Exception:  # noqa: BLE001
             shot = None
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             clamp_clip_duration,
         )
 
@@ -1260,7 +1260,7 @@ class DesignerGraphToolkit:
         cfg["clip_prompt_preview"] = str(text)[:1200]
         node["config"] = cfg
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+            from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
                 remember_generation,
             )
 
@@ -1274,7 +1274,7 @@ class DesignerGraphToolkit:
         except Exception:  # noqa: BLE001
             logger.debug("regenerate packet stamp failed", exc_info=True)
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                 stamp_wan_prompt_handoff,
             )
 
@@ -1649,7 +1649,7 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
         )
     if "call_image_model" in wanted:
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 image_prompt_limit_guidance,
             )
 
@@ -1681,7 +1681,7 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
         )
     if "call_video_model" in wanted:
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 video_prompt_limit_guidance,
             )
 

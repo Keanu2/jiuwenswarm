@@ -386,7 +386,7 @@ _LOGLINE_RE = re.compile(
 
 def brief_duration_seconds(text: str, default: int = 5) -> int:
     """Read an explicit duration from a brief or user request."""
-    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
         requested_film_duration_sec,
     )
 
@@ -455,7 +455,7 @@ def fallback_brief(prompt: str) -> str:
 
 
 def fallback_storyboard(prompt: str) -> str:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
         apply_shot_scope,
         needs_duration_slicing,
     )
@@ -507,7 +507,7 @@ def fallback_storyboard(prompt: str) -> str:
 
 def _stamp_bible_on_text(text: str, ctx: NodeExecutionContext) -> str:
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.production_bible import (
+        from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
             append_bible_to_markdown,
             build_production_bible,
         )

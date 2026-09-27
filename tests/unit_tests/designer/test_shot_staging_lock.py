@@ -5,7 +5,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     is_compose_sink_node,
     is_soft_artifact_dependency,
 )
-from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
     build_action_lock,
     build_positioning_lock,
     build_relationship_lock,

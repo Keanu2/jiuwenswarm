@@ -187,7 +187,7 @@ def test_clip_prompt_leads_with_storyboard_beat(monkeypatch):
 
 
 def test_last_frame_clause_does_not_override_storyboard_plot():
-    from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
         last_frame_continuity_clause,
     )
 
@@ -204,7 +204,7 @@ def test_last_frame_clause_does_not_override_storyboard_plot():
 
 
 def test_lock_clip_480p_uses_documented_wan_size():
-    from jiuwenswarm.server.runtime.designer.experiments.axis_locks import lock_clip_480p
+    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import lock_clip_480p
 
     assert lock_clip_480p("854*480", "480P") == ("832*480", "480P")
     assert lock_clip_480p("1280*720", "720P") == ("832*480", "480P")

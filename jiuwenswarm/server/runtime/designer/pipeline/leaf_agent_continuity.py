@@ -142,7 +142,7 @@ def hollywood_leaf_instructions(role: str) -> str:
 
 def _wan_leaf_extra() -> str:
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+        from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
             wan_leaf_skill_block,
         )
 

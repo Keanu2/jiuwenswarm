@@ -171,7 +171,7 @@ class GraphExecutor:
                 c["last_wan_prompt"] = text[:4000]
                 c["clip_prompt_preview"] = text[:1200]
             if role in {NODE_ROLE_FRAME, "frame", "keyframe"} and bool(c.get("is_scene_master")):
-                from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+                from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
                     architecture_clause_from_bible,
                 )
 
@@ -182,7 +182,7 @@ class GraphExecutor:
             if role in {NODE_ROLE_SCENE, "scene"} or (
                 node_id.startswith("n_scene_") and bool(c.get("is_scene_master"))
             ):
-                from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+                from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
                     architecture_clause_from_bible,
                 )
 
@@ -195,7 +195,7 @@ class GraphExecutor:
             node = n
             break
         if role in {NODE_ROLE_CLIP, "clip", "video"} and shot_index >= 1:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                 stamp_wan_prompt_handoff,
             )
 
@@ -208,7 +208,7 @@ class GraphExecutor:
                 speech_line=str(cfg.get("speech_line") or ""),
             )
         if role in {NODE_ROLE_FRAME, "frame", "keyframe"} and shot_index >= 1:
-            from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+            from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
                 architecture_clause_from_bible,
             )
 
@@ -349,7 +349,7 @@ class GraphExecutor:
         meta["pending_llm_analysis"] = False
         graph["metadata"] = meta
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+            from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
                 capture_regenerate_packet,
             )
 
@@ -1829,7 +1829,7 @@ class GraphExecutor:
             maybe = locks.get(setting_id) if isinstance(locks, dict) else None
             if isinstance(maybe, dict):
                 bible = maybe
-        from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+        from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
             architecture_clause_from_bible,
         )
 
@@ -2352,7 +2352,7 @@ class GraphExecutor:
                             c["previous_keyframe_node_id"] = node_id
                             n["config"] = c
                     if node_pipeline(node) == NODE_ROLE_CLIP and shot_index >= 1:
-                        from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+                        from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                             stamp_wan_prompt_handoff,
                         )
 

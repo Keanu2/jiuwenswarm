@@ -765,7 +765,7 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
                 )
                 n["config"] = cfg
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
                     chain_prior_speech_across_clips,
                 )
 
@@ -1884,13 +1884,13 @@ class SupervisorAgent:
                 logger.info("Supervisor author_storyboard LLM failed", exc_info=True)
 
         from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import apply_shot_scope
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import apply_shot_scope
 
         analysis = ensure_audio_locks_on_analysis(analysis, user_prompt)
         analysis = apply_shot_scope(analysis, user_prompt)
         shots = list(analysis.get("shots") or shots)
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+            from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
                 ensure_shot_start_end_states,
                 validate_storyboard_state_chain,
             )
@@ -1976,7 +1976,7 @@ class SupervisorAgent:
 
         # Chain prior speech across consecutive clips so N+1 does not restate N.
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
                 chain_prior_speech_across_clips,
             )
 
@@ -2059,7 +2059,7 @@ class SupervisorAgent:
                     '"shots":[...],"target_shot_count":N,"include_speech":bool,'
                     '"include_music":bool,"skip_scene_specs":false,"notes":"..."}'
                 )
-                from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+                from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
                     infer_shot_budget,
                 )
 
@@ -2125,7 +2125,7 @@ class SupervisorAgent:
                     source = "llm"
                     analysis["source"] = "llm"
                     notes = str(parsed.get("notes") or "")[:1000]
-                    from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+                    from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
                         _HARD_MAX_SHOTS,
                         _SOFT_MAX_SHOTS,
                         _explicit_shot_count_from_prompt,
@@ -2136,7 +2136,7 @@ class SupervisorAgent:
                         llm_tsc = int(parsed.get("target_shot_count") or 0)
                     except (TypeError, ValueError):
                         llm_tsc = 0
-                    from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+                    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                         needs_duration_slicing as _nds,
                     )
 
@@ -2173,7 +2173,7 @@ class SupervisorAgent:
 
         # Final clamp even on non-LLM path — soft max unless user asked for explicit N.
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+            from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
                 _HARD_MAX_SHOTS,
                 _SOFT_MAX_SHOTS,
                 _explicit_shot_count_from_prompt,
@@ -2181,7 +2181,7 @@ class SupervisorAgent:
             )
 
             explicit_n = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
-            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                 needs_duration_slicing,
             )
 
@@ -2219,7 +2219,7 @@ class SupervisorAgent:
             ]
         analysis["shots"] = shots
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                 apply_shot_scope,
             )
 
@@ -2782,7 +2782,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             cfg["character_node_ids"] = solo_nodes
             notes.append(f"{node.get('id')}: identity_refs -> solo sheets {solo_nodes}")
         names = [id_to_name.get(cid, cid) for cid in cids]
-        from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
             costume_lock_for_ids,
             enrich_character_clothing,
         )
@@ -3085,11 +3085,11 @@ class ManagerAgent:
         node: DesignerGraphNode,
     ) -> dict[str, Any]:
         """Gate every frame/clip media prompt against locks + prior handoff / already_done."""
-        from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
             collect_prior_clip_prompts,
             handoff_clause_for_prompt,
         )
-        from jiuwenswarm.server.runtime.designer.experiments.continuity_card import (
+        from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
             architecture_clause_from_bible,
             strip_prior_prompt_pastes,
         )
@@ -3210,7 +3210,7 @@ class ManagerAgent:
             changed = True
         # Always reinforce garment-level clothing lock for frames + clips.
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
                 clothing_lock_clause,
                 ensure_cfg_clothing_lock,
             )
@@ -3280,7 +3280,7 @@ class ManagerAgent:
             and "PREVIOUS KEYFRAME HAD" not in prompt
             and "PRIOR KEYFRAME PROMPT" not in prompt
         ):
-            from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                 keyframe_continuity_note,
             )
 
@@ -3422,7 +3422,7 @@ class ManagerAgent:
         elif role == "clip" and crowd:
             # Clips: stamp structured crowd_state for story-form coverage (no LOCK banner).
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
                     infer_crowd_state,
                     stamp_continuity_story_fields,
                 )
@@ -3453,7 +3453,7 @@ class ManagerAgent:
 
         # Per-shot staging locks (positioning / action / relationships) — equal to clothing.
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.shot_staging_lock import (
+            from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
                 ensure_cfg_staging_locks,
             )
 
@@ -3494,7 +3494,7 @@ class ManagerAgent:
             aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
         if not aspect:
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                     infer_aspect_lock,
                 )
 
@@ -3518,7 +3518,7 @@ class ManagerAgent:
                     notes.append("stamp_image_size_aspect")
                     changed = True
             if role == "clip":
-                from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                     lock_clip_480p,
                 )
 
@@ -3559,7 +3559,7 @@ class ManagerAgent:
                     clause = f"STYLE LOCK (film-wide): {look}" if look else ""
                 if not clause:
                     try:
-                        from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+                        from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
                             ensure_photoreal_style_lock,
                         )
 
@@ -3582,7 +3582,7 @@ class ManagerAgent:
         elif role in {"clip", "frame", "keyframe", "scene", "character"}:
             # Unspecified style → hard photoreal lock (domain-agnostic default).
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+                from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
                     ensure_photoreal_style_lock,
                 )
                 from jiuwenswarm.server.runtime.designer.media_model_playbook import (
@@ -3650,7 +3650,7 @@ class ManagerAgent:
                 cont_clip = str(cfg.get("continuity_clip_node_id") or cfg.get("previous_clip_node_id") or "").strip()
                 if cont_clip:
                     try:
-                        from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+                        from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
                             ensure_prior_clip_story_on_cfg,
                         )
 
@@ -3658,7 +3658,7 @@ class ManagerAgent:
                     except Exception:  # noqa: BLE001
                         pass
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
                     scrub_restated_speech,
                 )
 
@@ -3666,7 +3666,7 @@ class ManagerAgent:
             except Exception:  # noqa: BLE001
                 pass
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.wan_r2v_best_practices import (
+                from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
                     contact_anti_penetration_clause,
                 )
 
@@ -3691,7 +3691,7 @@ class ManagerAgent:
                     }
                 ]
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
                     apply_continuity_contract,
                     prompt_violates_continuity,
                 )
@@ -3727,7 +3727,7 @@ class ManagerAgent:
                 ][-6:]
             if "CONTINUITY STATE" not in prompt:
                 try:
-                    from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+                    from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
                         positive_continuity_clause,
                     )
 
@@ -3750,7 +3750,7 @@ class ManagerAgent:
                 if str(x)
             )
             if "CHARACTER CONSISTENCY" not in prompt:
-                from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
+                from jiuwenswarm.server.runtime.designer.pipeline.wan_reference_binding import (
                     clip_uses_scene_card,
                 )
 
@@ -3780,7 +3780,7 @@ class ManagerAgent:
                 notes.append("inject_clip_costume_lock")
                 changed = True
             if costume_lock and "CLOTHING LOCK" not in prompt:
-                from jiuwenswarm.server.runtime.designer.experiments.clothing_lock import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
                     clothing_lock_clause,
                 )
 
@@ -3830,7 +3830,7 @@ class ManagerAgent:
             )
             # stamp_audio re-copies storyboard speech — re-enforce uniqueness after.
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
                     enforce_speech_uniqueness,
                 )
 
@@ -3891,7 +3891,7 @@ class ManagerAgent:
                         break
 
         if role == "clip":
-            from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+            from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
                 ensure_story_lock_coverage,
                 supervisor_approve_video_prompt,
             )
@@ -3907,7 +3907,7 @@ class ManagerAgent:
                     else {}
                 )
                 try:
-                    from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                         infer_time_of_day_lock,
                     )
 
@@ -4011,7 +4011,7 @@ class ManagerAgent:
                 )
             if not tod:
                 try:
-                    from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+                    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                         infer_time_of_day_lock,
                     )
 
@@ -4030,7 +4030,7 @@ class ManagerAgent:
                 cfg["style_lock"] = style_l
             # Fidelity: rewrite lock essays into positive still prompts; soft-fill gaps.
             try:
-                from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+                from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
                     ensure_still_tool_prompt,
                 )
 
@@ -4051,7 +4051,7 @@ class ManagerAgent:
 
         # Stamp configured backend prompt budgets onto the leaf (never forces a model).
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+            from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 media_prompt_limit_packet,
                 resolve_prompt_limit,
                 trim_prompt_to_limit,
@@ -4145,7 +4145,7 @@ class ManagerAgent:
         spatial_notes = _spatial_geography_lock_patch(graph)
         # Film-wide aspect/style/axis locks on every still + clip node.
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+            from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                 apply_axis_locks_to_graph,
             )
 
@@ -4742,7 +4742,7 @@ class ManagerAgent:
                 logger.info("Manager storyboard LLM review failed; keeping heuristic", exc_info=True)
 
         from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import apply_shot_scope
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import apply_shot_scope
 
         analysis = ensure_audio_locks_on_analysis(analysis, user_prompt)
         analysis = apply_shot_scope(analysis, user_prompt)
@@ -4811,7 +4811,7 @@ class ManagerAgent:
                         node["config"] = cfg
                         break
                 try:
-                    from jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff import (
+                    from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
                         chain_prior_speech_across_clips,
                     )
 

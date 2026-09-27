@@ -36,7 +36,7 @@ def _two_clip_graph() -> dict:
 
 
 def test_agent_prior_story_block_has_no_raw_wan_dump() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
         agent_prior_story_block,
     )
 
@@ -62,7 +62,7 @@ def test_agent_prior_story_block_has_no_raw_wan_dump() -> None:
 
 
 def test_enforce_speech_uniqueness_clears_duplicate() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
         enforce_speech_uniqueness,
         merge_storyboard_continuity,
     )
@@ -86,7 +86,7 @@ def test_enforce_speech_uniqueness_clears_duplicate() -> None:
 
 
 def test_prompt_violates_restated_speech_and_prior_action() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
         prompt_violates_continuity,
     )
 
@@ -113,7 +113,7 @@ def test_prompt_violates_restated_speech_and_prior_action() -> None:
 
 
 def test_cross_setting_does_not_carry_speech() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
         merge_storyboard_continuity,
     )
 

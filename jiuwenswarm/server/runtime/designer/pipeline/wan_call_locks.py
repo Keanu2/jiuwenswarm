@@ -55,7 +55,7 @@ def apply_keyframe_call_locks(
     graph = graph if isinstance(graph, dict) else {}
     role = str(cfg.get("role") or "").lower()
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+        from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
             ensure_still_tool_prompt,
         )
 
@@ -90,14 +90,14 @@ def apply_wan_call_locks(
     cfg_map = cfg if isinstance(cfg, dict) else {}
     if isinstance(graph, dict):
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
                 ensure_prior_clip_story_on_cfg,
             )
 
             cfg_map = ensure_prior_clip_story_on_cfg(cfg_map, graph)
         except Exception:  # noqa: BLE001
             pass
-    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
         supervisor_approve_video_prompt,
     )
 

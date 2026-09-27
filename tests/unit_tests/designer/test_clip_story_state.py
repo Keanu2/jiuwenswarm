@@ -6,21 +6,21 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.server.runtime.designer.experiments.cast_prop_locks import (
+from jiuwenswarm.server.runtime.designer.pipeline.cast_prop_locks import (
     occupancy_clause_for_clip,
 )
-from jiuwenswarm.server.runtime.designer.experiments.clip_prompt_handoff import (
+from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
     handoff_clause_for_prompt,
     stamp_wan_prompt_handoff,
 )
-from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
     apply_story_state_to_next_cfg,
     compact_wan_story_clause,
     extract_finished_events,
     narrative_from_wan_prompt,
 )
-from jiuwenswarm.server.runtime.designer.experiments.wan_call_locks import apply_wan_call_locks
-from jiuwenswarm.server.runtime.designer.experiments.wan_reference_binding import (
+from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import apply_wan_call_locks
+from jiuwenswarm.server.runtime.designer.pipeline.wan_reference_binding import (
     build_wan_reference_binding,
 )
 
@@ -290,7 +290,7 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
         fake_generate,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff.extract_last_frame",
+        "jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff.extract_last_frame",
         lambda *a, **k: None,
     )
     clip = next(n for n in graph["nodes"] if n["id"] == "n_clip_2")
@@ -404,7 +404,7 @@ async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
         fake_generate,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.experiments.clip_last_frame_handoff.extract_last_frame",
+        "jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff.extract_last_frame",
         lambda *a, **k: None,
     )
     clip = next(n for n in graph["nodes"] if n["id"] == "n_clip_1")
@@ -423,7 +423,7 @@ async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
 
 def test_smart_graph_scene_card_is_empty_plate() -> None:
     from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
-    from jiuwenswarm.server.runtime.designer.experiments.production_bible import build_production_bible
+    from jiuwenswarm.server.runtime.designer.pipeline.production_bible import build_production_bible
 
     graph = build_smart_video_graph(
         project_id="p_first",
@@ -495,7 +495,7 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
 
 
 def test_wan_prompt_drops_already_done_and_keeps_style() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+    from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
         scrub_negative_wan_prompt,
     )
 
@@ -514,7 +514,7 @@ def test_wan_prompt_drops_already_done_and_keeps_style() -> None:
 
 
 def test_regenerate_packet_keeps_prompt_and_upstream_image(tmp_path: Path) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.wan_prompt_hygiene import (
+    from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
         capture_regenerate_packet,
     )
 
@@ -556,7 +556,7 @@ def test_regenerate_packet_keeps_prompt_and_upstream_image(tmp_path: Path) -> No
 
 
 def test_manager_rewrites_lock_essay_into_image_binding() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
         manager_approve_video_prompt,
     )
 
@@ -617,7 +617,7 @@ def test_manager_rewrites_lock_essay_into_image_binding() -> None:
 
 
 def test_compose_weaves_language_and_time_of_day() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
         compose_practice_prompt,
         ensure_story_lock_coverage,
     )
@@ -656,7 +656,7 @@ def test_compose_weaves_language_and_time_of_day() -> None:
 
 
 def test_compose_keeps_prior_prompt_continuity() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
         compose_practice_prompt,
     )
 
@@ -695,7 +695,7 @@ def test_compose_keeps_prior_prompt_continuity() -> None:
 
 
 def test_exited_cast_omitted_until_returned() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
         compose_practice_prompt,
     )
 
@@ -724,7 +724,7 @@ def test_exited_cast_omitted_until_returned() -> None:
     assert "do not" not in text.lower()
 
 def test_cross_setting_does_not_pull_prior_wan_prompt() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
         ensure_prior_clip_story_on_cfg,
     )
 
@@ -761,7 +761,7 @@ def test_cross_setting_does_not_pull_prior_wan_prompt() -> None:
 
 
 def test_same_setting_pulls_prior_wan_prompt() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
         ensure_prior_clip_story_on_cfg,
     )
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from jiuwenswarm.server.runtime.designer.experiments.director_contract import (
+from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
     _cid_list,
     _explicit_shot_count_from_prompt,
     enrich_analysis_heuristically,

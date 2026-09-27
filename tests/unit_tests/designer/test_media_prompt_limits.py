@@ -7,7 +7,7 @@ import os
 
 
 def test_resolves_minimax_image_1500(monkeypatch) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         resolve_prompt_limit,
     )
 
@@ -19,7 +19,7 @@ def test_resolves_minimax_image_1500(monkeypatch) -> None:
 
 
 def test_resolves_qwen_image_3(monkeypatch) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         resolve_prompt_limit,
     )
 
@@ -30,7 +30,7 @@ def test_resolves_qwen_image_3(monkeypatch) -> None:
 
 
 def test_resolves_minimax_h3_video_7000(monkeypatch) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         resolve_prompt_limit,
     )
 
@@ -41,7 +41,7 @@ def test_resolves_minimax_h3_video_7000(monkeypatch) -> None:
 
 
 def test_resolves_hailuo_legacy_2000(monkeypatch) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         resolve_prompt_limit,
     )
 
@@ -52,7 +52,7 @@ def test_resolves_hailuo_legacy_2000(monkeypatch) -> None:
 
 
 def test_resolves_wan_and_seedance(monkeypatch) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         resolve_prompt_limit,
     )
 
@@ -64,7 +64,7 @@ def test_resolves_wan_and_seedance(monkeypatch) -> None:
 
 
 def test_unknown_backend_soft_default(monkeypatch) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         resolve_prompt_limit,
     )
 
@@ -80,7 +80,7 @@ def test_unknown_backend_soft_default(monkeypatch) -> None:
 
 
 def test_env_override_wins(monkeypatch) -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         resolve_prompt_limit,
     )
 
@@ -92,7 +92,7 @@ def test_env_override_wins(monkeypatch) -> None:
 
 
 def test_trim_only_for_known_hard_cap() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.media_prompt_limits import (
+    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         PromptLimit,
         trim_prompt_to_limit,
     )

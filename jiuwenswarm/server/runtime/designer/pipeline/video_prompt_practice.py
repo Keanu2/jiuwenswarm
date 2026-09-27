@@ -586,7 +586,7 @@ def _ensure_crowd_state(cfg: dict[str, Any]) -> dict[str, Any]:
     if state.get("disposition") or state.get("hold"):
         return state
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
             infer_crowd_state,
         )
 
@@ -605,7 +605,7 @@ def _continuity_story_lines(cfg: dict[str, Any]) -> list[str]:
     """Opening holds from storyboard start_state + crowd + continue cue."""
     lines: list[str] = []
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.storyboard_shot_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
             start_end_story_lines,
         )
 
@@ -618,7 +618,7 @@ def _continuity_story_lines(cfg: dict[str, Any]) -> list[str]:
     holds = [str(x).strip() for x in (cfg.get("pose_holds") or []) if str(x).strip()]
     if not holds and not lines:
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.clip_story_state import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
                 pose_holds_from_events,
             )
 
@@ -1133,7 +1133,7 @@ def manager_approve_video_prompt(
     cfg = cfg if isinstance(cfg, dict) else {}
     reasons = prompt_respects_practice(prompt, cfg=cfg, graph=graph)
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_continuity_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
             prompt_violates_continuity,
         )
 

@@ -281,7 +281,7 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     crowd_by_set: dict[str, dict[str, Any]] = {}
     compose_actions_by_set: dict[str, dict[str, str]] = {}
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             user_asked_coverage,
         )
 
@@ -506,7 +506,7 @@ def build_scene_specs_for_setting(
             lighting_raw = (shot.get("time_of_day_lock") or {}).get("lighting")
     if not lighting_raw:
         try:
-            from jiuwenswarm.server.runtime.designer.experiments.axis_locks import (
+            from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                 infer_time_of_day_lock,
             )
 

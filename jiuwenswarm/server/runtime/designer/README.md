@@ -63,7 +63,7 @@ designer.graph.bootstrap
 | `handlers/audio_nodes.py` | Speech / music beds |
 | `handlers/common.py` | `generate_designer_image`, path helpers |
 
-### Experiments (locks & continuity)
+### Pipeline (locks & continuity)
 
 | File | Responsibility |
 |------|----------------|

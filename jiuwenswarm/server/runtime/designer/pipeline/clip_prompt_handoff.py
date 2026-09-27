@@ -231,7 +231,7 @@ def _stem_token(token: str) -> str:
 
 def _content_stems(text: str) -> set[str]:
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             content_tokens,
         )
     except Exception:  # noqa: BLE001
@@ -262,7 +262,7 @@ def agent_replays_finished_events(
     if not body:
         return False
     try:
-        from jiuwenswarm.server.runtime.designer.experiments.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             overlap_ratio,
         )
     except Exception:  # noqa: BLE001

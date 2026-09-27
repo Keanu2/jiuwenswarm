@@ -5,7 +5,7 @@ from __future__ import annotations
 
 
 def test_looks_like_lock_essay() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
         looks_like_lock_essay,
     )
 
@@ -18,7 +18,7 @@ def test_looks_like_lock_essay() -> None:
 
 
 def test_compose_scene_plate_positive() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
         compose_scene_specs_prompt,
     )
 
@@ -45,7 +45,7 @@ def test_compose_scene_plate_positive() -> None:
 
 
 def test_compose_character_sheet_positive() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
         compose_character_sheet_prompt,
     )
 
@@ -65,7 +65,7 @@ def test_compose_character_sheet_positive() -> None:
 
 
 def test_ensure_rewrites_lock_essay_scene() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
         ensure_still_tool_prompt,
     )
 
@@ -88,7 +88,7 @@ def test_ensure_rewrites_lock_essay_scene() -> None:
 
 
 def test_ensure_rewrites_lock_essay_character() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.image_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
         ensure_still_tool_prompt,
     )
 
@@ -107,7 +107,7 @@ def test_ensure_rewrites_lock_essay_character() -> None:
 
 
 def test_continue_line_does_not_paste_prior_wan() -> None:
-    from jiuwenswarm.server.runtime.designer.experiments.video_prompt_practice import (
+    from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
         _continue_line,
         compose_practice_prompt,
     )
