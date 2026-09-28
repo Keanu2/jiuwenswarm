@@ -975,6 +975,78 @@ def _prompt_mentions_duration(prompt: str) -> tuple[bool, int | None]:
     return False, None
 
 
+_REFERENCE_SUBJECTS = {
+    "character": "character",
+    "person": "character",
+    "human": "character",
+    "portrait": "character",
+    "people": "character",
+    "人物": "character",
+    "角色": "character",
+    "人像": "character",
+    "scene": "scene",
+    "place": "scene",
+    "location": "scene",
+    "environment": "scene",
+    "background": "scene",
+    "setting": "scene",
+    "场景": "scene",
+    "地点": "scene",
+    "环境": "scene",
+    "object": "object",
+    "product": "object",
+    "prop": "object",
+    "item": "object",
+    "goods": "object",
+    "sku": "object",
+    "产品": "object",
+    "物品": "object",
+    "道具": "object",
+    "商品": "object",
+}
+
+
+def _reference_subject(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in _REFERENCE_SUBJECTS:
+        return _REFERENCE_SUBJECTS[text]
+    for token, subject in _REFERENCE_SUBJECTS.items():
+        if token and token in text:
+            return subject
+    return ""
+
+
+def _reference_reads(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep only image routes the model actually assigned after seeing the files."""
+    raw = parsed.get("reference_reads")
+    if not isinstance(raw, list):
+        raw = parsed.get("reads")
+    if not isinstance(raw, list):
+        return []
+    reads: list[dict[str, Any]] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            continue
+        subject = _reference_subject(item.get("subject") or item.get("kind") or item.get("type"))
+        if not subject:
+            continue
+        try:
+            slot = int(item.get("slot") or index)
+        except (TypeError, ValueError):
+            slot = index
+        if slot < 1:
+            slot = index
+        reads.append(
+            {
+                "slot": slot,
+                "subject": subject,
+                "character_id": str(item.get("character_id") or "").strip(),
+                "setting_id": str(item.get("setting_id") or "").strip(),
+            }
+        )
+    return reads
+
+
 def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dict[str, Any] | None:
     characters = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
     scenes = parsed.get("scenes") if isinstance(parsed.get("scenes"), list) else []
@@ -1195,6 +1267,9 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         or f"{len(norm_chars)} characters, {len(norm_shots)} shots",
         **decisions,
     }
+    reads = _reference_reads(parsed)
+    if reads:
+        out["reference_reads"] = reads
     try:
         tds = int(parsed.get("target_duration_sec") or 0)
     except (TypeError, ValueError):
@@ -1279,6 +1354,15 @@ async def analyze_creative_brief(
             "(in scene, not in frame), cast_actions {id: doing-what}. "
             + shot_count_rule
             + duration_rule
+            + (
+                "Attached images are image 1, image 2, ... in that order. Look at each one. "
+                "reference_reads.subject is character when the image is a person who still "
+                "needs a character-sheet pass (set character_id to that characters[].id); "
+                "scene when it is a place (set setting_id to the matching shot setting_id); "
+                "object when it is a prop or product that must appear inside the clips. "
+                if reference_images
+                else ""
+            )
             + " Output ONLY one JSON object (no markdown). "
             '{"story_name":"short film title any language",'
             '"characters":[{"id":"char_1","name":"...","description":"..."}],'
@@ -1288,6 +1372,12 @@ async def analyze_creative_brief(
             '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s"}],'
             '"target_shot_count":N'
             + (f',"target_duration_sec":{duration_sec}' if target_duration_sec else "")
+            + (
+                ',"reference_reads":[{"slot":1,"subject":"character",'
+                '"character_id":"char_1","setting_id":""}]'
+                if reference_images
+                else ""
+            )
             + "}"
         )
 

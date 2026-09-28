@@ -28,6 +28,11 @@ export type DesignerReactFlowNode = {
     width?: number;
     height?: number;
   };
+  /** Declared size. React Flow hides a node until width/height or measured size exists. */
+  width?: number;
+  height?: number;
+  initialWidth?: number;
+  initialHeight?: number;
 };
 
 /** Minimal React Flow edge shape used by the adapter. */
@@ -59,19 +64,26 @@ function nodeStyle(node: DesignerGraphNode): DesignerReactFlowNode['style'] {
 }
 
 export function toReactFlowGraph(graph: DesignerExecutionGraph): DesignerReactFlowGraph {
-  const nodes: DesignerReactFlowNode[] = graph.nodes.map((node) => ({
-    id: node.id,
-    type: node.type,
-    position: layoutPosition(node.layout),
-    style: nodeStyle(node),
-    data: {
-      label: node.label,
-      nodeType: node.type,
-      config: (node.config ?? {}) as Record<string, unknown>,
-      layout: node.layout ?? {},
-      outputRef: node.output_ref ?? null,
-    },
-  }));
+  const nodes: DesignerReactFlowNode[] = graph.nodes.map((node) => {
+    const size = nodeStyle(node);
+    return {
+      id: node.id,
+      type: node.type,
+      position: layoutPosition(node.layout),
+      style: size,
+      width: size.width,
+      height: size.height,
+      initialWidth: size.width,
+      initialHeight: size.height,
+      data: {
+        label: node.label,
+        nodeType: node.type,
+        config: (node.config ?? {}) as Record<string, unknown>,
+        layout: node.layout ?? {},
+        outputRef: node.output_ref ?? null,
+      },
+    };
+  });
 
   const edges: DesignerReactFlowEdge[] = graph.edges.map((edge) => ({
     id: edge.id,

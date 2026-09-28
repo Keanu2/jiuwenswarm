@@ -935,7 +935,8 @@ def _bootstrap_graph(
     meta["script_analysis"] = analysis
     # Enter already authored Brief→Storyboard→Graph — skip Play redesign.
     meta["director_composed_on_bootstrap"] = True
-    meta["freeze_shot_topology"] = False
+    # Keep the shot set built above. Storyboard completion must not replace nodes.
+    meta["freeze_shot_topology"] = True
     if isinstance(analysis.get("scene_locks"), dict) and analysis["scene_locks"]:
         meta["scene_locks"] = analysis["scene_locks"]
     graph["metadata"] = meta
@@ -1252,6 +1253,7 @@ async def _bootstrap_graph_with_director_impl(
     from jiuwenswarm.server.runtime.designer.script_analysis import analyze_creative_brief
     from jiuwenswarm.server.runtime.designer.user_references import (
         analysis_prompt_with_references,
+        classify_reference_images,
         normalize_user_references,
     )
 
@@ -1302,6 +1304,18 @@ async def _bootstrap_graph_with_director_impl(
             "stage",
             f"Director · LLM cast locked ({n} characters)",
         )
+    image_refs = [
+        item
+        for item in user_refs_preview
+        if str(item.get("kind") or "") == "image" and str(item.get("path") or "").strip()
+    ]
+    if image_refs:
+        if callable(on_progress):
+            on_progress("thinking", "Supervisor · Reading reference images")
+        reads = await classify_reference_images(prompt, image_refs)
+        if reads:
+            analysis = dict(analysis)
+            analysis["reference_reads"] = reads
 
     payload, error, code = await asyncio.to_thread(
         _bootstrap_graph,

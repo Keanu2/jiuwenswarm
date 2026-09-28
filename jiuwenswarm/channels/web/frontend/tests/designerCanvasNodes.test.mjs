@@ -284,6 +284,18 @@ test('packDesignerNodeLayouts keeps a wide table from covering the next column',
   assert.ok((frame.layout?.x ?? 0) >= (table.layout?.x ?? 0) + (table.layout?.width ?? 0));
 });
 
+test('resolvedNodeCanvasSize ignores a zero stored size', () => {
+  const size = resolvedNodeCanvasSize({
+    id: 'n_scene_1',
+    type: 'image',
+    label: 'Scene',
+    config: {},
+    layout: { x: 10, y: 20, width: 0, height: 0 },
+  });
+  assert.equal(size.width, 280);
+  assert.equal(size.height, 160);
+});
+
 test('resolvedNodeCanvasSize uses aspect lock on default landscape cards', () => {
   const size = resolvedNodeCanvasSize({
     id: 'n_clip_1',

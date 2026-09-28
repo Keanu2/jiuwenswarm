@@ -28,7 +28,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
 from jiuwenswarm.server.runtime.designer.user_references import (
     graph_user_references,
     prompt_slot_roster,
-    user_reference_image_paths,
+    wired_user_reference_images,
 )
 from jiuwenswarm.server.runtime.designer.a2a_collab import collaboration_card
 from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
@@ -364,6 +364,23 @@ def _with_card_ref(result: NodeResult, ctx: NodeExecutionContext, role: str) -> 
     )
 
 
+def _references_for_paths(graph: object, paths: list[str]) -> list[dict]:
+    """Roster entries for the upload files this node actually received."""
+    wanted: set[str] = set()
+    for raw in paths:
+        candidate = Path(str(raw))
+        if candidate.is_file():
+            wanted.add(str(candidate.resolve()))
+    if not wanted or not isinstance(graph, dict):
+        return []
+    kept: list[dict] = []
+    for item in graph_user_references(graph):
+        candidate = Path(str(item.get("path") or item.get("uri") or ""))
+        if candidate.is_file() and str(candidate.resolve()) in wanted:
+            kept.append(item)
+    return kept
+
+
 class CharacterDesignNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
@@ -373,8 +390,8 @@ class CharacterDesignNodeHandler:
         size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
         combined = bool(cfg.get("combined_cast"))
         max_tries = max(2, int(cfg.get("max_image_calls") or 1))
-        user_images = [str(path) for path in user_reference_image_paths(ctx.graph)]
-        roster = prompt_slot_roster(graph_user_references(ctx.graph))
+        user_images = [str(path) for path in wired_user_reference_images(ctx, node)]
+        roster = prompt_slot_roster(_references_for_paths(ctx.graph, user_images))
         prompt = _character_prompt(f"{name}\n{source}", combined_cast=combined)
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
@@ -431,7 +448,7 @@ class SceneNodeHandler:
                     if arch:
                         source = f"{source}\n{arch}"
         else:
-            refs = [str(path) for path in user_reference_image_paths(ctx.graph)]
+            refs = [str(path) for path in wired_user_reference_images(ctx, node)]
             char_nids = [
                 str(x)
                 for x in (
@@ -471,7 +488,7 @@ class SceneNodeHandler:
                 scene_prompt = apply_keyframe_call_locks(scene_prompt, cfg=cfg, graph=ctx.graph)
             except Exception:  # noqa: BLE001
                 pass
-        roster = prompt_slot_roster(graph_user_references(ctx.graph))
+        roster = prompt_slot_roster(_references_for_paths(ctx.graph, refs))
         if roster:
             scene_prompt = (
                 f"{scene_prompt}\nUser reference slots (original files are visual authority):\n"

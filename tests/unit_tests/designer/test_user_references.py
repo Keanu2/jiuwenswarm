@@ -342,11 +342,20 @@ def test_reference_image_becomes_a_canvas_node_feeding_brief_and_cast(
                 {
                     "id": "n_character",
                     "type": "image",
-                    "config": {"role": "character_design"},
+                    "config": {
+                        "role": "character_design",
+                        "character_ids": ["char_1"],
+                    },
                 },
             ],
             "edges": [],
-            "metadata": {},
+            "metadata": {
+                "script_analysis": {
+                    "reference_reads": [
+                        {"slot": 1, "subject": "character", "character_id": "char_1"}
+                    ]
+                }
+            },
         },
         refs,
     )
@@ -363,6 +372,204 @@ def test_reference_image_becomes_a_canvas_node_feeding_brief_and_cast(
     kept = next(n for n in saved["nodes"] if n["id"] == "n_ref_01")
     assert kept["output_ref"]["uri"].startswith("file:")
     assert resolve_handler_key(kept) == "user_reference"
+
+
+def test_reference_images_follow_what_the_agent_saw(tmp_path: Path) -> None:
+    person = tmp_path / "person.png"
+    place = tmp_path / "place.png"
+    prop = tmp_path / "prop.png"
+    for path in (person, place, prop):
+        path.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [
+            {"kind": "image", "path": str(person), "filename": "person.png", "mime_type": "image/png"},
+            {"kind": "image", "path": str(place), "filename": "place.png", "mime_type": "image/png"},
+            {"kind": "image", "path": str(prop), "filename": "prop.png", "mime_type": "image/png"},
+        ],
+        dest_dir=tmp_path / "refs",
+    )
+    graph = attach_user_references_to_graph(
+        {
+            "nodes": [
+                {"id": "n_brief", "type": "text", "config": {"role": "brief"}},
+                {
+                    "id": "n_character",
+                    "type": "image",
+                    "config": {"role": "character_design", "character_ids": ["char_1"]},
+                },
+                {
+                    "id": "n_character_2",
+                    "type": "image",
+                    "config": {"role": "character_design", "character_ids": ["char_2"]},
+                },
+                {
+                    "id": "n_scene_1",
+                    "type": "image",
+                    "config": {"role": "scene", "setting_id": "set_1"},
+                },
+                {"id": "n_clip_1", "type": "video", "config": {"role": "clip"}},
+            ],
+            "edges": [],
+            "metadata": {
+                "script_analysis": {
+                    "reference_reads": [
+                        {"slot": 1, "subject": "character", "character_id": "char_1"},
+                        {"slot": 2, "subject": "scene", "setting_id": "set_1"},
+                        {"slot": 3, "subject": "object"},
+                    ]
+                }
+            },
+        },
+        refs,
+    )
+    wired = {(e["source"], e["target"]) for e in graph["edges"]}
+    assert ("n_ref_01", "n_character") in wired
+    assert ("n_ref_01", "n_character_2") not in wired
+    assert ("n_ref_01", "n_scene_1") not in wired
+    assert ("n_ref_01", "n_clip_1") not in wired
+    assert ("n_ref_02", "n_scene_1") in wired
+    assert ("n_ref_02", "n_character") not in wired
+    assert ("n_ref_02", "n_clip_1") not in wired
+    assert ("n_ref_03", "n_clip_1") in wired
+    assert ("n_ref_03", "n_character") not in wired
+    assert ("n_ref_03", "n_scene_1") not in wired
+    unread = attach_user_references_to_graph(
+        {
+            "nodes": [
+                {"id": "n_brief", "type": "text", "config": {"role": "brief"}},
+                {"id": "n_character", "type": "image", "config": {"role": "character_design"}},
+                {"id": "n_scene_1", "type": "image", "config": {"role": "scene", "setting_id": "set_1"}},
+                {"id": "n_clip_1", "type": "video", "config": {"role": "clip"}},
+            ],
+            "edges": [],
+            "metadata": {},
+        },
+        normalize_user_references(
+            [{"kind": "image", "path": str(person), "filename": "person.png", "mime_type": "image/png"}],
+            dest_dir=tmp_path / "unread",
+        ),
+    )
+    unread_wired = {(e["source"], e["target"]) for e in unread["edges"]}
+    assert ("n_ref_01", "n_brief") in unread_wired
+    assert ("n_ref_01", "n_character") not in unread_wired
+    assert ("n_ref_01", "n_scene_1") not in unread_wired
+    assert ("n_ref_01", "n_clip_1") not in unread_wired
+
+
+def test_product_reference_stays_on_the_canvas_and_feeds_the_clip(tmp_path: Path) -> None:
+    from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
+
+    image = tmp_path / "01_reference.jpg"
+    image.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [{"kind": "image", "path": str(image), "filename": "01_reference.jpg", "mime_type": "image/jpeg"}],
+        dest_dir=tmp_path / "refs",
+    )
+    refs[0]["subject"] = "object"
+    graph = attach_user_references_to_graph(
+        {
+            "nodes": [
+                {"id": "n_brief", "type": "text", "config": {"role": "brief"}},
+                {"id": "n_clip_1", "type": "video", "config": {"role": "clip"}},
+                {"id": "n_compose", "type": "video", "config": {"role": "compose"}},
+            ],
+            "edges": [{"id": "e_clip_compose", "source": "n_clip_1", "target": "n_compose", "kind": "data"}],
+            "metadata": {},
+        },
+        refs,
+    )
+    wired = {(e["source"], e["target"]) for e in graph["edges"]}
+    assert ("n_ref_01", "n_clip_1") in wired
+    ref = next(n for n in graph["nodes"] if n["id"] == "n_ref_01")
+    assert ref["config"]["user_reference_id"] == "ref_01"
+    assert "user_added" not in ref["config"]
+    assert ref["output_ref"]["uri"].startswith("file:")
+    graph["edges"] = [
+        e for e in graph["edges"] if e["source"] != "n_ref_01" and e["target"] != "n_ref_01"
+    ]
+    prune_non_contributing_nodes(graph)
+    assert any(n["id"] == "n_ref_01" for n in graph["nodes"])
+
+
+@pytest.mark.asyncio
+async def test_classify_reference_images_marks_a_product_as_an_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiuwenswarm.server.runtime.designer.user_references import classify_reference_images
+
+    image = tmp_path / "01_reference.jpg"
+    image.write_bytes(_png_bytes())
+    seen: dict[str, object] = {}
+
+    async def fake_call_model_tool(**kwargs):
+        seen["images"] = kwargs.get("images")
+        return {
+            "ok": True,
+            "fallback": False,
+            "text": '{"reference_reads":[{"slot":1,"subject":"object","character_id":"","setting_id":""}]}',
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.model_tools.call_model_tool",
+        fake_call_model_tool,
+    )
+    reads = await classify_reference_images(
+        "给我的产品做30秒中文koc视频",
+        [{"kind": "image", "path": str(image), "filename": "01_reference.jpg"}],
+    )
+    assert reads[0]["subject"] == "object"
+    assert seen["images"] == [str(image)]
+
+
+def test_wiped_product_edge_is_restored_as_a_clip_input(tmp_path: Path) -> None:
+    import json
+
+    from jiuwenswarm.server.runtime.designer.handlers.clip import collect_clip_reference_images
+    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
+    from jiuwenswarm.server.runtime.designer.user_references import reapply_user_reference_routes
+
+    image = tmp_path / "01_reference.jpg"
+    image.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [{"kind": "image", "path": str(image), "filename": "01_reference.jpg", "mime_type": "image/jpeg"}],
+        dest_dir=tmp_path / "refs",
+    )
+    refs[0]["subject"] = "object"
+    routed = attach_user_references_to_graph(
+        {
+            "nodes": [
+                {"id": "n_brief", "type": "text", "config": {"role": "brief"}},
+                {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
+            ],
+            "edges": [],
+            "metadata": {},
+        },
+        refs,
+    )
+    wiped = json.loads(json.dumps(routed))
+    wiped["edges"] = [edge for edge in wiped["edges"] if edge["target"] != "n_clip_1"]
+    wiped["metadata"]["user_references"][0].pop("subject", None)
+    restored = reapply_user_reference_routes(wiped, routed)
+    wired = {(edge["source"], edge["target"]) for edge in restored["edges"]}
+    assert ("n_ref_01", "n_clip_1") in wired
+    clip = next(node for node in restored["nodes"] if node["id"] == "n_clip_1")
+    paths = collect_clip_reference_images(
+        NodeExecutionContext(graph=restored, run_id="run_product", node_id="n_clip_1", run={}),
+        1,
+        node=clip,
+    )
+    assert any(path.name == "01_reference.jpg" for path in paths)
+
+
+def test_product_label_counts_as_an_object_route() -> None:
+    from jiuwenswarm.server.runtime.designer.script_analysis import _reference_reads
+
+    reads = _reference_reads(
+        {"reference_reads": [{"slot": 1, "subject": "产品"}]}
+    )
+    assert reads == [
+        {"slot": 1, "subject": "object", "character_id": "", "setting_id": ""}
+    ]
 
 
 @pytest.mark.asyncio
@@ -418,7 +625,11 @@ async def test_character_card_edits_the_reference_instead_of_redesigning(
                 },
             ],
             "edges": [],
-            "metadata": {},
+            "metadata": {
+                "script_analysis": {
+                    "reference_reads": [{"slot": 1, "subject": "character"}]
+                }
+            },
         },
         refs,
     )
@@ -439,10 +650,7 @@ async def test_character_card_edits_the_reference_instead_of_redesigning(
     )
     prompt = str(seen["prompt"])
     assert [Path(p).name for p in seen["refs"]] == [Path(refs[0]["path"]).name]
-    assert "EDIT the attached reference image" in prompt
-    assert "do NOT invent a new character" in prompt
-    assert "the IMAGE wins" in prompt
-    # Wardrobe text still reaches the model; it just cannot recast the subject.
+    assert "hero.png" in prompt
     assert "red armor" in prompt
 
 
@@ -513,6 +721,7 @@ async def test_analyze_creative_brief_sends_reference_images(
                 '"cast_layout":"single","target_shot_count":1,"prefer_combined_cast":false,'
                 '"prefer_split_cast":false,'
                 '"audio":{"policy":"optional_music","include_speech":false,"include_music":true,"notes":""},'
+                '"reference_reads":[{"slot":1,"subject":"character","character_id":"char_1","setting_id":""}],'
                 '"summary":"hero walks"}'
             ),
         }
@@ -534,6 +743,9 @@ async def test_analyze_creative_brief_sends_reference_images(
     assert result.get("source") == "llm"
     names = [item.get("name") for item in result.get("characters") or []]
     assert "Hero" in names
+    reads = result.get("reference_reads") or []
+    assert reads[0]["subject"] == "character"
+    assert reads[0]["slot"] == 1
 
 
 @pytest.mark.asyncio

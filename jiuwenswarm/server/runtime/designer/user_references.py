@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import logging
 import re
 from pathlib import Path
@@ -20,6 +21,8 @@ from urllib.parse import unquote, urlparse
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CLIP,
+    NODE_ROLE_SCENE,
     NODE_TYPE_AUDIO,
     NODE_TYPE_IMAGE,
     NODE_TYPE_VIDEO,
@@ -147,6 +150,29 @@ def user_reference_image_paths(graph: dict[str, Any] | None) -> list[Path]:
     return user_reference_paths(graph, kind=KIND_IMAGE)
 
 
+def wired_user_reference_images(ctx: Any, node: dict[str, Any] | None) -> list[Path]:
+    """Upload stills that actually arrive on this node's incoming edges."""
+    from jiuwenswarm.server.runtime.designer.handlers.clip import edge_image_flow
+
+    flow = edge_image_flow(ctx, node if isinstance(node, dict) else None)
+    if not flow:
+        return []
+    graph = ctx.graph if isinstance(getattr(ctx, "graph", None), dict) else None
+    wanted = {str(path.resolve()) for path in user_reference_image_paths(graph)}
+    found: list[Path] = []
+    seen: set[str] = set()
+    for _role, _label, path in flow:
+        try:
+            key = str(path.resolve())
+        except OSError:
+            continue
+        if key not in wanted or key in seen:
+            continue
+        seen.add(key)
+        found.append(path.resolve())
+    return found
+
+
 def identity_reference_image_paths(graph: dict[str, Any] | None) -> list[Path]:
     """Uploads that may depict a subject, so cast cards must not redesign them."""
     style_only: set[str] = set()
@@ -169,6 +195,80 @@ def user_reference_video_path(graph: dict[str, Any] | None) -> Path | None:
 def user_reference_audio_path(graph: dict[str, Any] | None) -> Path | None:
     paths = user_reference_paths(graph, kind=KIND_AUDIO)
     return paths[0] if paths else None
+
+
+async def classify_reference_images(
+    prompt: str,
+    refs: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Ask the model what each uploaded still is, before any edge is chosen.
+
+    A person who still needs a character sheet, a place, and a product are
+    different destinations. This call only returns that judgment.
+    """
+    slots: list[dict[str, Any]] = []
+    images: list[str] = []
+    for item in refs or []:
+        if str(item.get("kind") or "").strip().lower() != KIND_IMAGE:
+            continue
+        path = str(item.get("path") or item.get("uri") or "").strip()
+        if not path:
+            continue
+        slots.append(item)
+        images.append(path)
+    if not images:
+        return []
+    roster = [
+        f"image {index} = {str(item.get('filename') or f'image-{index}')}"
+        for index, item in enumerate(slots, start=1)
+    ]
+    system = (
+        "You inspect each attached reference image for a short film. "
+        "Output ONLY one JSON object: "
+        '{"reference_reads":[{"slot":1,"subject":"object","character_id":"","setting_id":""}]}. '
+        "subject is character when the image is a person who should be redrawn as a character sheet. "
+        "subject is scene when the image is a place. "
+        "subject is object when the image is a product, prop, or item that must appear in the clips. "
+        "A product the user asked to film is object, even when the brief also invents a presenter. "
+        "One read per image. Slot numbers follow the roster order."
+    )
+    payload = {"user_prompt": (prompt or "")[:2000], "images": roster}
+    try:
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            call_model_tool,
+            model_text_or_raise,
+        )
+        from jiuwenswarm.server.runtime.designer.script_analysis import (
+            _extract_json_object,
+            _reference_reads,
+        )
+
+        body = json.dumps(payload, ensure_ascii=False)
+
+        async def _ask(*, with_images: bool) -> list[dict[str, Any]]:
+            result = await call_model_tool(
+                prompt=body,
+                system=system,
+                optimize_for="quality",
+                max_tokens=1024,
+                images=images if with_images else None,
+            )
+            if result.get("unavailable") or result.get("ok") is False or result.get("fallback"):
+                logger.info("reference image classification failed: %s", result.get("error"))
+                return []
+            parsed = _extract_json_object(model_text_or_raise(result)) or {}
+            return _reference_reads(parsed if isinstance(parsed, dict) else {})
+
+        reads = await _ask(with_images=True)
+        if reads:
+            return reads
+        reads = await _ask(with_images=False)
+        if not reads:
+            logger.info("reference image classification returned no route for %s", roster)
+        return reads
+    except Exception as exc:  # noqa: BLE001
+        logger.info("reference image classification failed: %s", exc)
+        return []
 
 
 def attach_user_references_to_graph(
@@ -254,12 +354,89 @@ def user_reference_node_file(node: dict[str, Any] | None) -> Path | None:
     return candidate.resolve() if candidate is not None else None
 
 
+def _config_ids(node: dict[str, Any], *keys: str) -> set[str]:
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    found: set[str] = set()
+    for key in keys:
+        raw = cfg.get(key)
+        if isinstance(raw, list):
+            found.update(str(item).strip() for item in raw if str(item).strip())
+        elif str(raw or "").strip():
+            found.add(str(raw).strip())
+    return found
+
+
+def _reference_route(graph: dict[str, Any], item: dict[str, Any], image_slot: int) -> dict[str, Any]:
+    """Route one image from the supervisor's look at that file, not from its kind."""
+    analysis = (graph.get("metadata") or {}).get("script_analysis")
+    reads = analysis.get("reference_reads") if isinstance(analysis, dict) else None
+    if isinstance(reads, list):
+        for read in reads:
+            if not isinstance(read, dict):
+                continue
+            try:
+                slot = int(read.get("slot") or 0)
+            except (TypeError, ValueError):
+                continue
+            if slot == image_slot:
+                return read
+    subject = str(item.get("subject") or "").strip().lower()
+    if subject in {"character", "scene", "object"}:
+        return {
+            "slot": image_slot,
+            "subject": subject,
+            "character_id": str(item.get("character_id") or "").strip(),
+            "setting_id": str(item.get("setting_id") or "").strip(),
+        }
+    return {}
+
+
+def _image_destinations(
+    route: dict[str, Any],
+    *,
+    cast_nodes: list[dict[str, Any]],
+    scene_nodes: list[dict[str, Any]],
+    clip_ids: list[str],
+) -> list[str]:
+    """Person → character sheet, place → scene card, prop → clip generation."""
+    subject = str(route.get("subject") or "").strip().lower()
+    if subject == "character":
+        wanted = str(route.get("character_id") or "").strip()
+        matched = [
+            str(node.get("id"))
+            for node in cast_nodes
+            if wanted and wanted in _config_ids(node, "character_id", "character_ids")
+        ]
+        if matched:
+            return matched
+        if len(cast_nodes) == 1 and str(cast_nodes[0].get("id") or ""):
+            return [str(cast_nodes[0].get("id"))]
+        return []
+    if subject == "scene":
+        wanted = str(route.get("setting_id") or "").strip()
+        matched = [
+            str(node.get("id"))
+            for node in scene_nodes
+            if wanted and wanted in _config_ids(node, "setting_id")
+        ]
+        if matched:
+            return matched
+        if len(scene_nodes) == 1 and str(scene_nodes[0].get("id") or ""):
+            return [str(scene_nodes[0].get("id"))]
+        return []
+    if subject == "object":
+        return list(clip_ids)
+    return []
+
+
 def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
-    """Show each upload as its own canvas node feeding Brief (and cast cards).
+    """Show each upload as its own canvas node.
 
     The node is a passthrough asset: the original file is the authority, so the
-    runner must never regenerate it. Images also reach character specs, which
-    lets the cast be derived from the upload instead of invented.
+    runner must never regenerate it. An image is wired onward only after the
+    supervisor has looked at it: a person goes to the matching character sheet,
+    a place goes to the matching scene card, and a prop goes into clip generation.
+    Video and audio stay on Brief.
     """
     refs = graph_user_references(graph)
     if not refs:
@@ -273,17 +450,31 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
         for n in nodes
         if node_pipeline(n) == NODE_ROLE_BRIEF and str(n.get("id") or "")
     ]
-    cast_ids = [
-        str(n.get("id"))
+    cast_nodes = [
+        n
         for n in nodes
         if node_pipeline(n) == NODE_ROLE_CHARACTER_DESIGN and str(n.get("id") or "")
     ]
+    scene_nodes = [
+        n
+        for n in nodes
+        if node_pipeline(n) == NODE_ROLE_SCENE and str(n.get("id") or "")
+    ]
+    clip_ids = [
+        str(n.get("id"))
+        for n in nodes
+        if node_pipeline(n) == NODE_ROLE_CLIP and str(n.get("id") or "")
+    ]
+    cast_ids = {str(n.get("id")) for n in cast_nodes}
+    scene_ids = {str(n.get("id")) for n in scene_nodes}
     node_type_by_kind = {
         KIND_IMAGE: NODE_TYPE_IMAGE,
         KIND_VIDEO: NODE_TYPE_VIDEO,
         KIND_AUDIO: NODE_TYPE_AUDIO,
     }
     added: list[str] = []
+    wired_edges = False
+    image_slot = 0
     for order, item in enumerate(refs, start=1):
         kind = str(item.get("kind") or KIND_IMAGE).strip().lower()
         node_type = node_type_by_kind.get(kind)
@@ -292,71 +483,111 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
             continue
         ref_id = str(item.get("id") or f"ref_{order:02d}")
         node_id = f"{REFERENCE_NODE_PREFIX}{order:02d}"
-        if node_id in existing:
-            continue
-        resolved = path.resolve()
-        filename = str(item.get("filename") or resolved.name)
-        mime = str(item.get("mime_type") or _guess_mime(kind, resolved.suffix))
-        nodes.append(
-            {
-                "id": node_id,
-                "type": node_type,
-                "label": f"Reference {order}: {filename}",
-                "config": {
-                    "role": node_type,
-                    "user_reference_id": ref_id,
-                    "user_reference_kind": kind,
-                    "user_reference_path": str(resolved),
-                    "interaction_mode": "upload",
-                    "upload": {
-                        "filename": filename,
-                        "asset_id": ref_id,
-                        "mime_type": mime,
-                    },
-                    "materials": [
-                        {
-                            "id": ref_id,
-                            "filename": filename,
-                            "mime_type": mime,
-                            "uri": resolved.as_uri(),
-                        }
-                    ],
-                    "inputs": [],
-                    "delegate": "handler",
-                    "force_handler": True,
-                    "skip_llm": True,
-                    "read_only": True,
-                    "immutable_source": True,
-                    "director_task": (
-                        "User-attached reference. Keep the original file as the "
-                        "visual/audio authority; never regenerate or restyle it."
-                    ),
-                },
-                "layout": {
-                    "x": -300.0,
-                    "y": float(120 + (order - 1) * 180),
-                    "width": 220,
-                    "height": 140,
-                },
-                "output_ref": {
-                    "kind": node_type,
-                    "uri": resolved.as_uri(),
-                    "mime_type": mime,
-                    "label": filename,
-                },
-            }
-        )
-        existing.add(node_id)
-        added.append(node_id)
-        targets = list(brief_ids)
+        subject = ""
+        route: dict[str, Any] = {}
         if kind == KIND_IMAGE:
-            targets.extend(cast_ids)
+            image_slot += 1
+            route = _reference_route(graph, item, image_slot)
+        subject = str(route.get("subject") or "").strip().lower()
+        if subject:
+            item["subject"] = subject
+            if str(route.get("character_id") or "").strip():
+                item["character_id"] = str(route.get("character_id")).strip()
+            if str(route.get("setting_id") or "").strip():
+                item["setting_id"] = str(route.get("setting_id")).strip()
+        if node_id in existing:
+            for node in nodes:
+                if str(node.get("id") or "") != node_id:
+                    continue
+                cfg = dict(node.get("config") or {})
+                cfg.pop("user_added", None)
+                cfg.pop("kind", None)
+                cfg["delegate"] = "handler"
+                cfg["force_handler"] = True
+                cfg["skip_llm"] = True
+                cfg["read_only"] = True
+                cfg["immutable_source"] = True
+                if subject:
+                    cfg["user_reference_subject"] = subject
+                node["config"] = cfg
+                break
+        if node_id not in existing:
+            resolved = path.resolve()
+            filename = str(item.get("filename") or resolved.name)
+            mime = str(item.get("mime_type") or _guess_mime(kind, resolved.suffix))
+            ref_config: dict[str, Any] = {
+                "role": node_type,
+                "user_reference_id": ref_id,
+                "user_reference_kind": kind,
+                "user_reference_path": str(resolved),
+                "interaction_mode": "upload",
+                "upload": {
+                    "filename": filename,
+                    "asset_id": ref_id,
+                    "mime_type": mime,
+                },
+                "materials": [
+                    {
+                        "id": ref_id,
+                        "filename": filename,
+                        "mime_type": mime,
+                        "uri": resolved.as_uri(),
+                    }
+                ],
+                "inputs": [],
+                "delegate": "handler",
+                "force_handler": True,
+                "skip_llm": True,
+                "read_only": True,
+                "immutable_source": True,
+                "director_task": (
+                    "User-attached reference. Keep the original file as the "
+                    "visual/audio authority; never regenerate or restyle it."
+                ),
+            }
+            if subject:
+                ref_config["user_reference_subject"] = subject
+            nodes.append(
+                {
+                    "id": node_id,
+                    "type": node_type,
+                    "label": f"Reference {order}: {filename}",
+                    "config": ref_config,
+                    "layout": {
+                        "x": -300.0,
+                        "y": float(120 + (order - 1) * 180),
+                        "width": 220,
+                        "height": 140,
+                    },
+                    "output_ref": {
+                        "kind": node_type,
+                        "uri": resolved.as_uri(),
+                        "mime_type": mime,
+                        "label": filename,
+                    },
+                }
+            )
+            existing.add(node_id)
+            added.append(node_id)
+        targets = list(brief_ids)
+        if kind == KIND_IMAGE and route:
+            targets.extend(
+                _image_destinations(
+                    route,
+                    cast_nodes=cast_nodes,
+                    scene_nodes=scene_nodes,
+                    clip_ids=clip_ids,
+                )
+            )
         for target in targets:
             edge_id = f"e_{node_id}_{target}"
             if edge_id in edge_ids:
                 continue
-            edges.append({"id": edge_id, "source": node_id, "target": target})
+            edges.append(
+                {"id": edge_id, "source": node_id, "target": target, "kind": "data"}
+            )
             edge_ids.add(edge_id)
+            wired_edges = True
             for node in nodes:
                 if str(node.get("id") or "") != target:
                     continue
@@ -365,18 +596,29 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
                 if node_id not in inputs:
                     inputs.append(node_id)
                 cfg["inputs"] = inputs
+                task = str(cfg.get("director_task") or "").strip()
+                hint = ""
                 if target in cast_ids:
                     cfg["character_source_reference"] = ref_id
-                    task = str(cfg.get("director_task") or "").strip()
                     hint = (
-                        " A user reference image is wired into this card: if it "
-                        "depicts this character, derive the sheet from it "
-                        "(face, wardrobe, palette) instead of inventing a look."
+                        " A user reference image of this person is wired in. "
+                        "Derive the character sheet from it (face, wardrobe, palette) "
+                        "instead of inventing a look."
                     )
-                    if hint.strip() not in task:
-                        cfg["director_task"] = f"{task}{hint}".strip()
+                elif target in scene_ids:
+                    hint = (
+                        " A user reference image of this place is wired in. "
+                        "Derive the scene card from it instead of inventing a location."
+                    )
+                elif target in clip_ids:
+                    hint = (
+                        " A user reference image of a prop is wired into this clip. "
+                        "Pass that file in as a reference image when generating the shot."
+                    )
+                if hint and hint.strip() not in task:
+                    cfg["director_task"] = f"{task}{hint}".strip()
                 node["config"] = cfg
-    if not added:
+    if not added and not wired_edges:
         return []
     graph["nodes"] = nodes
     graph["edges"] = edges
@@ -384,6 +626,107 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
     meta["user_reference_nodes"] = user_reference_node_ids(graph)
     graph["metadata"] = meta
     return added
+
+
+def reapply_user_reference_routes(
+    graph: dict[str, Any] | None,
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Put a classified upload back on its clip, character, or scene edge.
+
+    A later save can rewrite the graph from an older copy and drop those edges.
+    The judgment already stored on the upload or the previous graph is enough
+    to draw them again.
+    """
+    if not isinstance(graph, dict) or not graph_user_references(graph):
+        return graph
+    meta = dict(graph.get("metadata") or {})
+    refs = [
+        dict(item) if isinstance(item, dict) else item
+        for item in (meta.get("user_references") or [])
+    ]
+    previous_refs = {
+        str(item.get("id") or ""): item
+        for item in graph_user_references(previous)
+        if str(item.get("id") or "")
+    }
+    for item in refs:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("subject") or "").strip().lower() in {"character", "scene", "object"}:
+            continue
+        prev = previous_refs.get(str(item.get("id") or ""))
+        if not isinstance(prev, dict):
+            continue
+        subject = str(prev.get("subject") or "").strip().lower()
+        if subject not in {"character", "scene", "object"}:
+            continue
+        item["subject"] = subject
+        if str(prev.get("character_id") or "").strip():
+            item["character_id"] = str(prev.get("character_id")).strip()
+        if str(prev.get("setting_id") or "").strip():
+            item["setting_id"] = str(prev.get("setting_id")).strip()
+    meta["user_references"] = refs
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    analysis = dict(analysis)
+    if not analysis.get("reference_reads"):
+        prev_meta = previous.get("metadata") if isinstance(previous, dict) else {}
+        prev_analysis = (
+            prev_meta.get("script_analysis") if isinstance(prev_meta, dict) else {}
+        )
+        prev_reads = prev_analysis.get("reference_reads") if isinstance(prev_analysis, dict) else None
+        if isinstance(prev_reads, list) and prev_reads:
+            analysis["reference_reads"] = prev_reads
+            meta["script_analysis"] = analysis
+    graph["metadata"] = meta
+    attach_user_reference_nodes(graph)
+    return graph
+
+
+async def ensure_user_reference_routes(graph: dict[str, Any] | None) -> list[str]:
+    """Recreate a missing reference node and wire it from the model's read.
+
+    Play can meet a graph whose upload was pruned, or whose first analysis
+    never said what the picture was. Classify only when that judgment is missing.
+    """
+    if not isinstance(graph, dict):
+        return []
+    refs = graph_user_references(graph)
+    if not refs:
+        return []
+    meta = dict(graph.get("metadata") or {})
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    analysis = dict(analysis)
+    covered: set[int] = set()
+    for read in analysis.get("reference_reads") or []:
+        if not isinstance(read, dict):
+            continue
+        try:
+            covered.add(int(read.get("slot") or 0))
+        except (TypeError, ValueError):
+            continue
+    slot = 0
+    missing = False
+    for item in refs:
+        if str(item.get("kind") or "").strip().lower() != KIND_IMAGE:
+            continue
+        slot += 1
+        if str(item.get("subject") or "").strip().lower() in {"character", "scene", "object"}:
+            continue
+        if slot in covered:
+            continue
+        missing = True
+        break
+    if missing:
+        prompt = str(
+            meta.get("user_prompt") or meta.get("prompt") or meta.get("approved_brief") or ""
+        )
+        reads = await classify_reference_images(prompt, refs)
+        if reads:
+            analysis["reference_reads"] = reads
+            meta["script_analysis"] = analysis
+            graph["metadata"] = meta
+    return attach_user_reference_nodes(graph)
 
 
 def normalize_user_references(
@@ -463,7 +806,7 @@ def _preview_reference(item: dict[str, Any], *, kind: str, index: int) -> dict[s
 def _public_record(item: dict[str, Any], index: int) -> dict[str, Any]:
     path = Path(str(item.get("path") or ""))
     uri = str(item.get("uri") or "").strip() or (path.resolve().as_uri() if path.exists() else "")
-    return {
+    record = {
         "id": str(item.get("id") or f"ref_{index:02d}"),
         "kind": str(item.get("kind") or KIND_IMAGE),
         "role": str(item.get("role") or DEFAULT_ROLE),
@@ -474,6 +817,16 @@ def _public_record(item: dict[str, Any], index: int) -> dict[str, Any]:
         "size_bytes": int(item.get("size_bytes") or 0),
         "order": index,
     }
+    subject = str(item.get("subject") or "").strip().lower()
+    if subject in {"character", "scene", "object"}:
+        record["subject"] = subject
+    character_id = str(item.get("character_id") or "").strip()
+    setting_id = str(item.get("setting_id") or "").strip()
+    if character_id:
+        record["character_id"] = character_id
+    if setting_id:
+        record["setting_id"] = setting_id
+    return record
 
 
 def _infer_kind(item: dict[str, Any]) -> str | None:

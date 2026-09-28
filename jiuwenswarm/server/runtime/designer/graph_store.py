@@ -110,6 +110,11 @@ class DesignerGraphStore:
                     normalized = preserve_expanded_shot_nodes(normalized, existing)
                     normalized = preserve_nodes_added_since(normalized, existing)
                     normalized = preserve_node_output_refs(normalized, existing)
+                    from jiuwenswarm.server.runtime.designer.user_references import (
+                        reapply_user_reference_routes,
+                    )
+
+                    normalized = reapply_user_reference_routes(normalized, existing) or normalized
                 except (DesignerGraphValidationError, ValueError, json.JSONDecodeError, OSError):
                     pass
             normalized["updated_at"] = utc_now_ms()

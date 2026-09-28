@@ -213,9 +213,13 @@ export function resolvedNodeCanvasSize(node: DesignerGraphNode): { width: number
     return sizeNodeForContentAspect(aspect);
   }
   return {
-    width: storedWidth ?? DESIGNER_CANVAS_NODE_WIDTH,
-    height: storedHeight ?? DESIGNER_CANVAS_NODE_HEIGHT,
+    width: positiveCanvasSize(storedWidth, DESIGNER_CANVAS_NODE_WIDTH),
+    height: positiveCanvasSize(storedHeight, DESIGNER_CANVAS_NODE_HEIGHT),
   };
+}
+
+function positiveCanvasSize(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && value > 0 && Number.isFinite(value) ? value : fallback;
 }
 
 function applyNodeLayouts(

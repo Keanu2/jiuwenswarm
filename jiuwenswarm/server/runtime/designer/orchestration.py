@@ -1052,12 +1052,18 @@ class Director:
         onboarded: list[str] = []
         notes.extend(note_user_canvas_edits(graph))
 
+        from jiuwenswarm.server.runtime.designer.user_references import (
+            is_user_reference_node,
+        )
+
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
                 continue
             cfg = dict(node.get("config") or {})
             nid = str(node.get("id") or "")
-            if not nid or not cfg.get("user_added"):
+            # Uploaded references are routed by image classification, not by
+            # the "user drew this node, do not invent edges" rule.
+            if not nid or is_user_reference_node(node) or not cfg.get("user_added"):
                 continue
             onboarded.append(nid)
             role = _role_key(node)
@@ -1087,7 +1093,7 @@ class Director:
             if not isinstance(node, dict):
                 continue
             cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-            if not cfg.get("user_added"):
+            if not cfg.get("user_added") or is_user_reference_node(node):
                 continue
             if _role_key(node) not in {
                 "frame",
@@ -2089,7 +2095,8 @@ class Director:
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)
         rmeta["script_analysis"] = analysis
-        rmeta["freeze_shot_topology"] = False
+        # This replacement is the final workflow. Later storyboard passes stay locked.
+        rmeta["freeze_shot_topology"] = True
         rmeta["director_graph_ack"] = {
             "ok": True,
             "source": source,
@@ -3973,10 +3980,22 @@ class Director:
                 in {"clip", "frame", "keyframe", "compose", "speech", "music"}
             )
         }
+        from jiuwenswarm.server.runtime.designer.user_references import (
+            is_user_reference_node,
+        )
+
+        reference_ids = {
+            str(n.get("id"))
+            for n in (graph.get("nodes") or [])
+            if isinstance(n, dict) and is_user_reference_node(n)
+        }
         prune_ids = [
             str(x)
             for x in (parsed.get("prune_ids") or [])
-            if str(x).strip() and str(x) not in protected and str(x) != "n_compose"
+            if str(x).strip()
+            and str(x) not in protected
+            and str(x) not in reference_ids
+            and str(x) != "n_compose"
         ]
         if prune_ids:
             drop = set(prune_ids)

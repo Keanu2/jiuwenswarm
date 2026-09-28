@@ -68,6 +68,7 @@ from jiuwenswarm.server.runtime.designer.handlers import (
 from jiuwenswarm.server.runtime.designer.node_agent import NodeAgentHost, NodeAgentRunner
 from jiuwenswarm.server.runtime.designer.user_references import (
     carry_user_references,
+    ensure_user_reference_routes,
     is_user_reference_node,
 )
 
@@ -440,6 +441,13 @@ class GraphExecutor:
             cfg.pop("skip_llm", None)
             cfg["delegate"] = CONFIG_DELEGATE_AGENT
             cfg["kind"] = "agent"
+        await ensure_user_reference_routes(graph)
+        meta = dict(graph.get("metadata") or {})
+        # Lock before nodes run so a saved graph with the lock off cannot
+        # drop image nodes when the storyboard finishes.
+        meta["freeze_shot_topology"] = True
+        graph["metadata"] = meta
+        self._store.save_graph(graph)
         run["status"] = RUN_STATUS_RUNNING
         run["updated_at"] = utc_now_ms()
         run = self._store.save_run(run)
@@ -1553,7 +1561,7 @@ class GraphExecutor:
             ):
                 if key in meta and meta.get(key) is not None:
                     rmeta[key] = meta.get(key)
-            rmeta["freeze_shot_topology"] = False
+            rmeta["freeze_shot_topology"] = True
             rmeta["script_analysis"] = analysis
             rebuilt["metadata"] = rmeta
             carry_user_references(meta, rebuilt)
@@ -1645,7 +1653,7 @@ class GraphExecutor:
         ):
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)
-        rmeta["freeze_shot_topology"] = False
+        rmeta["freeze_shot_topology"] = True
         rebuilt["metadata"] = rmeta
         carry_user_references(meta, rebuilt)
         saved = self._store.save_graph(

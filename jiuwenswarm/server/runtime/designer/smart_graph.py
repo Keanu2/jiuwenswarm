@@ -212,7 +212,10 @@ def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
         str(n.get("id"))
         for n in nodes
         if isinstance((n.get("config") or {}), dict)
-        and bool((n.get("config") or {}).get("user_added"))
+        and (
+            bool((n.get("config") or {}).get("user_added"))
+            or bool(str((n.get("config") or {}).get("user_reference_id") or "").strip())
+        )
     }
     orphan = ids - contributing
     preserved = sorted(orphan & user_added)
