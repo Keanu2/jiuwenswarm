@@ -955,10 +955,15 @@ class DesignerGraphToolkit:
                 max_tries=2,
             )
             path = str((generated or {}).get("image_path") or "").strip()
-            out = f"Saved to: {path}" if path else str(generated or "")
+            if not path:
+                detail = ""
+                if isinstance(generated, dict):
+                    detail = str(generated.get("error") or "").strip()
+                raise RuntimeError(detail or "call_image_model produced no file")
+            out = f"Saved to: {path}"
         except Exception as exc:  # noqa: BLE001
             logger.warning("call_image_model failed: %s", exc, exc_info=True)
-            return f"call_image_model error: {exc}"
+            raise
         finally:
             beat.cancel()
         path = ""

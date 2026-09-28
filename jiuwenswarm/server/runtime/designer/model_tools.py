@@ -93,6 +93,7 @@ LLM_NOT_CONFIGURED = "LLM_NOT_CONFIGURED"
 LLM_BILLING = "LLM_BILLING"
 LLM_API_ERROR = "LLM_API_ERROR"
 LLM_REQUIRED = "LLM_REQUIRED"
+MEDIA_NOT_CONFIGURED = "MEDIA_NOT_CONFIGURED"
 
 
 class DesignerLlmError(RuntimeError):
@@ -244,6 +245,50 @@ def require_llm() -> None:
             "Chat model is not configured. Configure a model in Settings before using Design.",
             code=LLM_NOT_CONFIGURED,
         )
+
+
+def require_media_models(*, image: bool = False, video: bool = False) -> None:
+    """Block Play when a requested media modality has no usable endpoint.
+
+    Callers decide which modalities are needed. Only checks base URL + provider.
+    Credit and endpoint failures stay on the generation call.
+    """
+    import os
+
+    from jiuwenswarm.agents.harness.common.tools.multimodal_config import _get_model_config
+
+    def _endpoint_ready(model_type: str) -> bool:
+        mc = _get_model_config(get_config() or {}, model_type)
+        if not isinstance(mc, dict):
+            mc = {}
+        prefix = model_type.upper()
+        api_base = str(
+            mc.get("api_base")
+            or mc.get("base_url")
+            or os.getenv(f"{prefix}_API_BASE")
+            or ""
+        ).strip()
+        provider = str(
+            mc.get("client_provider")
+            or mc.get("model_provider")
+            or os.getenv(f"{prefix}_PROVIDER")
+            or ""
+        ).strip()
+        return bool(api_base and provider)
+
+    missing: list[str] = []
+    if image and not _endpoint_ready("image_gen"):
+        missing.append("image generation (models.image_gen)")
+    if video and not _endpoint_ready("video_gen"):
+        missing.append("video generation (models.video_gen)")
+    if not missing:
+        return
+    joined = " and ".join(missing)
+    raise DesignerLlmError(
+        f"Media model config is incomplete: {joined}. "
+        "Set the base URL and provider in Settings before Play.",
+        code=MEDIA_NOT_CONFIGURED,
+    )
 
 
 def model_text_or_raise(result: dict[str, Any] | None) -> str:

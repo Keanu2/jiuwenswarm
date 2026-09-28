@@ -318,6 +318,22 @@ class GraphExecutor:
         states = deepcopy(source_states)
         for node in graph.get("nodes", []):
             states.setdefault(node["id"], {"status": NODE_STATUS_PENDING})
+        for nid, state in list(states.items()):
+            if nid == node_id or not isinstance(state, dict):
+                continue
+            if state.get("status") != NODE_STATUS_RUNNING:
+                continue
+            # Orphaned running snapshots are not scheduled again (_is_ready
+            # only accepts pending). Park them so Continue can resume.
+            states[nid] = {
+                "status": NODE_STATUS_PENDING,
+                "started_at": None,
+                "completed_at": None,
+                "output_ref": state.get("output_ref"),
+                "output_refs": list(state.get("output_refs") or []),
+                "error": None,
+                "blocked_by": [],
+            }
         previous = states.get(node_id) or {}
         kept_ref = previous.get("output_ref") if _usable_ref(previous.get("output_ref")) else None
         kept_refs = [
@@ -352,7 +368,7 @@ class GraphExecutor:
             "current_node_ids": [],
             "created_at": now,
             "updated_at": now,
-            "metadata": {"use_prior_feedback": True},
+            "metadata": {"use_prior_feedback": True, "single_node_rerun": True},
         }
         # Opt-in: Run again reuses stored prompts, images, and upstream outputs.
         meta = dict(graph.get("metadata") or {})
@@ -396,11 +412,17 @@ class GraphExecutor:
             if not pending:
                 return run
         graph = self._require_graph(run["graph_id"])
-        from jiuwenswarm.server.runtime.designer.model_tools import require_llm
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            require_llm,
+            require_media_models,
+        )
 
         # One local credential gate at Play entry (Work/Code checks before
         # spawning agents). Billing/API failures still surface on the model call.
         require_llm()
+        # Incomplete image/video config blocks only when a yet-to-run leaf needs it.
+        # Runtime failures (credit, bad endpoint) still surface on the model call.
+        require_media_models(**_pending_media_modalities(graph, run))
         run.pop("error", None)
         for node in graph.get("nodes") or []:
             cfg = node.setdefault("config", {})
@@ -776,6 +798,7 @@ class GraphExecutor:
             (graph.get("metadata") or {}).get("use_prior_feedback")
             or (run.get("metadata") or {}).get("use_prior_feedback")
         )
+        single_node_rerun = bool((run.get("metadata") or {}).get("single_node_rerun"))
         prior: dict[str, Any] | None = None
         if use_prior:
             prior = load_prior_feedback(graph_id)
@@ -833,8 +856,10 @@ class GraphExecutor:
             scenario0 = str((graph.get("metadata") or {}).get("scenario") or "")
             meta_play = dict(graph.get("metadata") or {})
             already_composed = bool(meta_play.get("director_composed_on_bootstrap"))
-            run_enter_redesign = scenario0 == "video" and (
-                use_prior or not already_composed
+            run_enter_redesign = (
+                scenario0 == "video"
+                and not single_node_rerun
+                and (use_prior or not already_composed)
             )
             if run_enter_redesign:
                 with traj.span(
@@ -969,63 +994,72 @@ class GraphExecutor:
                     },
                 )
 
-            with traj.span(
-                agent_id="director",
-                action="plan",
-                phase="orchestration",
-                role="director",
-                tool="llm",
-                detail={"optimize_for": optimize_for, "has_prior_feedback": bool(prior)},
-            ):
-                director_skill = str(
-                    (graph.get("metadata") or {}).get("director_skill_excerpt") or ""
-                )
-                if director_skill:
-                    meta = dict(graph.get("metadata") or {})
-                    meta["active_director_skill"] = director_skill[:3000]
-                    graph["metadata"] = meta
-                plan = await Director().plan(
-                    graph,
-                    optimize_for=optimize_for,
-                    prior_feedback=prior,
-                )
+            if single_node_rerun:
                 traj.record(
                     agent_id="director",
-                    action="plan_result",
+                    action="skip_plan_single_node_rerun",
                     phase="orchestration",
                     role="director",
-                    detail={
-                        "notes": str((plan or {}).get("notes") or "")[:500],
-                        "rating_modality": (plan or {}).get("rating_modality"),
-                    },
+                    detail={"reason": "single_node_rerun"},
                 )
-                self._store.save_graph(graph)
+            else:
+                with traj.span(
+                    agent_id="director",
+                    action="plan",
+                    phase="orchestration",
+                    role="director",
+                    tool="llm",
+                    detail={"optimize_for": optimize_for, "has_prior_feedback": bool(prior)},
+                ):
+                    director_skill = str(
+                        (graph.get("metadata") or {}).get("director_skill_excerpt") or ""
+                    )
+                    if director_skill:
+                        meta = dict(graph.get("metadata") or {})
+                        meta["active_director_skill"] = director_skill[:3000]
+                        graph["metadata"] = meta
+                    plan = await Director().plan(
+                        graph,
+                        optimize_for=optimize_for,
+                        prior_feedback=prior,
+                    )
+                    traj.record(
+                        agent_id="director",
+                        action="plan_result",
+                        phase="orchestration",
+                        role="director",
+                        detail={
+                            "notes": str((plan or {}).get("notes") or "")[:500],
+                            "rating_modality": (plan or {}).get("rating_modality"),
+                        },
+                    )
+                    self._store.save_graph(graph)
 
-            with traj.span(
-                agent_id="director",
-                action="validate_plan",
-                phase="orchestration",
-                role="director",
-                tool="llm",
-            ):
-                director_ack = await Director().validate_plan(
-                    graph
-                )
-                traj.record(
+                with traj.span(
                     agent_id="director",
-                    action="validate_plan_result",
+                    action="validate_plan",
                     phase="orchestration",
                     role="director",
-                    detail={
-                        "patched": list(director_ack.get("patched") or [])[:20],
-                        "rating_modality": director_ack.get("rating_modality"),
-                        "can_vision": director_ack.get("can_vision"),
-                    },
-                )
-                graph = self._store.save_graph(graph)
-                self._resync_run_after_graph_redesign(run, graph)
-                self._publish(run, on_update)
-                self._publish_graph(run, graph)
+                    tool="llm",
+                ):
+                    director_ack = await Director().validate_plan(
+                        graph
+                    )
+                    traj.record(
+                        agent_id="director",
+                        action="validate_plan_result",
+                        phase="orchestration",
+                        role="director",
+                        detail={
+                            "patched": list(director_ack.get("patched") or [])[:20],
+                            "rating_modality": director_ack.get("rating_modality"),
+                            "can_vision": director_ack.get("can_vision"),
+                        },
+                    )
+                    graph = self._store.save_graph(graph)
+                    self._resync_run_after_graph_redesign(run, graph)
+                    self._publish(run, on_update)
+                    self._publish_graph(run, graph)
 
             remaining = {
                 node["id"]
@@ -1265,9 +1299,17 @@ class GraphExecutor:
                     if st.get("status") not in _TERMINAL_NODE_STATUSES:
                         remaining.add(nid)
                 if run.get("status") == RUN_STATUS_FAILED or self._is_cancelled(run_id):
+                    if run.get("status") == RUN_STATUS_FAILED and in_flight:
+                        for task in in_flight.values():
+                            task.cancel()
+                        await asyncio.gather(*in_flight.values(), return_exceptions=True)
+                        in_flight.clear()
+                        self._park_running_nodes(run, on_update)
                     break
             if self._is_cancelled(run_id):
                 return
+            if run.get("status") == RUN_STATUS_FAILED:
+                self._park_running_nodes(run, on_update)
             statuses = {state.get("status") for state in graph_node_states(run).values()}
             if NODE_STATUS_FAILED in statuses or remaining:
                 run["status"] = RUN_STATUS_FAILED
@@ -2224,6 +2266,41 @@ class GraphExecutor:
         cancel_flag = self._cancel_flags.get(run_id)
         return cancel_flag is not None and cancel_flag.is_set()
 
+    def _park_running_nodes(
+        self,
+        run: DesignerExecutionRun,
+        on_update: RunUpdateCallback | None,
+    ) -> None:
+        """Return in-flight siblings to pending so Continue can resume them.
+
+        A sibling failure used to leave other leaves ``running``. Those snapshots
+        are never scheduled again, so the canvas spinner never clears.
+        """
+        from jiuwenswarm.common.schema.designer_graph import is_leader_node_id
+
+        states = run.setdefault("node_states", {})
+        changed = False
+        for node_id, raw in list(states.items()):
+            if is_leader_node_id(node_id) or not isinstance(raw, dict):
+                continue
+            if raw.get("status") != NODE_STATUS_RUNNING:
+                continue
+            states[node_id] = {
+                "status": NODE_STATUS_PENDING,
+                "started_at": None,
+                "completed_at": None,
+                "output_ref": raw.get("output_ref"),
+                "output_refs": list(raw.get("output_refs") or []),
+                "error": None,
+                "blocked_by": list(raw.get("blocked_by") or []),
+            }
+            changed = True
+        if not changed:
+            return
+        run["updated_at"] = utc_now_ms()
+        self._publish(run, on_update)
+        self._store.save_run(run)
+
     def _resync_run_after_graph_redesign(
         self,
         run: DesignerExecutionRun,
@@ -2324,6 +2401,43 @@ def redistribute_frame_node_states(run: DesignerExecutionRun, shot_count: int) -
             state["output_ref"] = images[0]
             state["output_refs"] = [images[0]]
         states[node_id] = state
+
+
+def _pending_media_modalities(
+    graph: DesignerExecutionGraph,
+    run: DesignerExecutionRun,
+) -> dict[str, bool]:
+    """Which generation backends a Play needs, from yet-to-run node modalities.
+
+    Compose is video-typed but local ffmpeg — it does not need ``video_gen``.
+    """
+    from jiuwenswarm.common.schema.designer_graph import is_compose_sink_node
+
+    states = run.get("node_states") or {}
+    if not isinstance(states, dict):
+        states = {}
+    terminal = {
+        NODE_STATUS_COMPLETED,
+        NODE_STATUS_FAILED,
+        NODE_STATUS_CANCELLED,
+    }
+    needs_image = False
+    needs_video = False
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "")
+        status = str((states.get(node_id) or {}).get("status") or NODE_STATUS_PENDING)
+        if status in terminal:
+            continue
+        if is_compose_sink_node(node):
+            continue
+        modality = str(node.get("type") or "").strip().lower()
+        if modality == NODE_TYPE_IMAGE:
+            needs_image = True
+        elif modality == NODE_TYPE_VIDEO:
+            needs_video = True
+    return {"image": needs_image, "video": needs_video}
 
 
 def _usable_ref(ref: object) -> bool:

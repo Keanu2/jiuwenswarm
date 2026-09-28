@@ -146,18 +146,22 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       }, 400);
     }
     // Do NOT auto-press Continue / Regenerate — user chooses explicitly.
-    // Exception: if the run stopped early with pending work still remaining,
-    // auto-resume once so the continuous scheduler can finish (avoids false Continue stalls).
+    // Exception: a stall with pending work and no failed nodes auto-resumes once.
+    // Failed nodes stay visible; never auto-retry_failed.
     if (run && !isActiveDesignerRun(run.status)) {
       const graph = useDesignerStore.getState().domainGraph;
       const primary = get().primaryAction;
       const hasPending = Object.values(run.node_states || {}).some(
         (s) => s?.status === DESIGNER_NODE_STATUS_PENDING,
       );
+      const hasFailed = Object.values(run.node_states || {}).some(
+        (s) => s?.status === DESIGNER_NODE_STATUS_FAILED,
+      );
       if (
         graph &&
         hasPending &&
-        (primary === 'continue' || primary === 'retry_failed') &&
+        !hasFailed &&
+        primary === 'continue' &&
         run.status !== 'cancelled'
       ) {
         const key = `${run.run_id}:${Object.keys(run.node_states || {}).length}`;

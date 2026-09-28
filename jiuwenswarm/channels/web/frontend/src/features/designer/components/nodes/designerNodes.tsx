@@ -160,6 +160,11 @@ function DesignerNodeShell({
   const status = useDesignerRunStore(
     (state) => state.nodeStates[nodeId]?.status ?? 'pending',
   );
+  const nodeError = useDesignerRunStore((state) => {
+    const nodeState = state.nodeStates[nodeId];
+    if (nodeState?.status !== DESIGNER_NODE_STATUS_FAILED) return '';
+    return String(nodeState.error || '').trim();
+  });
   const statusClass =
     status === DESIGNER_NODE_STATUS_RUNNING
       ? ' is-running'
@@ -209,6 +214,11 @@ function DesignerNodeShell({
         </button>
       </div>
       <div className="designer-node__body">{body}</div>
+      {nodeError ? (
+        <p className="designer-node__error" data-testid="designer-node-error" title={nodeError}>
+          {nodeError}
+        </p>
+      ) : null}
       <Handle type="source" position={Position.Right} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
       <DesignerNodeSuccessorControl nodeId={nodeId} />
       <DesignerNodeResizeHandle nodeId={nodeId} />

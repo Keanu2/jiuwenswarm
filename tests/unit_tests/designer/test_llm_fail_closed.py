@@ -16,6 +16,8 @@ from jiuwenswarm.server.runtime.designer.model_tools import (
     require_llm,
 )
 
+_require_media_models = model_tools.require_media_models
+
 
 def test_classify_llm_failure_codes() -> None:
     code, message = classify_llm_failure("Error code: 402 Insufficient Balance")
@@ -264,3 +266,62 @@ async def test_director_reviews_reject_nonthrowing_model_failures(
     }
     with pytest.raises(DesignerLlmError):
         await director.review_storyboard_once(storyboard_graph, node_states=None)
+
+
+def test_require_media_models_blocks_incomplete_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(model_tools, "get_config", lambda: {"models": {}})
+    with pytest.raises(DesignerLlmError) as excinfo:
+        _require_media_models(image=True)
+    assert excinfo.value.code == model_tools.MEDIA_NOT_CONFIGURED
+    assert "image generation" in str(excinfo.value)
+
+
+def test_require_media_models_noop_when_nothing_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_tools, "get_config", lambda: {"models": {}})
+    _require_media_models()
+
+
+def test_require_media_models_blocks_incomplete_video_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        model_tools,
+        "get_config",
+        lambda: {
+            "models": {
+                "image_gen": {
+                    "model_client_config": {
+                        "api_base": "http://127.0.0.1:8000/v1",
+                        "client_provider": "OpenAI",
+                    }
+                }
+            }
+        },
+    )
+    with pytest.raises(DesignerLlmError) as excinfo:
+        _require_media_models(image=True, video=True)
+    message = str(excinfo.value)
+    assert "video generation" in message
+    assert "image generation" not in message
+
+
+def test_require_media_models_allows_missing_key_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        model_tools,
+        "get_config",
+        lambda: {
+            "models": {
+                "image_gen": {
+                    "model_client_config": {
+                        "api_base": "http://127.0.0.1:8000/v1",
+                        "client_provider": "OpenAI",
+                    }
+                }
+            }
+        },
+    )
+    _require_media_models(image=True)

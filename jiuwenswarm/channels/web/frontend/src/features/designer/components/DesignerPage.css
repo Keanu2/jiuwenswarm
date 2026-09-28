@@ -1075,6 +1075,18 @@
   color: #b91c1c;
 }
 
+.designer-node__error {
+  margin: 0;
+  padding: 6px 12px 8px;
+  color: var(--color-danger, #c0392b);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
 .designer-node__header {
   display: flex;
   flex-shrink: 0;

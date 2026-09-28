@@ -660,6 +660,48 @@ async def test_running_status_is_saved_before_handler_returns(
             await task
 
 
+def test_create_rerun_parks_orphaned_running_and_marks_single_node(
+    designer_store: DesignerGraphStore,
+) -> None:
+    graph = designer_store.save_graph(
+        _handler_graph(build_bootstrap_graph(project_id="proj_park_running", prompt="park")),
+    )
+    executor = GraphExecutor(designer_store)
+    source = executor.create_run(graph)
+    for state in source["node_states"].values():
+        state["status"] = NODE_STATUS_COMPLETED
+    source["node_states"]["n_scene"] = {
+        "status": NODE_STATUS_RUNNING,
+        "activity": {"kind": "tool_call", "text": "calling call_image_model"},
+        "error": None,
+    }
+    source["node_states"]["n_character"] = {"status": "failed", "error": "image_gen failed"}
+    designer_store.save_run(source)
+    rerun = executor.create_rerun(graph, source_run=source, node_id="n_character")
+    assert rerun["metadata"]["single_node_rerun"] is True
+    assert rerun["node_states"]["n_character"]["status"] == "pending"
+    assert not rerun["node_states"]["n_character"].get("error")
+    assert rerun["node_states"]["n_scene"]["status"] == "pending"
+    assert "activity" not in rerun["node_states"]["n_scene"]
+
+
+def test_park_running_nodes_leaves_failed_and_completed(
+    designer_store: DesignerGraphStore,
+) -> None:
+    graph = designer_store.save_graph(
+        _handler_graph(build_bootstrap_graph(project_id="proj_park_wave", prompt="park wave")),
+    )
+    executor = GraphExecutor(designer_store)
+    run = executor.create_run(graph)
+    run["node_states"]["n_character"] = {"status": "failed", "error": "no image"}
+    run["node_states"]["n_scene"] = {"status": NODE_STATUS_RUNNING, "error": None}
+    run["node_states"]["n_brief"] = {"status": NODE_STATUS_COMPLETED}
+    executor._park_running_nodes(run, None)
+    assert run["node_states"]["n_character"]["status"] == "failed"
+    assert run["node_states"]["n_scene"]["status"] == "pending"
+    assert run["node_states"]["n_brief"]["status"] == NODE_STATUS_COMPLETED
+
+
 @pytest.mark.asyncio
 async def test_rerun_single_node_keeps_upstream_outputs(
     designer_store: DesignerGraphStore, stub_clip_video: None
