@@ -2,8 +2,9 @@
 
 """Node handler registry for Designer graph execution.
 
-Dispatch order: ``node.config.pipeline`` (character_design / storyboard / ...)
-then ``node.type`` (image / video / ...). Canvas role is the MiniMax modality.
+Dispatch order: user uploads, ComfyUI imports (``config.is_comfyui``), then
+``node.config.pipeline`` (character_design / storyboard / ...), then
+``node.type`` (image / video / ...). Canvas role is the MiniMax modality.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_VIDEO,
     AssetRef,
     DesignerGraphNode,
+    is_comfyui_node,
     node_pipeline,
     node_role,
 )
@@ -33,6 +35,10 @@ from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import (
     MusicNodeHandler,
 )
 from jiuwenswarm.server.runtime.designer.handlers.clip import ClipNodeHandler
+from jiuwenswarm.server.runtime.designer.handlers.comfyui_nodes import (
+    COMFYUI_IMAGE_HANDLER,
+    COMFYUI_VIDEO_HANDLER,
+)
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.image_nodes import (
     CharacterDesignNodeHandler,
@@ -88,6 +94,8 @@ class MockNodeHandler(RoleNodeHandler):
 
 
 HANDLER_KEY_USER_REFERENCE = "user_reference"
+HANDLER_KEY_COMFYUI_IMAGE = "comfyui_image"
+HANDLER_KEY_COMFYUI_VIDEO = "comfyui_video"
 
 NODE_HANDLERS: dict[str, NodeHandler] = {
     NODE_ROLE_BRIEF: BriefNodeHandler(),
@@ -104,6 +112,8 @@ NODE_HANDLERS: dict[str, NodeHandler] = {
     NODE_TYPE_VIDEO: GENERIC_VIDEO_HANDLER,
     NODE_TYPE_AUDIO: GENERIC_AUDIO_HANDLER,
     HANDLER_KEY_USER_REFERENCE: USER_REFERENCE_HANDLER,
+    HANDLER_KEY_COMFYUI_IMAGE: COMFYUI_IMAGE_HANDLER,
+    HANDLER_KEY_COMFYUI_VIDEO: COMFYUI_VIDEO_HANDLER,
 }
 
 
@@ -111,6 +121,11 @@ def resolve_handler_key(node: DesignerGraphNode) -> str:
     config = node.get("config") if isinstance(node, dict) else None
     if isinstance(config, dict) and str(config.get("user_reference_id") or "").strip():
         return HANDLER_KEY_USER_REFERENCE
+    if is_comfyui_node(node):
+        if node.get("type") == NODE_TYPE_VIDEO:
+            return HANDLER_KEY_COMFYUI_VIDEO
+        if node.get("type") == NODE_TYPE_IMAGE:
+            return HANDLER_KEY_COMFYUI_IMAGE
     pipeline = node_pipeline(node)
     if pipeline == "speech":
         return "speech"

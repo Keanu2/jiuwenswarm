@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Handle, NodeResizeControl, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react';
+import { isComfyuiNodeConfig } from '../../comfyuiWorkflow';
 import { designerAssetPreviewUrl, designerAssetTextUrl } from '../../designerAssetUrl';
 import {
   DESIGNER_MATERIAL_SAVED_EVENT,
@@ -176,6 +177,9 @@ function DesignerNodeShell({
   const TypeIcon = modalityIcon(nodeType);
   const showMediaFill = media && (mediaFilled || status === DESIGNER_NODE_STATUS_COMPLETED);
   const removeNodes = useDesignerStore((state) => state.removeNodes);
+  const isComfyui = useDesignerStore((state) =>
+    isComfyuiNodeConfig(state.domainGraph?.nodes.find((node) => node.id === nodeId)?.config),
+  );
   const closeDock = useDesignerUiStore((state) => state.closeDock);
 
   const onDelete = useCallback(
@@ -196,6 +200,16 @@ function DesignerNodeShell({
       data-status={status}
     >
       <Handle type="target" position={Position.Left} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
+      {isComfyui ? (
+        <span
+          className="designer-node__comfyui-badge"
+          title={t('designer.comfyui.badgeHint')}
+          aria-label={t('designer.comfyui.badgeHint')}
+          data-testid="designer-node-comfyui-badge"
+        >
+          C
+        </span>
+      ) : null}
       <div className="designer-node__header">
         <span className="designer-node__type-icon" aria-hidden data-testid="designer-node-type-icon" data-node-type={nodeType}>
           <TypeIcon size={14} strokeWidth={1.75} />

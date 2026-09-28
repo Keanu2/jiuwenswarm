@@ -991,6 +991,17 @@ def _rerun_error_message(graph: dict[str, Any] | None, node_id: str, exc: Except
     message = str(exc)
     if "upstream not ready" not in message:
         return message
+    if graph is not None and _is_comfyui_target(graph, node_id):
+        missing = message.split("upstream not ready:", 1)[-1].strip()
+        label = next(
+            (
+                str(node.get("label") or missing)
+                for node in graph.get("nodes") or []
+                if isinstance(node, dict) and str(node.get("id") or "") == missing
+            ),
+            missing,
+        )
+        return f"ComfyUI reference has no file yet; upload or generate it first: {label}"
     role = ""
     if graph is not None:
         for node in graph.get("nodes") or []:
@@ -1005,13 +1016,23 @@ def _rerun_error_message(graph: dict[str, Any] | None, node_id: str, exc: Except
     return message
 
 
+def _is_comfyui_target(graph: dict[str, Any], node_id: str) -> bool:
+    from jiuwenswarm.common.schema.designer_graph import is_comfyui_node
+
+    return any(
+        str(node.get("id") or "") == node_id and is_comfyui_node(node)
+        for node in graph.get("nodes") or []
+        if isinstance(node, dict)
+    )
+
+
 def _start_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
     graph_id = str(params.get("graph_id") or "").strip()
     run_id = str(params.get("run_id") or "").strip()
     node_id = str(params.get("node_id") or "").strip()
     graph = _store.get_graph(graph_id) if graph_id else None
     contribution_warning = ""
-    if graph is not None:
+    if graph is not None and not (node_id and _is_comfyui_target(graph, node_id)):
         try:
             from jiuwenswarm.server.runtime.designer.orchestration import Director
 
@@ -1040,7 +1061,8 @@ def _start_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | Non
             run_id = run["run_id"]
     elif graph is not None and node_id:
         source = _store.get_latest_run_for_graph(graph["graph_id"])
-        if source is None:
+        # A ComfyUI node runs on its own, so it needs no earlier Play.
+        if source is None and not _is_comfyui_target(graph, node_id):
             return None, "no previous run to rerun from", "BAD_REQUEST"
         try:
             run = _executor.create_rerun(graph, source_run=source, node_id=node_id)

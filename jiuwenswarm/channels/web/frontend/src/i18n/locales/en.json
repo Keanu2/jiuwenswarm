@@ -174,6 +174,7 @@
       "assets": "Asset pack",
       "assetsTitle": "Asset pack",
       "assetsHint": "Open the asset pack. Drag an item onto the canvas to create a node.",
+      "comfyuiHint": "Import a ComfyUI workflow (.json). Only vLLM-Omni Generate Image / Generate Video nodes are added.",
       "group": {
         "image": "Image",
         "video": "Video",
@@ -183,7 +184,8 @@
       "node": {
         "image": "Image",
         "video": "Video",
-        "audio": "Audio"
+        "audio": "Audio",
+        "comfyui": "ComfyUI"
       }
     },
     "nodeActions": {
@@ -238,6 +240,40 @@
       "runFailed": "Failed to start the run",
       "rerunFailed": "Failed to regenerate this node",
       "chooseFailed": "Failed to choose a version"
+    },
+    "comfyui": {
+      "badgeHint": "Imported from ComfyUI. Always generates with vLLM-Omni using these parameters.",
+      "promptHint": "Sent to vLLM-Omni as-is, together with the ComfyUI parameters below. No agent rewrites it.",
+      "samplingTitle": "Sampling",
+      "field": {
+        "url": "Server URL",
+        "model": "Model",
+        "negative_prompt": "Negative prompt",
+        "width": "Width",
+        "height": "Height",
+        "fps": "FPS",
+        "duration": "Duration (s)",
+        "num_inference_steps": "Steps",
+        "guidance_scale": "Guidance scale",
+        "true_cfg_scale": "True CFG scale",
+        "vae_use_slicing": "VAE slicing",
+        "vae_use_tiling": "VAE tiling",
+        "seed": "Seed (-1 = random)"
+      },
+      "warning": "Imported {{file}} with omissions: {{items}}",
+      "warningItem": {
+        "skipped_input": "node {{node}} input \"{{detail}}\" is not supported and was skipped",
+        "multi_stage_sampling": "node {{node}} uses a multi-stage sampling list; sampling params were skipped",
+        "unsupported_sampling": "node {{node}} sampling source {{detail}} is not Diffusion Sampling; skipped",
+        "unsupported_model_params": "node {{node}} model params {{detail}} are not supported; skipped",
+        "unsupported_reference": "node {{node}} reference {{detail}} does not match the input type; skipped"
+      },
+      "error": {
+        "invalid_json": "{{file}} is not valid JSON: {{detail}}",
+        "unrecognized_format": "{{file}} is not a ComfyUI workflow export.",
+        "no_supported_nodes": "{{file}} has no vLLM-Omni Generate Image / Generate Video node.",
+        "read_failed": "Could not import {{file}}: {{detail}}"
+      }
     }
   },
   "videoLive": {

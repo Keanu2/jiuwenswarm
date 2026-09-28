@@ -8,6 +8,7 @@ import {
 } from '../../designerCanvasNodes';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
+import { useComfyuiImport } from '../../useComfyuiImport';
 import { DesignerAddNodeMenu } from '../DesignerAddNodeMenu';
 
 type DesignerNodeSuccessorControlProps = {
@@ -23,6 +24,7 @@ export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorCo
   const toggleSuccessorMenu = useDesignerUiStore((state) => state.toggleSuccessorMenu);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
   const menuOpen = successorMenuNodeId === nodeId;
+  const importComfyui = useComfyuiImport();
 
   const onToggle = useCallback(
     (event: MouseEvent) => {
@@ -46,6 +48,17 @@ export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorCo
       closeDock();
     },
     [addNode, closeDock, domainGraph, nodeId],
+  );
+
+  const onImportComfyui = useCallback(
+    (files: File[]) => {
+      const source = domainGraph?.nodes.find((node) => node.id === nodeId);
+      if (!domainGraph || !source) return;
+      const origin = positionRightOfNode(source, domainGraph.nodes);
+      closeDock();
+      void importComfyui(files, origin);
+    },
+    [closeDock, domainGraph, importComfyui, nodeId],
   );
 
   if (canvasTool === 'hand') return null;
@@ -77,6 +90,7 @@ export function DesignerNodeSuccessorControl({ nodeId }: DesignerNodeSuccessorCo
             title={t('designer.nodeActions.addTitle')}
             testIdPrefix="designer-node-add"
             onPick={onPick}
+            onImportComfyui={onImportComfyui}
           />
         </div>
       ) : null}

@@ -18,6 +18,7 @@ import {
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
 import { DESIGNER_FIT_VIEW_PADDING } from '../designerFitView';
+import { useComfyuiImport } from '../useComfyuiImport';
 
 export function DesignerCanvasDock() {
   const { t } = useTranslation();
@@ -30,26 +31,38 @@ export function DesignerCanvasDock() {
   const setCanvasTool = useDesignerUiStore((state) => state.setCanvasTool);
   const setDockPanel = useDesignerUiStore((state) => state.setDockPanel);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
+  const importComfyui = useComfyuiImport();
+
+  const canvasCenter = useCallback(() => {
+    const pane = document.querySelector('.designer-page__canvas');
+    const rect = pane?.getBoundingClientRect();
+    return screenToFlowPosition({
+      x: (rect?.left ?? 0) + (rect?.width ?? 640) / 2,
+      y: (rect?.top ?? 0) + (rect?.height ?? 480) / 2,
+    });
+  }, [screenToFlowPosition]);
 
   const placeAndAdd = useCallback(
     (template: DesignerAddTemplate) => {
-      const pane = document.querySelector('.designer-page__canvas');
-      const rect = pane?.getBoundingClientRect();
-      const screen = {
-        x: (rect?.left ?? 0) + (rect?.width ?? 640) / 2,
-        y: (rect?.top ?? 0) + (rect?.height ?? 480) / 2,
-      };
-      const origin = screenToFlowPosition(screen);
       const existing = domainGraph?.nodes ?? [];
       const node = buildManualDesignerNode({
         template,
         existing,
-        position: offsetCanvasPosition(origin, existing.length),
+        position: offsetCanvasPosition(canvasCenter(), existing.length),
       });
       addNode(node);
       closeDock();
     },
-    [addNode, closeDock, domainGraph?.nodes, screenToFlowPosition],
+    [addNode, canvasCenter, closeDock, domainGraph?.nodes],
+  );
+
+  const placeComfyui = useCallback(
+    (files: File[]) => {
+      const origin = offsetCanvasPosition(canvasCenter(), domainGraph?.nodes.length ?? 0);
+      closeDock();
+      void importComfyui(files, origin);
+    },
+    [canvasCenter, closeDock, domainGraph?.nodes.length, importComfyui],
   );
 
   const runAutoLayout = useCallback(() => {
@@ -70,6 +83,7 @@ export function DesignerCanvasDock() {
             title={t('designer.dock.addTitle')}
             testIdPrefix="designer-canvas-add"
             onPick={placeAndAdd}
+            onImportComfyui={placeComfyui}
           />
         </div>
       ) : null}

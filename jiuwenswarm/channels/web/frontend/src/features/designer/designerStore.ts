@@ -17,7 +17,12 @@ import {
   removeNodesFromGraph,
 } from './designerCanvasNodes';
 import { useDesignerUiStore } from './designerUiStore';
-import type { AssetRef, DesignerExecutionGraph, DesignerGraphNode } from './executionGraphTypes';
+import type {
+  AssetRef,
+  DesignerExecutionGraph,
+  DesignerGraphEdge,
+  DesignerGraphNode,
+} from './executionGraphTypes';
 
 export type DesignerLoadStatus =
   | 'idle'
@@ -90,6 +95,8 @@ type DesignerStore = {
   clearAssetReferences: (assetId: string) => void;
   addNode: (node: DesignerGraphNode) => void;
   addConnectedNode: (sourceId: string, node: DesignerGraphNode) => void;
+  /** Adds several new nodes and the edges among them with a single save. */
+  addSubgraph: (nodes: DesignerGraphNode[], edges: DesignerGraphEdge[]) => void;
   addEdge: (connection: { source: string; target: string; id?: string; label?: string }) => void;
   removeEdges: (edgeIds: string[]) => void;
   removeNodes: (nodeIds: string[]) => void;
@@ -371,6 +378,51 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
         metadata,
       },
       selectedNodeId: node.id,
+    });
+    void get().flushSave();
+  },
+
+  addSubgraph: (nodes, edges) => {
+    const graph = get().domainGraph;
+    if (!graph) return;
+    const taken = new Set(graph.nodes.map((node) => node.id));
+    const fresh = nodes.filter((node) => {
+      const id = String(node.id || '').trim();
+      if (!id || taken.has(id)) return false;
+      taken.add(id);
+      return true;
+    });
+    if (fresh.length === 0) return;
+    const freshIds = new Set(fresh.map((node) => node.id));
+    const freshEdges = edges.filter(
+      (edge) => freshIds.has(edge.source) && freshIds.has(edge.target),
+    );
+    let metadata = graph.metadata;
+    for (const node of fresh) {
+      metadata = appendUserCanvasEdit(metadata, {
+        op: 'add',
+        node_id: node.id,
+        label: node.label,
+        role: String(node.config?.role || ''),
+        type: node.type,
+      });
+    }
+    for (const edge of freshEdges) {
+      metadata = appendUserCanvasEdit(metadata, {
+        op: 'connect',
+        node_id: edge.source,
+        peer_id: edge.target,
+      });
+    }
+    set({
+      domainGraph: {
+        ...graph,
+        nodes: [...graph.nodes, ...fresh],
+        edges: [...graph.edges, ...freshEdges],
+        updated_at: Date.now(),
+        metadata,
+      },
+      selectedNodeId: fresh[fresh.length - 1].id,
     });
     void get().flushSave();
   },

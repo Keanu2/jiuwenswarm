@@ -157,10 +157,13 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       const hasFailed = Object.values(run.node_states || {}).some(
         (s) => s?.status === DESIGNER_NODE_STATUS_FAILED,
       );
+      // A ComfyUI generate leaves the rest of the canvas pending on purpose.
+      const scoped = Boolean(run.metadata?.scope_node_ids?.length);
       if (
         graph &&
         hasPending &&
         !hasFailed &&
+        !scoped &&
         primary === 'continue' &&
         run.status !== 'cancelled'
       ) {

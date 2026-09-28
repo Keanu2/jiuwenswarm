@@ -11,6 +11,7 @@ from typing import Any
 from jiuwenswarm.common.schema.designer_graph import (
     DesignerExecutionGraph,
     DesignerGraphNode,
+    is_comfyui_node,
     node_pipeline,
 )
 from jiuwenswarm.server.runtime.designer.continuity import (
@@ -1066,6 +1067,14 @@ class Director:
             if not nid or is_user_reference_node(node) or not cfg.get("user_added"):
                 continue
             onboarded.append(nid)
+            if is_comfyui_node(node):
+                # Imported ComfyUI params go to vLLM-Omni verbatim; no agent rewrites them.
+                cfg["force_handler"] = True
+                cfg["skip_llm"] = True
+                cfg["delegate"] = "handler"
+                node["config"] = cfg
+                notes.append(f"comfyui:{nid}")
+                continue
             role = _role_key(node)
             tools = _tools_for_node(node)
             cfg["kind"] = "agent"
@@ -1093,7 +1102,11 @@ class Director:
             if not isinstance(node, dict):
                 continue
             cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-            if not cfg.get("user_added") or is_user_reference_node(node):
+            if (
+                not cfg.get("user_added")
+                or is_user_reference_node(node)
+                or is_comfyui_node(node)
+            ):
                 continue
             if _role_key(node) not in {
                 "frame",

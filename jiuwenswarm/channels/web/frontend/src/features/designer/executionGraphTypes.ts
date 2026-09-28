@@ -115,6 +115,42 @@ export type DesignerMediaMaterialSlot = {
   uri?: string;
 };
 
+export type DesignerComfyuiClassType = 'VLLMOmniGenerateImage' | 'VLLMOmniGenerateVideo';
+
+/** Own widgets of the ComfyUI generate node; fps / duration exist on video only. */
+export type DesignerComfyuiFields = {
+  url: string;
+  model: string;
+  negative_prompt: string;
+  width: number;
+  height: number;
+  fps?: number;
+  duration?: number;
+};
+
+/** VLLMOmniDiffusionSampling minus ``n`` (one canvas node is one output). */
+export type DesignerComfyuiSamplingParams = {
+  num_inference_steps: number;
+  guidance_scale: number;
+  true_cfg_scale: number;
+  vae_use_slicing: boolean;
+  vae_use_tiling: boolean;
+  /** -1 lets the server pick. */
+  seed: number;
+};
+
+export type DesignerComfyuiModelParams =
+  | { type: 'minimax_h3'; audio_flow_shift?: number; flow_shift?: number }
+  | { type: 'wan'; guidance_scale_2?: number; boundary_ratio?: number; flow_shift?: number };
+
+export type DesignerComfyuiConfig = {
+  class_type: DesignerComfyuiClassType;
+  source_node_id: string;
+  fields: DesignerComfyuiFields;
+  sampling_params: DesignerComfyuiSamplingParams | null;
+  model_params: DesignerComfyuiModelParams | null;
+};
+
 type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
   role: R;
   pipeline?: string;
@@ -134,6 +170,13 @@ type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
   /** User dragged the node resize handle; skip content auto-fit. */
   user_resized?: boolean;
   kind?: string;
+  /** Imported from a ComfyUI workflow; never shown, always generates via vLLM-Omni. */
+  is_comfyui?: boolean;
+  comfyui?: DesignerComfyuiConfig;
+  force_handler?: boolean;
+  skip_llm?: boolean;
+  /** The upload replaced the generated output. */
+  user_replaced_output?: boolean;
 };
 
 export type DesignerNodeConfig =
@@ -166,6 +209,11 @@ export type DesignerNodeConfig =
       user_added?: boolean;
       user_resized?: boolean;
       kind?: string;
+      is_comfyui?: boolean;
+      comfyui?: DesignerComfyuiConfig;
+      force_handler?: boolean;
+      skip_llm?: boolean;
+      user_replaced_output?: boolean;
     };
 
 export const DESIGNER_EDGE_KIND_DATA = 'data' as const;
@@ -292,6 +340,8 @@ export type DesignerExecutionRun = {
   error?: string | null;
   warning?: string | null;
   warnings?: string[] | null;
+  /** `scope_node_ids`: the run only drives these nodes (a ComfyUI generate). */
+  metadata?: { scope_node_ids?: string[] } & Record<string, unknown>;
 };
 
 export type DesignerGraphSummary = {

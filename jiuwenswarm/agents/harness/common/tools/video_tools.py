@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -1157,7 +1157,7 @@ async def _invoke_model_video_generation(
     prompt: str,
     *,
     size: str = "1280*720",
-    duration: int = 5,
+    duration: int | float = 5,
     resolution: str | None = None,
     first_frame: str | None = None,
     reference_images: list[str] | None = None,
@@ -1165,8 +1165,17 @@ async def _invoke_model_video_generation(
     audio: bool | None = None,
     model: str | None = None,
     force_reference_mode: bool = False,
+    provider_override: Literal["vllm-omni"] | None = None,
+    api_base_override: str | None = None,
+    **backend_options: Any,
 ) -> dict[str, Any]:
-    """Generate a video via DashScope / MiniMax / 火山方舟 backends."""
+    """Generate a video via DashScope / MiniMax / 火山方舟 / vLLM-Omni backends.
+
+    ``provider_override`` pins the backend regardless of ``models.video_gen``;
+    the configured key / base / model are only reused when they belong to that
+    same backend. ``backend_options`` are forwarded to the vLLM-Omni request
+    (references, fps, negative prompt, sampling / model params).
+    """
     cfg = get_config() or {}
     mc = _get_model_config(cfg, "video_gen")
 
@@ -1177,6 +1186,7 @@ async def _invoke_model_video_generation(
         or _CHINA_DASHSCOPE_API_BASE
     ).strip().strip("'\"")
 
+    explicit_model = model
     model = str(
         model
         or mc.get("model_name")
@@ -1204,6 +1214,15 @@ async def _invoke_model_video_generation(
         api_base=api_base,
         model=model,
     )
+    if provider_override and provider_override != backend:
+        # Credentials of another vendor must never reach the pinned backend.
+        api_key, api_base = "", ""
+        model = str(explicit_model or "").strip()
+        backend = provider_override
+    if api_base_override and api_base_override.strip():
+        api_base = api_base_override.strip()
+    if backend_options and backend != "vllm-omni":
+        return {"error": "[ERROR]: extra video request options are only supported by vLLM-Omni."}
     if backend != "vllm-omni":
         # vLLM-Omni is self-deployed: the API key is optional and the model
         # name may be omitted (resolved via GET {api_base}/models instead).
@@ -1240,6 +1259,7 @@ async def _invoke_model_video_generation(
                 resolution=resolution,
                 first_frame=first_frame,
                 reference_images=reference_images,
+                **backend_options,
             )
         if backend == "minimax":
             return await asyncio.to_thread(

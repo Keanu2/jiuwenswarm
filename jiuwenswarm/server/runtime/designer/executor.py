@@ -47,6 +47,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     frame_node_id,
     graph_uses_agent_scheduler,
     initial_node_states,
+    is_comfyui_node,
     is_soft_artifact_dependency,
     new_run_id,
     node_pipeline,
@@ -300,13 +301,17 @@ class GraphExecutor:
         self,
         graph: DesignerExecutionGraph,
         *,
-        source_run: DesignerExecutionRun,
+        source_run: DesignerExecutionRun | None,
         node_id: str,
     ) -> DesignerExecutionRun:
         """Copy a finished run and reset one node so only that node executes again."""
         node_ids = {node["id"] for node in graph.get("nodes", [])}
         if node_id not in node_ids:
             raise KeyError(f"node not found: {node_id}")
+        if is_comfyui_node(_node_by_id(graph, node_id)):
+            return self._create_scoped_rerun(graph, source_run=source_run, node_id=node_id)
+        if source_run is None:
+            raise ValueError("no previous run to rerun from")
         incoming = execution_predecessors(graph)
         groups = sync_groups(graph)
         source_states = source_run.get("node_states") or {}
@@ -326,15 +331,7 @@ class GraphExecutor:
                 continue
             # Orphaned running snapshots are not scheduled again (_is_ready
             # only accepts pending). Park them so Continue can resume.
-            states[nid] = {
-                "status": NODE_STATUS_PENDING,
-                "started_at": None,
-                "completed_at": None,
-                "output_ref": state.get("output_ref"),
-                "output_refs": list(state.get("output_refs") or []),
-                "error": None,
-                "blocked_by": [],
-            }
+            states[nid] = _parked_node_state(state)
         previous = states.get(node_id) or {}
         kept_ref = previous.get("output_ref") if _usable_ref(previous.get("output_ref")) else None
         kept_refs = [
@@ -394,6 +391,65 @@ class GraphExecutor:
         self._store.save_graph(graph)
         return self._store.save_run(run)
 
+    def _create_scoped_rerun(
+        self,
+        graph: DesignerExecutionGraph,
+        *,
+        source_run: DesignerExecutionRun | None,
+        node_id: str,
+    ) -> DesignerExecutionRun:
+        """A run that executes only ``node_id`` on its handler.
+
+        No Director phase, no other node, no ratings. Inputs count as ready
+        when the user uploaded a file over them or a previous run produced one,
+        so a freshly imported workflow can generate before any full Play.
+        """
+        states = deepcopy((source_run or {}).get("node_states") or {})
+        for node in graph.get("nodes", []):
+            states.setdefault(node["id"], {"status": NODE_STATUS_PENDING})
+        for nid, state in list(states.items()):
+            if isinstance(state, dict) and state.get("status") == NODE_STATUS_RUNNING:
+                states[nid] = _parked_node_state(state)
+        from jiuwenswarm.server.runtime.designer.handlers.common import uploaded_output_ref
+
+        for pred in execution_predecessors(graph).get(node_id, []):
+            uploaded = uploaded_output_ref(graph, pred)
+            if uploaded is not None:
+                states[pred] = {
+                    **(states.get(pred) or {}),
+                    "status": NODE_STATUS_COMPLETED,
+                    "output_ref": uploaded,
+                    "output_refs": [uploaded],
+                    "error": None,
+                    "blocked_by": [],
+                }
+                continue
+            state = states.get(pred) or {}
+            if state.get("status") != NODE_STATUS_COMPLETED or not _usable_ref(
+                state.get("output_ref")
+            ):
+                raise ValueError(f"upstream not ready: {pred}")
+        previous = states.get(node_id) or {}
+        states[node_id] = {
+            **_parked_node_state(previous),
+            "output_ref": previous.get("output_ref") if _usable_ref(previous.get("output_ref")) else None,
+            "output_refs": [ref for ref in (previous.get("output_refs") or []) if _usable_ref(ref)],
+        }
+        now = utc_now_ms()
+        run: DesignerExecutionRun = {
+            "schema_version": "designer-execution-run.v1",
+            "run_id": new_run_id(),
+            "graph_id": graph["graph_id"],
+            "project_id": graph["project_id"],
+            "status": RUN_STATUS_DRAFT,
+            "node_states": states,
+            "current_node_ids": [],
+            "created_at": now,
+            "updated_at": now,
+            "metadata": {"single_node_rerun": True, "scope_node_ids": [node_id]},
+        }
+        return self._store.save_run(run)
+
     async def start_run(
         self,
         run_id: str,
@@ -418,18 +474,31 @@ class GraphExecutor:
             require_media_models,
         )
 
+        scope = _scope_node_ids(run)
+        if scope and all(
+            (graph_node_states(run).get(node_id) or {}).get("status") in _TERMINAL_NODE_STATUSES
+            for node_id in scope
+        ):
+            # Continue after a ComfyUI generate means "run the rest of the canvas".
+            meta = dict(run.get("metadata") or {})
+            meta.pop("scope_node_ids", None)
+            run["metadata"] = meta
+            scope = []
+        scoped = bool(scope)
         # One local credential gate at Play entry (Work/Code checks before
         # spawning agents). Billing/API failures still surface on the model call.
-        require_llm()
-        # Incomplete image/video config blocks only when a yet-to-run leaf needs it.
-        # Runtime failures (credit, bad endpoint) still surface on the model call.
-        require_media_models(**_pending_media_modalities(graph, run))
+        # Scoped runs only drive ComfyUI nodes: no LLM, and their own vLLM-Omni URL.
+        if not scoped:
+            require_llm()
+            # Incomplete image/video config blocks only when a yet-to-run leaf needs it.
+            # Runtime failures (credit, bad endpoint) still surface on the model call.
+            require_media_models(**_pending_media_modalities(graph, run))
         run.pop("error", None)
         for node in graph.get("nodes") or []:
             cfg = node.setdefault("config", {})
             if not isinstance(cfg, dict):
                 continue
-            if is_user_reference_node(node) or cfg.get("force_handler"):
+            if is_user_reference_node(node) or is_comfyui_node(node) or cfg.get("force_handler"):
                 cfg["delegate"] = CONFIG_DELEGATE_HANDLER
                 cfg["force_handler"] = True
                 cfg["skip_llm"] = True
@@ -441,13 +510,14 @@ class GraphExecutor:
             cfg.pop("skip_llm", None)
             cfg["delegate"] = CONFIG_DELEGATE_AGENT
             cfg["kind"] = "agent"
-        await ensure_user_reference_routes(graph)
-        meta = dict(graph.get("metadata") or {})
-        # Lock before nodes run so a saved graph with the lock off cannot
-        # drop image nodes when the storyboard finishes.
-        meta["freeze_shot_topology"] = True
-        graph["metadata"] = meta
-        self._store.save_graph(graph)
+        if not scoped:
+            await ensure_user_reference_routes(graph)
+            meta = dict(graph.get("metadata") or {})
+            # Lock before nodes run so a saved graph with the lock off cannot
+            # drop image nodes when the storyboard finishes.
+            meta["freeze_shot_topology"] = True
+            graph["metadata"] = meta
+            self._store.save_graph(graph)
         run["status"] = RUN_STATUS_RUNNING
         run["updated_at"] = utc_now_ms()
         run = self._store.save_run(run)
@@ -705,7 +775,63 @@ class GraphExecutor:
         # with pending nodes — UI showed Continue. Leaf agents still run via
         # config.delegate=agent inside _run_single_node.
         _ = graph_uses_agent_scheduler  # retained import for callers/tests
+        if _scope_node_ids(run):
+            await self._execute_scoped_run(graph, run, on_update=on_update)
+            return
         await self._execute_wave_run(graph, run, on_update=on_update)
+
+    async def _execute_scoped_run(
+        self,
+        graph: DesignerExecutionGraph,
+        run: DesignerExecutionRun,
+        *,
+        on_update: RunUpdateCallback | None,
+    ) -> None:
+        """Run only the scoped nodes, in order, with no Director phase or ratings."""
+        run_id = run["run_id"]
+        scope = _scope_node_ids(run)
+        try:
+            for node_id in scope:
+                await self._await_pause(run_id)
+                if self._is_cancelled(run_id):
+                    return
+                run["current_node_ids"] = [node_id]
+                await self._run_single_node(
+                    graph,
+                    run,
+                    _node_by_id(graph, node_id),
+                    on_update=on_update,
+                )
+                if (run.get("node_states") or {}).get(node_id, {}).get(
+                    "status"
+                ) == NODE_STATUS_FAILED:
+                    break
+            if self._is_cancelled(run_id):
+                return
+            failed = any(
+                (run.get("node_states") or {}).get(node_id, {}).get("status")
+                != NODE_STATUS_COMPLETED
+                for node_id in scope
+            )
+            run["status"] = RUN_STATUS_FAILED if failed else RUN_STATUS_COMPLETED
+            if failed and not str(run.get("error") or "").strip():
+                run["error"] = f"node did not finish: {', '.join(scope)}"
+            run["current_node_ids"] = []
+            run["updated_at"] = utc_now_ms()
+            self._publish(run, on_update)
+            self._store.save_run(run)
+        except asyncio.CancelledError:
+            run = self.cancel_run(run_id)
+            self._publish(run, on_update)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Designer scoped run %s failed: %s", run_id, exc)
+            _stamp_run_failure(run, exc)
+            run["current_node_ids"] = []
+            self._publish(run, on_update)
+            self._store.save_run(run)
+        finally:
+            self._cleanup_run(run_id)
 
     async def _execute_agent_run(
         self,
@@ -1240,6 +1366,11 @@ class GraphExecutor:
                 if not in_flight:
                     if remaining:
                         run["status"] = RUN_STATUS_FAILED
+                        if not str(run.get("error") or "").strip():
+                            run["error"] = (
+                                "Nodes could not start because their inputs are not ready: "
+                                + ", ".join(sorted(remaining))
+                            )[:500]
                         run["updated_at"] = utc_now_ms()
                         self._publish(run, on_update)
                         self._store.save_run(run)
@@ -1938,7 +2069,14 @@ class GraphExecutor:
             or (node.get("config") or {}).get("role")
             or ""
         ).lower()
-        if role_for_gate in {"frame", "keyframe", "clip", "character", "character_design", "scene"}:
+        if not is_comfyui_node(node) and role_for_gate in {
+            "frame",
+            "keyframe",
+            "clip",
+            "character",
+            "character_design",
+            "scene",
+        }:
             from jiuwenswarm.server.runtime.designer.orchestration import Director
 
             live_graph = self._require_graph(
@@ -2057,6 +2195,7 @@ class GraphExecutor:
                 uses_agent = (
                     node_uses_agent_runtime(node)
                     and not is_user_reference_node(node)
+                    and not is_comfyui_node(node)
                     and not _director_text_ready(ctx.graph, node)
                 )
                 emit_activity(
@@ -2418,6 +2557,7 @@ def _pending_media_modalities(
     """Which generation backends a Play needs, from yet-to-run node modalities.
 
     Compose is video-typed but local ffmpeg — it does not need ``video_gen``.
+    ComfyUI nodes call the vLLM-Omni URL from their own workflow instead.
     """
     from jiuwenswarm.common.schema.designer_graph import is_compose_sink_node
 
@@ -2438,7 +2578,7 @@ def _pending_media_modalities(
         status = str((states.get(node_id) or {}).get("status") or NODE_STATUS_PENDING)
         if status in terminal:
             continue
-        if is_compose_sink_node(node):
+        if is_compose_sink_node(node) or is_comfyui_node(node):
             continue
         modality = str(node.get("type") or "").strip().lower()
         if modality == NODE_TYPE_IMAGE:
@@ -2446,6 +2586,28 @@ def _pending_media_modalities(
         elif modality == NODE_TYPE_VIDEO:
             needs_video = True
     return {"image": needs_image, "video": needs_video}
+
+
+def _parked_node_state(state: DesignerNodeState | dict[str, Any]) -> DesignerNodeState:
+    """Pending again, keeping the last output so the canvas does not blank."""
+    return {
+        "status": NODE_STATUS_PENDING,
+        "started_at": None,
+        "completed_at": None,
+        "output_ref": state.get("output_ref"),
+        "output_refs": list(state.get("output_refs") or []),
+        "error": None,
+        "blocked_by": [],
+    }
+
+
+def _scope_node_ids(run: DesignerExecutionRun) -> list[str]:
+    """Nodes a scoped run is limited to; empty for a regular Play or rerun."""
+    meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    raw = meta.get("scope_node_ids")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if str(item or "").strip()]
 
 
 def _usable_ref(ref: object) -> bool:

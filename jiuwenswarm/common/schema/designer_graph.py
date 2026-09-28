@@ -1873,6 +1873,15 @@ def node_uses_agent_runtime(node: DesignerGraphNode) -> bool:
     return node_delegate(node) != CONFIG_DELEGATE_HANDLER
 
 
+CONFIG_KEY_IS_COMFYUI = "is_comfyui"
+CONFIG_KEY_COMFYUI = "comfyui"
+
+
+def is_comfyui_node(node: Any) -> bool:
+    """Imported from a ComfyUI workflow: always a vLLM-Omni handler, never an agent."""
+    return isinstance(node, dict) and bool(node_config(node).get(CONFIG_KEY_IS_COMFYUI))
+
+
 def graph_uses_agent_scheduler(graph: DesignerExecutionGraph) -> bool:
     nodes = graph.get("nodes") or []
     if not nodes:

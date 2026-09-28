@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { DesignerTextEditor } from '../../DesignerTextEditor';
+import { isComfyuiNodeConfig } from '../../comfyuiWorkflow';
 import { useDesignerAssetLibraryStore } from '../../designerAssetLibraryStore';
 import { localPathToFileUri, uploadDesignerAsset } from '../../designerAssetUrl';
 import {
@@ -17,6 +18,8 @@ import {
   writeMediaGeneratePatch,
   writeMediaUploadPatch,
 } from '../../mediaNodeConfig';
+import type { DesignerComfyuiConfig } from '../../executionGraphTypes';
+import { DesignerComfyuiParamsForm } from './DesignerComfyuiParamsForm';
 import { DesignerMaterialStrip } from './DesignerMaterialStrip';
 
 type DesignerNodeToolbarProps = {
@@ -86,6 +89,10 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
     (state) => state.domainGraph?.nodes.find((node) => node.id === nodeId)?.config ?? {},
   );
   const media = readMediaConfig(config, nodeType);
+  const comfyui =
+    isMedia && isComfyuiNodeConfig(config)
+      ? ((config as { comfyui?: DesignerComfyuiConfig }).comfyui ?? null)
+      : null;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -310,10 +317,12 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
         >
           <DesignerMaterialStrip nodeId={nodeId} nodeType={nodeType} />
           <p className="designer-node-toolbar__prompt-hint" data-testid="designer-node-toolbar-prompt-hint">
-            {t('designer.toolbar.finalPromptHint', {
-              defaultValue:
-                'Shows the last prompt sent to the image/video tool. Edit before regenerate; the leaf agent may still lightly refine locks.',
-            })}
+            {comfyui
+              ? t('designer.comfyui.promptHint')
+              : t('designer.toolbar.finalPromptHint', {
+                  defaultValue:
+                    'Shows the last prompt sent to the image/video tool. Edit before regenerate; the leaf agent may still lightly refine locks.',
+                })}
           </p>
           <textarea
             className="designer-node-toolbar__prompt"
@@ -323,6 +332,7 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
             data-testid="designer-node-toolbar-prompt"
             onChange={(event) => patchGenerate({ prompt: event.target.value })}
           />
+          {comfyui ? <DesignerComfyuiParamsForm nodeId={nodeId} comfyui={comfyui} /> : null}
           <button
             type="button"
             className="designer-node-toolbar__action"

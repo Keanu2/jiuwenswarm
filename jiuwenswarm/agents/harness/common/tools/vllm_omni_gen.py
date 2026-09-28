@@ -15,6 +15,11 @@ The served id matters twice:
 Only MiniMax-H3 is registered for now. When the served model is not in the
 registry, no ``extra_params`` is built and a plain generic request is sent.
 
+Callers that carry explicit request knobs (ComfyUI-imported nodes) pass them
+as ``**extra_fields``: top-level request fields such as sampling params, which
+override the spec-built ones, the same way the ComfyUI-vLLM-Omni plugin adds
+sampling params to the payload as-is.
+
 References: vLLM-Omni ``docs/serving/videos_api.md``,
 ``docs/serving/image_generation_api.md``, ``docs/serving/image_edit_api.md``
 and ``recipes/MiniMaxAI/MiniMax-H3.md``.
@@ -31,7 +36,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -62,6 +67,33 @@ _VIDEO_FPS = 24
 
 # H3 reference images accept up to 30 MiB each (recipe limit).
 _MAX_REFERENCE_BYTES = 30 * 1024 * 1024
+
+# Ref2VA reference limits (ComfyUI-vLLM-Omni ``utils/types.py``).
+_MAX_REFERENCE_IMAGES = 9
+_MAX_REFERENCE_VIDEOS = 3
+_MAX_REFERENCE_AUDIOS = 3
+_MAX_TOTAL_REFERENCES = 12
+
+# Fields the request builders own; ``extra_fields`` may not replace them.
+_RESERVED_REQUEST_FIELDS = frozenset(
+    {"prompt", "model", "extra_params", "input_reference", "input_references", "image"}
+)
+
+
+def _form_value(value: Any) -> str:
+    """Multipart text for one request field."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _checked_extra_fields(extra_fields: Mapping[str, Any]) -> dict[str, Any]:
+    reserved = sorted(set(extra_fields) & _RESERVED_REQUEST_FIELDS)
+    if reserved:
+        raise ValueError(f"vLLM-Omni extra fields may not override: {', '.join(reserved)}")
+    return {key: value for key, value in extra_fields.items() if value is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +188,7 @@ class VllmOmniVideoInputs:
     duration: int | float | None
     resolution: str | None
     has_references: bool
+    fps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -293,6 +326,14 @@ def _build_generic_video_form(inputs: VllmOmniVideoInputs) -> VllmOmniVideoForm:
     """Unregistered model: only OpenAI-style fields, never extra_params."""
     fields: dict[str, str] = {}
     parsed = _parse_size(inputs.size)
+    if inputs.fps:
+        # An explicit fps means an explicit frame lattice (ComfyUI Generate Video).
+        if parsed is not None:
+            fields["width"] = str(parsed[0])
+            fields["height"] = str(parsed[1])
+        if inputs.duration:
+            fields["num_frames"] = str(max(1, round(float(inputs.duration) * inputs.fps)))
+        return VllmOmniVideoForm(fields=fields, extra_params=None)
     if parsed is not None:
         fields["size"] = f"{parsed[0]}x{parsed[1]}"
     if inputs.duration:
@@ -305,11 +346,13 @@ def _build_generic_video_form(inputs: VllmOmniVideoInputs) -> VllmOmniVideoForm:
 # ---------------------------------------------------------------------------
 
 
-def _guess_image_mime(name: str) -> str:
+def _guess_mime(name: str, default_mime: str = "image/png") -> str:
+    """Guessed MIME of ``name`` when it shares ``default_mime``'s major type."""
     mime, _ = mimetypes.guess_type(name)
-    if mime and mime.startswith("image/"):
+    major = default_mime.split("/", 1)[0]
+    if mime and mime.startswith(f"{major}/"):
         return mime
-    return "image/png"
+    return default_mime
 
 
 def _local_reference_path(value: str) -> Path | None:
@@ -326,20 +369,23 @@ def _local_reference_path(value: str) -> Path | None:
     return candidate.resolve()
 
 
-def _read_reference_bytes(reference: str) -> tuple[str, bytes, str] | None:
-    """Load one reference image as ``(filename, bytes, mime)``; None if unreadable."""
+def _read_reference_bytes(
+    reference: str,
+    default_mime: str = "image/png",
+) -> tuple[str, bytes, str] | None:
+    """Load one reference file as ``(filename, bytes, mime)``; None if unreadable."""
     value = (reference or "").strip()
     if not value:
         return None
     if value.startswith("data:"):
         try:
             header, payload = value.split(",", 1)
-            mime = header[len("data:"):].split(";")[0] or "image/png"
+            mime = header[len("data:"):].split(";")[0] or default_mime
             raw = base64.b64decode(payload)
         except Exception:
             logger.warning("[vLLM-Omni] undecodable data: reference skipped")
             return None
-        ext = mimetypes.guess_extension(mime) or ".png"
+        ext = mimetypes.guess_extension(mime) or ""
         return (f"reference{ext}", raw, mime)
     if value.startswith(("http://", "https://")):
         try:
@@ -354,8 +400,8 @@ def _read_reference_bytes(reference: str) -> tuple[str, bytes, str] | None:
             logger.warning("[vLLM-Omni] reference download failed: %s", value[:120])
             return None
         raw = response.content
-        name = Path(unquote(urlparse(value).path)).name or "reference.png"
-        return (name, raw, _guess_image_mime(name))
+        name = Path(unquote(urlparse(value).path)).name or "reference"
+        return (name, raw, _guess_mime(name, default_mime))
     local = _local_reference_path(value)
     if local is None:
         logger.warning("[vLLM-Omni] reference is not a readable local file: %s", value[:120])
@@ -365,7 +411,36 @@ def _read_reference_bytes(reference: str) -> tuple[str, bytes, str] | None:
     except OSError:
         logger.warning("[vLLM-Omni] reference read failed: %s", local)
         return None
-    return (local.name, raw, _guess_image_mime(str(local)))
+    return (local.name, raw, _guess_mime(str(local), default_mime))
+
+
+def _load_media_references(
+    items: list[str | None],
+    *,
+    limit: int,
+    default_mime: str,
+    max_bytes: int | None = _MAX_REFERENCE_BYTES,
+) -> list[tuple[str, bytes, str]]:
+    """Deduped readable references of one media kind, capped at ``limit``."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = (item or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    references: list[tuple[str, bytes, str]] = []
+    for item in ordered:
+        loaded = _read_reference_bytes(item, default_mime)
+        if loaded is None:
+            continue
+        if max_bytes is not None and len(loaded[1]) > max_bytes:
+            logger.warning("[vLLM-Omni] reference exceeds 30 MiB, skipped: %s", loaded[0])
+            continue
+        references.append(loaded)
+        if len(references) >= limit:
+            break
+    return references
 
 
 def _load_video_references(
@@ -373,25 +448,11 @@ def _load_video_references(
     reference_images: list[str] | None,
 ) -> list[tuple[str, bytes, str]]:
     """First frame + reference images, deduped, capped at the H3 image limit."""
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for item in [first_frame, *(reference_images or [])]:
-        value = (item or "").strip()
-        if value and value not in seen:
-            seen.add(value)
-            ordered.append(value)
-    references: list[tuple[str, bytes, str]] = []
-    for item in ordered:
-        loaded = _read_reference_bytes(item)
-        if loaded is None:
-            continue
-        if len(loaded[1]) > _MAX_REFERENCE_BYTES:
-            logger.warning("[vLLM-Omni] reference exceeds 30 MiB, skipped: %s", loaded[0])
-            continue
-        references.append(loaded)
-        if len(references) >= 9:  # H3 accepts at most 9 images.
-            break
-    return references
+    return _load_media_references(
+        [first_frame, *(reference_images or [])],
+        limit=_MAX_REFERENCE_IMAGES,
+        default_mime="image/png",
+    )
 
 
 def _reference_files_payload(
@@ -429,12 +490,24 @@ def invoke_vllm_omni_video_generation_sync(
     api_base: str,
     model: str,
     size: str | None,
-    duration: int,
+    duration: int | float,
     resolution: str | None,
     first_frame: str | None = None,
     reference_images: list[str] | None = None,
+    reference_videos: list[str] | None = None,
+    reference_audios: list[str] | None = None,
+    fps: int | None = None,
+    negative_prompt: str | None = None,
+    extra_params: Mapping[str, Any] | None = None,
+    **extra_fields: Any,
 ) -> dict[str, Any]:
-    """vLLM-Omni async video generation (``POST /v1/videos`` + poll + download)."""
+    """vLLM-Omni async video generation (``POST /v1/videos`` + poll + download).
+
+    ``fps`` replaces the pinned provider fps; ``extra_params`` merges over the
+    spec-built ``extra_params`` JSON; ``extra_fields`` are top-level request
+    fields (sampling / model params) that override the spec-built ones.
+    """
+    overrides = _checked_extra_fields(extra_fields)
     base = (api_base or "").strip().rstrip("/")
     if not base:
         raise ValueError("VIDEO_GEN_API_BASE is required for the vLLM-Omni backend.")
@@ -451,29 +524,53 @@ def invoke_vllm_omni_video_generation_sync(
             served_model_id,
         )
 
-    references = _load_video_references(first_frame, reference_images)
-    if (first_frame or reference_images) and not references:
+    images = _load_video_references(first_frame, reference_images)
+    videos = _load_media_references(
+        list(reference_videos or []),
+        limit=_MAX_REFERENCE_VIDEOS,
+        default_mime="video/mp4",
+        max_bytes=None,
+    )
+    audios = _load_media_references(
+        list(reference_audios or []),
+        limit=_MAX_REFERENCE_AUDIOS,
+        default_mime="audio/mpeg",
+        max_bytes=None,
+    )
+    requested = bool(first_frame or reference_images or reference_videos or reference_audios)
+    if requested and not (images or videos or audios):
         raise ValueError(
-            "reference images were provided but none could be read as local files or URLs."
+            "reference files were provided but none could be read as local files or URLs."
         )
+    if audios and not (images or videos):
+        raise ValueError(
+            "vLLM-Omni references need at least one image or video; audio-only is not supported."
+        )
+    references = [*images, *videos, *audios][:_MAX_TOTAL_REFERENCES]
     inputs = VllmOmniVideoInputs(
         size=size,
         duration=duration,
         resolution=resolution,
         has_references=bool(references),
+        fps=fps,
     )
     form = spec.build(inputs) if spec else _build_generic_video_form(inputs)
 
     fields: dict[str, str] = {
         "prompt": prompt,
-        "fps": str(_VIDEO_FPS),
+        "fps": str(fps or _VIDEO_FPS),
         **form.fields,
     }
+    if negative_prompt:
+        fields["negative_prompt"] = negative_prompt
+    fields.update({key: _form_value(value) for key, value in overrides.items()})
     if model_to_send:
         fields["model"] = model_to_send
-    if form.extra_params:
-        # No seed / quality: reproducibility and cache policies stay server-side.
-        fields["extra_params"] = json.dumps(form.extra_params, ensure_ascii=False)
+    merged_extra_params = {**(form.extra_params or {}), **(extra_params or {})}
+    if merged_extra_params:
+        # Without explicit extra fields there is no seed / quality: reproducibility
+        # and cache policies stay server-side.
+        fields["extra_params"] = json.dumps(merged_extra_params, ensure_ascii=False)
     files = _reference_files_payload(references)
 
     logger.info(
@@ -587,13 +684,17 @@ def invoke_vllm_omni_image_generation_sync(
     model: str,
     size: str | None,
     reference_images: list[str] | None = None,
+    negative_prompt: str | None = None,
+    **extra_fields: Any,
 ) -> dict[str, Any]:
     """vLLM-Omni image generation.
 
     Plain prompt rides text-to-image (``POST /v1/images/generations``, JSON);
     with reference images it rides image-to-image (``POST /v1/images/edits``,
-    multipart, repeated ``image`` fields). No seed / quality is ever sent.
+    multipart, repeated ``image`` fields). Seed / quality are only sent when a
+    caller passes them in ``extra_fields`` (top-level request fields).
     """
+    overrides = _checked_extra_fields(extra_fields)
     base = (api_base or "").strip().rstrip("/")
     if not base:
         raise ValueError("IMAGE_GEN_API_BASE is required for the vLLM-Omni backend.")
@@ -618,6 +719,9 @@ def invoke_vllm_omni_image_generation_sync(
             fields["model"] = model_to_send
         if parsed is not None:
             fields["size"] = f"{parsed[0]}x{parsed[1]}"
+        if negative_prompt:
+            fields["negative_prompt"] = negative_prompt
+        fields.update({key: _form_value(value) for key, value in overrides.items()})
         files = [("image", item) for item in references]
         logger.info(
             "[vLLM-Omni] image edit model=%s size=%s refs=%d",
@@ -639,6 +743,9 @@ def invoke_vllm_omni_image_generation_sync(
             payload["size"] = f"{parsed[0]}x{parsed[1]}"
         if model_to_send:
             payload["model"] = model_to_send
+        if negative_prompt:
+            payload["negative_prompt"] = negative_prompt
+        payload.update(overrides)
         logger.info("[vLLM-Omni] image create model=%s size=%s", model_to_send, payload.get("size"))
         response = _http_request(
             "POST",

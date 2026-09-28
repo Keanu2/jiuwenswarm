@@ -9,7 +9,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 from fastmcp import FastMCP
@@ -414,14 +414,24 @@ async def _invoke_model_image_generation(
     quality: str = "standard",
     reference_images: list[str] | None = None,
     max_tries: int = 3,
+    *,
+    model_override: str | None = None,
+    provider_override: Literal["vllm-omni"] | None = None,
+    api_base_override: str | None = None,
+    **backend_options: Any,
 ) -> dict:
     """
-    Generate image via DashScope / MiniMax / 火山方舟 Seedream.
+    Generate image via DashScope / MiniMax / 火山方舟 Seedream / vLLM-Omni.
 
     Args:
         prompt: The text description for image generation
         size: Image size, e.g., "256x256", "512x512", "1024x1024"
         quality: Image quality, "standard" or "hd"
+        provider_override: Pin the backend regardless of ``models.image_gen``;
+            the configured key / base / model are only reused when they belong
+            to that same backend.
+        backend_options: Forwarded to the vLLM-Omni request (negative prompt,
+            sampling params).
 
     Returns:
         dict with 'image_path' or 'error' key
@@ -461,6 +471,16 @@ async def _invoke_model_image_generation(
         api_base=api_base,
         model=model,
     )
+    if provider_override and provider_override != backend:
+        # Credentials of another vendor must never reach the pinned backend.
+        api_key, api_base, model = "", "", ""
+        backend = provider_override
+    if model_override and model_override.strip():
+        model = model_override.strip()
+    if api_base_override and api_base_override.strip():
+        api_base = api_base_override.strip()
+    if backend_options and backend != "vllm-omni":
+        return {"error": "[ERROR]: extra image request options are only supported by vLLM-Omni."}
     if backend != "vllm-omni":
         # vLLM-Omni is self-deployed: the API key is optional and the model
         # name may be omitted (resolved via GET {api_base}/models instead).
@@ -497,6 +517,7 @@ async def _invoke_model_image_generation(
                 model=model,
                 size=size,
                 reference_images=reference_images,
+                **backend_options,
             )
         if backend == "volcengine":
             return await asyncio.to_thread(

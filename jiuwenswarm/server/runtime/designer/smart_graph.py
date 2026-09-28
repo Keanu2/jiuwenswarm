@@ -96,6 +96,7 @@ def apply_runtime_delegate(graph: DesignerExecutionGraph) -> DesignerExecutionGr
     from jiuwenswarm.common.schema.designer_graph import (
         CONFIG_DELEGATE_AGENT,
         CONFIG_DELEGATE_HANDLER,
+        is_comfyui_node,
     )
     from jiuwenswarm.server.runtime.designer.user_references import (
         is_user_reference_node,
@@ -107,7 +108,7 @@ def apply_runtime_delegate(graph: DesignerExecutionGraph) -> DesignerExecutionGr
         config = node.setdefault("config", {})
         if not isinstance(config, dict):
             continue
-        if is_user_reference_node(node) or config.get("force_handler"):
+        if is_user_reference_node(node) or is_comfyui_node(node) or config.get("force_handler"):
             config["delegate"] = CONFIG_DELEGATE_HANDLER
             config["force_handler"] = True
             config["skip_llm"] = True

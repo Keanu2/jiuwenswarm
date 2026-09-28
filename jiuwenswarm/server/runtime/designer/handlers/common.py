@@ -318,6 +318,7 @@ def apply_uploaded_outputs_to_run(run: dict, graph: dict) -> bool:
 
 _TEXT_SUFFIXES = {".md", ".txt", ".markdown", ".csv"}
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+_AUDIO_SUFFIXES = {".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a"}
 _TEXT_KINDS = {"text", "markdown", "storyboard", "brief"}
 
 
@@ -340,6 +341,8 @@ def _file_kind(path: Path, ref: dict | None = None) -> str:
         return "image"
     if kind == "video" or mime.startswith("video/") or suffix in _VIDEO_SUFFIXES:
         return "video"
+    if kind == "audio" or mime.startswith("audio/") or suffix in _AUDIO_SUFFIXES:
+        return "audio"
     if kind in _TEXT_KINDS or mime.startswith("text/") or suffix in _TEXT_SUFFIXES:
         return "text"
     return ""
@@ -387,6 +390,22 @@ def _locked_replacement_refs(graph: dict | None, node_id: str) -> list[dict] | N
     if path is not None and path.is_file():
         return [dict(ref)]
     return []
+
+
+def uploaded_output_ref(graph: dict | None, node_id: str) -> dict | None:
+    """Run output ref for the media file the user uploaded over this node, if it exists."""
+    refs = _locked_replacement_refs(graph, node_id)
+    if not refs:
+        return None
+    ref = dict(refs[0])
+    path = path_from_uri(str(ref.get("uri") or ""))
+    if path is None:
+        return None
+    kind = _file_kind(path, ref)
+    if kind not in {"image", "video", "audio"}:
+        return None
+    ref["kind"] = kind
+    return ref
 
 
 def _graph_saved_refs(node: dict | None) -> list[dict]:
@@ -541,7 +560,7 @@ def predecessor_outputs(
                 if body:
                     items.append(PredecessorOutput(source_id, role, label, "text", resolved, body))
                 continue
-            if kind in {"image", "video"}:
+            if kind in {"image", "video", "audio"}:
                 items.append(PredecessorOutput(source_id, role, label, kind, resolved, ""))
     return items
 

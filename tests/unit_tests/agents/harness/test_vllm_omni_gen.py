@@ -472,3 +472,130 @@ def test_invoke_image_with_unreadable_references_raises(
             size=None,
             reference_images=["/nonexistent/missing.png"],
         )
+
+
+def test_invoke_video_comfyui_extras_become_form_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUg=="))
+    clip = tmp_path / "motion.mp4"
+    clip.write_bytes(b"mp4")
+    voice = tmp_path / "voice.mp3"
+    voice.write_bytes(b"mp3")
+    posts: list[dict] = []
+
+    def fake_request(method: str, url: str, **kwargs):
+        if method == "GET" and url.endswith("/models"):
+            return _Resp(True, {"data": [{"id": "Wan-AI/Wan2.2-T2V-A14B-Diffusers"}]})
+        if method == "POST" and url.endswith("/videos"):
+            posts.append(kwargs)
+            return _Resp(True, {"id": "video-6", "status": "queued"})
+        if method == "GET" and url.endswith("/videos/video-6"):
+            return _Resp(True, {"id": "video-6", "status": "completed"})
+        if method == "GET" and url.endswith("/videos/video-6/content"):
+            return _Resp(True, {}, content=b"mp4-bytes")
+        raise AssertionError(f"unexpected request {method} {url}")
+
+    monkeypatch.setattr(vllm_omni_gen, "_http_request", fake_request)
+    monkeypatch.setattr(vllm_omni_gen, "get_agent_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(vllm_omni_gen.time, "sleep", lambda *_: None)
+
+    result = vllm_omni_gen.invoke_vllm_omni_video_generation_sync(
+        "a boat",
+        api_key="",
+        api_base="http://127.0.0.1:8091/v1",
+        model="",
+        size="832x480",
+        duration=2.5,
+        resolution=None,
+        reference_images=[str(ref)],
+        reference_videos=[str(clip)],
+        reference_audios=[str(voice)],
+        fps=16,
+        negative_prompt="blurry",
+        extra_params={"audio_flow_shift": 2.0},
+        num_inference_steps=30,
+        vae_use_tiling=True,
+        boundary_ratio=0.875,
+    )
+
+    assert "video_path" in result
+    fields = posts[0]["data"]
+    assert fields["width"] == "832"
+    assert fields["height"] == "480"
+    assert fields["fps"] == "16"
+    assert fields["num_frames"] == "40"
+    assert "size" not in fields and "seconds" not in fields
+    assert fields["negative_prompt"] == "blurry"
+    assert fields["num_inference_steps"] == "30"
+    assert fields["vae_use_tiling"] == "true"
+    assert fields["boundary_ratio"] == "0.875"
+    assert json.loads(fields["extra_params"]) == {"audio_flow_shift": 2.0}
+    names = [item[1][0] for item in posts[0]["files"]]
+    assert names == ["ref.png", "motion.mp4", "voice.mp3"]
+
+
+def test_invoke_video_rejects_reserved_extra_fields(tmp_path) -> None:
+    with pytest.raises(ValueError, match="prompt"):
+        vllm_omni_gen.invoke_vllm_omni_video_generation_sync(
+            "a boat",
+            api_key="",
+            api_base="http://127.0.0.1:8091/v1",
+            model="",
+            size=None,
+            duration=5,
+            resolution=None,
+            prompt="shadowed",
+        )
+
+
+def test_invoke_video_audio_only_references_raise(tmp_path) -> None:
+    voice = tmp_path / "voice.mp3"
+    voice.write_bytes(b"mp3")
+    with pytest.raises(ValueError, match="audio-only"):
+        vllm_omni_gen.invoke_vllm_omni_video_generation_sync(
+            "a boat",
+            api_key="",
+            api_base="http://127.0.0.1:8091/v1",
+            model="m",
+            size=None,
+            duration=5,
+            resolution=None,
+            reference_audios=[str(voice)],
+        )
+
+
+def test_invoke_image_comfyui_extras_join_the_json_payload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    posts: list[dict] = []
+    png_b64 = base64.b64encode(b"png-bytes").decode("ascii")
+
+    def fake_request(method: str, url: str, **kwargs):
+        if method == "POST" and url.endswith("/images/generations"):
+            posts.append(kwargs)
+            return _Resp(True, {"data": [{"b64_json": png_b64}]})
+        raise AssertionError(f"unexpected request {method} {url}")
+
+    monkeypatch.setattr(vllm_omni_gen, "_http_request", fake_request)
+    monkeypatch.setattr(vllm_omni_gen, "get_agent_workspace_dir", lambda: tmp_path)
+
+    vllm_omni_gen.invoke_vllm_omni_image_generation_sync(
+        "a dragon",
+        api_key="",
+        api_base="http://127.0.0.1:8000/v1",
+        model="Qwen-Image",
+        size="768x512",
+        negative_prompt="text",
+        seed=7,
+        guidance_scale=4.0,
+        vae_use_slicing=False,
+    )
+
+    payload = posts[0]["json"]
+    assert payload["size"] == "768x512"
+    assert payload["negative_prompt"] == "text"
+    assert payload["seed"] == 7
+    assert payload["guidance_scale"] == 4.0
+    assert payload["vae_use_slicing"] is False
