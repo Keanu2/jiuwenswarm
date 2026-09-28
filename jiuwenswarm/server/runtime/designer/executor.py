@@ -30,6 +30,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_STATUS_FAILED,
     NODE_STATUS_PENDING,
     NODE_STATUS_RUNNING,
+    NODE_TYPE_AUDIO,
     NODE_TYPE_IMAGE,
     NODE_TYPE_VIDEO,
     RUN_STATUS_CANCELLED,
@@ -70,7 +71,7 @@ from jiuwenswarm.server.runtime.designer.node_agent import NodeAgentHost, NodeAg
 from jiuwenswarm.server.runtime.designer.user_references import (
     carry_user_references,
     ensure_user_reference_routes,
-    is_user_reference_node,
+    is_uploaded_media_node,
 )
 
 logger = logging.getLogger(__name__)
@@ -485,6 +486,11 @@ class GraphExecutor:
             run["metadata"] = meta
             scope = []
         scoped = bool(scope)
+        _reject_pending_audio_generation(
+            graph,
+            run,
+            node_ids=set(scope) if scoped else None,
+        )
         # One local credential gate at Play entry (Work/Code checks before
         # spawning agents). Billing/API failures still surface on the model call.
         # Scoped runs only drive ComfyUI nodes: no LLM, and their own vLLM-Omni URL.
@@ -498,11 +504,11 @@ class GraphExecutor:
             cfg = node.setdefault("config", {})
             if not isinstance(cfg, dict):
                 continue
-            if is_user_reference_node(node) or is_comfyui_node(node) or cfg.get("force_handler"):
+            if is_uploaded_media_node(node) or is_comfyui_node(node) or cfg.get("force_handler"):
                 cfg["delegate"] = CONFIG_DELEGATE_HANDLER
                 cfg["force_handler"] = True
                 cfg["skip_llm"] = True
-                if is_user_reference_node(node):
+                if is_uploaded_media_node(node):
                     cfg["read_only"] = True
                     cfg["immutable_source"] = True
                 continue
@@ -2194,7 +2200,7 @@ class GraphExecutor:
                 # too and do not call the leaf model again.
                 uses_agent = (
                     node_uses_agent_runtime(node)
-                    and not is_user_reference_node(node)
+                    and not is_uploaded_media_node(node)
                     and not is_comfyui_node(node)
                     and not _director_text_ready(ctx.graph, node)
                 )
@@ -2548,6 +2554,39 @@ def redistribute_frame_node_states(run: DesignerExecutionRun, shot_count: int) -
             state["output_ref"] = images[0]
             state["output_refs"] = [images[0]]
         states[node_id] = state
+
+
+def _reject_pending_audio_generation(
+    graph: DesignerExecutionGraph,
+    run: DesignerExecutionRun,
+    *,
+    node_ids: set[str] | None = None,
+) -> None:
+    """Fail Play before any work starts when an audio node needs generation."""
+    states = run.get("node_states") or {}
+    if not isinstance(states, dict):
+        states = {}
+    terminal = {
+        NODE_STATUS_COMPLETED,
+        NODE_STATUS_FAILED,
+        NODE_STATUS_CANCELLED,
+    }
+    unsupported: list[str] = []
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("type") or "") != NODE_TYPE_AUDIO:
+            continue
+        node_id = str(node.get("id") or "")
+        if node_ids is not None and node_id not in node_ids:
+            continue
+        status = str((states.get(node_id) or {}).get("status") or NODE_STATUS_PENDING)
+        if status in terminal or is_uploaded_media_node(node):
+            continue
+        unsupported.append(str(node.get("label") or node_id or "Audio"))
+    if unsupported:
+        raise NotImplementedError(
+            "Audio generation is not implemented. Upload audio content before running: "
+            + ", ".join(unsupported)
+        )
 
 
 def _pending_media_modalities(

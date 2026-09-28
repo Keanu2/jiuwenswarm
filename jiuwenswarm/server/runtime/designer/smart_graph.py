@@ -27,7 +27,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_FRAME,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
-    NODE_TYPE_AUDIO,
     NODE_TYPE_IMAGE,
     NODE_TYPE_TABLE,
     NODE_TYPE_TEXT,
@@ -1780,14 +1779,14 @@ def build_smart_video_graph(
         prev_shot_by_setting[setting_id] = shot_id
         prev_shot_global = shot_id
 
-    audio_ids: list[str] = []
-    film_sec = max(6, int(film_duration or max(6, len(shots) * 5)))
-    # Audio routing: separate nodes only when backends exist; else fold into shots.
+    # Audio routing records backend capabilities but keeps sound clip-native.
     from jiuwenswarm.server.runtime.designer.capabilities import detect_audio_backends
 
     backends = detect_audio_backends()
     can_speech = bool(backends.get("can_speech"))
     can_music = bool(backends.get("can_music"))
+    # Keep requested sound in clip-native prompts. Audio generation is not
+    # implemented, so generated graphs must never add speech/music canvas nodes.
     clip_embedded = False
     if audio.get("policy") != "silent":
         want_speech = bool(audio.get("include_speech"))
@@ -1795,70 +1794,7 @@ def build_smart_video_graph(
             audio.get("include_music")
             or audio.get("policy") in {"optional_music", "music", "speech_and_music"}
         )
-        if want_speech and not can_speech:
-            clip_embedded = True
-            want_speech = False
-        if want_music and not can_music:
-            # BGM is one film-wide bed mixed after concat, so the node survives
-            # and writes a silent placeholder until a music API is configured.
-            clip_embedded = True
-        if want_speech:
-            audio_ids.append("n_speech")
-            nodes.append(
-                {
-                    "id": "n_speech",
-                    "type": NODE_TYPE_AUDIO,
-                    "label": "Speech / TTS",
-                    "config": {
-                        "role": "speech",
-                        "prompt": prompt_text,
-                        "inputs": ["n_brief", "n_storyboard"],
-                        "optimize_for": mode,
-                        "agent_name": "Speech Agent",
-                        "kind": "agent",
-                        "skill_id": "speech_tts",
-                        "tools": ["call_speech_model", "read_upstream", "call_model"],
-                        "delegate": "agent",
-                        "film_duration_sec": film_sec,
-                    },
-                    "layout": {"x": 1320, "y": float(40 + len(shots) * 160), "width": 220, "height": 120},
-                }
-            )
-            edges.append(_edge("e_sb_speech", "n_storyboard", "n_speech"))
-            edges.append(_edge("e_brief_speech", "n_brief", "n_speech"))
-        if want_music:
-            audio_ids.append("n_music")
-            nodes.append(
-                {
-                    "id": "n_music",
-                    "type": NODE_TYPE_AUDIO,
-                    "label": "Music / BGM",
-                    "config": {
-                        "role": "music",
-                        "prompt": prompt_text,
-                        "inputs": ["n_brief", "n_storyboard"],
-                        "optimize_for": mode,
-                        "agent_name": "Music Agent",
-                        "kind": "agent",
-                        "skill_id": "audio_bed",
-                        "tools": ["call_music_model", "read_upstream", "call_model"],
-                        "delegate": (
-                            "agent" if can_music else "handler"
-                        ),
-                        "force_handler": not can_music,
-                        "placeholder_until_api": not can_music,
-                        "film_duration_sec": film_sec,
-                    },
-                    "layout": {
-                        "x": 1320,
-                        "y": float(40 + (len(shots) + 1) * 160),
-                        "width": 220,
-                        "height": 120,
-                    },
-                }
-            )
-            edges.append(_edge("e_sb_music", "n_storyboard", "n_music"))
-            edges.append(_edge("e_brief_music", "n_brief", "n_music"))
+        clip_embedded = want_speech or want_music
         if clip_embedded:
             from jiuwenswarm.server.runtime.designer.audio_locks import stamp_audio_fields_on_clip_config
 
@@ -1894,11 +1830,8 @@ def build_smart_video_graph(
                 chain_prior_speech_across_clips({"nodes": nodes})
             except Exception:  # noqa: BLE001
                 pass
-            # Prefer clip-native audio when TTS/BGM backends are missing (capability-gated).
-            # (Stamped again on metadata below.)
-            pass
 
-    compose_inputs = [*shot_ids, *audio_ids]
+    compose_inputs = list(shot_ids)
     nodes.append(
         {
             "id": "n_compose",
@@ -1946,8 +1879,8 @@ def build_smart_video_graph(
                 "can_music": can_music,
                 "can_video_audio": bool(backends.get("can_video_audio", True)),
                 "video_audio_model": str(backends.get("video_audio_model") or ""),
-                "speech_nodes": "n_speech" in audio_ids,
-                "music_nodes": "n_music" in audio_ids,
+                "speech_nodes": False,
+                "music_nodes": False,
             },
             "language_lock": str(
                 analysis.get("language_lock") or audio.get("language_lock") or "en"

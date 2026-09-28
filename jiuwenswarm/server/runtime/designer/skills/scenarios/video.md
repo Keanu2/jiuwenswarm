@@ -1,12 +1,12 @@
 ---
 name: designer-scenario-video
-description: Guide video graph composition and shot pipeline (R2V shots, optional speech/music/silence).
+description: Guide video graph composition and shot pipeline (R2V shots with clip-native sound).
 ---
 
 # Designer Video Scenario Skill
 
 ## Goal
-Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard → Clips (R2V) → Compose, with optional speech/music.
+Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard → Clips (R2V) → Compose.
 
 ## Graph creation rules
 1. Always keep a Brief agent first.
@@ -17,15 +17,15 @@ Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard
 6. Named director styles live in `metadata.video_style` (e.g. `final_frame_reverse` = reference still is the LAST 1s endpoint; reverse-form the action; see `skills/styles/`).
 
 ## Audio policy
-- If user says **no sound / silent / mute / 无声**: set `audio_intent.policy=silent`; do not add speech or music nodes; tell clip/compose agents to avoid implied dialogue.
-- If user asks for **speech / voiceover / narration / 配音**: add Speech/TTS agent after storyboard; feed script into mix.
-- If user asks for **music / BGM / 配乐**: add Music/bed agent; duck under speech if both exist.
-- Default for unspecified video: optional soft bed, no forced dialogue.
+- Do not create audio, speech, TTS, music, or BGM nodes.
+- Keep requested dialogue or sound direction in clip-native video prompts.
+- Users may manually add an Audio node, upload a file, and connect it to Compose.
+- If user says **no sound / silent / mute / 无声**, tell clip/compose agents to avoid implied dialogue.
 
 ## Model capabilities to exploit
 - Image: t2i and i2i/editing (character consistency).
 - Video: reference-to-video (solos + scene specs).
-- Audio/speech: TTS when speech is requested.
+- Audio/speech: use clip-native video audio when supported.
 
 ## Quality bar
 Cinematic lighting, consistent identity, readable action, configured resolution clips, coherent continuity across shots.

@@ -118,8 +118,11 @@ NODE_HANDLERS: dict[str, NodeHandler] = {
 
 
 def resolve_handler_key(node: DesignerGraphNode) -> str:
-    config = node.get("config") if isinstance(node, dict) else None
-    if isinstance(config, dict) and str(config.get("user_reference_id") or "").strip():
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        is_uploaded_media_node,
+    )
+
+    if is_uploaded_media_node(node):
         return HANDLER_KEY_USER_REFERENCE
     if is_comfyui_node(node):
         if node.get("type") == NODE_TYPE_VIDEO:

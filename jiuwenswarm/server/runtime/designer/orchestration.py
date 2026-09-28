@@ -560,107 +560,18 @@ def _director_reedit_artifacts_after_prune(
 
 
 def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
-    """If audio intent / analysis asks for speech or music, ensure nodes exist."""
-    from jiuwenswarm.common.schema.designer_graph import NODE_TYPE_AUDIO
-
-    notes: list[str] = []
-    meta = dict(graph.get("metadata") or {})
-    audio = dict(meta.get("audio_intent") or {})
-    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
-    analysis_audio = analysis.get("audio") if isinstance(analysis.get("audio"), dict) else {}
-    want_speech = bool(audio.get("include_speech") or analysis_audio.get("include_speech"))
-    # Explicit False on either intent or analysis wins (StrictGate / speech-only).
-    explicit_no_music = (
-        audio.get("include_music") is False or analysis_audio.get("include_music") is False
-    )
-    policy = str(audio.get("policy") or analysis_audio.get("policy") or "")
-    want_music = (not explicit_no_music) and bool(
-        audio.get("include_music")
-        or analysis_audio.get("include_music")
-        or policy in {"optional_music", "music", "speech_and_music"}
-    )
-    # Audible bed when speech is already requested — never scan prompt for topic nouns.
-    if not explicit_no_music and policy != "silent" and want_speech:
-        want_music = True
-        policy = "speech_and_music"
-    if policy in {"silent", "speech"} and explicit_no_music:
-        want_music = False
-    if policy == "silent":
-        return notes
-
-    nodes = list(graph.get("nodes") or [])
-    edges = list(graph.get("edges") or [])
-    existing = {str(n.get("id") or "") for n in nodes}
-    brief_id = "n_brief" if "n_brief" in existing else None
-    compose_id = "n_compose" if "n_compose" in existing else ("n_final" if "n_final" in existing else None)
-    mode = str(meta.get("optimize_for") or "quality")
-
-    def _add(node_id: str, label: str, role: str, skill_id: str, tool: str) -> None:
-        nonlocal notes
-        if node_id in existing:
-            return
-        nodes.append(
-            {
-                "id": node_id,
-                "type": NODE_TYPE_AUDIO,
-                "label": label,
-                "config": {
-                    "role": role,
-                    "prompt": graph.get("description") or "",
-                    "inputs": [brief_id] if brief_id else [],
-                    "optimize_for": mode,
-                    "agent_name": f"{label} Agent",
-                    "kind": "agent",
-                    "skill_id": skill_id,
-                    "modality": "audio",
-                    "delegate": "agent",
-                    "tools": [tool, "read_upstream", "call_model"],
-                    "duration_sec": 18 if mode != "cost" else 6,
-                    "max_audio_sec": 24 if mode != "cost" else 8,
-                },
-                "layout": {"x": 1280.0, "y": 720.0 if role == "music" else 560.0, "width": 240, "height": 120},
-            }
-        )
-        existing.add(node_id)
-        if brief_id:
-            edges.append({"id": f"e_{brief_id}_{node_id}", "source": brief_id, "target": node_id})
-        if compose_id:
-            edges.append({"id": f"e_{node_id}_{compose_id}", "source": node_id, "target": compose_id})
-            for node in nodes:
-                if node.get("id") != compose_id:
-                    continue
-                cfg = dict(node.get("config") or {})
-                inputs = list(cfg.get("inputs") or [])
-                if node_id not in inputs:
-                    inputs.append(node_id)
-                cfg["inputs"] = inputs
-                node["config"] = cfg
-        notes.append(f"added {node_id} for audio intent")
-
-    if want_speech:
-        _add("n_speech", "Speech / TTS", "speech", "speech_tts", "call_speech_model")
-    if want_music:
-        _add("n_music", "Music / BGM", "music", "audio_bed", "call_music_model")
-
-    if notes:
-        graph["nodes"] = nodes
-        graph["edges"] = edges
-        meta["audio_nodes"] = [
-            nid for nid in ("n_speech", "n_music") if nid in existing
-        ]
-        graph["metadata"] = meta
-    return notes
+    """Audio intent currently stays on clip prompts; it never creates canvas nodes."""
+    del graph
+    return []
 
 
 def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
-    """Director: promote speech/music to fast LLM agents when backends exist.
-
-    Dialogue folds into clip leaves (``clip_embedded``) without a TTS backend.
-    The Music node always survives: it is the single film-wide BGM mixed after
-    concat, and without a music API its handler writes a silent placeholder.
-    """
+    """Record routing for existing audio nodes without creating new ones."""
     from jiuwenswarm.server.runtime.designer.capabilities import detect_audio_backends
     from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        is_uploaded_media_node,
+    )
 
     backends = detect_audio_backends()
     can_speech = bool(backends.get("can_speech"))
@@ -740,6 +651,8 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
                 continue
+            if is_uploaded_media_node(node):
+                continue
             nid = str(node.get("id") or "")
             if nid != "n_music" and _role_key(node).lower() not in {"music", "audio_bed"}:
                 continue
@@ -815,6 +728,8 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
     assigned: list[str] = []
 
     for node in graph.get("nodes") or []:
+        if is_uploaded_media_node(node):
+            continue
         cfg = dict(node.get("config") or {})
         role = _role_key(node).lower()
         nid = str(node.get("id") or "")
@@ -1054,7 +969,7 @@ class Director:
         notes.extend(note_user_canvas_edits(graph))
 
         from jiuwenswarm.server.runtime.designer.user_references import (
-            is_user_reference_node,
+            is_uploaded_media_node,
         )
 
         for node in graph.get("nodes") or []:
@@ -1064,7 +979,7 @@ class Director:
             nid = str(node.get("id") or "")
             # Uploaded references are routed by image classification, not by
             # the "user drew this node, do not invent edges" rule.
-            if not nid or is_user_reference_node(node) or not cfg.get("user_added"):
+            if not nid or is_uploaded_media_node(node) or not cfg.get("user_added"):
                 continue
             onboarded.append(nid)
             if is_comfyui_node(node):
@@ -1104,7 +1019,7 @@ class Director:
             cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
             if (
                 not cfg.get("user_added")
-                or is_user_reference_node(node)
+                or is_uploaded_media_node(node)
                 or is_comfyui_node(node)
             ):
                 continue
@@ -1267,14 +1182,12 @@ class Director:
             "scene consistency (spatial lock: landmarks/layout/light must not drift), "
             "motion consistency, and consistency. "
             "Assign each leaf node a concrete task + tools so agents produce real media "
-            "(images/video/audio), not markdown stubs. "
+            "(images/video), not markdown stubs. Never create audio nodes. "
             "Scene master plate must be authored first; later scene views must EDIT that plate. "
             "Coordinate node agents in a ComfyUI-like pipeline. "
             "Follow the scenario skill and audio policy. "
             "For each node, choose optimize_for (cost|quality) and a preferred_model "
             "from the configured Settings model list. "
-            "For speech/music nodes: if TTS/music backends exist, assign an agent task "
-            "with call_speech_model / call_music_model; otherwise note handler fallback. "
             "On rerun, incorporate prior feedback suggestions. "
             "Respond with JSON only: "
             '{"optimize_for_global":"cost|quality",'

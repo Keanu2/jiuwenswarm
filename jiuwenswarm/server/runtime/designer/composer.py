@@ -26,11 +26,7 @@ from jiuwenswarm.server.runtime.designer.catalog import (
     catalog_nodes_by_id,
     scenario_template,
 )
-from jiuwenswarm.server.runtime.designer.skills_loader import (
-    attach_skills_metadata,
-    detect_audio_intent,
-    load_scenario_skill,
-)
+from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
 from jiuwenswarm.server.runtime.designer.static_graphs import build_static_video_graph
 
 logger = logging.getLogger(__name__)
@@ -90,118 +86,6 @@ def detect_scenario(prompt: str) -> str:
     if scores[best] <= 0:
         return "video"
     return best
-
-
-def _append_audio_nodes(
-    graph: DesignerExecutionGraph,
-    *,
-    prompt: str,
-) -> DesignerExecutionGraph:
-    """Optionally attach speech/music agents guided by audio intent + video skill."""
-    audio = detect_audio_intent(prompt)
-    meta = dict(graph.get("metadata") or {})
-    meta["audio_intent"] = audio
-    skill = load_scenario_skill("video")
-    if skill:
-        meta["scenario_skill_excerpt"] = skill[:6000]
-    if audio.get("policy") == "silent":
-        meta["audio_nodes"] = []
-        graph["metadata"] = meta
-        return graph
-
-    nodes = list(graph.get("nodes") or [])
-    edges = list(graph.get("edges") or [])
-    existing = {str(n.get("id")) for n in nodes}
-    # Prefer wiring into compose/final if present
-    sink_id = "n_compose" if "n_compose" in existing else ("n_final" if "n_final" in existing else None)
-    storyboard_id = "n_storyboard" if "n_storyboard" in existing else None
-    added: list[str] = []
-
-    brief_id = "n_brief" if "n_brief" in existing else None
-
-    def _add_node(
-        node_id: str,
-        label: str,
-        modality: str,
-        inputs: list[str],
-        y: float,
-        *,
-        role: str,
-    ) -> None:
-        if node_id in existing:
-            return
-        node_type = _MODALITY_TO_NODE_TYPE.get(modality, NODE_TYPE_AUDIO)
-        skill_key = "audio_bed"
-        nodes.append(
-            {
-                "id": node_id,
-                "type": node_type,
-                "label": "Audio",
-                "config": {
-                    "role": node_type,
-                    "pipeline": role,
-                    "prompt": prompt,
-                    "optimize_for": meta.get("optimize_for") or "quality",
-                    "agent_id": f"agent_{node_id}",
-                    "agent_name": f"{label} Agent",
-                    "agent_role": "node_worker",
-                    "catalog_id": node_id,
-                    "skill_id": skill_key,
-                    "tools": ["call_model", "read_upstream", f"call_{modality}_model"],
-                    "kind": "agent",
-                    "modality": modality,
-                    "inputs": inputs,
-                    # Local silent bed until a remote music API is wired.
-                    "delegate": "handler",
-                    "force_handler": True,
-                    "duration_sec": 4 if str(meta.get("optimize_for") or "") == "cost" else 6,
-                },
-                "layout": {"x": 980.0, "y": y, "width": 260.0, "height": 150.0},
-            }
-        )
-        existing.add(node_id)
-        added.append(node_id)
-        for src in inputs:
-            if src in existing:
-                edges.append(
-                    {
-                        "id": f"e_{src}_{node_id}",
-                        "source": src,
-                        "target": node_id,
-                    }
-                )
-
-    # Depend on Brief (not storyboard) so audio runs parallel with cast/scene/video.
-    audio_srcs = [brief_id] if brief_id else ([storyboard_id] if storyboard_id else [])
-    if audio.get("include_music") and audio.get("policy") != "silent":
-        _add_node(
-            "n_music",
-            "Music / Bed",
-            "audio",
-            [s for s in audio_srcs if s],
-            680.0,
-            role="music",
-        )
-
-    if sink_id and added:
-        for aid in added:
-            edges.append({"id": f"e_{aid}_{sink_id}", "source": aid, "target": sink_id})
-            # extend sink inputs
-            for node in nodes:
-                if node.get("id") != sink_id:
-                    continue
-                cfg = dict(node.get("config") or {})
-                inputs = list(cfg.get("inputs") or [])
-                if aid not in inputs:
-                    inputs.append(aid)
-                cfg["inputs"] = inputs
-                node["config"] = cfg
-
-    meta["audio_nodes"] = added
-    graph["nodes"] = nodes
-    graph["edges"] = edges
-    graph["metadata"] = meta
-    return normalize_execution_graph(graph)
 
 
 def _layout_for_index(index: int, column: int) -> dict[str, float]:

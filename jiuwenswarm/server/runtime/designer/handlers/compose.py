@@ -16,6 +16,7 @@ from pathlib import Path
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
     NODE_ROLE_CLIP,
+    NODE_TYPE_AUDIO,
     NODE_TYPE_VIDEO,
     AssetRef,
     DesignerGraphNode,
@@ -424,16 +425,27 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
 
 
 def _collect_role_audio_paths(ctx: NodeExecutionContext, roles: set[str]) -> list[Path]:
-    """Collect real audio files from speech/music nodes (skip markdown stubs)."""
+    """Collect real audio files directly connected to this compose node."""
     states = (ctx.run or {}).get("node_states") or {}
+    connected = {
+        str(edge.get("source") or "")
+        for edge in (ctx.graph.get("edges") or [])
+        if str(edge.get("target") or "") == str(ctx.node_id or "")
+    }
+    for node in ctx.graph.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id") or "") != str(ctx.node_id or ""):
+            continue
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        connected.update(str(item) for item in (cfg.get("inputs") or []) if str(item).strip())
+        break
     found: list[Path] = []
     for node in ctx.graph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
-        role = node_pipeline(node)
-        if role not in roles:
-            continue
         nid = str(node.get("id") or "")
+        role = node_pipeline(node) or str(node.get("type") or "")
+        if nid not in connected or role not in roles:
+            continue
         state = states.get(nid) if isinstance(states.get(nid), dict) else {}
         refs: list[dict] = []
         if isinstance(state.get("output_ref"), dict):
@@ -529,9 +541,10 @@ def mix_compose_soundtrack(
 
     upstream: list[Path] = []
     if ctx is not None:
-        speech = _collect_role_audio_paths(ctx, {"speech"})
-        music = _collect_role_audio_paths(ctx, {"music"})
-        upstream = [*speech, *music]
+        upstream = _collect_role_audio_paths(
+            ctx,
+            {"speech", "music", NODE_TYPE_AUDIO},
+        )
         if not upstream:
             from jiuwenswarm.server.runtime.designer.user_references import (
                 user_reference_audio_path,

@@ -72,6 +72,7 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
   const { t } = useTranslation();
   const isTextLike = isTextLikeNodeType(nodeType);
   const isMedia = isMediaNodeType(nodeType);
+  const canGenerate = nodeType !== 'audio';
   const updateNodeConfig = useDesignerStore((state) => state.updateNodeConfig);
   const setNodeOutputRef = useDesignerStore((state) => state.setNodeOutputRef);
   const applyUploadedOutput = useDesignerRunStore((state) => state.applyUploadedOutput);
@@ -257,24 +258,26 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
         >
           {t('designer.toolbar.inspect')}
         </button>
-        <button
-          type="button"
-          role="tab"
-          data-testid="designer-node-toolbar-tab-generate"
-          disabled={isRunning || !domainGraph}
-          title={t('designer.toolbar.rerunHint')}
-          aria-selected={isMedia && expanded === 'generate'}
-          className={`designer-node-toolbar__tab${isMedia && expanded === 'generate' ? ' is-active' : ''}`}
-          onClick={() => {
-            if (isMedia) {
-              setExpanded((prev) => (prev === 'generate' ? null : 'generate'));
-              return;
-            }
-            onGenerateNode();
-          }}
-        >
-          {t('designer.toolbar.regenerate')}
-        </button>
+        {canGenerate ? (
+          <button
+            type="button"
+            role="tab"
+            data-testid="designer-node-toolbar-tab-generate"
+            disabled={isRunning || !domainGraph}
+            title={t('designer.toolbar.rerunHint')}
+            aria-selected={isMedia && expanded === 'generate'}
+            className={`designer-node-toolbar__tab${isMedia && expanded === 'generate' ? ' is-active' : ''}`}
+            onClick={() => {
+              if (isMedia) {
+                setExpanded((prev) => (prev === 'generate' ? null : 'generate'));
+                return;
+              }
+              onGenerateNode();
+            }}
+          >
+            {t('designer.toolbar.regenerate')}
+          </button>
+        ) : null}
         <button
           type="button"
           role="tab"
@@ -309,7 +312,7 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
         ) : null}
       </div>
 
-      {expanded === 'generate' && isMedia ? (
+      {expanded === 'generate' && isMedia && canGenerate ? (
         <div
           className="designer-node-toolbar__panel"
           role="tabpanel"

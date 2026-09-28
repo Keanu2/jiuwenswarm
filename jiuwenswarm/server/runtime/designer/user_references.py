@@ -339,11 +339,32 @@ def is_user_reference_node(node: dict[str, Any] | None) -> bool:
     return bool(str(cfg.get("user_reference_id") or "").strip())
 
 
+def is_uploaded_media_node(node: dict[str, Any] | None) -> bool:
+    """True when a canvas media node is backed by user-uploaded content."""
+    if not isinstance(node, dict):
+        return False
+    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+    if is_user_reference_node(node):
+        return True
+    if str(cfg.get("interaction_mode") or "").strip() != "upload":
+        return False
+    upload = cfg.get("upload") if isinstance(cfg.get("upload"), dict) else {}
+    output_ref = node.get("output_ref") if isinstance(node.get("output_ref"), dict) else {}
+    return bool(
+        str(upload.get("uri") or "").strip()
+        or str(output_ref.get("uri") or "").strip()
+    )
+
+
 def user_reference_node_file(node: dict[str, Any] | None) -> Path | None:
     """Resolve the uploaded file behind a reference node."""
     cfg = (node or {}).get("config") if isinstance(node, dict) else None
     cfg = cfg if isinstance(cfg, dict) else {}
     candidate = _existing_file(str(cfg.get("user_reference_path") or ""))
+    if candidate is not None:
+        return candidate.resolve()
+    upload = cfg.get("upload") if isinstance(cfg.get("upload"), dict) else {}
+    candidate = _existing_file(str(upload.get("uri") or ""))
     if candidate is not None:
         return candidate.resolve()
     ref_uri = ""

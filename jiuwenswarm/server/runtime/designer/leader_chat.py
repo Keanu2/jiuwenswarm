@@ -13,7 +13,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     ACTIVITY_KIND_STAGE,
     ACTIVITY_KIND_THINKING,
     ACTIVITY_KIND_TOOL_CALL,
-    NODE_TYPE_AUDIO,
     NODE_TYPE_IMAGE,
     NODE_TYPE_VIDEO,
     DesignerExecutionGraph,
@@ -40,13 +39,13 @@ _ADD_HINT = re.compile(
     re.I,
 )
 _CONNECT_HINT = re.compile(r"(接到|连到|connect(?:\s+to)?)", re.I)
-_AUDIO_HINT = re.compile(r"(配乐|音乐|music|bgm|旁白|配音|speech|voice)", re.I)
 _VIDEO_HINT = re.compile(r"(视频|镜头|clip|video)", re.I)
 
 _LEADER_SYSTEM = """You are the invisible Designer Leader. Reply with a JSON object only.
 Canvas node type and config.role must be one of: text, table, image, video, audio.
 Character/Scene/Keyframe/Clip/Film are pipelines, never node kinds.
 Do not rebuild the whole graph. Patch only what the user asked.
+Do not create audio nodes. Audio generation is not implemented; users add and upload audio on the canvas.
 Do not wire a new node into clip/compose unless the user asked to connect it.
 user_canvas_edits is the user's canvas log: add, remove, connect, disconnect, replace.
 Treat that log as fact. Do not recreate a removed node, restore a disconnected edge,

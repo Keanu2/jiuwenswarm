@@ -2327,6 +2327,25 @@ def compose_required_predecessor_ids(graph: DesignerExecutionGraph) -> list[str]
     Edges/inputs alone can drift; this always collects live media nodes so compose
     cannot start after only the last clip or a soft prompt handoff.
     """
+    compose_ids = {
+        str(node.get("id") or "")
+        for node in graph.get("nodes") or []
+        if is_compose_sink_node(node) and str(node.get("id") or "")
+    }
+    connected_to_compose: set[str] = set()
+    for node in graph.get("nodes") or []:
+        if str(node.get("id") or "") not in compose_ids:
+            continue
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        connected_to_compose.update(
+            str(item).strip() for item in (cfg.get("inputs") or []) if str(item).strip()
+        )
+    for edge in graph.get("edges") or []:
+        if str(edge.get("target") or "") in compose_ids:
+            source = str(edge.get("source") or "").strip()
+            if source:
+                connected_to_compose.add(source)
+
     out: list[str] = []
     seen: set[str] = set()
     for node in graph.get("nodes") or []:
@@ -2350,7 +2369,7 @@ def compose_required_predecessor_ids(graph: DesignerExecutionGraph) -> list[str]
             "speech",
             "music",
         }
-        if is_clip or is_audio:
+        if is_clip or (is_audio and nid in connected_to_compose):
             seen.add(nid)
             out.append(nid)
     # Stable: clips by shot, then audio ids.
