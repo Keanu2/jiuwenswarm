@@ -250,7 +250,7 @@ def enforce_style_shot_floor(
 
 
 def final_frame_reverse_playbook() -> str:
-    """Director playbook injected into Supervisor / Storyboard / Clip when active."""
+    """Director playbook injected into Director / Storyboard / Clip when active."""
     return """
 ## Video style: final_frame_reverse（终帧倒推）
 User reference / classic still = LAST ~1s ENDPOINT, not the opening frame.
@@ -298,7 +298,7 @@ def video_style_clause(style_id: str, *, for_clip: bool = False) -> str:
 
 
 def video_style_skill_excerpt(style_id: str) -> str:
-    """Longer excerpt for node skill_excerpt / supervisor metadata."""
+    """Longer excerpt for node skill_excerpt / director metadata."""
     if style_id == VIDEO_STYLE_FINAL_FRAME_REVERSE:
         return final_frame_reverse_playbook()
     return ""

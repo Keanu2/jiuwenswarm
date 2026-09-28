@@ -205,7 +205,7 @@ def test_smart_graph_rejects_missing_llm_analysis_sections() -> None:
 
 
 @pytest.mark.asyncio
-async def test_supervisor_graph_design_rejects_empty_model_text(
+async def test_director_graph_design_rejects_empty_model_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from jiuwenswarm.server.runtime.designer import orchestration
@@ -228,11 +228,11 @@ async def test_supervisor_graph_design_rejects_empty_model_text(
     }
 
     with pytest.raises(DesignerLlmError):
-        await orchestration.SupervisorAgent().design_execution_graph(graph)
+        await orchestration.Director().design_execution_graph(graph)
 
 
 @pytest.mark.asyncio
-async def test_manager_reviews_reject_nonthrowing_model_failures(
+async def test_director_reviews_reject_nonthrowing_model_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from jiuwenswarm.server.runtime.designer import orchestration
@@ -241,7 +241,7 @@ async def test_manager_reviews_reject_nonthrowing_model_failures(
         return {"ok": False, "error": "authentication failed", "text": ""}
 
     monkeypatch.setattr(orchestration, "call_model_tool", fail_model_call)
-    manager = orchestration.ManagerAgent()
+    director = orchestration.Director()
     brief_graph = {
         "description": "Lead opens the door.",
         "nodes": [],
@@ -251,7 +251,7 @@ async def test_manager_reviews_reject_nonthrowing_model_failures(
         },
     }
     with pytest.raises(DesignerLlmError):
-        await manager.review_brief(brief_graph)
+        await director.review_brief(brief_graph)
 
     storyboard_graph = {
         "description": "Lead opens the door.",
@@ -263,4 +263,4 @@ async def test_manager_reviews_reject_nonthrowing_model_failures(
         },
     }
     with pytest.raises(DesignerLlmError):
-        await manager.review_storyboard_once(storyboard_graph, node_states=None)
+        await director.review_storyboard_once(storyboard_graph, node_states=None)

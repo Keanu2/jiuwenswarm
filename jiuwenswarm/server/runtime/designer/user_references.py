@@ -186,13 +186,13 @@ def attach_user_references_to_graph(
             continue
         cfg = dict(node.get("config") or {})
         cfg["user_reference_ids"] = ids
-        task = str(cfg.get("supervisor_task") or "").strip()
+        task = str(cfg.get("director_task") or "").strip()
         if roster:
             extra = (
                 " User attached reference media; original files are visual/audio "
                 f"authority. Slots:\n{roster}"
             )
-            cfg["supervisor_task"] = f"{task}{extra}".strip() if task else extra.strip()
+            cfg["director_task"] = f"{task}{extra}".strip() if task else extra.strip()
         node["config"] = cfg
         break
     attach_user_reference_nodes(graph)
@@ -206,7 +206,7 @@ def carry_user_references(
     """Re-seed uploads onto a rebuilt graph.
 
     ``build_smart_video_graph`` starts from a fresh metadata dict, so a
-    Supervisor redesign or shot re-expansion would otherwise drop the user's
+    Director redesign or shot re-expansion would otherwise drop the user's
     attachments and their canvas nodes.
     """
     if not isinstance(rebuilt, dict):
@@ -327,7 +327,7 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
                     "skip_llm": True,
                     "read_only": True,
                     "immutable_source": True,
-                    "supervisor_task": (
+                    "director_task": (
                         "User-attached reference. Keep the original file as the "
                         "visual/audio authority; never regenerate or restyle it."
                     ),
@@ -367,14 +367,14 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
                 cfg["inputs"] = inputs
                 if target in cast_ids:
                     cfg["character_source_reference"] = ref_id
-                    task = str(cfg.get("supervisor_task") or "").strip()
+                    task = str(cfg.get("director_task") or "").strip()
                     hint = (
                         " A user reference image is wired into this card: if it "
                         "depicts this character, derive the sheet from it "
                         "(face, wardrobe, palette) instead of inventing a look."
                     )
                     if hint.strip() not in task:
-                        cfg["supervisor_task"] = f"{task}{hint}".strip()
+                        cfg["director_task"] = f"{task}{hint}".strip()
                 node["config"] = cfg
     if not added:
         return []

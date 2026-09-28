@@ -513,8 +513,8 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "all_solo_node_ids": identity.get("all_solo_node_ids"),
         "prior_keyframe_node_id": cfg.get("prior_keyframe_node_id")
         or identity.get("prior_keyframe_node_id"),
-        "manager_prompt_reviewed": bool(cfg.get("manager_prompt_reviewed")),
-        "manager_lock_gate": cfg.get("manager_lock_gate"),
+        "director_prompt_reviewed": bool(cfg.get("director_prompt_reviewed")),
+        "director_lock_gate": cfg.get("director_lock_gate"),
         "language_lock": cfg.get("language_lock"),
         "speech_line": cfg.get("speech_line"),
         "speech_by_character": cfg.get("speech_by_character"),
@@ -624,7 +624,7 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "previous_clip_finished_events": cfg.get("previous_clip_finished_events"),
         "scene_architecture_clause": str(cfg.get("scene_architecture_clause") or "")[:900],
         "locks": locks,
-        "manager_prompt_reviewed": locks["manager_prompt_reviewed"],
+        "director_prompt_reviewed": locks["director_prompt_reviewed"],
     }
     snapshot.update(extra)
     prior_lead = str(extra.get("previous_clip_story_state") or "").strip()
@@ -840,7 +840,7 @@ class DesignerGraphToolkit:
         )
         result = await call_model_tool(
             prompt=str(prompt or graph_prompt(self.ctx.graph, node) or "")[:6000],
-            system=str(system or cfg.get("supervisor_task") or "You are a Designer node agent.")[:4000],
+            system=str(system or cfg.get("director_task") or "You are a Designer node agent.")[:4000],
             optimize_for=optimize,
             max_tokens=16384,
         )

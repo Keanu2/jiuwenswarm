@@ -16,11 +16,9 @@ flowchart TD
   U["User prompt in Designer UI"] --> BOOT["designer.graph.bootstrap"]
   BOOT --> SA["analyze_creative_brief LLM"]
   SA --> G0["build_smart_video_graph"]
-  G0 --> BR["Supervisor → Brief"]
-  BR --> M1["Manager approve Brief"]
-  M1 --> SB["Supervisor → Storyboard<br/>start_state → beat → end_state"]
-  SB --> M2["Manager approve Storyboard"]
-  M2 --> PLAY["Play → GraphExecutor"]
+  G0 --> BR["Director → Brief"]
+  BR --> SB["Director → Storyboard<br/>start_state → beat → end_state"]
+  SB --> PLAY["Play → GraphExecutor"]
   PLAY --> CHAR["n_character_* solo sheets"]
   PLAY --> SCENE["n_scene_* empty plates"]
   CHAR --> CLIP["n_clip_* R2V shots<br/>on-screen solos + scene"]
@@ -60,8 +58,7 @@ flowchart LR
 
 | Agent | Role | Owns |
 |-------|------|------|
-| **Supervisor** (= Director) | Creative authority | Brief, storyboard (incl. start/end states), shot budget, graph redesign, plan directives |
-| **Manager** (= Producer) | Gates & locks | Approve/edit brief & storyboard, prune dead nodes, stamp locks, **rewrite every leaf video prompt** into concise story form, dual ratings |
+| **Director** | Sole overseer | Brief, storyboard (incl. start/end states), shot budget, graph redesign, plan directives, approve/edit, prune, lock stamps, **leaf video prompt rewrite**, dual ratings |
 | **Leaf DeepAgent** (`NodeAgentHost`) | Per-node craft | `call_model` / `call_image_model` / `call_video_model` / `ffmpeg_compose` |
 | **Handler** | Deterministic media | Runs when `delegate=handler` or after the agent authors a media spec |
 
@@ -89,7 +86,7 @@ Per-node detail: [`docs/BRIEF.md`](./jiuwenswarm/server/runtime/designer/docs/BR
 [`CHARACTER`](./jiuwenswarm/server/runtime/designer/docs/CHARACTER.md) ·
 [`SCENE`](./jiuwenswarm/server/runtime/designer/docs/SCENE.md) ·
 [`CLIP`](./jiuwenswarm/server/runtime/designer/docs/CLIP.md) ·
-[`ORCHESTRATORS`](./jiuwenswarm/server/runtime/designer/docs/ORCHESTRATORS.md).
+[`DIRECTOR`](./jiuwenswarm/server/runtime/designer/docs/DIRECTOR.md).
 
 ---
 
@@ -97,7 +94,7 @@ Per-node detail: [`docs/BRIEF.md`](./jiuwenswarm/server/runtime/designer/docs/BR
 
 Locks live on the **node**. Continuity lore lives on the **storyboard row**.
 The video API body is a concise narrative rewritten by
-`pipeline/video_prompt_practice.py` (Manager / Supervisor gate):
+`pipeline/video_prompt_practice.py` (Director gate):
 
 - Open from this shot’s `start_state`; end at `end_state`
 - Scene as Image N; each **on_screen** cast member from Image k, wearing …, is …

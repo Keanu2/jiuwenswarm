@@ -754,13 +754,13 @@ def build_clip_prompt(
                 action = extracted
                 parts.append(f"Primary action for shot {shot_index}: {action}")
             elif not _looks_like_contaminated_prompt(override):
-                parts.append(f"Supervisor shot brief: {extracted[:400]}")
+                parts.append(f"Director shot brief: {extracted[:400]}")
         elif (
             not extracted
             and not _looks_like_contaminated_prompt(override)
             and override.casefold() not in (action or "").casefold()
         ):
-            parts.append(f"Supervisor shot brief: {override[:400]}")
+            parts.append(f"Director shot brief: {override[:400]}")
     occupancy = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
     if occupancy:
         parts.append(
@@ -807,7 +807,7 @@ def build_clip_prompt(
             "Attached audio 1 is a soundtrack/voice reference only; "
             "do not invent a conflicting score."
         )
-    # Locked speech / language / BGM (Supervisor storyboard + Manager).
+    # Locked speech / language / BGM (Director storyboard + Director).
     from jiuwenswarm.server.runtime.designer.audio_locks import (
         audio_lock_prompt_block,
         resolve_audio_intent_flags,
@@ -835,14 +835,14 @@ def build_clip_prompt(
     if block and "LANGUAGE LOCK" not in "\n".join(parts) and "SPEECH LOCK" not in "\n".join(parts):
         parts.append(block)
     from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
-        supervisor_approve_video_prompt,
+        director_approve_video_prompt,
     )
 
     extra_labels = [
         f"{label} ({path.name})"
         for label, path in connected_clip_extra_images(ctx, node if isinstance(node, dict) else None)
     ]
-    approved, _notes = supervisor_approve_video_prompt(
+    approved, _notes = director_approve_video_prompt(
         action or "",
         cfg=cfg,
         graph=graph if isinstance(graph, dict) else {},

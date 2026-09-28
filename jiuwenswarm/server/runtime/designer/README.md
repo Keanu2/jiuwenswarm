@@ -10,7 +10,7 @@ Same-setting clips run **concurrently** once storyboard + needed solos + scene a
 See repo [`README.md`](../../../../../README.md) and [`DETAIL.md`](../../../../../DETAIL.md).
 
 **Per-node / overseer pipeline docs:** [`docs/INDEX.md`](./docs/INDEX.md)
-([brief](./docs/BRIEF.md) · [storyboard](./docs/STORYBOARD.md) · [character](./docs/CHARACTER.md) · [scene](./docs/SCENE.md) · [clip](./docs/CLIP.md) · [orchestrators](./docs/ORCHESTRATORS.md)).
+([brief](./docs/BRIEF.md) · [storyboard](./docs/STORYBOARD.md) · [character](./docs/CHARACTER.md) · [scene](./docs/SCENE.md) · [clip](./docs/CLIP.md) · [director](./docs/DIRECTOR.md)).
 
 ---
 
@@ -20,11 +20,11 @@ See repo [`README.md`](../../../../../README.md) and [`DETAIL.md`](../../../../.
 UI Play
   → designer_adapter.start_run
   → GraphExecutor._execute_wave_run
-       → SupervisorAgent.plan
-       → ManagerAgent.validate_plan / review_leaf_media_prompt
+       → Director.plan
+       → Director.validate_plan / review_leaf_media_prompt
        → NodeAgentHost (or handler) per ready node
        → handlers/{image,clip,compose,audio,text}_nodes
-       → Manager dual_rate_final
+       → Director dual_rate_final
 ```
 
 Bootstrap (before Play):
@@ -33,7 +33,7 @@ Bootstrap (before Play):
 designer.graph.bootstrap
   → script_analysis.analyze_creative_brief
   → smart_graph.build_smart_video_graph
-  → Supervisor brief + storyboard (optional on bootstrap)
+  → Director brief + storyboard (optional on bootstrap)
 ```
 
 ---
@@ -44,7 +44,7 @@ designer.graph.bootstrap
 |------|----------------|
 | `smart_graph.py` | Build quality.v5 DAG: brief → storyboard → solos → empty scenes → clips → compose (**no clip→clip**) |
 | `script_analysis.py` | LLM cast, scenes, shots, occupancy (`heuristic_analysis` is test-only) |
-| `orchestration.py` | Supervisor / Manager; storyboard start/end authoring; leaf prompt rewrite; ratings |
+| `orchestration.py` | Director; storyboard start/end authoring; leaf prompt rewrite; ratings |
 | `executor.py` | Ready-queue scheduler (concurrency ≤3); storyboard→clip sync; compose hard-wait |
 | `node_agent.py` | Leaf DeepAgent tools (`call_image_model` → `generate_designer_image`, `call_video_model`, `ffmpeg_compose`) |
 | `node_labels.py` | Canvas titles (`Brief:…`, `Scene N:…`, `Scene S: Shot K:…`) |
@@ -72,7 +72,7 @@ designer.graph.bootstrap
 | `video_prompt_practice.py` | Compose / approve **story-form** video prompts; omit exited cast |
 | `image_prompt_practice.py` | Solo / empty-plate still prompt hygiene |
 | `media_prompt_limits.py` | Prompt length / token caps |
-| `wan_call_locks.py` | Supervisor rewrite into practice prompt for video API |
+| `wan_call_locks.py` | Director rewrite into practice prompt for video API |
 | `wan_r2v_best_practices.py` | Positive R2V formula (no examples / negatives on the call) |
 | `wan_reference_binding.py` | Attach-order rules for refs |
 | `wan_prompt_hygiene.py` | Scrub lock banners from narrative |
@@ -84,24 +84,26 @@ designer.graph.bootstrap
 | `leaf_agent_continuity.py` | Domain-agnostic leaf instructions |
 | `clothing_lock.py` / `shot_staging_lock.py` / `axis_locks.py` / `cast_prop_locks.py` | Wardrobe, staging, screen axis, cast vs props |
 | `director_contract.py` | Shot budget / exit carry |
+| `skills/orchestration/director.md` | The only overseer skill loaded into `director_skill_excerpt` |
+| `skills/{scenarios,agents,subjects,styles}/` | Scenario, leaf, subject, and style skills loaded by `skills_loader.py` |
 | `skills/wan-reference-video/` | Optional skill pack for leaf agents |
 
 ---
 
 ## Agent responsibilities (detail)
 
-### Supervisor
+### Director (authoring)
 
 - Author brief + storyboard (with per-shot start/end states) from user prompt
 - Own `target_shot_count` (prefer ≤8, hard ≤16)
 - Plan leaf tasks/tools; finalize after compose
 
-### Manager
+### Director (gating / review)
 
 - Gate brief/storyboard fidelity; validate start/end chain
 - Prune nodes that cannot reach `n_compose`
 - Before every clip tool call: `review_leaf_media_prompt` →
-  continuity contract + `supervisor_approve_video_prompt` (concise story form,
+  continuity contract + `director_approve_video_prompt` (concise story form,
   character locks enforced, exited cast omitted, no negatives/examples on the API body)
 - Dual rate final film
 

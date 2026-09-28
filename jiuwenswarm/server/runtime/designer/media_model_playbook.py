@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Wan 3.0 + Qwen-Image multi-angle playbooks for Supervisor / Manager / leaf agents.
+"""Wan 3.0 + Qwen-Image multi-angle playbooks for Director / leaf agents.
 
 Encode prompt and tool guidance so storyboards specify objects + camera facing,
 and media tools keep identity / style / positioning consistent.
@@ -79,7 +79,7 @@ QWEN_IMAGE_PLAYBOOK = """
 ## Configured image model (call_image_model)
 Use for solo character sheets and scene specs / stills.
 - PROMPT LENGTH: obey the IMAGE PROMPT LIMIT stamped from the configured IMAGE_GEN
-  backend (Manager / leaf context). Prefer dense shot-ready prose; do not pad.
+  backend (Director / leaf context). Prefer dense shot-ready prose; do not pad.
 - COST: Prefer ~1K resolution (size 1K / 1024x1024 or aspect-matched ~1K). Do not request 2K/4K.
 - EVERY named character gets a solo identity sheet before any keyframe.
 - First KF of a setting_id: compose_from_solo_refs — GENERATE the setting AND place ONLY
@@ -109,7 +109,7 @@ configured VIDEO_GEN backend.
 """.strip()
 
 STORYBOARD_DETAIL_RULES = """
-## Storyboard detail (Supervisor authors — hierarchical by SCENE then keyframes)
+## Storyboard detail (Director authors — hierarchical by SCENE then keyframes)
 Group shots by setting_id / place. For EACH scene block author a SCENE SPECS:
 objects + locations, lighting, crowd size/positions, and hierarchical views
 (front/left/right/side/top/bottom) so coverage is coherent and things do not appear
@@ -135,11 +135,11 @@ When correcting leaf agents / drafting node prompts:
 - NON-NEGOTIABLE film-wide locks on EVERY keyframe AND clip: aspect_lock (same ratio /
   ~1K stills / 480P video), style_lock, spatial_lock, costume/identity, occupancy, screen axis.
 - If agents ignore storyboard facing/objects/speech OR drop any lock, rewrite
-  supervisor_task / generate.prompt once (no loops).
+  director_task / generate.prompt once (no loops).
 """.strip()
 
 MANAGER_CORRECTION_HINTS = """
-Manager one-pass corrections (locks bind ALL agents — leaf rewrites cannot drop them):
+Director one-pass corrections (locks bind ALL agents — leaf rewrites cannot drop them):
 - Reject / rewrite shots that all share the same facing or that omit placement/motion/speech/objects.
 - Require camera_rig + screen_positions + speech_line; stamp setting_id + keyframe_strategy.
 - BEFORE media calls: gate every frame/keyframe/clip prompt for aspect_lock, style_lock,
@@ -153,15 +153,15 @@ Manager one-pass corrections (locks bind ALL agents — leaf rewrites cannot dro
 def playbook_for_role(role: str) -> str:
     role_l = str(role or "").lower()
     chunks = [STORYBOARD_DETAIL_RULES]
-    if role_l in {"storyboard", "brief", "supervisor", "manager"}:
+    if role_l in {"storyboard", "brief", "director"}:
         chunks.extend([QWEN_IMAGE_PLAYBOOK, WAN3_VIDEO_PLAYBOOK])
     if role_l in {"frame", "keyframe", "scene", "character", "character_design", "image"}:
         chunks.append(QWEN_IMAGE_PLAYBOOK)
     if role_l in {"clip", "video"}:
         chunks.append(WAN3_VIDEO_PLAYBOOK)
-    if role_l in {"supervisor", "brief", "storyboard"}:
+    if role_l in {"director", "brief", "storyboard"}:
         chunks.append(SUPERVISOR_CORRECTION_HINTS)
-    if role_l in {"manager"}:
+    if role_l in {"director"}:
         chunks.append(MANAGER_CORRECTION_HINTS)
     return "\n\n".join(chunks)
 

@@ -1,76 +1,34 @@
-# Scene node pipeline (`n_scene_*`)
+# Scene node (`n_scene_*`)
 
-**Builder:** `smart_graph.build_smart_video_graph`  
-**Handler / tool:** scene image path via `call_image_model` / `generate_designer_image`  
-**Type:** `image` — **empty environment plate** (no people)
+**Handler:** `handlers/image_nodes.py` `SceneNodeHandler`  
+**Type:** image  
+**One node per setting.** The image is empty scene specs: the room or location, with no people baked in.
 
----
+## Required input
 
-## 1. Purpose
-
-One plate per `setting_id`: empty room / location for R2V.  
-People come only from character solos at clip time — never baked into the scene PNG.
-
----
-
-## 2. Graph inputs / edges
-
-| Item | Value |
-|------|--------|
-| Typical inputs | `n_storyboard` (+ often `n_brief`) |
-| Downstream | All clips with matching `setting_id` |
-| Label | Setting name / id |
-
-Hard for clips: compose/clip wait until real scene PNG on disk.
-
----
-
-## 3. Config at build
-
-| Field | Meaning |
-|-------|---------|
-| `role` | `scene` |
-| `setting_id` / description | Geography |
-| `style_lock`, spatial locks | Continuity of place |
-| `tools` | `call_image_model`, `read_upstream` |
-| Image backend | **IMAGE_GEN** (Qwen) |
-
----
-
-## 4. Runtime sequence
-
-```
-Storyboard ready
-        ↓
-Manager.review_leaf_media_prompt (still)
-        ↓
-generate empty plate (no cast)
-        ↓
-PNG → last R2V reference on matching clips
-```
-
----
-
-## 5. Output
-
-| Output | Form |
+| Source | Data |
 |--------|------|
-| `output_ref` | Empty scene PNG |
-| UI Assets | Image tile |
+| `n_storyboard` | Setting name, architecture, light, and time of day |
+| `n_brief` | Optional ordering edge |
+| Node config | `setting_id`, scene specs, style lock, spatial lock |
+| Earlier scene image | Only when this node is a derived view (`scene_strategy=edit_master_view`) |
+| Director gate | Approved still prompt before the image call |
 
----
+People are not an input. They enter later, from character solos, at shot time.
 
-## 6. Key functions
+## What the node does
 
-| # | Function | File |
-|---|----------|------|
-| 1 | Scene nodes + setting map | `smart_graph.py` |
-| 2 | Empty-plate prompt practice | image prompt helpers |
-| 3 | Clip refs: solos then scene last | `handlers/clip.py` |
+1. Builds a scene prompt from the storyboard setting text and scene specs.
+2. If this is a derived view, it edits the master scene image instead of inventing a new place.
+3. `ensure_still_tool_prompt` keeps the prompt as an empty environment.
+4. Calls image generation at the locked size.
+5. Writes the PNG, or fallback scene notes if generation fails.
 
----
+## Output to the next node
 
-## 7. Design notes
+| Output | Next node |
+|--------|-----------|
+| Empty scene PNG | Every `n_clip_*` with the same `setting_id` |
+| Scene specs (architecture, light, props) | Those shots' reference list and prompt locks |
 
-- Never peopled keyframes (`n_frame_*` removed).  
-- Same-setting continuity is storyboard start/end + this plate — never cross rooms in one clip.
+Shots do not start until this image is on disk, unless the graph explicitly skips scene specs.

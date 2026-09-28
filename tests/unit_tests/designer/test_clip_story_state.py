@@ -561,9 +561,9 @@ def test_regenerate_packet_keeps_prompt_and_upstream_image(tmp_path: Path) -> No
     assert packet["upstream"][0]["prompt"].startswith("ONE person")
 
 
-def test_manager_rewrites_lock_essay_into_image_binding() -> None:
+def test_director_rewrites_lock_essay_into_image_binding() -> None:
     from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
-        manager_approve_video_prompt,
+        director_approve_video_prompt,
     )
 
     essay = (
@@ -601,8 +601,8 @@ def test_manager_rewrites_lock_essay_into_image_binding() -> None:
         },
         "style_lock": {"look": "photoreal cinematic"},
     }
-    approved, notes = manager_approve_video_prompt(essay, cfg=cfg, graph={})
-    assert "manager_rewrote" in notes
+    approved, notes = director_approve_video_prompt(essay, cfg=cfg, graph={})
+    assert "director_rewrote" in notes
     low = approved.lower()
     assert "mother from image 1" in low or "from image 1" in low
     assert "young child from image 2" in low or "from image 2" in low
@@ -610,7 +610,14 @@ def test_manager_rewrites_lock_essay_into_image_binding() -> None:
     assert "wearing" in low
     # Silent offscreen omitted; speaking offscreen may be heard — exited never named.
     assert "teenage son" not in low
-    assert "continue after" in low or "same setting" in low or "same placement" in low or "continues" in low
+    assert (
+        "continue after" in low
+        or "same setting" in low
+        or "same placement" in low
+        or "continues" in low
+        or "scene is as in image" in low
+        or "in the scene from image" in low
+    )
     assert "seated" in low or "near the table" in low or "screen-left" in low
     assert "scene description" in low or "golden-hour" in low or "warm" in low
     assert "nods once" in approved or "leans forward" in approved.lower()

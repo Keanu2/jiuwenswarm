@@ -573,7 +573,7 @@ def stamp_scene_last_frame_chain(
 def chain_prior_speech_across_clips(graph: dict[str, Any]) -> list[str]:
     """Stamp previous_clip_speech onto consecutive clips and scrub restatements.
 
-    Call after Manager/storyboard stamps speech_line onto clip configs so shot N+1
+    Call after Director/storyboard stamps speech_line onto clip configs so shot N+1
     does not restate dialogue already assigned to shot N.
     """
     notes: list[str] = []

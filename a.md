@@ -14,16 +14,16 @@ Per-node pipelines: `jiuwenswarm/server/runtime/designer/docs/INDEX.md`.
 | Bootstrap / Play | Web UI `designerGraphClient.bootstrap` / `startRun` → RPC |
 | Gateway | `designer_adapter.py` builds/saves graph, starts `GraphExecutor` |
 | Graph build | `smart_graph.build_smart_video_graph` after `script_analysis.analyze_creative_brief` |
-| Play loop | `executor._execute_wave_run`: Supervisor → Manager → ready-queue leaves → dual raters |
+| Play loop | `executor._execute_wave_run`: Director → ready-queue leaves → dual raters |
 | Live updates | WebSocket run events; media under `~/.jiuwenswarm/agent/workspace/` |
 
-Heuristics run **only** when `llm_available()` is false.
+A missing or failed chat model raises `DesignerLlmError`. There is no heuristic film plan.
 
 ## Quality DAG (v5 — no keyframes)
 
 ```
-Brief (Supervisor + Manager gate)
-  → Storyboard (Supervisor + Manager gate; start_state → beat → end_state)
+Brief (Director)
+  → Storyboard (Director; start_state → beat → end_state)
   → Solo character sheets (identity / wardrobe)
   → Scene specs per setting_id (environment only)
   → Clips as shots (R2V: on-screen solos + scene specs;
@@ -39,10 +39,10 @@ There are **no** `n_frame_*` nodes. There are **no** clip→clip edges.
 
 ## Orchestration (one pass)
 
-1. Supervisor analysis + plan (storyboard owns continuity)
-2. Manager validates / prunes / stamps locks
+1. Director analysis + plan (storyboard owns continuity)
+2. Director validates / prunes / stamps locks
 3. Ready-queue leaves (max concurrency **3**); clips fire when *their* deps are ready
-4. Manager rewrites clip prompts to story form (omit exited cast)
+4. Director rewrites clip prompts to story form (omit exited cast)
 5. Compose only when all predecessor media exists on disk
 6. Dual raters (write-only feedback)
 
@@ -50,8 +50,7 @@ There are **no** `n_frame_*` nodes. There are **no** clip→clip edges.
 
 | Agent | Does |
 |-------|------|
-| Supervisor | Brief, storyboard (+ start/end), shot count, plan |
-| Manager | Approve, prune, leaf prompt rewrite, ratings |
+| Director | Brief, storyboard (+ start/end), shot count, plan, approve, prune, leaf prompt rewrite, ratings |
 | Leaf DeepAgent | Image / video / ffmpeg tools per node |
 | Handler | Deterministic materialize when delegated |
 

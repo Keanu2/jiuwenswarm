@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Persisted Designer pipeline feedback (self/supervisor/manager ratings)."""
+"""Persisted Designer pipeline feedback (self/director ratings)."""
 
 from __future__ import annotations
 
@@ -68,12 +68,30 @@ def save_feedback(graph_id: str, run_id: str, payload: dict[str, Any]) -> Path:
     return path
 
 
+def director_node_suggestions(feedback: dict[str, Any] | None) -> dict[str, Any]:
+    """Per-node rerun notes. Trajectory stores them on director.suggestions.
+
+    Reports written before that key existed nest the same map under
+    director.final.suggestions.
+    """
+    if not isinstance(feedback, dict):
+        return {}
+    director = feedback.get("director") if isinstance(feedback.get("director"), dict) else {}
+    top = director.get("suggestions")
+    if isinstance(top, dict) and top:
+        return top
+    final = director.get("final") if isinstance(director.get("final"), dict) else {}
+    nested = final.get("suggestions")
+    if isinstance(nested, dict) and nested:
+        return nested
+    return top if isinstance(top, dict) else {}
+
+
 def suggestion_for_node(feedback: dict[str, Any] | None, node_id: str) -> str:
     if not feedback:
         return ""
-    supervisor = feedback.get("supervisor") or {}
-    suggestions = supervisor.get("suggestions") or {}
-    if isinstance(suggestions, dict) and suggestions.get(node_id):
+    suggestions = director_node_suggestions(feedback)
+    if suggestions.get(node_id):
         return str(suggestions[node_id])
     agents = feedback.get("agents") or {}
     agent = agents.get(node_id) or {}

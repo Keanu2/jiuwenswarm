@@ -122,7 +122,7 @@ def test_music_node_always_created_when_brief_wants_bgm(monkeypatch) -> None:
     assert "Do NOT generate music" in blob or "NOT in this clip" in blob or "dialogue only" in blob.lower()
 
 
-def test_supervisor_keeps_music_node_without_music_backend(monkeypatch) -> None:
+def test_director_keeps_music_node_without_music_backend(monkeypatch) -> None:
     from jiuwenswarm.server.runtime.designer.orchestration import assign_audio_node_agents
     from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
 

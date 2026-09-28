@@ -1,11 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Domain-agnostic shot consistency contract (storyboard + Manager).
+"""Domain-agnostic shot consistency contract (storyboard + Director).
 
 No scene/genre/prompt hardcodes. Continuity comes from:
   - prior same-setting storyboard rows (action / camera / speech)
   - compact structured end_state (not raw prior Wan paragraphs)
 
-Leaf agents receive structured state only. Manager hard-clears duplicate speech
+Leaf agents receive structured state only. Director hard-clears duplicate speech
 and rejects prompts that restage finished beats.
 """
 
@@ -244,7 +244,7 @@ def merge_storyboard_continuity(
         out["previous_clip_shot_index"] = int(latest.get("shot_index") or 0)
     out["previous_clip_handoff_ready"] = True
 
-    # Structured end_state for leaf/Manager — never the full prior Wan body.
+    # Structured end_state for leaf/Director — never the full prior Wan body.
     out["end_state"] = {
         "from_shot_index": int(latest.get("shot_index") or 0),
         "action_done": _short(str(latest.get("shot_action") or ""), limit=160),
@@ -375,7 +375,7 @@ def prompt_violates_continuity(
     *,
     cfg: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Hard Manager reasons to force rewrite from this storyboard row."""
+    """Hard Director reasons to force rewrite from this storyboard row."""
     reasons: list[str] = []
     cfg = cfg if isinstance(cfg, dict) else {}
     body = str(prompt or "").strip()
@@ -430,7 +430,7 @@ def apply_continuity_contract(
     graph: dict[str, Any] | None = None,
     prompt: str = "",
 ) -> tuple[dict[str, Any], str, list[str]]:
-    """Full Manager gate: merge storyboard continuity, scrub speech, flag prompt."""
+    """Full Director gate: merge storyboard continuity, scrub speech, flag prompt."""
     out, notes = merge_storyboard_continuity(cfg, graph=graph)
     reasons = prompt_violates_continuity(prompt, cfg=out) if prompt else []
     if reasons:

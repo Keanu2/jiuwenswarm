@@ -214,11 +214,6 @@ def build_static_video_graph(
             "bootstrap": "designer.graph.static_video.v1",
             "scenario": "video",
             "optimize_for": mode,
-            "agentic": True,
-            "orchestration": {
-                "supervisor_id": "supervisor",
-                "manager_id": "manager",
-            },
         },
         "created_at": now,
         "updated_at": now,

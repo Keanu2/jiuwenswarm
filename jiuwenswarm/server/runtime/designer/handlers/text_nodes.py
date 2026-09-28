@@ -453,6 +453,15 @@ def _stamp_bible_on_text(text: str, ctx: NodeExecutionContext) -> str:
 class BriefNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         cfg = node_config(node)
+        meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
+        approved = str(meta.get("approved_brief") or "").strip()
+        if approved:
+            text = _stamp_bible_on_text(approved, ctx)
+            path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
+            return NodeResult(
+                output_ref=file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown"),
+                message="brief written (director)",
+            )
         source = graph_prompt(ctx.graph, node)
         skill = str(cfg.get("skill_excerpt") or "")
         audio = (ctx.graph.get("metadata") or {}).get("audio_intent") or {}
@@ -502,6 +511,16 @@ class StoryboardNodeHandler:
 
         cfg = node_config(node)
         planned = cfg.get("planned_shots")
+        meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
+        approved = str(meta.get("approved_storyboard") or "").strip()
+        if approved:
+            sync_shot_nodes_from_storyboard_markdown(ctx.graph, approved)
+            text = _stamp_bible_on_text(approved, ctx)
+            path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
+            return NodeResult(
+                output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),
+                message="storyboard written (director)",
+            )
         source = role_output_text(ctx, NODE_ROLE_BRIEF) or graph_prompt(ctx.graph, node)
         alignment = _storyboard_alignment_context(ctx)
         planned_block = ""
@@ -509,7 +528,7 @@ class StoryboardNodeHandler:
             import json as _json
 
             planned_block = (
-                "\n\nPlanned shots from supervisor casting (honor these shots; expand camera detail):\n"
+                "\n\nPlanned shots from director casting (honor these beats; expand camera detail):\n"
                 + _json.dumps(planned, ensure_ascii=False, indent=2)
                 + "\n"
             )

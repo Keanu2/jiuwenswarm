@@ -154,7 +154,7 @@ def continuity_card_from_prior(
     bible: dict[str, Any] | None = None,
     storyboard_hints: str = "",
 ) -> dict[str, Any]:
-    """Build a slim character consistency Manager/leaves can inject (never the full prior prompt)."""
+    """Build a slim character consistency Director/leaves can inject (never the full prior prompt)."""
     seed = prior_action or _clean_action_snippet(prior_prompt, limit=240)
     done = extract_already_done_beats(
         seed,
@@ -179,7 +179,7 @@ def continuity_card_clause(card: dict[str, Any] | None) -> str:
     if not isinstance(card, dict) or not card:
         return ""
     lines: list[str] = [
-        "CHARACTER CONSISTENCY (Manager): use this to avoid repeats — do NOT copy a prior shot prompt."
+        "CHARACTER CONSISTENCY (Director): use this to avoid repeats — do NOT copy a prior shot prompt."
     ]
     src = card.get("from_shot_index") or card.get("from_node_id")
     if src:
@@ -223,7 +223,7 @@ def strip_prior_prompt_pastes(prompt: str) -> str:
         r"\n*PRIOR KEYFRAME PROMPT \(do not redo the same beat; advance time\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
         r"\n*PRIOR SHOT CONSISTENCY \(do NOT redo these beats; continue the film forward\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
         r"\n*MASTER SCENE PROMPT:\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
-        r"\n*CHARACTER CONSISTENCY \(Manager\):[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
+        r"\n*CHARACTER CONSISTENCY \(Director\):[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
     )
     out = text
     for pat in patterns:

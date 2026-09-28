@@ -98,10 +98,10 @@ def apply_wan_call_locks(
         except Exception:  # noqa: BLE001
             pass
     from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
-        supervisor_approve_video_prompt,
+        director_approve_video_prompt,
     )
 
-    approved, _notes = supervisor_approve_video_prompt(
+    approved, _notes = director_approve_video_prompt(
         prompt,
         cfg=cfg_map,
         graph=graph if isinstance(graph, dict) else {},

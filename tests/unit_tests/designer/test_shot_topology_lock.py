@@ -139,7 +139,7 @@ def test_failed_video_does_not_expand_shot_topology():
     assert should_expand_shot_topology_after_nodes([], {"n_clip_1": {"status": "failed"}}) is True
 
 
-def test_heuristic_skeleton_does_not_lock_supervisor_shot_count():
+def test_heuristic_skeleton_does_not_lock_director_shot_count():
     from jiuwenswarm.server.runtime.designer.orchestration import (
         _apply_llm_shot_list,
         _shot_expand_lock_count,

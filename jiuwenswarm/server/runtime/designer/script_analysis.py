@@ -576,7 +576,7 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
             )
             if ranked and ranked[0][0] > 0:
                 shot["character_ids"] = [ranked[0][1]]
-            # else leave empty — fail closed; Supervisor/Manager must fill on_screen
+            # else leave empty — fail closed; Director must fill on_screen
     return _clamp_list(shots, min(_MAX_SHOTS, shot_ceiling))
 
 
@@ -670,7 +670,7 @@ def _select_shots_for_budget(
                 best_i = i
         take(best_i)
 
-    # Uncovered cast stays uncovered (Manager/Supervisor must list them).
+    # Uncovered cast stays uncovered (Director must list them).
     # Never fold into on_screen/character_ids via action-text scoring — that bleeds
     # later-meet people into early beats.
     for i, shot in enumerate(selected, start=1):
@@ -678,12 +678,12 @@ def _select_shots_for_budget(
     return selected
 
 
-def _supervisor_pipeline_decisions(
+def _director_pipeline_decisions(
     prompt: str,
     characters: list[dict[str, Any]],
     shots: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Supervisor-style layout + shot budget from prompt length and cast coverage."""
+    """Director-style layout + shot budget from prompt length and cast coverage."""
     n_chars = len(characters)
     n_shots = max(1, len(shots))
     words = len((prompt or "").split())
@@ -850,14 +850,14 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
     # Explicit N-shot / N分镜 is the only general multi-shot escape hatch.
     if explicit >= 2:
         shots = _heuristic_shots(prompt, characters)
-        decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
+        decisions = _director_pipeline_decisions(prompt, characters, shots)
         decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
         shots = _select_shots_for_budget(
             shots, int(decisions["target_shot_count"]), characters
         )
         for i, shot in enumerate(shots, start=1):
             shot["shot_index"] = i
-        decisions = _supervisor_pipeline_decisions(prompt, characters, shots)
+        decisions = _director_pipeline_decisions(prompt, characters, shots)
         decisions["target_shot_count"] = max(1, min(_MAX_SHOTS, explicit))
         if len(shots) > explicit:
             shots = shots[:explicit]
@@ -1123,7 +1123,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         graph_title=str(parsed.get("story_name") or ""),
     )
     user_prompt = str(base.get("user_prompt") or base.get("summary") or "")
-    decisions = _supervisor_pipeline_decisions(user_prompt, norm_chars, norm_shots)
+    decisions = _director_pipeline_decisions(user_prompt, norm_chars, norm_shots)
     heuristic_budget = int(decisions["target_shot_count"])
     explicit = 0
     try:
@@ -1171,7 +1171,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         ceiling = max(1, min(len(norm_shots), _MAX_SHOTS))
     decisions["target_shot_count"] = ceiling
     norm_shots = _select_shots_for_budget(norm_shots, ceiling, norm_chars)
-    layout_decisions = _supervisor_pipeline_decisions(user_prompt, norm_chars, norm_shots)
+    layout_decisions = _director_pipeline_decisions(user_prompt, norm_chars, norm_shots)
     for key in ("cast_layout", "prefer_combined_cast", "prefer_split_cast"):
         if key in layout_decisions:
             decisions[key] = layout_decisions[key]
@@ -1267,7 +1267,7 @@ async def analyze_creative_brief(
             duration_rule = ""
         # Compact schema — long prompts make deepseek-flash return prose/empty.
         system = (
-            "You are the Designer Supervisor. Domain-agnostic: use only places/people from the prompt. "
+            "You are the Designer Director. Domain-agnostic: use only places/people from the prompt. "
             "Extract EVERY named human into characters[]. Anonymous crowd is not a character. "
             "Each character description MUST lock wardrobe garments: shirt/top style+color, "
             "trousers/skirt/bottom style+color, footwear, outerwear/accessories if any "

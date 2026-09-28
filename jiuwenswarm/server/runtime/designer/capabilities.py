@@ -210,13 +210,12 @@ def _tools_for_role(
         tools = ["call_model", "read_upstream", "call_music_model"]
         if not can_music:
             tools = ["call_model", "read_upstream", "write_artifact"]
-    elif role in {"supervisor", "manager"}:
+    elif role in {"director"}:
         tools = ["call_model", "read_upstream", "rate_nodes", "write_report"]
     else:
         tools = list(base)
     if can_vision and role in {
-        "supervisor",
-        "manager",
+        "director",
         "character",
         "character_design",
         "scene",
@@ -229,7 +228,7 @@ def _tools_for_role(
     }:
         tools.append("inspect_image")
         tools.append("visual_question_answering")
-    if can_video and role in {"supervisor", "manager", "clip", "compose"}:
+    if can_video and role in {"director", "clip", "compose"}:
         tools.append("inspect_video")
     # de-dupe preserve order
     seen: set[str] = set()
@@ -242,7 +241,7 @@ def _tools_for_role(
 
 
 def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
-    """Manager start decision: models + tools → rating modality per agent."""
+    """Director start decision: models + tools → rating modality per agent."""
     chat = _chat_models_capability()
     vision_backend = _vision_backend_configured()
     audio = detect_audio_backends()
@@ -263,8 +262,8 @@ def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
     if can_vision:
         global_mod = "multimodal"
         reason = (
-            "Vision tool/model available — supervisor/manager may inspect images "
-            "(and keyframes standing in for clips) when rating."
+            "Vision tool/model available — director may inspect images "
+            "(and keyframes standing in for shots) when rating."
         )
     else:
         global_mod = "text_only"
@@ -275,18 +274,8 @@ def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
     reason = f"{reason} TTS disabled; music backend={'yes' if can_music else 'no'}."
 
     agents: dict[str, Any] = {
-        "supervisor": {
-            "role": "supervisor",
-            "models": chat,
-            "tools": list(rating_tools),
-            "rating_modality": global_mod,
-            "can_vision": can_vision,
-            "can_video": can_video,
-            "can_speech": can_speech,
-            "can_music": can_music,
-        },
-        "manager": {
-            "role": "manager",
+        "director": {
+            "role": "director",
             "models": chat,
             "tools": list(rating_tools),
             "rating_modality": global_mod,
@@ -334,7 +323,7 @@ def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
         cfg["tools"] = tools
         cfg["rating_modality"] = node_mod
         cfg["modality_reason"] = reason[:400]
-        # Legacy speech nodes are removed by Supervisor; never promote them.
+        # Legacy speech nodes are removed by Director; never promote them.
         if role in {"speech", "tts"}:
             cfg["force_handler"] = True
             cfg["delegate"] = "handler"

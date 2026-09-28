@@ -73,7 +73,7 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
     `Decomposing your request into an agentic ${optimizeFor}-optimized design graph…`;
   const doneText =
     params.doneText ??
-    'Supervisor composed the workflow. Tweak nodes or hit Play when ready.';
+    'Director composed the workflow. Tweak nodes or hit Play when ready.';
   const errorText = params.errorText ?? 'Failed to compose the design workflow. Please retry.';
 
   const designerStore = useDesignerStore.getState();

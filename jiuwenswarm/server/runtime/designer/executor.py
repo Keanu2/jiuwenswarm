@@ -19,6 +19,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphNode,
     DesignerNodeState,
     MAX_SHOT_CLIP_NODES,
+    NODE_ROLE_BRIEF,
     NODE_ROLE_CLIP,
     NODE_ROLE_COMPOSE,
     NODE_ROLE_FRAME,
@@ -83,7 +84,7 @@ class RunUpdateCallback(Protocol):
     ) -> None: ...
 
 _MOCK_NODE_DELAY_SECONDS = 0.35
-# Ready clips start together once their inputs exist. The cap only limits how
+# Ready shots start together once their inputs exist. The cap only limits how
 # many node agents run at once; it is not a dependency lock.
 _MAX_CONCURRENT_NODE_AGENTS = 3
 _TERMINAL_NODE_STATUSES = {
@@ -91,6 +92,18 @@ _TERMINAL_NODE_STATUSES = {
     NODE_STATUS_FAILED,
     NODE_STATUS_CANCELLED,
 }
+
+
+def _director_text_ready(graph: DesignerExecutionGraph, node: DesignerGraphNode) -> bool:
+    """True when the director already approved the brief or storyboard text."""
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    role = node_pipeline(node)
+    node_id = str(node.get("id") or "")
+    if role == NODE_ROLE_BRIEF or node_id == "n_brief":
+        return bool(str(meta.get("approved_brief") or "").strip())
+    if role == NODE_ROLE_STORYBOARD or node_id == "n_storyboard":
+        return bool(str(meta.get("approved_storyboard") or "").strip())
+    return False
 
 
 @dataclass(frozen=True)
@@ -174,8 +187,8 @@ class GraphExecutor:
                     architecture_clause_from_bible,
                 )
 
-                bible_m = c.get("scene_specs") if isinstance(c.get("scene_specs"), dict) else None
-                arch_m = architecture_clause_from_bible(bible_m)
+                specs_m = c.get("scene_specs") if isinstance(c.get("scene_specs"), dict) else None
+                arch_m = architecture_clause_from_bible(specs_m)
                 c["scene_architecture_clause"] = arch_m or text[:900]
                 c["scene_master_prompt"] = (arch_m or text)[:900]
             if role in {NODE_ROLE_SCENE, "scene"} or (
@@ -185,8 +198,8 @@ class GraphExecutor:
                     architecture_clause_from_bible,
                 )
 
-                bible_m = c.get("scene_specs") if isinstance(c.get("scene_specs"), dict) else None
-                arch_m = architecture_clause_from_bible(bible_m)
+                specs_m = c.get("scene_specs") if isinstance(c.get("scene_specs"), dict) else None
+                arch_m = architecture_clause_from_bible(specs_m)
                 c["scene_architecture_clause"] = arch_m or text[:900]
                 c["scene_master_prompt"] = (arch_m or text)[:900]
                 c["handoff_artifact_ready"] = True
@@ -211,14 +224,14 @@ class GraphExecutor:
                 architecture_clause_from_bible,
             )
 
-            bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
-            if not bible:
+            specs = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
+            if not specs:
                 meta0 = live.get("metadata") if isinstance(live.get("metadata"), dict) else {}
                 locks0 = meta0.get("scene_locks") if isinstance(meta0.get("scene_locks"), dict) else {}
                 sid = str(cfg.get("setting_id") or "").strip()
                 if sid and isinstance(locks0.get(sid), dict):
-                    bible = locks0[sid]
-            arch = architecture_clause_from_bible(bible)
+                    specs = locks0[sid]
+            arch = architecture_clause_from_bible(specs)
             next_ids = {f"n_frame_{shot_index + 1}", f"n_clip_{shot_index + 1}"}
             for n in live.get("nodes") or []:
                 if not isinstance(n, dict):
@@ -524,7 +537,7 @@ class GraphExecutor:
     async def spawn_node_agent(self, run_id: str, node_id: str) -> str:
         """Start one node's Agent.
 
-        Compose/ffmpeg is never allowed early — all clips (+ separate audio) must
+        Compose/ffmpeg is never allowed early — all shots (+ separate audio) must
         have completed first. Other nodes may still be spawned by agents.
         """
         target = str(node_id or "").strip()
@@ -547,7 +560,7 @@ class GraphExecutor:
             groups = sync_groups(graph)
             if not _is_ready(target, run, preds, groups, graph):
                 return (
-                    f"compose blocked: waiting for all clips"
+                    f"compose blocked: waiting for all shots"
                     f"{' and audio nodes' if any(k.startswith('n_speech') or k.startswith('n_music') or 'speech' in k or 'music' in k for k in preds.get(target, [])) else ''}"
                     " to finish before ffmpeg"
                 )
@@ -747,9 +760,7 @@ class GraphExecutor:
         run_id = run["run_id"]
         graph_id = str(graph.get("graph_id") or "")
         from jiuwenswarm.server.runtime.designer.orchestration import (
-            ManagerAgent,
-            SupervisorAgent,
-            SupervisorReviewer,
+            Director,
             write_run_feedback,
         )
         from jiuwenswarm.server.runtime.designer.trajectory import (
@@ -765,10 +776,6 @@ class GraphExecutor:
             (graph.get("metadata") or {}).get("use_prior_feedback")
             or (run.get("metadata") or {}).get("use_prior_feedback")
         )
-        # Skip Play Enter redesign when bootstrap already composed the graph.
-        meta0 = dict(graph.get("metadata") or {})
-        already_composed = bool(meta0.get("supervisor_composed_on_bootstrap"))
-
         prior: dict[str, Any] | None = None
         if use_prior:
             prior = load_prior_feedback(graph_id)
@@ -800,18 +807,18 @@ class GraphExecutor:
         agent_feedback: dict[str, dict[str, Any]] = {}
         try:
             with traj.span(
-                agent_id="manager",
+                agent_id="director",
                 action="decide_capabilities",
                 phase="orchestration",
-                role="manager",
+                role="director",
                 tool="structural",
             ):
-                cap_plan = ManagerAgent().decide_capabilities(graph)
+                cap_plan = Director().decide_capabilities(graph)
                 traj.record(
-                    agent_id="manager",
+                    agent_id="director",
                     action="decide_capabilities_result",
                     phase="orchestration",
-                    role="manager",
+                    role="director",
                     detail={
                         "rating_modality": cap_plan.get("global_rating_modality"),
                         "can_vision": cap_plan.get("can_vision"),
@@ -825,26 +832,26 @@ class GraphExecutor:
             # or user explicitly asked Run again with prior feedback.
             scenario0 = str((graph.get("metadata") or {}).get("scenario") or "")
             meta_play = dict(graph.get("metadata") or {})
-            already_composed = bool(meta_play.get("supervisor_composed_on_bootstrap"))
+            already_composed = bool(meta_play.get("director_composed_on_bootstrap"))
             run_enter_redesign = scenario0 == "video" and (
                 use_prior or not already_composed
             )
             if run_enter_redesign:
                 with traj.span(
-                    agent_id="supervisor",
+                    agent_id="director",
                     action="author_creative_brief",
                     phase="orchestration",
-                    role="supervisor",
+                    role="director",
                     tool="llm",
                 ):
-                    brief_ack = await SupervisorAgent().author_creative_brief(
+                    brief_ack = await Director().author_creative_brief(
                         graph
                     )
                     traj.record(
-                        agent_id="supervisor",
+                        agent_id="director",
                         action="author_creative_brief_result",
                         phase="orchestration",
-                        role="supervisor",
+                        role="director",
                         detail={
                             "source": brief_ack.get("source"),
                             "chars": brief_ack.get("chars"),
@@ -854,18 +861,18 @@ class GraphExecutor:
                     graph = self._store.save_graph(graph)
 
                 with traj.span(
-                    agent_id="manager",
+                    agent_id="director",
                     action="review_brief",
                     phase="orchestration",
-                    role="manager",
+                    role="director",
                     tool="llm",
                 ):
-                    mgr_brief = await ManagerAgent().review_brief(graph)
+                    mgr_brief = await Director().review_brief(graph)
                     traj.record(
-                        agent_id="manager",
+                        agent_id="director",
                         action="review_brief_result",
                         phase="orchestration",
-                        role="manager",
+                        role="director",
                         detail={
                             "source": mgr_brief.get("source"),
                             "patched": list(mgr_brief.get("patched") or [])[:20],
@@ -875,20 +882,20 @@ class GraphExecutor:
                     graph = self._store.save_graph(graph)
 
                 with traj.span(
-                    agent_id="supervisor",
+                    agent_id="director",
                     action="author_storyboard",
                     phase="orchestration",
-                    role="supervisor",
+                    role="director",
                     tool="llm",
                 ):
-                    sb_ack = await SupervisorAgent().author_storyboard(
+                    sb_ack = await Director().author_storyboard(
                         graph
                     )
                     traj.record(
-                        agent_id="supervisor",
+                        agent_id="director",
                         action="author_storyboard_result",
                         phase="orchestration",
-                        role="supervisor",
+                        role="director",
                         detail={
                             "source": sb_ack.get("source"),
                             "shot_count": sb_ack.get("shot_count"),
@@ -898,20 +905,20 @@ class GraphExecutor:
                     graph = self._store.save_graph(graph)
 
                 with traj.span(
-                    agent_id="manager",
+                    agent_id="director",
                     action="review_storyboard_pre",
                     phase="orchestration",
-                    role="manager",
+                    role="director",
                     tool="llm",
                 ):
-                    mgr_sb = await ManagerAgent().review_storyboard(
+                    mgr_sb = await Director().review_storyboard(
                         graph
                     )
                     traj.record(
-                        agent_id="manager",
+                        agent_id="director",
                         action="review_storyboard_pre_result",
                         phase="orchestration",
-                        role="manager",
+                        role="director",
                         detail={
                             "source": mgr_sb.get("source"),
                             "patched": list(mgr_sb.get("patched") or [])[:20],
@@ -920,15 +927,15 @@ class GraphExecutor:
                     )
                     graph = self._store.save_graph(graph)
 
-                # Supervisor designs flexible multi-shot graph from locked Brief+Storyboard.
+                # Director designs flexible multi-shot graph from locked Brief+Storyboard.
                 with traj.span(
-                    agent_id="supervisor",
+                    agent_id="director",
                     action="design_execution_graph",
                     phase="orchestration",
-                    role="supervisor",
+                    role="director",
                     tool="llm",
                 ):
-                    graph_ack = await SupervisorAgent().design_execution_graph(
+                    graph_ack = await Director().design_execution_graph(
                         graph,
                         optimize_for=optimize_for,
                     )
@@ -938,10 +945,10 @@ class GraphExecutor:
                     self._publish(run, on_update)
                     self._publish_graph(run, graph)
                     traj.record(
-                        agent_id="supervisor",
+                        agent_id="director",
                         action="design_execution_graph_result",
                         phase="orchestration",
-                        role="supervisor",
+                        role="director",
                         detail={
                             "source": graph_ack.get("source"),
                             "shot_count": graph_ack.get("shot_count"),
@@ -952,41 +959,41 @@ class GraphExecutor:
                     )
             elif scenario0 == "video":
                 traj.record(
-                    agent_id="supervisor",
+                    agent_id="director",
                     action="skip_enter_redesign",
                     phase="orchestration",
-                    role="supervisor",
+                    role="director",
                     detail={
-                        "reason": "supervisor_composed_on_bootstrap",
+                        "reason": "director_composed_on_bootstrap",
                         "use_prior_feedback": use_prior,
                     },
                 )
 
             with traj.span(
-                agent_id="supervisor",
+                agent_id="director",
                 action="plan",
                 phase="orchestration",
-                role="supervisor",
+                role="director",
                 tool="llm",
                 detail={"optimize_for": optimize_for, "has_prior_feedback": bool(prior)},
             ):
-                supervisor_skill = str(
-                    (graph.get("metadata") or {}).get("supervisor_skill_excerpt") or ""
+                director_skill = str(
+                    (graph.get("metadata") or {}).get("director_skill_excerpt") or ""
                 )
-                if supervisor_skill:
+                if director_skill:
                     meta = dict(graph.get("metadata") or {})
-                    meta["active_supervisor_skill"] = supervisor_skill[:3000]
+                    meta["active_director_skill"] = director_skill[:3000]
                     graph["metadata"] = meta
-                plan = await SupervisorAgent().plan(
+                plan = await Director().plan(
                     graph,
                     optimize_for=optimize_for,
                     prior_feedback=prior,
                 )
                 traj.record(
-                    agent_id="supervisor",
+                    agent_id="director",
                     action="plan_result",
                     phase="orchestration",
-                    role="supervisor",
+                    role="director",
                     detail={
                         "notes": str((plan or {}).get("notes") or "")[:500],
                         "rating_modality": (plan or {}).get("rating_modality"),
@@ -995,24 +1002,24 @@ class GraphExecutor:
                 self._store.save_graph(graph)
 
             with traj.span(
-                agent_id="manager",
+                agent_id="director",
                 action="validate_plan",
                 phase="orchestration",
-                role="manager",
+                role="director",
                 tool="llm",
             ):
-                manager_ack = await ManagerAgent().validate_plan(
+                director_ack = await Director().validate_plan(
                     graph
                 )
                 traj.record(
-                    agent_id="manager",
+                    agent_id="director",
                     action="validate_plan_result",
                     phase="orchestration",
-                    role="manager",
+                    role="director",
                     detail={
-                        "patched": list(manager_ack.get("patched") or [])[:20],
-                        "rating_modality": manager_ack.get("rating_modality"),
-                        "can_vision": manager_ack.get("can_vision"),
+                        "patched": list(director_ack.get("patched") or [])[:20],
+                        "rating_modality": director_ack.get("rating_modality"),
+                        "can_vision": director_ack.get("can_vision"),
                     },
                 )
                 graph = self._store.save_graph(graph)
@@ -1028,7 +1035,7 @@ class GraphExecutor:
             }
             incoming = execution_predecessors(graph)
             groups = sync_groups(graph)
-            graph, remaining, incoming, groups = self._expand_clips_if_needed(
+            graph, remaining, incoming, groups = self._expand_shots_if_needed(
                 graph, run, remaining, on_update=on_update
             )
             # Continuous scheduling: start each node as soon as graph deps are met
@@ -1046,10 +1053,10 @@ class GraphExecutor:
                         agent_feedback=agent_feedback,
                     )
 
-            def _maybe_adjust_clips() -> None:
+            def _maybe_adjust_shots() -> None:
                 nonlocal graph
                 meta_live = dict(graph.get("metadata") or {})
-                if meta_live.get("clips_adjusted_after_keyframes"):
+                if meta_live.get("shots_adjusted_after_keyframes"):
                     return
                 frame_nodes = [
                     n
@@ -1061,7 +1068,7 @@ class GraphExecutor:
                     for n in (graph.get("nodes") or [])
                     if node_pipeline(n) == NODE_ROLE_SCENE
                 ]
-                clip_pending = [
+                shot_pending = [
                     n
                     for n in (graph.get("nodes") or [])
                     if node_pipeline(n) == NODE_ROLE_CLIP
@@ -1080,41 +1087,41 @@ class GraphExecutor:
                     in _TERMINAL_NODE_STATUSES
                     for n in scene_nodes
                 )
-                # Scene-card path: adjust once all scene specs finish (no n_frame_*).
+                # Scene-specs path: adjust once all scene specs finish (no n_frame_*).
                 # Legacy path: adjust once all keyframes finish.
                 ready_gate = (
                     (scenes_done and not frame_nodes)
                     or frames_done
                 )
-                if not (ready_gate and clip_pending):
+                if not (ready_gate and shot_pending):
                     return
                 with traj.span(
-                    agent_id="supervisor",
+                    agent_id="director",
                     action="adjust_after_keyframes",
                     phase="orchestration",
-                    role="supervisor",
+                    role="director",
                     tool="structural",
                 ):
-                    adj_notes = SupervisorAgent().adjust_clips_after_keyframes(
+                    adj_notes = Director().adjust_clips_after_keyframes(
                         graph,
                         node_states=run.get("node_states"),
                         agent_feedback=agent_feedback,
                     )
                     traj.record(
-                        agent_id="supervisor",
+                        agent_id="director",
                         action="adjust_after_keyframes_result",
                         phase="orchestration",
-                        role="supervisor",
+                        role="director",
                         detail={"notes": adj_notes[:20], "rating_modality": "text_only"},
                     )
                 with traj.span(
-                    agent_id="manager",
+                    agent_id="director",
                     action="ack_keyframe_adjustment",
                     phase="orchestration",
-                    role="manager",
+                    role="director",
                     tool="structural",
                 ):
-                    ManagerAgent().ack_keyframe_adjustment(graph, adj_notes)
+                    Director().ack_keyframe_adjustment(graph, adj_notes)
                 graph = self._store.save_graph(graph)
 
             async def _maybe_review_storyboard() -> None:
@@ -1126,21 +1133,21 @@ class GraphExecutor:
                 if sb_state.get("status") not in _TERMINAL_NODE_STATUSES:
                     return
                 with traj.span(
-                    agent_id="manager",
+                    agent_id="director",
                     action="review_storyboard",
                     phase="orchestration",
-                    role="manager",
+                    role="director",
                     tool="llm",
                 ):
-                    sb_ack = await ManagerAgent().review_storyboard_once(
+                    sb_ack = await Director().review_storyboard_once(
                         graph,
                         node_states=run.get("node_states"),
                     )
                     traj.record(
-                        agent_id="manager",
+                        agent_id="director",
                         action="review_storyboard_result",
                         phase="orchestration",
-                        role="manager",
+                        role="director",
                         detail={
                             "patched": list(sb_ack.get("patched") or [])[:20],
                             "source": sb_ack.get("source"),
@@ -1230,10 +1237,10 @@ class GraphExecutor:
                 for node_id in finished_ids:
                     state = (run.get("node_states") or {}).get(node_id) or {}
                     traj.record(
-                        agent_id="supervisor",
+                        agent_id="director",
                         action="node_report",
                         phase="orchestration",
-                        role="supervisor",
+                        role="director",
                         detail={
                             "node_id": node_id,
                             "status": state.get("status"),
@@ -1245,11 +1252,11 @@ class GraphExecutor:
 
                 run["current_node_ids"] = list(in_flight.keys())
                 await _maybe_review_storyboard()
-                _maybe_adjust_clips()
-                graph, remaining, incoming, groups = self._expand_clips_if_needed(
+                _maybe_adjust_shots()
+                graph, remaining, incoming, groups = self._expand_shots_if_needed(
                     graph, run, remaining, on_update=on_update
                 )
-                # Re-queue any newly expanded clip ids that are not in-flight.
+                # Re-queue any newly expanded shot ids that are not in-flight.
                 for node in graph.get("nodes") or []:
                     nid = str(node.get("id") or "")
                     if not nid or nid in in_flight:
@@ -1269,63 +1276,63 @@ class GraphExecutor:
             run["current_node_ids"] = []
             run["updated_at"] = utc_now_ms()
 
-            # Write-only reports: supervisor rates nodes → manager rates all + supervisor.
+            # Write-only reports: director rates nodes → director rates all + director.
             # Never feed ratings back into this run (no loop).
-            supervisor_plan = (graph.get("metadata") or {}).get("supervisor_plan") or {}
+            director_plan = (graph.get("metadata") or {}).get("director_plan") or {}
             with traj.span(
-                agent_id="supervisor",
+                agent_id="director",
                 action="finalize",
                 phase="orchestration",
-                role="supervisor",
+                role="director",
                 tool="llm",
             ):
-                supervisor_final = await SupervisorReviewer().finalize(
+                director_final = await Director().finalize(
                     graph,
                     agent_feedback=agent_feedback,
-                    manager_review={},
+                    director_review={},
                     optimize_for=optimize_for,
                     node_states=run.get("node_states"),
                 )
             with traj.span(
-                agent_id="manager",
+                agent_id="director",
                 action="review",
                 phase="orchestration",
-                role="manager",
+                role="director",
                 tool="llm",
             ):
-                manager_review = await ManagerAgent().review(
+                director_review = await Director().review(
                     graph,
                     agent_feedback=agent_feedback,
-                    supervisor_plan=supervisor_plan if isinstance(supervisor_plan, dict) else {},
+                    director_plan=director_plan if isinstance(director_plan, dict) else {},
                     prior_feedback=None,
                     optimize_for=optimize_for,
-                    supervisor_report=supervisor_final,
+                    director_report=director_final,
                     node_states=run.get("node_states"),
                 )
             with traj.span(
-                agent_id="manager",
+                agent_id="director",
                 action="dual_rate_final",
                 phase="orchestration",
-                role="manager",
+                role="director",
                 tool="llm",
             ):
-                manager_review = await ManagerAgent().assign_dual_raters(
+                director_review = await Director().assign_dual_raters(
                     graph,
                     agent_feedback=agent_feedback,
-                    supervisor_final=supervisor_final,
-                    manager_review=manager_review,
+                    director_final=director_final,
+                    director_review=director_review,
                     node_states=run.get("node_states"),
                 )
                 traj.record(
-                    agent_id="manager",
+                    agent_id="director",
                     action="dual_rate_final_result",
                     phase="orchestration",
-                    role="manager",
+                    role="director",
                     detail={
-                        "aggregated_overall": manager_review.get("aggregated_overall"),
-                        "raters": len((manager_review.get("dual_raters") or {}).get("raters") or []),
+                        "aggregated_overall": director_review.get("aggregated_overall"),
+                        "raters": len((director_review.get("dual_raters") or {}).get("raters") or []),
                         "recommendations": len(
-                            manager_review.get("aggregated_recommendations") or []
+                            director_review.get("aggregated_recommendations") or []
                         ),
                     },
                 )
@@ -1333,26 +1340,26 @@ class GraphExecutor:
                 graph=graph,
                 run_id=run_id,
                 agent_feedback=agent_feedback,
-                supervisor_plan=supervisor_plan if isinstance(supervisor_plan, dict) else {},
-                manager_review=manager_review,
-                supervisor_final=supervisor_final,
+                director_plan=director_plan if isinstance(director_plan, dict) else {},
+                director_review=director_review,
+                director_final=director_final,
                 optimize_for=optimize_for,
             )
             traj.set_feedback(
                 {
                     "agents": agent_feedback,
-                    "supervisor": {
-                        "plan": supervisor_plan,
-                        "scores": supervisor_final.get("scores"),
-                        "node_reports": supervisor_final.get("node_reports"),
-                        "summary": supervisor_final.get("summary"),
-                        "suggestions": supervisor_final.get("suggestions"),
+                    "director": {
+                        "plan": director_plan,
+                        "scores": director_final.get("scores"),
+                        "node_reports": director_final.get("node_reports"),
+                        "summary": director_final.get("summary"),
+                        "suggestions": director_final.get("suggestions"),
+                        "review": director_review,
                     },
-                    "manager": manager_review,
                     "final": {
-                        "improvement_plan": supervisor_final.get("improvement_plan"),
-                        "aggregated_score": supervisor_final.get("aggregated_score"),
-                        "summary": supervisor_final.get("summary"),
+                        "improvement_plan": director_final.get("improvement_plan"),
+                        "aggregated_score": director_final.get("aggregated_score"),
+                        "summary": director_final.get("summary"),
                         "apply_on": "run_again_only",
                     },
                     "feedback_path": str(feedback_path) if feedback_path else None,
@@ -1361,8 +1368,8 @@ class GraphExecutor:
             meta = dict(graph.get("metadata") or {})
             meta["last_feedback_run_id"] = run_id
             meta["last_trajectory_run_id"] = run_id
-            meta["last_aggregated_score"] = supervisor_final.get("aggregated_score")
-            meta["last_improvement_plan"] = supervisor_final.get("improvement_plan")
+            meta["last_aggregated_score"] = director_final.get("aggregated_score")
+            meta["last_improvement_plan"] = director_final.get("improvement_plan")
             meta["use_prior_feedback"] = False
             graph["metadata"] = meta
             self._store.save_graph(graph)
@@ -1402,12 +1409,12 @@ class GraphExecutor:
             run = self._store.get_latest_run_for_graph(graph_id)
         if run is None:
             return graph
-        expanded, _, _, _ = self._expand_clips_if_needed(
+        expanded, _, _, _ = self._expand_shots_if_needed(
             graph, run, set(), on_update=None
         )
         return expanded
 
-    def _expand_clips_if_needed(
+    def _expand_shots_if_needed(
         self,
         graph: DesignerExecutionGraph,
         run: DesignerExecutionRun,
@@ -1427,15 +1434,15 @@ class GraphExecutor:
         from jiuwenswarm.server.runtime.designer.handlers.text_nodes import shot_generate_prompt
 
         prompts = [shot_generate_prompt(shot) for shot in shot_rows]
-        has_clip_pipeline = any(
+        has_shot_pipeline = any(
             node_pipeline(node) in {NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}
             or str(node.get("id") or "") in {"n_clip", "n_compose"}
             or str(node.get("id") or "").startswith("n_clip_")
             for node in graph.get("nodes") or []
         )
-        if not has_clip_pipeline:
+        if not has_shot_pipeline:
             return graph, remaining, execution_predecessors(graph), sync_groups(graph)
-        # Flexible Supervisor graphs: if storyboard shot count differs from frame
+        # Flexible Director graphs: if storyboard shot count differs from frame
         # nodes, rebuild from analysis (do NOT use expand_shot_nodes — that dumps
         # all cast into every frame and breaks identity wiring).
         meta = graph.get("metadata") or {}
@@ -1445,10 +1452,10 @@ class GraphExecutor:
             if str(node.get("id") or "").startswith("n_frame_")
             or node_pipeline(node) == NODE_ROLE_FRAME
         }
-        designed_clip_shots = (
+        uses_scene_card_plus_clip_shots = (
             str(meta.get("scene_continuity_mode") or "") == "scene_card_plus_clip_shots"
         )
-        if designed_clip_shots and not current_frame_ids:
+        if uses_scene_card_plus_clip_shots and not current_frame_ids:
             meta = dict(meta)
             meta["freeze_shot_topology"] = True
             graph["metadata"] = meta
@@ -1500,7 +1507,7 @@ class GraphExecutor:
                 "approved_brief",
                 "approved_storyboard",
                 "user_prompt",
-                "manager_lock_ack",
+                "director_lock_ack",
             ):
                 if key in meta and meta.get(key) is not None:
                     rmeta[key] = meta.get(key)
@@ -1535,7 +1542,7 @@ class GraphExecutor:
             if callback is not None:
                 callback(deepcopy(saved))
             return saved, remaining, execution_predecessors(saved), sync_groups(saved)
-        current_clip_ids = {
+        current_shot_ids = {
             str(node.get("id") or "")
             for node in graph.get("nodes") or []
             if node_pipeline(node) == NODE_ROLE_CLIP
@@ -1545,14 +1552,14 @@ class GraphExecutor:
             for node in graph.get("nodes") or []
             if node_pipeline(node) == NODE_ROLE_FRAME
         }
-        wanted_clip_ids = {clip_node_id(index) for index in range(1, shot_count + 1)}
+        wanted_shot_ids = {clip_node_id(index) for index in range(1, shot_count + 1)}
         wanted_frame_ids = {frame_node_id(index) for index in range(1, shot_count + 1)}
         has_compose = any(
             node_pipeline(node) == NODE_ROLE_COMPOSE or str(node.get("id") or "") == "n_compose"
             for node in graph.get("nodes") or []
         )
         topology_matches = (
-            current_clip_ids == wanted_clip_ids
+            current_shot_ids == wanted_shot_ids
             and current_frame_ids == wanted_frame_ids
             and has_compose
         )
@@ -1570,7 +1577,7 @@ class GraphExecutor:
                 callback(deepcopy(saved))
             return saved, remaining, execution_predecessors(saved), sync_groups(saved)
 
-        # Prefer Supervisor-style rebuild over expand_shot_nodes (identity-safe).
+        # Prefer Director-style rebuild over expand_shot_nodes (identity-safe).
         from jiuwenswarm.server.runtime.designer.smart_graph import (
             apply_runtime_delegate,
             build_smart_video_graph,
@@ -1592,7 +1599,7 @@ class GraphExecutor:
             "approved_brief",
             "approved_storyboard",
             "user_prompt",
-            "manager_lock_ack",
+            "director_lock_ack",
         ):
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)
@@ -1625,7 +1632,7 @@ class GraphExecutor:
         graph: DesignerExecutionGraph,
         completed_id: str,
     ) -> None:
-        """Forward scene specs / master prompt after a scene card or scene-master frame completes."""
+        """Forward scene specs / master prompt after a scene specs or scene-master frame completes."""
         by_id = {
             str(n.get("id") or ""): n
             for n in (graph.get("nodes") or [])
@@ -1646,23 +1653,23 @@ class GraphExecutor:
         setting_id = str(scfg.get("setting_id") or "").strip()
         if not setting_id:
             return
-        bible = scfg.get("scene_specs") if isinstance(scfg.get("scene_specs"), dict) else None
-        if not bible:
+        specs = scfg.get("scene_specs") if isinstance(scfg.get("scene_specs"), dict) else None
+        if not specs:
             meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             locks = meta.get("scene_locks") if isinstance(meta.get("scene_locks"), dict) else {}
             maybe = locks.get(setting_id) if isinstance(locks, dict) else None
             if isinstance(maybe, dict):
-                bible = maybe
+                specs = maybe
         from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
             architecture_clause_from_bible,
         )
 
-        arch = architecture_clause_from_bible(bible)
+        arch = architecture_clause_from_bible(specs)
         gen_src = dict(scfg.get("generate") or {}) if isinstance(scfg.get("generate"), dict) else {}
         master_prompt = str(
             scfg.get("scene_master_prompt") or gen_src.get("prompt") or arch or ""
         ).strip()[:900]
-        if not arch and not bible and not master_prompt:
+        if not arch and not specs and not master_prompt:
             return
         changed = False
         target_role = NODE_ROLE_CLIP if is_scene else NODE_ROLE_FRAME
@@ -1681,8 +1688,8 @@ class GraphExecutor:
             if is_scene:
                 cfg["master_scene_node_id"] = src_id
                 cfg["scene_node_id"] = cfg.get("scene_node_id") or src_id
-            if bible:
-                cfg["scene_specs"] = dict(bible)
+            if specs:
+                cfg["scene_specs"] = dict(specs)
             if arch or master_prompt:
                 cfg["scene_architecture_clause"] = arch or master_prompt[:900]
                 cfg["scene_master_prompt"] = master_prompt or (arch[:900] if arch else "")
@@ -1702,8 +1709,8 @@ class GraphExecutor:
             if is_scene:
                 irefs["master_scene_node_id"] = src_id
                 irefs["scene_node_id"] = irefs.get("scene_node_id") or src_id
-                if bible:
-                    irefs["scene_specs"] = dict(bible)
+                if specs:
+                    irefs["scene_specs"] = dict(specs)
             else:
                 irefs["keyframe_strategy"] = "compose_from_solo_refs"
                 cfg["keyframe_strategy"] = "compose_from_solo_refs"
@@ -1837,7 +1844,13 @@ class GraphExecutor:
         # Leaf nodes: task skill only (already on config). Do not dump scenario/subjects.
         skill = str((node.get("config") or {}).get("skill_excerpt") or "").strip()
         if not skill:
-            skill = (load_agent_skill(role) or load_agent_skill(node_id) or "")[:1200]
+            stamped_skill = str((node.get("config") or {}).get("skill_id") or "").strip()
+            skill = (
+                (load_agent_skill(stamped_skill) if stamped_skill else "")
+                or load_agent_skill(role)
+                or load_agent_skill(node_id)
+                or ""
+            )[:1200]
             if skill:
                 cfg = dict(node.get("config") or {})
                 cfg["skill_excerpt"] = skill
@@ -1856,31 +1869,33 @@ class GraphExecutor:
         if (graph.get("metadata") or {}).get("use_prior_feedback"):
             cfg = dict(node.get("config") or {})
             prior_plan = str((graph.get("metadata") or {}).get("last_improvement_plan") or "")
-            suggestions = ((graph.get("metadata") or {}).get("prior_feedback") or {}).get(
-                "supervisor"
-            ) or {}
-            if isinstance(suggestions, dict):
-                node_suggestion = (suggestions.get("suggestions") or {}).get(node_id)
-                if node_suggestion:
-                    cfg["rerun_suggestion"] = str(node_suggestion)
+            from jiuwenswarm.server.runtime.designer.feedback import (
+                director_node_suggestions,
+            )
+
+            node_suggestion = director_node_suggestions(
+                (graph.get("metadata") or {}).get("prior_feedback")
+            ).get(node_id)
+            if node_suggestion:
+                cfg["rerun_suggestion"] = str(node_suggestion)
             if prior_plan and not cfg.get("rerun_suggestion"):
                 cfg["rerun_suggestion"] = prior_plan[:1500]
             node["config"] = cfg
 
-        # Manager leaf prompt gate + prior-shot handoff for frame/clip media.
+        # Director leaf prompt gate + prior-shot handoff for frame/shot media.
         role_for_gate = str(
             _node_pipeline_fn(node)
             or (node.get("config") or {}).get("role")
             or ""
         ).lower()
         if role_for_gate in {"frame", "keyframe", "clip", "character", "character_design", "scene"}:
-            from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent
+            from jiuwenswarm.server.runtime.designer.orchestration import Director
 
             live_graph = self._require_graph(
                 str(run.get("graph_id") or graph.get("graph_id") or "")
             )
-            gate = ManagerAgent().review_leaf_media_prompt(live_graph, node)
-            # Always persist Manager lock-gate stamps (even when prompt text unchanged).
+            gate = Director().review_leaf_media_prompt(live_graph, node)
+            # Always persist Director lock-gate stamps (even when prompt text unchanged).
             graph = live_graph
             self._store.save_graph(graph)
             for n in graph.get("nodes") or []:
@@ -1907,7 +1922,11 @@ class GraphExecutor:
             )
             self._store.save_run(run)
             self._publish(run, on_update, node_id)
-        tool_name = "node_agent" if node_uses_agent_runtime(node) else "handler"
+        tool_name = (
+            "handler"
+            if _director_text_ready(graph, node) or not node_uses_agent_runtime(node)
+            else "node_agent"
+        )
         span_cm = (
             traj.span(
                 agent_id=node_id,
@@ -1958,22 +1977,6 @@ class GraphExecutor:
                     self._store.save_graph(graph)
                 # User uploads are immutable source assets. Even if an older saved
                 # graph incorrectly says delegate=agent, never regenerate them.
-                uses_agent = (
-                    node_uses_agent_runtime(node)
-                    and not is_user_reference_node(node)
-                )
-                emit_activity(
-                    ACTIVITY_KIND_THINKING,
-                    f"starting {node.get('label') or node_id}",
-                    force=True,
-                )
-                emit_activity(
-                    ACTIVITY_KIND_TOOL_CALL if uses_agent else ACTIVITY_KIND_STAGE,
-                    stage_text_for_node(node),
-                    tool="node_agent" if uses_agent else "handler",
-                    force=True,
-                )
-
                 def _on_prompt_artifact(text: str) -> None:
                     self._publish_prompt_artifact_early(
                         graph,
@@ -1998,6 +2001,25 @@ class GraphExecutor:
                         if isinstance(fresh_node, dict) and str(fresh_node.get("id") or "") == node_id:
                             node = fresh_node
                             break
+                # User uploads stay on the handler. Director markdown for brief
+                # and storyboard is the node file, so those nodes use the handler
+                # too and do not call the leaf model again.
+                uses_agent = (
+                    node_uses_agent_runtime(node)
+                    and not is_user_reference_node(node)
+                    and not _director_text_ready(ctx.graph, node)
+                )
+                emit_activity(
+                    ACTIVITY_KIND_THINKING,
+                    f"starting {node.get('label') or node_id}",
+                    force=True,
+                )
+                emit_activity(
+                    ACTIVITY_KIND_TOOL_CALL if uses_agent else ACTIVITY_KIND_STAGE,
+                    stage_text_for_node(node),
+                    tool="node_agent" if uses_agent else "handler",
+                    force=True,
+                )
                 if uses_agent:
                     result = await self._host.execute(node, ctx)
                     handler_name = "NodeAgentHost"
@@ -2095,9 +2117,9 @@ class GraphExecutor:
                             live_graph["metadata"] = meta
                             self._store.save_graph(live_graph)
                 except Exception:  # noqa: BLE001
-                    logger.debug("storyboard→clip sync failed", exc_info=True)
-                self._expand_clips_if_needed(live_graph, run, set(), on_update=on_update)
-            # Stamp prior-shot prompt handoff after frame/clip media completes.
+                    logger.debug("storyboard→shot sync failed", exc_info=True)
+                self._expand_shots_if_needed(live_graph, run, set(), on_update=on_update)
+            # Stamp prior-shot prompt handoff after frame/shot media completes.
             if node_pipeline(node) in {NODE_ROLE_FRAME, NODE_ROLE_CLIP}:
                 live_graph = self._require_graph(
                     str(run.get("graph_id") or graph.get("graph_id") or "")
@@ -2126,7 +2148,7 @@ class GraphExecutor:
                         break
                     if node_pipeline(node) == NODE_ROLE_FRAME and shot_index >= 1:
                         next_frame = f"n_frame_{shot_index + 1}"
-                        next_clip = f"n_clip_{shot_index + 1}"
+                        next_shot = f"n_clip_{shot_index + 1}"
                         action_snip = str(
                             cfg_done.get("shot_action")
                             or cfg_done.get("character_action")
@@ -2134,7 +2156,7 @@ class GraphExecutor:
                         ).strip() or approved[:220]
                         for n in live_graph.get("nodes") or []:
                             nid = str(n.get("id") or "")
-                            if nid not in {next_frame, next_clip}:
+                            if nid not in {next_frame, next_shot}:
                                 continue
                             c = dict(n.get("config") or {})
                             # Always overwrite consecutive stamp (parallel KF race fix).
@@ -2183,7 +2205,7 @@ class GraphExecutor:
                     "role": role,
                     "self_score": 2,
                     "notes": _exception_text(exc),
-                    "suggestion_for_next": "Retry with adjusted params from manager plan",
+                    "suggestion_for_next": "Retry with adjusted params from director plan",
                     "tool": tool_name,
                 }
         finally:
@@ -2207,7 +2229,7 @@ class GraphExecutor:
         run: DesignerExecutionRun,
         graph: DesignerExecutionGraph,
     ) -> None:
-        """Keep run.node_states aligned after Supervisor redesigns topology."""
+        """Keep run.node_states aligned after Director redesigns topology."""
         live_ids = {
             str(node.get("id") or "")
             for node in (graph.get("nodes") or [])
@@ -2420,8 +2442,8 @@ def _is_ready(
     if state.get("status") != NODE_STATUS_PENDING:
         return False
     preds = list(incoming.get(node_id, []))
-    # Compose/ffmpeg must wait for EVERY clip (+ separate speech/music), even if
-    # edges drifted or only the last clip was wired.
+    # Compose/ffmpeg must wait for EVERY shot (+ separate speech/music), even if
+    # edges drifted or only the last shot was wired.
     if graph is not None:
         from jiuwenswarm.common.schema.designer_graph import (
             compose_required_predecessor_ids,
@@ -2455,7 +2477,7 @@ def _is_ready(
             if compose_wait:
                 if member_status != NODE_STATUS_COMPLETED:
                     return False
-                # Require a real on-disk clip/audio file — not just COMPLETED + URI.
+                # Require a real on-disk shot/audio file — not just COMPLETED + URI.
                 try:
                     from jiuwenswarm.server.runtime.designer.handlers.compose import (
                         compose_predecessor_media_ready,
@@ -2470,7 +2492,7 @@ def _is_ready(
                 continue
             if member_status == NODE_STATUS_COMPLETED:
                 continue
-            # Soft artifact deps (another clip's beat): unlock while that clip
+            # Soft artifact deps (another shot's beat): unlock while that shot
             # is still generating, once the storyboard shot is already known.
             if graph is not None and is_soft_artifact_dependency(graph, member, node_id):
                 if artifact_dependency_satisfied(graph, node_id, member):

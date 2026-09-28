@@ -109,7 +109,7 @@ def wan_leaf_skill_block(*, role: str = "clip") -> str:
                 "(2) THIS storyboard action + camera + speech, "
                 "(3) same-setting continue only — never across setting_id.",
                 "Omit exited cast from the video call. No negatives, no worked examples.",
-                "Manager/supervisor keep concise faithful story-form; rewrite lock essays.",
+                "Director keep concise faithful story-form; rewrite lock essays.",
                 "STYLE: one look phrase (photoreal cinematic unless the brief names another medium).",
             ]
         )

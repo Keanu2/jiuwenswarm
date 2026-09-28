@@ -161,7 +161,7 @@ def _score_human(ch: dict[str, Any], blob: str) -> int:
 
 
 def _beat_text_for_scoring(action: str) -> str:
-    """Strip supervisor lock suffixes so scoring uses the storyboard shot only."""
+    """Strip director lock suffixes so scoring uses the storyboard shot only."""
     text = str(action or "")
     for marker in (
         "IDENTITY LOCK:",
@@ -392,7 +392,7 @@ def _stamp_props_and_occupancy(
 
 
 def enforce_setting_transitions(analysis: dict[str, Any]) -> list[str]:
-    """Supervisor cross-check: setting_id change ⇒ new compose, not edit-across-set."""
+    """Director cross-check: setting_id change ⇒ new compose, not edit-across-set."""
     notes: list[str] = []
     shots = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
     prev_set = ""

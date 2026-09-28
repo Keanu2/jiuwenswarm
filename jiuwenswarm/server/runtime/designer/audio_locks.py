@@ -311,7 +311,7 @@ def audio_lock_prompt_block(
     include_music: bool = False,
     clip_embedded: bool = False,
 ) -> str:
-    """Manager / clip prompt clause for locked speech + BGM (+ video-model audio)."""
+    """Director / clip prompt clause for locked speech + BGM (+ video-model audio)."""
     lines: list[str] = []
     lang = _normalize_language(language_lock) if language_lock else ""
     if lang:

@@ -41,7 +41,7 @@ class PromptLimit:
     """True when this is only advisory (unknown model / soft family default)."""
 
     source: str
-    """Short provenance note for logs / Manager gate."""
+    """Short provenance note for logs / Director gate."""
 
     def guidance(self) -> str:
         label = "IMAGE" if self.kind == "image" else "VIDEO"
@@ -244,7 +244,7 @@ def video_prompt_limit_guidance(
 
 
 def media_prompt_limit_packet() -> dict[str, Any]:
-    """Structured limits for Manager lock gate / leaf JSON context."""
+    """Structured limits for Director lock gate / leaf JSON context."""
     image = resolve_prompt_limit("image")
     video = resolve_prompt_limit("video")
     return {

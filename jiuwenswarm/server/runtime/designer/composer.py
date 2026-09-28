@@ -24,7 +24,6 @@ from jiuwenswarm.common.schema.designer_graph import (
 )
 from jiuwenswarm.server.runtime.designer.catalog import (
     catalog_nodes_by_id,
-    load_node_catalog,
     scenario_template,
 )
 from jiuwenswarm.server.runtime.designer.skills_loader import (
@@ -223,7 +222,6 @@ def _compose_from_catalog(
     scenario: str,
 ) -> DesignerExecutionGraph:
     prompt_text = prompt.strip()
-    catalog = load_node_catalog()
     by_id = catalog_nodes_by_id()
     template_ids = scenario_template(scenario)
     nodes: list[DesignerGraphNode] = []
@@ -306,12 +304,6 @@ def _compose_from_catalog(
             "bootstrap": "designer.graph.catalog_agents.v1",
             "scenario": scenario,
             "optimize_for": optimize_for,
-            "catalog_schema": catalog.get("schema_version"),
-            "agentic": True,
-            "orchestration": {
-                "supervisor_id": "supervisor",
-                "manager_id": "manager",
-            },
         },
         "created_at": now,
         "updated_at": now,
@@ -327,7 +319,7 @@ def compose_execution_graph(
     optimize_for: OptimizeMode = "quality",
     scenario: str | None = None,
 ) -> DesignerExecutionGraph:
-    """Bootstrap canvas via Supervisor/Leader smart video pipeline.
+    """Bootstrap canvas via Director/Leader smart video pipeline.
 
     Catalog templates are a node library, not the workflow dumped onto the canvas.
     """

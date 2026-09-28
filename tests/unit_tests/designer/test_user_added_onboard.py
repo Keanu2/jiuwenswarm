@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwenswarm.server.runtime.designer.orchestration import SupervisorAgent
+from jiuwenswarm.server.runtime.designer.orchestration import Director
 
 
 def _pairs(graph: dict) -> set[tuple[str, str]]:
@@ -71,7 +71,7 @@ def test_onboard_does_not_rewire_successor_connected_image(
             },
         ],
     }
-    SupervisorAgent().onboard_user_added_nodes(graph)
+    Director().onboard_user_added_nodes(graph)
     pairs = _pairs(graph)
     assert ("n_character", "n_image_user") in pairs
     assert ("n_image_user", "n_clip_1") not in pairs
@@ -113,7 +113,7 @@ def test_onboard_does_not_rewire_successor_connected_video(
             },
         ],
     }
-    SupervisorAgent().onboard_user_added_nodes(graph)
+    Director().onboard_user_added_nodes(graph)
     pairs = _pairs(graph)
     assert ("n_frame_1", "n_video_user") in pairs
     assert ("n_video_user", "n_compose") not in pairs
@@ -158,23 +158,23 @@ def test_onboard_does_not_wire_orphan_dock_node(
             },
         ],
     }
-    SupervisorAgent().onboard_user_added_nodes(graph)
+    Director().onboard_user_added_nodes(graph)
     pairs = _pairs(graph)
     assert ("n_image_user", "n_clip_1") not in pairs
     assert ("n_image_user", "n_compose") not in pairs
     assert ("n_video_user", "n_compose") not in pairs
     assert ("n_clip_1", "n_compose") in pairs
-    assert graph["metadata"]["supervisor_user_node_onboard"]["orphans"]
+    assert graph["metadata"]["director_user_node_onboard"]["orphans"]
 
 
-def test_manager_records_canvas_add_and_remove_without_new_edges(
+def test_director_records_canvas_add_and_remove_without_new_edges(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.designer.model_tools.llm_available",
         lambda: False,
     )
-    from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent
+    from jiuwenswarm.server.runtime.designer.orchestration import Director
 
     graph = {
         "metadata": {
@@ -220,13 +220,13 @@ def test_manager_records_canvas_add_and_remove_without_new_edges(
             },
         ],
     }
-    SupervisorAgent().onboard_user_added_nodes(graph)
-    ManagerAgent().ensure_agents_and_prune(graph)
+    Director().onboard_user_added_nodes(graph)
+    Director().ensure_agents_and_prune(graph)
     pairs = _pairs(graph)
     assert ("n_image_user", "n_clip_1") not in pairs
     assert ("n_clip_user", "n_compose") not in pairs
     assert ("n_clip_1", "n_compose") in pairs
-    awareness = graph["metadata"]["manager_canvas_awareness"]
+    awareness = graph["metadata"]["director_canvas_awareness"]
     assert awareness["added"][0]["node_id"] == "n_image_user"
     assert awareness["removed"][0]["node_id"] == "n_clip_9"
     assert awareness["connected"][0]["peer_id"] == "n_clip_user"

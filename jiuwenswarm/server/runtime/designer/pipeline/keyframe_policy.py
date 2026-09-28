@@ -449,7 +449,7 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
         }
         prev_set = sid
 
-    # Per-setting scene locks (hierarchical views) for Manager / graph stamps.
+    # Per-setting scene locks (hierarchical views) for Director / graph stamps.
     scene_locks: dict[str, dict[str, Any]] = {}
     for shot in shots:
         sid = str(shot.get("setting_id") or "set_1")

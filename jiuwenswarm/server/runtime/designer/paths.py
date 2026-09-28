@@ -43,11 +43,17 @@ def catalog_txt_path() -> Path:
 
 
 def skills_dir() -> Path:
-    return designer_package_dir() / "skills"
+    """In-repo Designer skill markdown.
+
+    Scenario, director, agent, subject, and style files live next to this
+    package. The gitignored ``designer_catalog_skills_reports_trajectory``
+    directory is for local catalogs, reports, and trajectory only.
+    """
+    return Path(__file__).resolve().parent / "skills"
 
 
 def runs_dir() -> Path:
-    """Per-run trajectory + supervisor/manager report bundles."""
+    """Per-run trajectory + director report bundles."""
     path = designer_package_dir() / "runs"
     path.mkdir(parents=True, exist_ok=True)
     return path

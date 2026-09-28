@@ -39,7 +39,7 @@ from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionCont
 
 
 def _resolve_image_size(cfg: dict, graph: dict | None = None) -> str:
-    """Prefer Manager-stamped aspect_lock image_size (~1K), then node config."""
+    """Prefer Director-stamped aspect_lock image_size (~1K), then node config."""
     aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
     if not aspect and isinstance(graph, dict):
         meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}

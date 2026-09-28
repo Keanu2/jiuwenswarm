@@ -1117,7 +1117,7 @@ def _pull_labeled(prompt: str, prefixes: tuple[str, ...]) -> str:
     return ""
 
 
-def manager_approve_video_prompt(
+def director_prepare_video_prompt(
     prompt: str,
     *,
     cfg: dict[str, Any] | None,
@@ -1180,10 +1180,10 @@ def manager_approve_video_prompt(
         model=model,
         extra_image_labels=extra_image_labels,
     )
-    return composed, ["manager_rewrote", *reasons]
+    return composed, ["director_rewrote", *reasons]
 
 
-def supervisor_approve_video_prompt(
+def director_approve_video_prompt(
     prompt: str,
     *,
     cfg: dict[str, Any] | None,
@@ -1194,7 +1194,7 @@ def supervisor_approve_video_prompt(
     camera: str = "",
     extra_image_labels: list[str] | None = None,
 ) -> tuple[str, list[str]]:
-    """Supervisor gate: concise story-form that still enforces wardrobe/seat/visibility locks.
+    """Director gate: concise story-form that still enforces wardrobe/seat/visibility locks.
 
     Approves a leaf rewrite when it is narrative, faithful, and short. Otherwise edits
     via compose_practice_prompt into the story-form Image-N binding.
@@ -1210,7 +1210,7 @@ def supervisor_approve_video_prompt(
         or str(cfg.get("camera") or "")
         or _pull_labeled(prompt, ("camera move", "camera for shot", "camera"))
     )
-    approved, notes = manager_approve_video_prompt(
+    approved, notes = director_prepare_video_prompt(
         prompt,
         cfg=cfg,
         graph=graph,
@@ -1230,7 +1230,7 @@ def supervisor_approve_video_prompt(
             model=model,
             extra_image_labels=extra_image_labels,
         )
-        reasons = ["supervisor_rewrote_for_storyboard", *reasons]
+        reasons = ["director_rewrote_for_storyboard", *reasons]
     elif beat and not _story_leads_prompt(approved, beat):
         approved = compose_practice_prompt(
             cfg=cfg,
@@ -1240,9 +1240,9 @@ def supervisor_approve_video_prompt(
             model=model,
             extra_image_labels=extra_image_labels,
         )
-        reasons = ["supervisor_rewrote_story_first", *reasons]
-    elif "manager_rewrote" not in notes and "kept_agent_prompt" in notes:
-        reasons = ["supervisor_approved", *reasons]
+        reasons = ["director_rewrote_story_first", *reasons]
+    elif "director_rewrote" not in notes and "kept_agent_prompt" in notes:
+        reasons = ["director_approved", *reasons]
     else:
-        reasons = ["supervisor_checked", *reasons]
+        reasons = ["director_checked", *reasons]
     return approved.strip()[:2200], reasons

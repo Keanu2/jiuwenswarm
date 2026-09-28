@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Load Designer scenario / agent / subject skills from designer_catalog_and_skills."""
+"""Load Designer scenario, director, agent, subject, and style skills."""
 
 from __future__ import annotations
 
@@ -26,7 +26,11 @@ _ROLE_ALIASES: dict[str, str] = {
     "compose": "compose",
     "final": "compose",
     "audio": "audio_bed",
+    "audio_bed": "audio_bed",
     "music": "music",
+    "speech": "speech_tts",
+    "tts": "speech_tts",
+    "speech_tts": "speech_tts",
     "mesh": "mesh",
     "3d": "mesh",
 }
@@ -238,8 +242,7 @@ def skill_bundle_for_graph(
     return {
         "scenario": scenario,
         "scenario_skill": load_scenario_skill(scenario),
-        "supervisor_skill": load_orchestration_skill("supervisor"),
-        "manager_skill": load_orchestration_skill("manager"),
+        "director_skill": load_orchestration_skill("director"),
         "agent_skills": agent_skills,
         "subjects": subjects,
         "subject_skills": {s: load_subject_skill(s) for s in subjects},
@@ -315,7 +318,12 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
         role = str(node_pipeline(node) or cfg.get("role") or cfg.get("agent_role") or node.get("id") or "")
         roles.append(role)
         # Leaf agents: role skill + matching tool playbook (image / video / ffmpeg).
-        skill_text = load_agent_skill(role) or load_agent_skill(str(node.get("id") or ""))
+        stamped_skill = str(cfg.get("skill_id") or "").strip()
+        skill_text = (
+            (load_agent_skill(stamped_skill) if stamped_skill else "")
+            or load_agent_skill(role)
+            or load_agent_skill(str(node.get("id") or ""))
+        )
         tool_text = _tool_skills_for_role(role)
         # Clip / storyboard / brief also receive the active director style.
         role_l = _ROLE_ALIASES.get(role, role)
@@ -332,7 +340,8 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
             cfg["video_style"] = style_id
         merged = "\n\n".join(x for x in (skill_text, tool_text, style_bit) if x).strip()
         if merged:
-            cfg["skill_id"] = _ROLE_ALIASES.get(role, role)
+            if not stamped_skill:
+                cfg["skill_id"] = _ROLE_ALIASES.get(role, role)
             cfg["skill_excerpt"] = merged[:2800]
         else:
             cfg.pop("skill_excerpt", None)
@@ -359,27 +368,23 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
         node_roles=roles,
         video_style=style_id,
     )
-    # Overall skills live only on graph metadata for supervisor / manager.
-    meta["skills_package"] = "designer_catalog_skills_reports_trajectory"
+    # Overall skills live only on graph metadata for the director.
+    meta["skills_package"] = "jiuwenswarm/server/runtime/designer/skills"
     meta["scenario_skill_excerpt"] = (bundle.get("scenario_skill") or "")[:4000]
-    meta["supervisor_skill_excerpt"] = (bundle.get("supervisor_skill") or "")[:4000]
-    meta["manager_skill_excerpt"] = (bundle.get("manager_skill") or "")[:4000]
+    meta["director_skill_excerpt"] = (bundle.get("director_skill") or "")[:4000]
     if style_skill:
-        # Prepend director style so Supervisor/Manager see it first.
-        meta["supervisor_skill_excerpt"] = (
-            style_skill + "\n\n" + str(meta.get("supervisor_skill_excerpt") or "")
-        ).strip()[:5000]
-        meta["manager_skill_excerpt"] = (
-            style_skill + "\n\n" + str(meta.get("manager_skill_excerpt") or "")
+        # Prepend the active video style so the director sees it first.
+        meta["director_skill_excerpt"] = (
+            style_skill + "\n\n" + str(meta.get("director_skill_excerpt") or "")
         ).strip()[:5000]
         meta["style_skill_excerpt"] = style_skill[:4000]
     meta["subject_keys"] = bundle.get("subjects") or []
     meta["audio_intent"] = bundle.get("audio") or {}
     meta["skill_guided"] = True
     meta["skill_policy"] = (
-        "Leaf nodes: agents/<role>.md + tools/(image_gen|video_gen|ffmpeg).md + "
-        "styles/<video_style>.md when active. "
-        "Supervisor/manager: orchestration skills + active video style in metadata."
+        "Leaf nodes: agents/<skill_id>.md, plus a tool playbook when that file exists, "
+        "and styles/<video_style>.md when a style is active. "
+        "Director: orchestration/director.md plus the active video style."
     )
     graph["metadata"] = meta
     return graph

@@ -1,116 +1,31 @@
-# Storyboard node pipeline (`n_storyboard`)
+# Storyboard node (`n_storyboard`)
 
-**Builder:** `smart_graph.build_smart_video_graph`  
-**Handler:** `handlers/text_nodes.StoryboardNodeHandler`  
-**Type:** `table` (markdown storyboard)  
-**Continuity module:** `pipeline/storyboard_shot_state.py`
+**Handler:** `handlers/text_nodes.py` `StoryboardNodeHandler`  
+**Type:** table / markdown  
+**Author:** the director (`Director.author_storyboard`), then this node writes the table.
 
----
+## Required input
 
-## 1. Purpose
-
-Turn the approved brief (+ analysis shots) into a **time-coherent storyboard**.  
-Each row is **one closed continuity window**:
-
-`start_state` → action / camera / speech → `end_state`
-
-Same `setting_id`: shot N `start_state` must match shot N−1 `end_state` (Manager validates; builder fills gaps).  
-Clips do **not** read prior Wan text for plot — this board is the sole continuity authority.
-
-Also appends the **Production Lock Bible** for leaf context.
-
----
-
-## 2. Graph inputs / edges
-
-| Item | Value |
-|------|--------|
-| Inputs | `["n_brief"]` |
-| Edge | `e_brief_storyboard` |
-| Downstream | → all characters, scenes, clips |
-| Label | `Storyboard:…` |
-
----
-
-## 3. Config at build
-
-| Field | Meaning |
-|-------|---------|
-| `role` | `storyboard` |
-| `prompt` | User prompt |
-| `planned_shots` | Shot list from analysis / Supervisor |
-| `inputs` | `["n_brief"]` |
-| `tools` | `call_model`, `write_artifact` |
-| `delegate` | `agent` |
-| `skill_id` | `storyboard` |
-
-### Per-shot fields (required for continuity)
-
-| Field | Meaning |
-|-------|---------|
-| `timeline`, `camera`, `action` / `cast_actions` | This window only |
-| `on_screen`, `offscreen`, `exiting_character_ids` | Occupancy |
-| `speech_line` / `speech_by_character`, `language_lock` | Dialogue (empty = silent) |
-| `start_state` | Opening pose / seats / facing / on_screen |
-| `end_state` | Closing pose / seats / exited / speech_done |
-| `already_done`, `continuity_lock` | Prior finished beats in this setting |
-| `setting_id` | Geography key |
-
-`ensure_shot_start_end_states` fills missing start/end and chains same-setting opens from prior ends.
-
----
-
-## 4. Upstream artifacts
-
-| Artifact | From |
-|----------|------|
-| Brief markdown | `n_brief` `output_ref` |
-
----
-
-## 5. Runtime sequence
-
-```
-n_brief COMPLETED
-        ↓
-Storyboard ready
-        ↓
-StoryboardNodeHandler  OR  agent
-        ↓
-planned_shots + LLM storyboard
-  ensure_shot_start_end_states
-  sync_shot_nodes_from_storyboard_markdown → clip configs
-  stamp Production Lock Bible
-        ↓
-COMPLETED → unlocks characters, scenes, clips (clips concurrent thereafter)
-```
-
----
-
-## 6. Output
-
-| Output | Form |
+| Source | Data |
 |--------|------|
-| `output_ref` | Markdown storyboard (+ bible) |
-| Side effect | Clip configs get action/camera/speech/start_state/end_state |
+| `n_brief` | Creative brief and production specs (hard edge) |
+| Director plan | `planned_shots`: index, timeline, camera, action, on-screen cast, speech, `start_state`, `end_state` |
+| Graph metadata | Shot budget, scene names, character consistency locks |
 
----
+## What the node does
 
-## 7. Key functions
+1. If `metadata.approved_storyboard` is set, the handler writes that text and does not call the model again. An empty chat model still fails closed when that text is missing.
+2. Otherwise the leaf text model drafts the table from the brief.
+3. Each row is one shot window: timeline, camera, action, consistency note, and the prompt seed for that shot.
+4. The table is written to the workspace.
 
-| # | Function | File |
-|---|----------|------|
-| 1 | `_write_storyboard_markdown` | `smart_graph.py` |
-| 2 | `ensure_shot_start_end_states` / `validate_storyboard_state_chain` | `storyboard_shot_state.py` |
-| 3 | `StoryboardNodeHandler.execute` | `handlers/text_nodes.py` |
-| 4 | `sync_shot_nodes_from_storyboard_markdown` | text_nodes / executor |
-| 5 | Supervisor `author_storyboard` | `orchestration.py` |
+The storyboard is the consistency authority. Later shots must follow this row's start, action, and end, not an earlier video prompt.
 
----
+## Output to the next nodes
 
-## 8. Design notes
+| Output | Next nodes |
+|--------|------------|
+| Storyboard markdown | Every `n_character_*`, `n_scene_*`, and `n_clip_*` that lists `n_storyboard` as an input |
+| Per-shot fields copied onto shot configs | Shot handler (`action`, `timeline`, speech, on-screen ids, scene id) |
 
-- Soft prefer ≤8 shots, hard max 16.  
-- Explicit N-shot / N分镜 is a ceiling.  
-- Domain-agnostic — no scene-specific hardcodes.  
-- Assets UI shows storyboard as a **text** tile (not an empty image card).
+Same-setting shots do not wait on each other. They wait on this table plus the character and scene images they need.

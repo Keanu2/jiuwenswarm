@@ -20,16 +20,16 @@ flowchart TD
   U["User prompt in Designer UI"] --> BOOT["designer.graph.bootstrap"]
   BOOT --> SA["analyze_creative_brief<br/>LLM owns shot count N"]
   SA --> G0["build_smart_video_graph provisional"]
-  G0 --> BR["Supervisor author_creative_brief"]
-  BR --> M1["Manager review / approve brief"]
-  M1 --> SB["Supervisor author_storyboard<br/>start_state → beat → end_state"]
-  SB --> M2["Manager review / approve storyboard"]
-  M2 --> DG["Supervisor design_execution_graph"]
-  DG --> MV["Manager validate_plan + locks"]
+  G0 --> BR["Director author_creative_brief"]
+  BR --> M1["Director review / approve brief"]
+  M1 --> SB["Director author_storyboard<br/>start_state → beat → end_state"]
+  SB --> M2["Director review / approve storyboard"]
+  M2 --> DG["Director design_execution_graph"]
+  DG --> MV["Director validate_plan + locks"]
   MV --> UI["Canvas named agents"]
   UI --> PLAY["Play → designer.run.start"]
   PLAY --> SCH["GraphExecutor ready-queue"]
-  SCH --> PL["Supervisor.plan + Manager gates"]
+  SCH --> PL["Director.plan + Director gates"]
   PL --> SOLO["n_character_* solo sheets"]
   PL --> SC["n_scene_* empty plates"]
   SOLO --> CLIP["n_clip_* R2V<br/>on-screen solos + scene"]
@@ -51,7 +51,7 @@ depend on prior Wan text or prior clip nodes — they run **concurrently** once
 storyboard + needed solos + scene are ready. Exited cast is omitted until the
 storyboard returns them on_screen. **No** `n_frame_*` keyframes.
 
-**Shot count:** the Supervisor LLM owns `target_shot_count` (prefer ≤8, hard
+**Shot count:** the Director LLM owns `target_shot_count` (prefer ≤8, hard
 max 16). Prefer fewer shots: same cast + same setting + continuous motion
 (including a pan) = one clip; put camera motion in the video prompt. New
 clip only on hard cut, new setting, wardrobe/prop change, large pose/framing
@@ -64,10 +64,10 @@ ceiling. Chat model is required — Enter / chat / Play fail closed without one.
 
 User prompt (natural language) → Designer execution graph → **one forward Play**:
 
-1. **Supervisor (= Director)** authors **Production Brief** + **Storyboard**
-   (with per-shot start/end states), decides shot count, then (after Manager lock)
+1. **Director** authors **Production Brief** + **Storyboard**
+   (with per-shot start/end states), decides shot count, then (after Director lock)
    **builds the graph** and assigns **minimal tools**.
-2. **Manager (= Producer)** gates Brief/Storyboard vs the user prompt, stamps
+2. **Director (= Producer)** gates Brief/Storyboard vs the user prompt, stamps
    **scene locks**, **prunes nodes that cannot reach `n_compose`**, re-edits
    artifacts, reviews **every leaf media prompt**, and enforces the storyboard
    continuity contract so completed beats / speech are not restaged.
@@ -103,8 +103,8 @@ clips are the shots.
 
 | Agent | Responsibility |
 |-------|----------------|
-| Supervisor | Brief, storyboard, shot budget, graph redesign, plan directives |
-| Manager | Approve/edit gates, prune, scene locks, leaf prompt gate, dual rate |
+| Director | Brief, storyboard, shot budget, graph redesign, plan directives |
+| Director | Approve/edit gates, prune, scene locks, leaf prompt gate, dual rate |
 | Leaf DeepAgent | Per-node tools: `call_model`, `call_image_model`, `call_video_model`, `ffmpeg_compose` |
 | Handler | Deterministic media when `delegate=handler` or after agent authors a spec |
 
@@ -165,7 +165,7 @@ n_brief (text)
 Bootstrap stamp: `metadata.bootstrap = designer.graph.smart_video.quality.v5`.  
 **Scene cards are required.**
 `metadata.scene_continuity_mode = scene_card_plus_clip_shots`.  
-`metadata.freeze_shot_topology = False` — Supervisor owns a **flexible**
+`metadata.freeze_shot_topology = False` — Director owns a **flexible**
 multi-shot graph; storyboard / LLM `target_shot_count` drives `n_clip_*`
 (and one `n_scene_*` per unique setting).
 
@@ -182,7 +182,7 @@ multi-shot graph; storyboard / LLM `target_shot_count` drives `n_clip_*`
   and R2V reference mode (`keyframe_strategy = clip_from_scene_and_solos`).
 - **Video reference mode:** attach on-screen solos + Scene N as
   `reference_images` (not a peopled first_frame). Prompt is story-form from
-  this row’s start → beat → end — Manager/Supervisor rewrite via
+  this row’s start → beat → end — Director rewrite via
   `video_prompt_practice.py`. Positive only: no forbid / examples /
   sit-stand hardcodes on the API body.
 - **Same-setting continuity:** storyboard chain (`shot N start` = `shot N−1 end`)
@@ -190,8 +190,8 @@ multi-shot graph; storyboard / LLM `target_shot_count` drives `n_clip_*`
   Never cross rooms. Exited cast stays off prompts until returned on_screen.
 - **Concurrency:** no clip→clip edges; ready clips run up to concurrency **3**.
 - **Hard style default:** unspecified brief → film-wide **photoreal cinematic**.
-- **Lock gate:** Manager `review_leaf_media_prompt` + continuity contract then
-  `supervisor_approve_video_prompt` before every clip tool call.
+- **Lock gate:** Director `review_leaf_media_prompt` + continuity contract then
+  `director_approve_video_prompt` before every clip tool call.
 
 ### Hierarchical scene bible (per setting)
 
@@ -238,11 +238,11 @@ multi-shot graph; storyboard / LLM `target_shot_count` drives `n_clip_*`
 
 | Role | How created | When |
 |------|-------------|------|
-| **SupervisorAgent** | In-process via `call_model_tool` | Brief / Storyboard → rebuild graph → plan → finalize |
-| **ManagerAgent** | Same | Capabilities → lock gate → validate/prune → leaf prompt gate → dual raters |
+| **Director** | In-process via `call_model_tool` | Brief / Storyboard → rebuild graph → plan → finalize |
+| **Director** | Same | Capabilities → lock gate → validate/prune → leaf prompt gate → dual raters |
 | **Leaf DeepAgent** | `NodeAgentHost` → `create_deep_agent` | Each ready node with `config.delegate=agent` |
 | **Handler** | Role handler class | `delegate=handler` or agent failure / `force_handler` |
-| **Rater A / B** | Manager `dual_rate_final` | After film completes |
+| **Rater A / B** | Director `dual_rate_final` | After film completes |
 
 Leaf tools (minimal per role): `call_model`, `call_image_model`,
 `call_video_model`, `ffmpeg_compose`, graph get/patch, `designer_node_complete`.
@@ -257,16 +257,16 @@ scene-prompt handoff early; scene→clip and compose stay hard.
 `GraphExecutor._execute_wave_run` — continuous ready-queue (no wave barrier).
 
 ```
-1. Play entry requires chat model (`require_llm`)
-2. Skip Enter redesign when supervisor_composed_on_bootstrap
-3. Manager.decide_capabilities
-4. Supervisor.plan
-5. Manager.validate_plan (+ prune / identity stamp)
-6. Ready-queue leaves; Manager.review_leaf_media_prompt before each scene/clip
+1. Play entry requires a chat model (`require_llm`)
+2. Skip Enter redesign when director_composed_on_bootstrap
+3. Director.decide_capabilities
+4. Director.plan
+5. Director.validate_plan (+ prune / identity stamp)
+6. Ready-queue leaves; Director.review_leaf_media_prompt before each scene/clip
 7. Scene-card prompt handoff onto same-setting clips
 8. Serial clips + Wan prompt stamp onto next clip
 9. Compose only when all clips completed + usable
-10. SupervisorReviewer.finalize + Manager.review + dual_rate_final
+10. Director.finalize + Director.review + dual_rate_final
 11. write_run_feedback (apply_on=run_again_only)
 ```
 
@@ -282,7 +282,7 @@ jiuwenswarm/server/runtime/designer/
   README.md                 # this package's module map
   smart_graph.py            # build_smart_video_graph (v5 empty plates + clip shots)
   script_analysis.py        # LLM creative brief + shot budget (heuristic_analysis test-only)
-  orchestration.py          # Supervisor / Manager, prune+reedit, leaf prompt gate
+  orchestration.py          # Director, prune+reedit, leaf prompt gate
   executor.py               # ready-queue (≤3), storyboard sync, compose hard-wait
   node_agent.py             # NodeAgentHost; call_image_model → generate_designer_image
   node_labels.py            # Brief / Story Board / Scene / Clip / Final Composed
@@ -336,7 +336,7 @@ jiuwenswarm/agents/harness/common/tools/{image_tools,video_tools,multimodal_conf
 ### Import-level check (no media cost)
 
 ```bash
-conda run -n new --no-capture-output python -c "from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph; from jiuwenswarm.server.runtime.designer.orchestration import SupervisorAgent, ManagerAgent; print('ok')"
+conda run -n new --no-capture-output python -c "from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph; from jiuwenswarm.server.runtime.designer.orchestration import Director, Director; print('ok')"
 ```
 
 Topology smoke (scene cards + clip-as-shot; no `n_frame_*`):
@@ -392,7 +392,7 @@ Do not commit: videos, PNGs/JPEGs from runs, workspace media, `pipeline_*_out/`,
 | `LocalFunction` not callable on image | Leaf must use `generate_designer_image` (fixed in `node_agent`) |
 | Run stops; UI shows Continue | Ready-queue path; pending nodes auto-resume |
 | Missing scene plates | Required `n_scene_*` nodes are present |
-| Architecture drifts | `scene_bible` + storyboard start/end chain + Manager leaf gate |
+| Architecture drifts | `scene_bible` + storyboard start/end chain + Director leaf gate |
 | Clip redo / resay | continuity contract + start_state; no prior-Wan dump |
 | Clips stuck serial | no clip→clip edges; check on-screen-only deps |
 | Wrong people / lost identity | solos as refs + `on_screen` / occupancy; omit exited |
@@ -401,4 +401,4 @@ Do not commit: videos, PNGs/JPEGs from runs, workspace media, `pipeline_*_out/`,
 | Silent film when sound requested | `audio_routing`; TTS/BGM or clip-embedded |
 | still freezes as clips | still→mp4 creative fallback is disabled |
 | Generic node titles | `node_labels` + analysis names |
-| Negative / essay video prompts | Manager rewrite via `video_prompt_practice` |
+| Negative / essay video prompts | Director rewrite via `video_prompt_practice` |

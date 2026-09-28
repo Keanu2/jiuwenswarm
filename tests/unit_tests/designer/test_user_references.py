@@ -83,7 +83,7 @@ def test_attach_user_references_stays_on_metadata_not_brief_body(tmp_path: Path)
             {
                 "id": "n_brief",
                 "type": "text",
-                "config": {"role": "brief", "prompt": "火车站短片", "supervisor_task": "Write a brief."},
+                "config": {"role": "brief", "prompt": "火车站短片", "director_task": "Write a brief."},
             }
         ],
         "metadata": {},
@@ -94,7 +94,7 @@ def test_attach_user_references_stays_on_metadata_not_brief_body(tmp_path: Path)
     brief = attached["nodes"][0]["config"]
     assert brief["prompt"] == "火车站短片"
     assert brief["user_reference_ids"] == ["ref_01"]
-    assert "image 1 =" in brief["supervisor_task"]
+    assert "image 1 =" in brief["director_task"]
     assert user_reference_image_paths(attached)[0].is_file()
     assert "火车站短片" in analysis_prompt_with_references("火车站短片", refs)
 
@@ -119,7 +119,7 @@ def test_carry_user_references_survives_graph_rebuild(tmp_path: Path) -> None:
         },
         refs,
     )
-    # Supervisor rebuilds drop metadata and replace the brief node wholesale.
+    # Director rebuilds drop metadata and replace the brief node wholesale.
     rebuilt = {
         "nodes": [{"id": "n_brief", "type": "text", "config": {"role": "brief"}}],
         "edges": [],

@@ -1,12 +1,19 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""One-shot writer for designer_catalog_skills_reports_trajectory/skills markdown packs."""
+"""Write Designer skill markdown into the in-repo designer skills package."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1] / "designer_catalog_skills_reports_trajectory" / "skills"
+ROOT = (
+    Path(__file__).resolve().parents[1]
+    / "jiuwenswarm"
+    / "server"
+    / "runtime"
+    / "designer"
+    / "skills"
+)
 
 SCENARIOS = {
     "video": """---
@@ -83,19 +90,19 @@ description: Cross-modal package spanning image/video/audio/3d as needed.
 ---
 
 # Multimodal Scenario Skill
-Detect modalities from prompt; fan out to modality agents; sync via supervisor; assemble final package.
+Detect modalities from prompt; fan out to modality agents; sync via the director; assemble final package.
 """,
 }
 
 ORCH = {
-    "supervisor": """---
-name: designer-supervisor
-description: Plans node directives, model choice, audio policy, and graph redesign on rerun.
+    "director": """---
+name: designer-director
+description: One overseer. Plans the graph, gates prompts, and writes the next-run improvement plan.
 ---
 
-# Supervisor Skill
+# Director Skill
 
-You coordinate Designer agents.
+You are the only Designer overseer.
 
 ## Planning
 - Read scenario skill + prior feedback/trajectory.
@@ -103,25 +110,16 @@ You coordinate Designer agents.
 - Enforce audio policy (silent / speech / music).
 - Prefer R2V shots (on-screen solos + scene specs).
 
-## Rerun / redesign
+## Gates
+- Approve the brief and storyboard before leaves run.
+- Rewrite every leaf video prompt into concise story form.
+- Prune nodes that do not contribute to compose.
+
+## Rerun / rating
 - When prior ratings are low, redesign weak nodes or reorder edges.
-- Pass manager recommendations into node directives.
-
-## Rating
-Score each agent 0–10 with actionable suggestions.
-""",
-    "manager": """---
-name: designer-manager
-description: Reviews run quality and produces improvement plan for next run.
----
-
-# Manager Skill
-
-After a run:
-1. Inspect trajectory timings and tool usage.
-2. Rate artifacts 0–10.
-3. Write `improvement_plan` and per-node recommendations for the next Run.
-4. If speech was requested but missing, force speech nodes next run; if silent was requested but audio leaked, flag compose.
+- Score each agent 0–10 with actionable suggestions.
+- Write `improvement_plan` and per-node recommendations for the next Run.
+- If speech was requested but missing, force speech nodes next run; if silent was requested but audio leaked, flag compose.
 """,
 }
 

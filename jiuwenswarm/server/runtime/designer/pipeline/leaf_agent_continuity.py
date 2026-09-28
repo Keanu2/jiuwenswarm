@@ -43,9 +43,9 @@ def hollywood_leaf_instructions(role: str) -> str:
     """Compact continuity bible for leaf agents — no scene-genre hardcodes."""
     r = str(role or "").strip().lower()
     shared = (
-        "You are a leaf craft artist under a film hierarchy: "
-        "Supervisor = Director (creative authority: brief, storyboard, shot prompts); "
-        "Manager = Producer (gates, budgets, identity/spatial consistency checks). "
+        "You are a leaf craft artist under one Director. "
+        "The Director owns the brief, storyboard, shot prompts, gates, budgets, "
+        "and identity/spatial consistency checks. "
         "You MUST read the STORYBOARD (and BRIEF only when you are the storyboard leaf) "
         "and obey the Director's on_screen cast + setting_id. "
         "If vision tools exist, inspect upstream sheets/scene/prior KF and reconcile conflicts "
@@ -179,7 +179,7 @@ def collect_production_context(
     }
 
 
-def merge_supervisor_task(existing: str, planned: str) -> str:
+def merge_director_task(existing: str, planned: str) -> str:
     """Keep graph-built Hollywood tasks; append planner task if useful."""
     old = (existing or "").strip()
     new = (planned or "").strip()

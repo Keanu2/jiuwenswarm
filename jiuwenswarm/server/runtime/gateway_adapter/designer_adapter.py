@@ -409,7 +409,7 @@ async def _create_design_workspace_once(
                 else {}
             ),
         }
-        bootstrap, error, code = await _bootstrap_graph_with_supervisor(
+        bootstrap, error, code = await _bootstrap_graph_with_director(
             bootstrap_params,
             request.channel_id,
             _leader_progress_callback(request),
@@ -462,7 +462,7 @@ async def _create_design_workspace_once(
                 "request_id": request.request_id,
                 "channel_id": request.channel_id or "web",
                 "timestamp": now + 0.001,
-                "content": "Supervisor composed the workflow.",
+                "content": "Director composed the workflow.",
                 "event_type": "design.bootstrap_completed",
                 "design_kind": "bootstrap_done",
                 "graph_id": graph_id,
@@ -703,11 +703,11 @@ def _save_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | No
     try:
         graph = normalize_execution_graph(raw_graph)
         try:
-            from jiuwenswarm.server.runtime.designer.orchestration import SupervisorAgent
+            from jiuwenswarm.server.runtime.designer.orchestration import Director
 
-            SupervisorAgent().onboard_user_added_nodes(graph)
+            Director().onboard_user_added_nodes(graph)
         except Exception:
-            logger.debug("Supervisor user-node onboard on save failed", exc_info=True)
+            logger.debug("Director user-node onboard on save failed", exc_info=True)
         saved = _store.save_graph(graph)
         _persist_uploaded_outputs(saved)
     except DesignerGraphValidationError as exc:
@@ -769,11 +769,11 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
                 raw_patch = {**raw_patch, "upsert_nodes": stamped}
         next_graph = apply_graph_patch(graph, raw_patch)
         try:
-            from jiuwenswarm.server.runtime.designer.orchestration import SupervisorAgent
+            from jiuwenswarm.server.runtime.designer.orchestration import Director
 
-            SupervisorAgent().onboard_user_added_nodes(next_graph)
+            Director().onboard_user_added_nodes(next_graph)
         except Exception:
-            logger.debug("Supervisor user-node onboard on patch failed", exc_info=True)
+            logger.debug("Director user-node onboard on patch failed", exc_info=True)
         saved = _store.save_graph(next_graph)
         _persist_uploaded_outputs(saved)
     except DesignerGraphValidationError as exc:
@@ -897,10 +897,10 @@ def _bootstrap_graph(
     except UserReferenceError as exc:
         return None, str(exc), exc.code
 
-    # Catalog templates must not be dumped onto the canvas. Supervisor/Leader
+    # Catalog templates must not be dumped onto the canvas. Director/Leader
     # always owns topology via the smart video pipeline.
     if callable(on_progress):
-        on_progress("thinking", "Supervisor · Reading brief")
+        on_progress("thinking", "Director · Reading brief")
     # Never call LLM from this sync thread (asyncio.run breaks AsyncOpenAI).
     # Caller must pass LLM analysis from the main event loop.
     if not isinstance(analysis, dict) or str(analysis.get("source") or "") != "llm":
@@ -912,7 +912,7 @@ def _bootstrap_graph(
     if callable(on_progress):
         on_progress(
             "tool_call",
-            "Supervisor · Materializing graph",
+            "Director · Materializing graph",
             "build_smart_video_graph",
         )
     try:
@@ -934,7 +934,7 @@ def _bootstrap_graph(
     meta["scenario"] = "video"
     meta["script_analysis"] = analysis
     # Enter already authored Brief→Storyboard→Graph — skip Play redesign.
-    meta["supervisor_composed_on_bootstrap"] = True
+    meta["director_composed_on_bootstrap"] = True
     meta["freeze_shot_topology"] = False
     if isinstance(analysis.get("scene_locks"), dict) and analysis["scene_locks"]:
         meta["scene_locks"] = analysis["scene_locks"]
@@ -948,7 +948,7 @@ def _bootstrap_graph(
         )
         on_progress(
             "stage",
-            f"Supervisor · Graph materialised ({cast_n} solo cards)",
+            f"Director · Graph materialised ({cast_n} solo cards)",
         )
     if user_refs:
         graph = attach_user_references_to_graph(graph, user_refs)
@@ -962,7 +962,7 @@ def _bootstrap_graph(
         metadata["session_id"] = session_id
         graph["metadata"] = metadata
     if callable(on_progress):
-        on_progress("stage", "Manager · Saving graph")
+        on_progress("stage", "Director · Saving graph")
     saved = _store.save_graph(graph)
     payload: dict[str, Any] = {"graph": dict(saved), "project_id": project_id}
     if project_payload is not None:
@@ -1012,13 +1012,13 @@ def _start_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | Non
     contribution_warning = ""
     if graph is not None:
         try:
-            from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent
+            from jiuwenswarm.server.runtime.designer.orchestration import Director
 
-            audit = ManagerAgent().audit_contribution_for_run(graph)
+            audit = Director().audit_contribution_for_run(graph)
             contribution_warning = str(audit.get("warning") or "")
             _store.save_graph(graph)
         except Exception:
-            logger.debug("Manager contribution audit failed", exc_info=True)
+            logger.debug("Director contribution audit failed", exc_info=True)
     if run_id:
         existing = _store.get_run(run_id)
         if existing is None:
@@ -1219,7 +1219,7 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
     }, None, None
 
 
-async def _bootstrap_graph_with_supervisor(
+async def _bootstrap_graph_with_director(
     params: dict[str, Any],
     channel_id: str,
     on_progress: Any | None = None,
@@ -1229,19 +1229,19 @@ async def _bootstrap_graph_with_supervisor(
     )
 
     with use_preferred_designer_model(str(params.get("model_name") or "").strip()):
-        return await _bootstrap_graph_with_supervisor_impl(
+        return await _bootstrap_graph_with_director_impl(
             params,
             channel_id,
             on_progress,
         )
 
 
-async def _bootstrap_graph_with_supervisor_impl(
+async def _bootstrap_graph_with_director_impl(
     params: dict[str, Any],
     channel_id: str,
     on_progress: Any | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    """Enter: seed cast → Brief/Manager → Storyboard/Manager → Graph/Manager.
+    """Enter: seed cast → Brief/Director → Storyboard/Director → Graph/Director.
 
     Never runs AsyncOpenAI inside ``asyncio.to_thread`` / ``asyncio.run``.
     """
@@ -1276,7 +1276,7 @@ async def _bootstrap_graph_with_supervisor_impl(
     analysis_prompt = analysis_prompt_with_references(prompt, user_refs_preview)
 
     if callable(on_progress):
-        on_progress("thinking", "Supervisor · Extracting cast and scenes (LLM)")
+        on_progress("thinking", "Director · Extracting cast and scenes (LLM)")
     try:
         analysis = await analyze_creative_brief(
             analysis_prompt,
@@ -1300,7 +1300,7 @@ async def _bootstrap_graph_with_supervisor_impl(
         n = len(analysis.get("characters") or [])
         on_progress(
             "stage",
-            f"Supervisor · LLM cast locked ({n} characters)",
+            f"Director · LLM cast locked ({n} characters)",
         )
 
     payload, error, code = await asyncio.to_thread(
@@ -1316,7 +1316,7 @@ async def _bootstrap_graph_with_supervisor_impl(
     if not isinstance(graph, dict):
         return payload, error, code
 
-    from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent, SupervisorAgent
+    from jiuwenswarm.server.runtime.designer.orchestration import Director
     from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
 
     optimize_for = str(
@@ -1326,30 +1326,30 @@ async def _bootstrap_graph_with_supervisor_impl(
     )
     try:
         if callable(on_progress):
-            on_progress("thinking", "Supervisor · Authoring brief (LLM)")
-        await SupervisorAgent().author_creative_brief(graph)
+            on_progress("thinking", "Director · Authoring brief (LLM)")
+        await Director().author_creative_brief(graph)
         if callable(on_progress):
-            on_progress("thinking", "Manager · Reviewing / approving brief")
-        await ManagerAgent().review_brief(graph)
+            on_progress("thinking", "Director · Reviewing / approving brief")
+        await Director().review_brief(graph)
         if callable(on_progress):
-            on_progress("thinking", "Supervisor · Designing storyboard (LLM)")
-        await SupervisorAgent().author_storyboard(graph)
+            on_progress("thinking", "Director · Designing storyboard (LLM)")
+        await Director().author_storyboard(graph)
         if callable(on_progress):
-            on_progress("thinking", "Manager · Reviewing / approving storyboard")
-        await ManagerAgent().review_storyboard(graph)
+            on_progress("thinking", "Director · Reviewing / approving storyboard")
+        await Director().review_storyboard(graph)
         if callable(on_progress):
             on_progress(
                 "tool_call",
-                "Supervisor · Designing execution graph (LLM)",
+                "Director · Designing execution graph (LLM)",
                 "design_execution_graph",
             )
-        await SupervisorAgent().design_execution_graph(
+        await Director().design_execution_graph(
             graph,
             optimize_for=optimize_for,
         )
         if callable(on_progress):
-            on_progress("thinking", "Manager · Validating / approving graph + locks")
-        await ManagerAgent().validate_plan(graph)
+            on_progress("thinking", "Director · Validating / approving graph + locks")
+        await Director().validate_plan(graph)
         graph = apply_runtime_delegate(graph)
         meta = dict(graph.get("metadata") or {})
         cast_n = sum(
@@ -1357,12 +1357,12 @@ async def _bootstrap_graph_with_supervisor_impl(
             for n in (graph.get("nodes") or [])
             if str(n.get("id") or "").startswith("n_character")
         )
-        meta["supervisor_composed_on_bootstrap"] = True
+        meta["director_composed_on_bootstrap"] = True
         graph["metadata"] = meta
         if callable(on_progress):
             on_progress(
                 "stage",
-                f"Manager · Approved — {cast_n} solo cards",
+                f"Director · Approved — {cast_n} solo cards",
             )
         saved = _store.save_graph(graph)
         payload = dict(payload)
@@ -1370,20 +1370,20 @@ async def _bootstrap_graph_with_supervisor_impl(
         return payload, None, None
     except DesignerLlmError as exc:
         logger.info(
-            "Supervisor bootstrap approval chain failed (LLM): %s",
+            "Director bootstrap approval chain failed (LLM): %s",
             exc,
             exc_info=True,
         )
         return None, exc.user_message, exc.code
     except Exception as exc:  # noqa: BLE001
         logger.info(
-            "Supervisor bootstrap approval chain failed: %s",
+            "Director bootstrap approval chain failed: %s",
             exc,
             exc_info=True,
         )
         return (
             None,
-            f"Supervisor/Manager approval chain failed: {exc}",
+            f"Director approval chain failed: {exc}",
             "LLM_API_ERROR",
         )
 
@@ -1426,8 +1426,8 @@ class DesignerAdapter(GatewayAdapter):
             elif method == ReqMethod.DESIGNER_GRAPH_SAVE:
                 payload, error, code = await asyncio.to_thread(_save_graph, params)
             elif method == ReqMethod.DESIGNER_GRAPH_BOOTSTRAP:
-                # Enter: provisional graph, then Supervisor/Manager LLM approval chain.
-                payload, error, code = await _bootstrap_graph_with_supervisor(
+                # Enter: provisional graph, then Director LLM approval chain.
+                payload, error, code = await _bootstrap_graph_with_director(
                     params,
                     request.channel_id,
                     _leader_progress_callback(request),

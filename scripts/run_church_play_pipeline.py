@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the real Designer Play pipeline (not competition) on the church Bible prompt.
 
-Uses Supervisor/Manager + leaf agents when LLM is configured. Saves the final
+Uses the Director plus leaf agents when a chat model is configured. Saves the final
 compose mp4 (if any) under pipeline_test_out/ and a JSON report beside it.
 """
 
@@ -257,11 +257,11 @@ async def main() -> int:
 
     from jiuwenswarm.server.runtime.designer.orchestration import (
         _ensure_audio_nodes_for_intent,
-        _manager_prune_and_cohere,
+        _director_prune_and_cohere,
     )
 
     _ensure_audio_nodes_for_intent(graph)
-    _manager_prune_and_cohere(graph)
+    _director_prune_and_cohere(graph)
 
     pruned = prune_non_contributing_nodes(graph)
     report["pruned_before_run"] = pruned

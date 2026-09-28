@@ -2,7 +2,7 @@
 """Film-wide production lock bible — stamped into brief/storyboard and leaf prompts.
 
 Domain-agnostic: style, landmarks, lighting, crowd, speech, axis, aspect.
-Leaves MUST read this before calling image/video models. Manager/Supervisor may rewrite
+Leaves MUST read this before calling image/video models. Director may rewrite
 generate.prompt to stay faithful to brief + storyboard + user prompt.
 """
 
@@ -238,7 +238,7 @@ def enforce_locks_on_generate_prompt(
     role: str = "",
     max_chars: int = 3200,
 ) -> str:
-    """Manager/Supervisor: fold missing locks into a leaf generate.prompt (deterministic)."""
+    """Director: fold missing locks into a leaf generate.prompt (deterministic)."""
     p = (prompt or "").strip()
     additions: list[str] = []
 
