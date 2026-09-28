@@ -13,7 +13,6 @@ Plan B (master_still): shot-1 master with featured cast; later edit prior.
 
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Any
 
 
@@ -265,7 +264,6 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     # Do NOT force orphan cast into scene 1 visuals — solo cards still come from characters[].
     out["setting_ensembles"] = ensembles
     # Scene specs are the geography lock for clip R2V (Qwen stills).
-    out["skip_scene_specs"] = False
     out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
 
     # Distinct place text per setting_id (from scenes[] or first compose action).
@@ -354,7 +352,6 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
             shot["ensemble_master"] = False
             shot["compose_setting_master"] = True
             shot["is_scene_master"] = True
-            shot["skip_scene_specs"] = True
             compose_actions_by_set[sid] = dict(actions)
             shot["scene_compose_authority"] = True
             other_sets = [s for s in setting_place if s != sid]
@@ -377,7 +374,6 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
             shot["ensemble_master"] = False
             shot["compose_setting_master"] = False
             shot["is_scene_master"] = False
-            shot["skip_scene_specs"] = True
             shot["scene_compose_authority"] = False
             prior_actions = compose_actions_by_set.get(sid) or {}
             shot["setting_lock"] = {
@@ -470,7 +466,6 @@ def apply_compose_solos_setting_policy(analysis: dict[str, Any]) -> dict[str, An
     out["crowd_locks_by_setting"] = crowd_by_set
     out["setting_places"] = setting_place
     out["scene_locks"] = scene_locks
-    out["skip_scene_specs"] = False
     out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
     out["keyframe_policy"] = "scene_card_plus_clip_shots"
     out["keyframe_policy_notes"] = {
@@ -526,11 +521,11 @@ def build_scene_specs_for_setting(
         ]
     view_defs = {
         "front": f"VIEW front: facing primary landmark of `{setting_id}`; show full width of locked props.",
-        "left": f"VIEW left: 90° left of front; same objects must remain fixed — no new props.",
-        "right": f"VIEW right: 90° right of front; mirrored coverage of the same locked set.",
-        "side": f"VIEW side: oblique ~45°; reveal depth while keeping object L/R continuity.",
-        "top": f"VIEW top/high: elevated angle; floor plan of props matches other views.",
-        "bottom": f"VIEW bottom/low: low angle looking up; ceiling/sky consistent with lighting lock.",
+        "left": "VIEW left: 90° left of front; same objects must remain fixed — no new props.",
+        "right": "VIEW right: 90° right of front; mirrored coverage of the same locked set.",
+        "side": "VIEW side: oblique ~45°; reveal depth while keeping object L/R continuity.",
+        "top": "VIEW top/high: elevated angle; floor plan of props matches other views.",
+        "bottom": "VIEW bottom/low: low angle looking up; ceiling/sky consistent with lighting lock.",
         "sequence": (
             "TIME WINDOW: film this shot's own action. Do not restage another "
             "window of the same scene from front, left, or right."

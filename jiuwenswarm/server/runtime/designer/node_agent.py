@@ -828,7 +828,10 @@ class DesignerGraphToolkit:
         return "completed"
 
     async def call_model(self, *, prompt: str = "", system: str = "") -> str:
-        from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            call_model_tool,
+            model_text_or_raise,
+        )
 
         node = _node_from_ctx(self.ctx)
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
@@ -841,9 +844,7 @@ class DesignerGraphToolkit:
             optimize_for=optimize,
             max_tokens=16384,
         )
-        if not result.get("ok"):
-            return f"call_model error: {result.get('error') or 'unknown'}"
-        return str(result.get("text") or "")
+        return model_text_or_raise(result)
 
     def refresh_canvas(self) -> None:
         from jiuwenswarm.server.runtime.designer.graph_store import reload_graph_inplace
@@ -1755,7 +1756,12 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
 
 
 class NodeAgentHost:
-    """Run one Designer node as a DeepAgent, with handler fallback."""
+    """Run one Designer node as a DeepAgent.
+
+    Media backends still live on handlers: after a successful agent creative
+    pass, text-only output may be materialized via the handler. Agent/LLM
+    failures themselves fail closed — no demote-to-handler soft success.
+    """
 
     def __init__(
         self,
@@ -1812,16 +1818,8 @@ class NodeAgentHost:
                     exc_info=True,
                 )
                 agent_result = toolkit.completed
-            elif self._runner is not None:
-                raise
             else:
-                logger.exception(
-                    "Designer node agent failed; falling back to handler. node=%s",
-                    ctx.node_id,
-                )
-                from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
-
-                return await get_node_handler(node).execute(node, ctx)
+                raise
 
         # Agents author creative direction via designer_* tools, but media
         # generation backends live on handlers. If the agent only submitted
@@ -2017,11 +2015,6 @@ class NodeAgentHost:
         else:
             text = str(getattr(result, "content", "") or result)
         if not text.strip():
-            # Empty agent reply on media nodes → handler path (no silent hang).
-            if _node_expects_media(node):
-                from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
-
-                return await get_node_handler(node).execute(node, ctx)
             raise RuntimeError("node agent returned empty output")
         path = write_workspace_text(f"designer_agent_{ctx.run_id}_{ctx.node_id}", text)
         agent_result = NodeResult(

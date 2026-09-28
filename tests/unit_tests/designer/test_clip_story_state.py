@@ -434,6 +434,13 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
                 {"id": "char_mum", "name": "Mum", "description": "red dress"},
                 {"id": "char_child", "name": "Child", "description": "blue shirt"},
             ],
+            "scenes": [
+                {
+                    "id": "set_1",
+                    "name": "Family room",
+                    "description": "window, tea table, and door",
+                }
+            ],
             "shots": [
                 {
                     "shot_index": 1,
@@ -453,7 +460,6 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
                 },
             ],
         },
-        ai_mode=False,
     )
     scene = next(n for n in graph["nodes"] if str(n.get("id") or "").startswith("n_scene"))
     scfg = scene.get("config") or {}
@@ -466,7 +472,6 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
     assert scfg.get("composed_scene") is False
     assert not scfg.get("character_node_ids")
     assert scfg.get("style_lock")
-    assert scfg.get("skip_scene_specs") is False
     clip1 = next(n for n in graph["nodes"] if n.get("id") == "n_clip_1")
     clip2 = next(n for n in graph["nodes"] if n.get("id") == "n_clip_2")
     assert (clip1.get("config") or {}).get("first_of_setting") is True
@@ -485,13 +490,14 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
     assert "do not restart" not in clip2_prompt.lower()
     assert graph["metadata"].get("freeze_shot_topology") is True
     brief = next(n for n in graph["nodes"] if n.get("id") == "n_brief")
-    prewritten = str((brief.get("config") or {}).get("prewritten") or "")
+    assert "prewritten" not in (brief.get("config") or {})
+    assert "draft_prewritten" not in (brief.get("config") or {})
     bible = build_production_bible(
         graph.get("metadata", {}).get("script_analysis") or {},
         user_prompt=str(graph.get("description") or graph.get("prompt") or ""),
     )
-    assert "USER INTENT" in bible or "USER INTENT" in prewritten
-    assert "PRODUCTION LOCK BIBLE" in prewritten
+    assert "USER INTENT" in bible
+    assert "PRODUCTION LOCK BIBLE" in bible
 
 
 def test_wan_prompt_drops_already_done_and_keeps_style() -> None:

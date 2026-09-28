@@ -58,7 +58,6 @@ def test_solo_prompt_is_one_person_on_a_plain_backdrop() -> None:
         project_id="proj_solo",
         prompt=DINNER,
         analysis=analysis,
-        ai_mode=False,
     )
     sheets = [
         n
@@ -88,7 +87,6 @@ def test_long_film_clips_use_time_windows_not_angles() -> None:
         project_id="proj_windows",
         prompt=prompt,
         analysis=analysis,
-        ai_mode=False,
     )
     clips = [n for n in graph["nodes"] if str(n.get("id") or "").startswith("n_clip")]
     assert len(clips) >= 2
@@ -104,7 +102,7 @@ def test_long_film_clips_use_time_windows_not_angles() -> None:
         assert str(cfg.get("view_key") or "") == ""
 
 
-def test_402_marks_chat_unavailable_and_demotes_agents() -> None:
+def test_402_marks_chat_unavailable_and_fails_closed() -> None:
     model_tools._chat_billing_block = ""
     try:
         assert model_tools.is_chat_payment_block("Error code: 402 Insufficient Balance")
@@ -113,22 +111,21 @@ def test_402_marks_chat_unavailable_and_demotes_agents() -> None:
             "Error code: 402 Insufficient Balance"
         )
         assert model_tools.llm_available() is False
+        with pytest.raises(model_tools.DesignerLlmError) as excinfo:
+            model_tools.require_llm()
+        assert excinfo.value.code == model_tools.LLM_BILLING
         graph = build_smart_video_graph(
             project_id="proj_402",
             prompt="A father reads a letter.",
             analysis=heuristic_analysis("A father reads a letter."),
-            ai_mode=True,
         )
+        # Graph stamping stays blunt — no demote-to-handler and no nested
+        # require_llm. Billing is enforced at entry gates / call_model_tool.
+        stamped = apply_runtime_delegate(graph)
         assert any(
-            str((n.get("config") or {}).get("delegate")) == "agent" for n in graph["nodes"]
+            str((n.get("config") or {}).get("delegate")) == "agent"
+            for n in stamped["nodes"]
         )
-        demoted = apply_runtime_delegate(graph)
-        assert demoted["metadata"]["all_nodes_agents"] is False
-        assert demoted["metadata"].get("chat_model_unavailable")
-        for node in demoted["nodes"]:
-            cfg = node.get("config") or {}
-            assert cfg.get("delegate") == "handler"
-            assert cfg.get("skip_llm") is True
     finally:
         model_tools._chat_billing_block = ""
 

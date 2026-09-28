@@ -289,6 +289,7 @@ export type DesignerExecutionRun = {
   current_node_ids: string[];
   created_at?: number;
   updated_at?: number;
+  error?: string | null;
   warning?: string | null;
   warnings?: string[] | null;
 };

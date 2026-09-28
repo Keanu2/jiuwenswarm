@@ -87,61 +87,38 @@ def _character_display_name(character: dict[str, Any], prompt: str) -> str:
 
 
 def apply_runtime_delegate(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
-    """All creative nodes are LLM agents with tools when a chat model exists.
+    """Stamp creative nodes as LLM agents with tools.
 
-    Handlers remain only as media-backend materializers after the agent authors
-    the creative spec — never as the primary delegate when LLM is available.
+    Do not demote to heuristic handlers when chat credentials are missing —
+    the first ``call_model_tool`` raises ``DesignerLlmError`` instead.
+    User-reference uploads remain force-handler / read-only.
     """
     from jiuwenswarm.common.schema.designer_graph import (
         CONFIG_DELEGATE_AGENT,
         CONFIG_DELEGATE_HANDLER,
     )
-    from jiuwenswarm.server.runtime.designer.model_tools import (
-        chat_model_billing_block,
-        demote_config_to_handler,
-        ensure_chat_model_reachable,
-        llm_available,
-    )
     from jiuwenswarm.server.runtime.designer.user_references import (
         is_user_reference_node,
     )
 
-    ensure_chat_model_reachable()
-    use_agents = llm_available()
-    delegate = CONFIG_DELEGATE_AGENT if use_agents else CONFIG_DELEGATE_HANDLER
     for node in graph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
         config = node.setdefault("config", {})
         if not isinstance(config, dict):
             continue
-        if is_user_reference_node(node):
+        if is_user_reference_node(node) or config.get("force_handler"):
             config["delegate"] = CONFIG_DELEGATE_HANDLER
             config["force_handler"] = True
             config["skip_llm"] = True
-            config["read_only"] = True
-            config["immutable_source"] = True
+            if is_user_reference_node(node):
+                config["read_only"] = True
+                config["immutable_source"] = True
             continue
-        if use_agents:
-            config.pop("force_handler", None)
-            config["delegate"] = CONFIG_DELEGATE_AGENT
-            config["kind"] = "agent"
-            if config.get("skip_llm"):
-                config["skip_llm"] = False
-            if config.get("prewritten") and not config.get("draft_prewritten"):
-                config["draft_prewritten"] = config.pop("prewritten")
-            elif config.get("prewritten"):
-                config.pop("prewritten", None)
-        else:
-            demote_config_to_handler(config)
-    meta = dict(graph.get("metadata") or {})
-    meta["ai_agent_pipeline"] = use_agents
-    meta["runtime_delegate"] = delegate
-    meta["all_nodes_agents"] = use_agents
-    block = chat_model_billing_block()
-    if block:
-        meta["chat_model_unavailable"] = block[:300]
-    graph["metadata"] = meta
+        config.pop("force_handler", None)
+        config.pop("skip_llm", None)
+        config["delegate"] = CONFIG_DELEGATE_AGENT
+        config["kind"] = "agent"
     return normalize_execution_graph(graph)
 
 
@@ -272,47 +249,6 @@ def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
     meta["prune_notes"] = notes[-40:]
     graph["metadata"] = meta
     return pruned
-
-
-def _write_brief_markdown(
-    prompt: str,
-    characters: list[dict[str, Any]],
-    scenes: list[dict[str, Any]],
-    audio: dict[str, Any],
-    duration_sec: int | None = None,
-) -> str:
-    cast_lines = []
-    for c in characters:
-        name = _character_display_name(c, prompt)
-        desc = str(c.get("description") or "").strip()
-        cast_lines.append(f"- **{name}:** {desc or 'lock face, hair, body, costume'}")
-    setting = str((scenes[0] if scenes else {}).get("name") or "Primary setting")
-    setting_desc = str((scenes[0] if scenes else {}).get("description") or "")
-    policy = str(audio.get("policy") or "optional_music")
-    duration = int(duration_sec or max(6, min(24, max(1, len(characters)) * 3 + 4)))
-    fallback_cast = _character_display_name(
-        characters[0] if characters else {},
-        prompt,
-    )
-    return (
-        f"# Brief\n\n"
-        f"**User prompt (verbatim intent):** {prompt.strip()[:600]}\n\n"
-        f"**Logline:** {prompt.strip()[:280]}\n\n"
-        f"**Cast (solo identity locks — one sheet each, never concatenate):**\n"
-        + ("\n".join(cast_lines) or f"- **{fallback_cast}:** lock face, hair, body, costume")
-        + "\n\n"
-        f"**Setting:** {setting} — {setting_desc}\n\n"
-        f"**Consistency gates:**\n"
-        f"- Character: same face/wardrobe every shot unless brief says change\n"
-        f"- Scene: shared architecture/lighting across shot views\n"
-        f"- Motion / continuity: time-coherent across shots "
-        f"(do not undo a completed beat on a later shot)\n"
-        f"- Camera: distinct views per shot covering the prompt beats\n\n"
-        f"**Duration:** ~{duration}s short film\n\n"
-        f"**Visual style:** cinematic, coherent lighting, no subtitles\n\n"
-        f"**Audio policy:** {policy}\n\n"
-        f"**Avoid:** comic grids, watermark text, identity drift, orphan graph nodes\n"
-    )
 
 
 def _write_storyboard_markdown(shots: list[dict[str, Any]], characters: list[dict[str, Any]]) -> str:
@@ -893,24 +829,15 @@ def build_smart_video_graph(
     analysis: dict[str, Any],
     title: str | None = None,
     optimize_for: str = "quality",
-    ai_mode: bool | None = None,
 ) -> DesignerExecutionGraph:
     """Lean multi-shot video DAG: few image gens + brief/storyboard.
 
-    When ``ai_mode`` is True (LLM available), Brief/Storyboard are authored by
-    node agents (no skip_llm). Heuristic prewrites are only used as drafts/fallback.
+    Creative nodes are always stamped as LLM agents (``delegate=agent``).
     """
     from jiuwenswarm.server.runtime.designer.pipeline.keyframe_policy import (
         apply_compose_solos_setting_policy,
     )
-    from jiuwenswarm.server.runtime.designer.model_tools import (
-        ensure_chat_model_reachable,
-        llm_available,
-    )
 
-    ensure_chat_model_reachable()
-    if ai_mode is None:
-        ai_mode = llm_available()
     prompt_text = prompt.strip()
     mode = "cost" if str(optimize_for).strip().lower() == "cost" else "quality"
     from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
@@ -942,34 +869,31 @@ def build_smart_video_graph(
         graph_title=str(title or ""),
     )
     analysis["story_name"] = story_name
-    characters = list(analysis.get("characters") or [])
-    scenes = list(analysis.get("scenes") or [])
-    shots = list(analysis.get("shots") or [])
+    characters = [item for item in (analysis.get("characters") or []) if isinstance(item, dict)]
+    scenes = [item for item in (analysis.get("scenes") or []) if isinstance(item, dict)]
+    shots = [item for item in (analysis.get("shots") or []) if isinstance(item, dict)]
     audio = dict(analysis.get("audio") or {})
-    if not characters:
-        from jiuwenswarm.server.runtime.designer.script_analysis import infer_primary_subject_name
+    missing = [
+        name
+        for name, values in (
+            ("characters", characters),
+            ("scenes", scenes),
+            ("shots", shots),
+        )
+        if not values
+    ]
+    if missing:
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+        )
 
-        characters = [
-            {
-                "id": "char_1",
-                "name": infer_primary_subject_name(prompt_text),
-                "description": prompt_text[:200],
-            }
-        ]
-    if not scenes:
-        scenes = [{"id": "scene_1", "name": "Setting", "description": "primary setting"}]
-    if not shots:
-        shots = [
-            {
-                "shot_index": 1,
-                "title": "Shot 1",
-                "action": prompt_text[:300],
-                "camera": "medium / eye-level",
-                "character_ids": [characters[0]["id"]],
-                "keyframe_prompt": prompt_text[:300],
-                "timeline": "0.0-2.0s",
-            }
-        ]
+        raise DesignerLlmError(
+            "Chat model analysis did not return usable "
+            + ", ".join(missing)
+            + "; refusing to synthesize a deterministic execution graph.",
+            code=LLM_API_ERROR,
+        )
     shots = shots[: _shot_budget(analysis, shots)]
     analysis["target_shot_count"] = len(shots)
     for i, shot in enumerate(shots, start=1):
@@ -993,8 +917,6 @@ def build_smart_video_graph(
     except Exception:  # noqa: BLE001
         pass
     # Continuity: scene specs + on-screen solos; storyboard start/end owns continuity.
-    skip_scene_specs = False
-    analysis["skip_scene_specs"] = False
     analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
 
     # Quality path: solo identity sheets only — keyframes compose multi-person.
@@ -1005,24 +927,13 @@ def build_smart_video_graph(
     # Drop any combined sheets that slipped through (no concatenation).
     cast_sheets = [s for s in cast_sheets if not s.get("combined_cast")]
     film_duration = _duration_sec_for_graph(prompt_text, analysis, characters)
-    brief_md = _write_brief_markdown(
-        prompt_text,
-        characters,
-        scenes,
-        audio,
-        duration_sec=film_duration,
-    )
-    storyboard_md = _write_storyboard_markdown(shots, characters)
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
-            append_bible_to_markdown,
             build_production_bible,
         )
 
         bible = build_production_bible(analysis, user_prompt=prompt_text)
         analysis["production_bible"] = bible
-        brief_md = append_bible_to_markdown(brief_md, bible)
-        storyboard_md = append_bible_to_markdown(storyboard_md, bible)
     except Exception:  # noqa: BLE001
         pass
 
@@ -1038,17 +949,12 @@ def build_smart_video_graph(
             "config": {
                 "role": NODE_ROLE_BRIEF,
                 "prompt": prompt_text,
-                # AI mode: agents write the brief; draft is a hint only.
-                **(
-                    {"draft_prewritten": brief_md, "skip_llm": False, "tools": ["call_model", "write_artifact"]}
-                    if ai_mode
-                    else {"prewritten": brief_md, "skip_llm": True, "tools": ["write_artifact"]}
-                ),
+                "tools": ["call_model", "write_artifact"],
                 "optimize_for": mode,
                 "agent_name": label_brief(story_name),
                 "kind": "agent",
                 "skill_id": "brief",
-                "delegate": ("agent" if ai_mode else "handler"),
+                "delegate": "agent",
                 "supervisor_task": (
                     "Author a DETAILED creative brief from the user prompt: every named "
                     "character with wardrobe/face locks, scene geography, language/speech, "
@@ -1071,7 +977,7 @@ def build_smart_video_graph(
         "agent_name": label_storyboard(story_name),
         "kind": "agent",
         "skill_id": "storyboard",
-        "delegate": ("agent" if ai_mode else "handler"),
+        "delegate": "agent",
         "supervisor_task": (
             "Build a time-coherent DETAILED storyboard from the approved brief: "
             "per-shot duration, camera/view, on-screen cast, full blocking/action, "
@@ -1079,15 +985,8 @@ def build_smart_video_graph(
             "(do not undo a completed beat). Each row is THAT window in full detail — "
             "not a camera restage of the whole prompt, and not a stripped one-liner."
         ),
+        "tools": ["call_model", "write_artifact"],
     }
-    if ai_mode:
-        sb_cfg["draft_prewritten"] = storyboard_md
-        sb_cfg["skip_llm"] = False
-        sb_cfg["tools"] = ["call_model", "write_artifact"]
-    else:
-        sb_cfg["prewritten"] = storyboard_md
-        sb_cfg["skip_llm"] = True
-        sb_cfg["tools"] = ["write_artifact"]
     nodes.append(
         {
             "id": "n_storyboard",
@@ -1178,7 +1077,7 @@ def build_smart_video_graph(
                     "kind": "agent",
                     "skill_id": "character",
                     "tools": ["call_image_model", "read_upstream", "call_model"],
-                    "delegate": ("agent" if ai_mode else "handler"),
+                    "delegate": "agent",
                     "supervisor_task": (
                         f"Solo identity sheet for {display}. "
                         "Write a positive Qwen-ready studio portrait from the locks "
@@ -1226,7 +1125,6 @@ def build_smart_video_graph(
             f"{lock.get('crowd_rule')}"
         )
 
-    master_id = ""
     scene_locks_meta: dict[str, Any] = (
         analysis.get("scene_locks")
         if isinstance(analysis.get("scene_locks"), dict)
@@ -1239,12 +1137,6 @@ def build_smart_video_graph(
             setting_order.append(_sid)
     setting_num = {sid: i + 1 for i, sid in enumerate(setting_order)}
     shot_ord_by_setting: dict[str, int] = {sid: 0 for sid in setting_order}
-
-    all_solo_ids = [
-        nid
-        for nid in char_node_ids
-        if not bool(sheet_by_id.get(nid, {}).get("combined_cast"))
-    ] or list(dict.fromkeys(char_node_ids))
 
     scene_by_id: dict[str, dict[str, Any]] = {}
     for sc in scenes:
@@ -1414,7 +1306,6 @@ def build_smart_video_graph(
                     "spatial_lock": shot_spatial_scene,
                     "time_of_day_lock": tod if isinstance(tod, dict) else None,
                     "is_scene_master": True,
-                    "skip_scene_specs": False,
                     "generate": {"prompt": scene_prompt},
                     "prompt": scene_prompt,
                     "image_size": _IMAGE_SIZE,
@@ -1425,7 +1316,7 @@ def build_smart_video_graph(
                     "kind": "agent",
                     "skill_id": "scene",
                     "tools": ["call_image_model", "read_upstream"],
-                    "delegate": ("agent" if ai_mode else "handler"),
+                    "delegate": "agent",
                     "supervisor_task": (
                         f"Empty environment plate for setting {sid}. "
                         "Write a positive Qwen-ready plate prompt from the locks "
@@ -1440,7 +1331,6 @@ def build_smart_video_graph(
             edges.append(_edge(f"e_{src}_{scene_nid}", src, scene_nid))
 
     clip_ids: list[str] = []
-    prev_clip_global = ""
     prev_clip_by_setting: dict[str, str] = {}
     camera_cycle = (
         "wide / establishing",
@@ -1460,12 +1350,6 @@ def build_smart_video_graph(
             for nid in focus_char_nodes
             if not bool(sheet_by_id.get(nid, {}).get("combined_cast"))
         ]
-        from jiuwenswarm.server.runtime.designer.script_analysis import (
-            _cast_id_maps,
-            resolve_cast_token_list,
-        )
-
-        _valid, _by_name = _cast_id_maps(characters)
         occ0 = shot.get("occupancy") if isinstance(shot.get("occupancy"), dict) else {}
         visible_cids = resolve_cast_token_list(
             shot.get("on_screen")
@@ -1474,16 +1358,16 @@ def build_smart_video_graph(
             or shot.get("compose_cast_ids")
             or shot.get("character_ids")
             or [],
-            valid_ids=_valid,
-            by_name=_by_name,
+            valid_ids=_valid_cast,
+            by_name=_by_name_cast,
         )
         offscreen_cids = resolve_cast_token_list(
             shot.get("offscreen")
             or shot.get("off_screen_cast_ids")
             or occ0.get("offscreen")
             or [],
-            valid_ids=_valid,
-            by_name=_by_name,
+            valid_ids=_valid_cast,
+            by_name=_by_name_cast,
         )
         offscreen_cids = [c for c in offscreen_cids if c not in visible_cids]
         focus_cids = list(dict.fromkeys(visible_cids))
@@ -1494,8 +1378,8 @@ def build_smart_video_graph(
         ]
         featured_cids = resolve_cast_token_list(
             featured_cids or focus_cids[:1],
-            valid_ids=_valid,
-            by_name=_by_name,
+            valid_ids=_valid_cast,
+            by_name=_by_name_cast,
         ) or list(focus_cids[:1])
         cast_actions = (
             shot.get("cast_actions")
@@ -1530,7 +1414,6 @@ def build_smart_video_graph(
             for cid in focus_cids
             if cast_actions.get(cid)
         )
-        multi = len(focus_names) > 1
         camera = str(shot.get("camera") or "").strip() or camera_cycle[(idx - 1) % len(camera_cycle)]
         shot["camera"] = camera
         action = str(shot.get("action") or shot.get("keyframe_prompt") or "").strip()
@@ -1713,7 +1596,6 @@ def build_smart_video_graph(
             "spatial_lock": shot_spatial,
             "occupancy": occupancy or None,
             "crowd_lock": crowd or None,
-            "skip_scene_specs": False,
             "on_screen": list(focus_cids),
             "offscreen": list(shot.get("offscreen") or []),
             "cast_actions": cast_actions or None,
@@ -1839,7 +1721,6 @@ def build_smart_video_graph(
             "first_of_setting": first_of_setting,
             "composed_scene": False,
             "style_lock": dict(film_style),
-            "allow_still_clip_fallback": False,
             "generate": {"prompt": clip_prompt_body},
             "max_video_calls": 1,
             "inputs": clip_inputs,
@@ -1848,7 +1729,7 @@ def build_smart_video_graph(
             "kind": "agent",
             "skill_id": "clip",
             "tools": ["call_video_model", "read_upstream"],
-            "delegate": ("agent" if ai_mode else "handler"),
+            "delegate": "agent",
             "supervisor_task": (
                 f"Shot {idx}: on-screen character sheets plus scene specs {scene_nid}. "
                 "Write ONE positive story-form video prompt from THIS storyboard row "
@@ -1892,7 +1773,6 @@ def build_smart_video_graph(
         for src in clip_inputs:
             edges.append(_edge(f"e_{src}_{clip_id}", src, clip_id))
         prev_clip_by_setting[setting_id] = clip_id
-        prev_clip_global = clip_id
 
     audio_ids: list[str] = []
     film_sec = max(6, int(film_duration or max(6, len(shots) * 5)))
@@ -1932,7 +1812,7 @@ def build_smart_video_graph(
                         "kind": "agent",
                         "skill_id": "speech_tts",
                         "tools": ["call_speech_model", "read_upstream", "call_model"],
-                        "delegate": ("agent" if ai_mode else "handler"),
+                        "delegate": "agent",
                         "film_duration_sec": film_sec,
                     },
                     "layout": {"x": 1320, "y": float(40 + len(shots) * 160), "width": 220, "height": 120},
@@ -1957,7 +1837,7 @@ def build_smart_video_graph(
                         "skill_id": "audio_bed",
                         "tools": ["call_music_model", "read_upstream", "call_model"],
                         "delegate": (
-                            ("agent" if ai_mode else "handler") if can_music else "handler"
+                            "agent" if can_music else "handler"
                         ),
                         "force_handler": not can_music,
                         "placeholder_until_api": not can_music,
@@ -2027,7 +1907,7 @@ def build_smart_video_graph(
                 "skill_id": "compose",
                 "audio_policy": audio.get("policy"),
                 "tools": ["ffmpeg_compose", "mix_audio", "read_upstream", "call_model"],
-                "delegate": ("agent" if ai_mode else "handler"),
+                "delegate": "agent",
                 "supervisor_task": (
                     "Concatenate shot clips in storyboard order; mux speech/music when present. "
                     "Output a real non-empty .mp4 only — never markdown. Use ffmpeg_compose tool."
@@ -2075,17 +1955,11 @@ def build_smart_video_graph(
             ),
             "prefer_clip_native_audio": bool(clip_embedded),
             "prefer_wan3_clip_audio": bool(clip_embedded),  # legacy alias
-            "skip_scene_specs": False,
             "scene_continuity_mode": "scene_card_plus_clip_shots",
             "scene_masters": dict(scene_master_by_setting),
             "scene_locks": dict(scene_locks_meta),
-            "lean_pipeline": False,
             # Storyboard must not rebuild the node set (that spawned extra nodes).
             "freeze_shot_topology": True,
-            "supervisor_owns_graph": True,
-            "ai_agent_pipeline": bool(ai_mode),
-            "all_nodes_agents": bool(ai_mode),
-            "allow_still_clip_fallback": False,
             "combined_cast": False,
             "cast_layout": cast_layout,
             "spatial_lock": spatial_lock,
@@ -2111,21 +1985,20 @@ def build_smart_video_graph(
             },
             "max_shots": len(shots),
             "target_shot_count": len(shots),
-            "prewritten_brief": not bool(ai_mode),
-            "prewritten_storyboard": not bool(ai_mode),
             "image_size": _IMAGE_SIZE,
             "max_image_calls_per_node": 1,
             "orchestration": {
                 "supervisor_id": "supervisor",
                 "manager_id": "manager",
-                "planner": "supervisor_llm" if ai_mode else "heuristic_fallback",
+                "planner": "supervisor_llm",
                 "flow": (
                     "supervisor_brief→manager_brief→supervisor_storyboard→manager_lock→"
                     "supervisor_graph→manager_prune_reedit→leaf_prompt_gate→dual_raters"
                 ),
                 "notes": (
-                    "Supervisor=Director, Manager=Producer. Heuristics only if LLM unavailable. "
-                    "One-pass forward; ratings write-only and apply on Run again."
+                    "Supervisor=Director, Manager=Producer. Chat model is required; "
+                    "missing/billing LLM fails closed. One-pass forward; ratings "
+                    "write-only and apply on Run again."
                 ),
             },
         },

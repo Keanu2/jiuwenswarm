@@ -7,7 +7,7 @@ import {
   derivePrimaryAction,
   type DesignerRunPrimaryAction,
 } from './designerLayerRun';
-import { isActiveDesignerRun } from './designerRunView';
+import { isActiveDesignerRun, designerRunFailureMessage } from './designerRunView';
 import {
   DESIGNER_LEADER_NODE_ID,
   DESIGNER_NODE_STATUS_COMPLETED,
@@ -122,9 +122,12 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       return;
     }
     const leader = run?.node_states?.[DESIGNER_LEADER_NODE_ID];
+    const failureMessage = designerRunFailureMessage(run);
     set({
       ...applySnapshot(run, graph),
-      runError: null,
+      // Async LLM/API failures arrive via designer.run.updated after start
+      // succeeds — lift them into runError so DesignerPage can toast.
+      runError: failureMessage,
       ...(leader?.activity
         ? {
             leaderActivity: leader.activity,

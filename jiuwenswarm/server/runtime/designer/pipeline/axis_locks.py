@@ -1,19 +1,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Film-wide axis / occupancy / aspect locks — domain-agnostic.
 
-Fixes observed failures without scene-specific rules:
+Structural locks derived from analysis blocking / cast (not an LLM substitute):
   - identity under occlusion (partially hidden person must keep sex/age/hair)
   - 180-degree screen L/R (camera pan must not flip who sits left vs right)
   - same aspect ratio on every still and clip
   - landmark placements stay put; extras do not spawn/vanish
-LLM may refine heuristic locks; heuristics always provide a floor.
 """
 
 from __future__ import annotations
 
-import json
 import re
-from copy import deepcopy
 from typing import Any
 
 _MALE_RE = re.compile(
@@ -403,139 +400,6 @@ def apply_aspect_to_node_config(cfg: dict[str, Any], aspect: dict[str, Any] | No
         if aspect.get("video_resolution"):
             cfg["video_resolution"] = aspect["video_resolution"]
 
-
-async def llm_refine_axis_locks(
-    prompt: str,
-    analysis: dict[str, Any],
-) -> dict[str, Any]:
-    """Ask the chat LLM to fill sex/age, screen L/R, occupancy, landmarks. Merge onto analysis."""
-    from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool, llm_available
-
-    if not llm_available():
-        return stamp_axis_locks(deepcopy(analysis))
-    base = stamp_axis_locks(deepcopy(analysis))
-    payload = {
-        "user_prompt": (prompt or "")[:2500],
-        "characters": [
-            {
-                "id": c.get("id"),
-                "name": c.get("name"),
-                "description": str(c.get("description") or "")[:200],
-                "identity_attrs": c.get("identity_attrs"),
-            }
-            for c in (base.get("characters") or [])
-            if isinstance(c, dict)
-        ],
-        "shots": [
-            {
-                "shot_index": s.get("shot_index"),
-                "action": str(s.get("action") or "")[:240],
-                "character_ids": s.get("character_ids"),
-                "camera": s.get("camera"),
-                "blocking": s.get("blocking"),
-                "screen_axis": s.get("screen_axis"),
-                "occupancy": s.get("occupancy"),
-                "setting_id": s.get("setting_id"),
-            }
-            for s in (base.get("shots") or [])
-            if isinstance(s, dict)
-        ],
-        "spatial_lock": base.get("spatial_lock"),
-    }
-    system = (
-        "You are a script supervisor. Output JSON only. Domain-agnostic: no genre cliches. "
-        "Lock: (1) each character sex male|female|unspecified and age_band child|teen|adult from text, "
-        "(2) per-shot screen_axis map character_id -> screen_left|screen_center|screen_right "
-        "that obeys the 180-degree rule across pans (do not flip L/R unless action says they cross), "
-        "(3) occupancy must_appear / must_not_appear ids, "
-        "(4) landmark_placements [{name, where}] relative to the set (front/back/left/right), "
-        "(5) occlusion_rule per character. "
-        'Schema: {"characters":[{"id":"char_1","sex":"male","age_band":"adult",'
-        '"occlusion_rule":"..."}],'
-        '"shots":[{"shot_index":1,"screen_axis":{"char_1":"screen_left"},'
-        '"must_appear":["char_1"],"must_not_appear":[]}],'
-        '"landmark_placements":[{"name":"...","where":"..."}]}'
-    )
-    try:
-        result = await call_model_tool(
-            prompt=json.dumps(payload, ensure_ascii=False)[:7000],
-            system=system,
-            optimize_for="quality",
-            max_tokens=16384,
-        )
-        text = str(result.get("text") or "")
-        parsed = _extract_json_obj(text)
-    except Exception:  # noqa: BLE001
-        return base
-    if not isinstance(parsed, dict):
-        return base
-    by_id = {str(c.get("id")): c for c in (base.get("characters") or []) if isinstance(c, dict)}
-    for row in parsed.get("characters") or []:
-        if not isinstance(row, dict):
-            continue
-        ch = by_id.get(str(row.get("id") or ""))
-        if not ch:
-            continue
-        attrs = dict(ch.get("identity_attrs") or {})
-        if row.get("sex") in {"male", "female", "unspecified"}:
-            attrs["sex"] = str(row["sex"])
-        if row.get("age_band") in {"child", "teen", "adult"}:
-            attrs["age_band"] = str(row["age_band"])
-        if row.get("occlusion_rule"):
-            attrs["occlusion_rule"] = str(row["occlusion_rule"])[:240]
-        ch["identity_attrs"] = attrs
-    shots_by_i = {
-        int(s.get("shot_index") or 0): s
-        for s in (base.get("shots") or [])
-        if isinstance(s, dict)
-    }
-    for row in parsed.get("shots") or []:
-        if not isinstance(row, dict):
-            continue
-        shot = shots_by_i.get(int(row.get("shot_index") or 0))
-        if not shot:
-            continue
-        axis = row.get("screen_axis") if isinstance(row.get("screen_axis"), dict) else {}
-        if axis:
-            shot["screen_axis"] = {str(k): str(v) for k, v in axis.items() if str(v)}
-        occ = dict(shot.get("occupancy") or {})
-        if isinstance(row.get("must_appear"), list):
-            occ["must_appear"] = [str(x) for x in row["must_appear"] if str(x)]
-        if isinstance(row.get("must_not_appear"), list):
-            occ["must_not_appear"] = [str(x) for x in row["must_not_appear"] if str(x)]
-        shot["occupancy"] = occ
-    places = parsed.get("landmark_placements")
-    if isinstance(places, list) and places:
-        spatial = dict(base.get("spatial_lock") or {})
-        spatial["landmark_placements"] = [
-            {"name": str(p.get("name") or ""), "where": str(p.get("where") or "")}
-            for p in places
-            if isinstance(p, dict) and str(p.get("name") or "").strip()
-        ][:8]
-        base["spatial_lock"] = spatial
-    base["axis_lock_source"] = "llm+heuristic"
-    return base
-
-
-def _extract_json_obj(text: str) -> dict[str, Any] | None:
-    raw = (text or "").strip()
-    if not raw:
-        return None
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-    try:
-        obj = json.loads(raw)
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", raw, re.S)
-        if not m:
-            return None
-        try:
-            obj = json.loads(m.group(0))
-            return obj if isinstance(obj, dict) else None
-        except json.JSONDecodeError:
-            return None
 
 
 def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:

@@ -32,10 +32,6 @@ def test_explicit_shot_count_en():
 
 
 def test_resolve_cast_names_to_ids():
-    chars = [
-        {"id": "char_1", "name": "年轻人"},
-        {"id": "char_2", "name": "伴侣"},
-    ]
     valid = {"char_1", "char_2"}
     by_name = {"年轻人": "char_1", "伴侣": "char_2", "char_1": "char_1", "char_2": "char_2"}
     assert resolve_cast_token_list(["年轻人"], valid_ids=valid, by_name=by_name) == ["char_1"]
@@ -151,7 +147,6 @@ def test_normalize_llm_owns_shot_count_not_heuristic_ceiling():
             }
             for i in range(1, 6)
         ],
-        "skip_scene_specs": True,
     }
     out = _normalize_llm_analysis(parsed, base)
     assert out is not None

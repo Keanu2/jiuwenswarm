@@ -7,7 +7,6 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +23,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     node_shot_index,
 )
 from jiuwenswarm.server.runtime.designer.handlers.common import (
-    graph_prompt,
-    node_generate_prompt,
     node_output_image_paths,
     role_output_image_path,
     role_output_text,
@@ -53,54 +50,6 @@ def _find_ffmpeg() -> str | None:
         return None
 
 
-def still_image_to_mp4(
-    image: Path,
-    *,
-    duration: int = 5,
-    dest: Path | None = None,
-) -> Path:
-    """Local fallback: hold a still as a real mp4 when remote video returns no URL."""
-    ffmpeg = _find_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg unavailable for still→mp4 fallback")
-    if not image.is_file():
-        raise RuntimeError(f"still image missing: {image}")
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
-        clamp_clip_duration,
-    )
-
-    sec = clamp_clip_duration(duration, default=5)
-    out = dest or (image.parent / f"{image.stem}_still_{sec}s.mp4")
-    # -loop 1 + -t produces a valid H.264 mp4 compose can concatenate.
-    proc = subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-loop",
-            "1",
-            "-i",
-            str(image.resolve()),
-            "-t",
-            str(sec),
-            "-vf",
-            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-r",
-            "24",
-            str(out.resolve()),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if proc.returncode != 0 or not out.is_file() or out.stat().st_size <= 0:
-        detail = (proc.stderr or proc.stdout or "").strip()[-400:]
-        raise RuntimeError(f"still→mp4 failed: {detail or 'ffmpeg error'}")
-    return out.resolve()
 
 def parse_shot_duration_seconds(timeline: str, default: int = 5) -> int:
     from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
@@ -1145,38 +1094,9 @@ class ClipNodeHandler:
             except Exception:  # noqa: BLE001
                 logger.debug("post-clip last-frame stamp failed", exc_info=True)
         except Exception as exc:
-            meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
-            allow_still = bool(
-                meta.get("allow_still_clip_fallback")
-                or (node.get("config") or {}).get("allow_still_clip_fallback")
-            )
-            if not allow_still:
-                raise RuntimeError(
-                    f"Video gen failed for shot {shot_index} and still→mp4 fallback is disabled: {exc}"
-                ) from exc
-            _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
-
-            def _is_image(p: Path | None) -> bool:
-                return bool(p and p.is_file() and p.suffix.lower() in _IMG)
-
-            candidates = [*ref_files]
-            still = next((p for p in candidates if _is_image(p)), None)
-            if still is None:
-                raise
-            logger.warning(
-                "Remote video failed for shot %s (%s); using still→mp4 fallback from %s",
-                shot_index,
-                exc,
-                still,
-            )
-            from jiuwenswarm.common.utils import get_agent_workspace_dir
-
-            dest = (
-                Path(get_agent_workspace_dir())
-                / f"designer_clip_still_{ctx.run_id}_shot{shot_index}.mp4"
-            )
-            path = still_image_to_mp4(Path(still), duration=duration, dest=dest)
-            message = f"clip {shot_index} still→mp4 fallback ({type(exc).__name__})"
+            raise RuntimeError(
+                f"Video gen failed for shot {shot_index}; still→mp4 fallback is disabled: {exc}"
+            ) from exc
         output_ref: AssetRef = {
             "kind": NODE_TYPE_VIDEO,
             "uri": path.resolve().as_uri(),

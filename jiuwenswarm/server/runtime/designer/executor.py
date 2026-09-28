@@ -42,7 +42,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     artifact_dependency_satisfied,
     clip_node_id,
     execution_predecessors,
-    expand_shot_nodes,
     filter_ready_by_dependency_order,
     frame_node_id,
     graph_uses_agent_scheduler,
@@ -346,7 +345,6 @@ class GraphExecutor:
         meta = dict(graph.get("metadata") or {})
         meta["use_prior_feedback"] = True
         meta["freeze_shot_topology"] = True
-        meta["pending_llm_analysis"] = False
         graph["metadata"] = meta
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
@@ -385,47 +383,28 @@ class GraphExecutor:
             if not pending:
                 return run
         graph = self._require_graph(run["graph_id"])
-        from jiuwenswarm.server.runtime.designer.model_tools import (
-            chat_model_billing_block,
-            demote_config_to_handler,
-            ensure_chat_model_reachable,
-            llm_available,
-        )
+        from jiuwenswarm.server.runtime.designer.model_tools import require_llm
 
-        # Framework: every node is an LLM agent with tools when the chat model
-        # can actually answer. A 402 marks it unavailable and nodes stay handlers.
-        ensure_chat_model_reachable()
-        use_agents = llm_available()
+        # One local credential gate at Play entry (Work/Code checks before
+        # spawning agents). Billing/API failures still surface on the model call.
+        require_llm()
+        run.pop("error", None)
         for node in graph.get("nodes") or []:
             cfg = node.setdefault("config", {})
             if not isinstance(cfg, dict):
                 continue
-            if is_user_reference_node(node):
+            if is_user_reference_node(node) or cfg.get("force_handler"):
                 cfg["delegate"] = CONFIG_DELEGATE_HANDLER
                 cfg["force_handler"] = True
                 cfg["skip_llm"] = True
-                cfg["read_only"] = True
-                cfg["immutable_source"] = True
+                if is_user_reference_node(node):
+                    cfg["read_only"] = True
+                    cfg["immutable_source"] = True
                 continue
-            if use_agents:
-                cfg.pop("force_handler", None)
-                cfg["delegate"] = CONFIG_DELEGATE_AGENT
-                cfg["kind"] = "agent"
-                if cfg.get("skip_llm"):
-                    cfg["skip_llm"] = False
-                if cfg.get("prewritten") and not cfg.get("draft_prewritten"):
-                    cfg["draft_prewritten"] = cfg.pop("prewritten")
-                else:
-                    cfg.pop("prewritten", None)
-            else:
-                demote_config_to_handler(cfg)
-        meta = dict(graph.get("metadata") or {})
-        meta["ai_agent_pipeline"] = use_agents
-        meta["all_nodes_agents"] = use_agents
-        block = chat_model_billing_block()
-        if block:
-            meta["chat_model_unavailable"] = block[:300]
-        graph["metadata"] = meta
+            cfg.pop("force_handler", None)
+            cfg.pop("skip_llm", None)
+            cfg["delegate"] = CONFIG_DELEGATE_AGENT
+            cfg["kind"] = "agent"
         run["status"] = RUN_STATUS_RUNNING
         run["updated_at"] = utc_now_ms()
         run = self._store.save_run(run)
@@ -752,8 +731,7 @@ class GraphExecutor:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("Designer agent run %s failed: %s", run_id, exc)
-            run["status"] = RUN_STATUS_FAILED
-            run["updated_at"] = utc_now_ms()
+            _stamp_run_failure(run, exc)
             self._publish(run, on_update)
             self._store.save_run(run)
         finally:
@@ -787,148 +765,10 @@ class GraphExecutor:
             (graph.get("metadata") or {}).get("use_prior_feedback")
             or (run.get("metadata") or {}).get("use_prior_feedback")
         )
-        # Supervisor LLM analysis when pending / heuristic bootstrap — rebuild once, no loop.
+        # Skip Play Enter redesign when bootstrap already composed the graph.
         meta0 = dict(graph.get("metadata") or {})
-        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+        already_composed = bool(meta0.get("supervisor_composed_on_bootstrap"))
 
-        use_llm_orch = llm_available()
-        # Stamp how agents run for this Play (docs + trajectory).
-        meta0 = dict(graph.get("metadata") or {})
-        meta0["ai_agent_pipeline"] = bool(use_llm_orch)
-        meta0["agent_runtime"] = {
-            "mode": "ai" if use_llm_orch else "heuristic",
-            "orch": (
-                "SupervisorAgent/ManagerAgent via jiuwenswarm model_tools.call_model_tool "
-                "(Settings chat models + orchestration skills)"
-                if use_llm_orch
-                else "SupervisorAgent/ManagerAgent plan_fast / validate_plan_fast heuristics"
-            ),
-            "leaves": (
-                "NodeAgentHost → openjiuwen create_deep_agent (jiuwenswarm Settings model) "
-                "when config.delegate=agent; handler fallback on agent failure"
-                if use_llm_orch
-                else "role handlers / direct image-video APIs only"
-            ),
-            "force_handler": (
-                "music/speech stay on MusicNodeHandler/SpeechNodeHandler until TTS/music "
-                "backends exist; if audio not requested, nodes are omitted"
-            ),
-            "heuristic_when": "llm_available() is False (no Settings chat models)",
-        }
-        graph["metadata"] = meta0
-        # One-pass: skip Play-time redesign only when bootstrap truly LLM-composed.
-        already_composed = bool(meta0.get("supervisor_composed_on_bootstrap")) and not bool(
-            meta0.get("pending_llm_analysis")
-        )
-        if already_composed:
-            meta0["pending_llm_analysis"] = False
-            meta0["pending_supervisor_graph"] = False
-            graph["metadata"] = meta0
-        elif (
-            str(meta0.get("scenario") or "") == "video"
-            and use_llm_orch
-            and (
-                meta0.get("pending_llm_analysis")
-                or str(meta0.get("script_analysis_mode") or "") != "llm"
-            )
-            and not already_composed
-        ):
-            try:
-                from jiuwenswarm.server.runtime.designer.script_analysis import (
-                    analyze_creative_brief,
-                )
-                from jiuwenswarm.server.runtime.designer.smart_graph import (
-                    apply_runtime_delegate,
-                    build_smart_video_graph,
-                )
-                from jiuwenswarm.server.runtime.designer.skills_loader import (
-                    attach_skills_metadata,
-                )
-
-                prompt_text = str(graph.get("description") or "")
-                if prompt_text:
-                    analysis = await analyze_creative_brief(
-                        prompt_text, use_llm=True, timeout_sec=45.0
-                    )
-                    if str(analysis.get("source") or "") == "llm":
-                        # Cast shrink guard: never replace a richer solo cast with fewer humans.
-                        old_solos = sum(
-                            1
-                            for n in (graph.get("nodes") or [])
-                            if str(n.get("id") or "").startswith("n_character")
-                        )
-                        new_chars = [
-                            c
-                            for c in (analysis.get("characters") or [])
-                            if isinstance(c, dict)
-                            and c.get("id")
-                            and not c.get("is_prop")
-                            and str(c.get("cast_kind") or "") not in {"brand_mascot", "prop"}
-                        ]
-                        if old_solos > 1 and len(new_chars) < old_solos:
-                            logger.info(
-                                "Play rebuild rejected: would shrink cast %s → %s",
-                                old_solos,
-                                len(new_chars),
-                            )
-                            meta0["pending_llm_analysis"] = False
-                            meta0["script_analysis_mode"] = str(
-                                meta0.get("script_analysis_mode") or "heuristic"
-                            )
-                            graph["metadata"] = meta0
-                            graph = self._store.save_graph(graph)
-                        else:
-                            old_id = str(graph.get("graph_id") or "")
-                            project_id = str(graph.get("project_id") or "")
-                            rebuilt = build_smart_video_graph(
-                                project_id=project_id,
-                                prompt=prompt_text,
-                                analysis=analysis,
-                                title=str(graph.get("title") or "") or None,
-                                optimize_for=optimize_for,
-                                ai_mode=True,
-                            )
-                            rebuilt["graph_id"] = old_id
-                            rebuilt["project_id"] = project_id
-                            rebuilt["created_at"] = graph.get("created_at") or rebuilt.get(
-                                "created_at"
-                            )
-                            rebuilt = apply_runtime_delegate(rebuilt)
-                            rebuilt = attach_skills_metadata(rebuilt, prompt_text)
-                            meta_r = dict(rebuilt.get("metadata") or {})
-                            meta_r["script_analysis"] = analysis
-                            meta_r["script_analysis_mode"] = "llm"
-                            meta_r["pending_llm_analysis"] = False
-                            meta_r["ai_agent_pipeline"] = True
-                            meta_r["supervisor_analyzed"] = True
-                            meta_r["supervisor_composed_on_bootstrap"] = True
-                            rebuilt["metadata"] = meta_r
-                            carry_user_references(meta0, rebuilt)
-                            graph = self._store.save_graph(rebuilt)
-                    else:
-                        meta0["script_analysis"] = analysis
-                        meta0["script_analysis_mode"] = str(
-                            analysis.get("source") or "heuristic"
-                        )
-                        meta0["pending_llm_analysis"] = False
-                        graph["metadata"] = meta0
-                        graph = self._store.save_graph(graph)
-            except Exception:  # noqa: BLE001
-                logger.info("Play-time supervisor LLM analysis skipped", exc_info=True)
-                meta0 = dict(graph.get("metadata") or {})
-                meta0["pending_llm_analysis"] = False
-                graph["metadata"] = meta0
-                try:
-                    graph = self._store.save_graph(graph)
-                except Exception:  # noqa: BLE001
-                    pass
-        elif meta0.get("pending_llm_analysis"):
-            meta0["pending_llm_analysis"] = False
-            graph["metadata"] = meta0
-            try:
-                graph = self._store.save_graph(graph)
-            except Exception:  # noqa: BLE001
-                pass
         prior: dict[str, Any] | None = None
         if use_prior:
             prior = load_prior_feedback(graph_id)
@@ -954,7 +794,6 @@ class GraphExecutor:
                 "optimize_for": optimize_for,
                 "skill_guided": bool((graph.get("metadata") or {}).get("skill_guided")),
                 "audio_intent": (graph.get("metadata") or {}).get("audio_intent"),
-                "one_pass": True,
                 "use_prior_feedback": use_prior,
             },
         )
@@ -965,7 +804,7 @@ class GraphExecutor:
                 action="decide_capabilities",
                 phase="orchestration",
                 role="manager",
-                tool="heuristic",
+                tool="structural",
             ):
                 cap_plan = ManagerAgent().decide_capabilities(graph)
                 traj.record(
@@ -986,10 +825,8 @@ class GraphExecutor:
             # or user explicitly asked Run again with prior feedback.
             scenario0 = str((graph.get("metadata") or {}).get("scenario") or "")
             meta_play = dict(graph.get("metadata") or {})
-            already_composed = bool(meta_play.get("supervisor_composed_on_bootstrap")) and not bool(
-                meta_play.get("pending_llm_analysis")
-            )
-            run_enter_redesign = scenario0 == "video" and use_llm_orch and (
+            already_composed = bool(meta_play.get("supervisor_composed_on_bootstrap"))
+            run_enter_redesign = scenario0 == "video" and (
                 use_prior or not already_composed
             )
             if run_enter_redesign:
@@ -1001,7 +838,7 @@ class GraphExecutor:
                     tool="llm",
                 ):
                     brief_ack = await SupervisorAgent().author_creative_brief(
-                        graph, use_llm=True
+                        graph
                     )
                     traj.record(
                         agent_id="supervisor",
@@ -1023,7 +860,7 @@ class GraphExecutor:
                     role="manager",
                     tool="llm",
                 ):
-                    mgr_brief = await ManagerAgent().review_brief(graph, use_llm=True)
+                    mgr_brief = await ManagerAgent().review_brief(graph)
                     traj.record(
                         agent_id="manager",
                         action="review_brief_result",
@@ -1045,7 +882,7 @@ class GraphExecutor:
                     tool="llm",
                 ):
                     sb_ack = await SupervisorAgent().author_storyboard(
-                        graph, use_llm=True
+                        graph
                     )
                     traj.record(
                         agent_id="supervisor",
@@ -1068,7 +905,7 @@ class GraphExecutor:
                     tool="llm",
                 ):
                     mgr_sb = await ManagerAgent().review_storyboard(
-                        graph, use_llm=True
+                        graph
                     )
                     traj.record(
                         agent_id="manager",
@@ -1089,11 +926,10 @@ class GraphExecutor:
                     action="design_execution_graph",
                     phase="orchestration",
                     role="supervisor",
-                    tool=("llm" if use_llm_orch else "deterministic"),
+                    tool="llm",
                 ):
                     graph_ack = await SupervisorAgent().design_execution_graph(
                         graph,
-                        use_llm=use_llm_orch,
                         optimize_for=optimize_for,
                     )
                     graph = self._store.save_graph(graph)
@@ -1131,7 +967,7 @@ class GraphExecutor:
                 action="plan",
                 phase="orchestration",
                 role="supervisor",
-                tool=("llm" if use_llm_orch else "deterministic"),
+                tool="llm",
                 detail={"optimize_for": optimize_for, "has_prior_feedback": bool(prior)},
             ):
                 supervisor_skill = str(
@@ -1145,7 +981,6 @@ class GraphExecutor:
                     graph,
                     optimize_for=optimize_for,
                     prior_feedback=prior,
-                    use_llm=use_llm_orch,
                 )
                 traj.record(
                     agent_id="supervisor",
@@ -1155,7 +990,6 @@ class GraphExecutor:
                     detail={
                         "notes": str((plan or {}).get("notes") or "")[:500],
                         "rating_modality": (plan or {}).get("rating_modality"),
-                        "use_llm": use_llm_orch,
                     },
                 )
                 self._store.save_graph(graph)
@@ -1165,10 +999,10 @@ class GraphExecutor:
                 action="validate_plan",
                 phase="orchestration",
                 role="manager",
-                tool=("llm" if use_llm_orch else "heuristic"),
+                tool="llm",
             ):
                 manager_ack = await ManagerAgent().validate_plan(
-                    graph, use_llm=use_llm_orch
+                    graph
                 )
                 traj.record(
                     agent_id="manager",
@@ -1179,7 +1013,6 @@ class GraphExecutor:
                         "patched": list(manager_ack.get("patched") or [])[:20],
                         "rating_modality": manager_ack.get("rating_modality"),
                         "can_vision": manager_ack.get("can_vision"),
-                        "use_llm": use_llm_orch,
                     },
                 )
                 graph = self._store.save_graph(graph)
@@ -1260,7 +1093,7 @@ class GraphExecutor:
                     action="adjust_after_keyframes",
                     phase="orchestration",
                     role="supervisor",
-                    tool="heuristic",
+                    tool="structural",
                 ):
                     adj_notes = SupervisorAgent().adjust_clips_after_keyframes(
                         graph,
@@ -1279,7 +1112,7 @@ class GraphExecutor:
                     action="ack_keyframe_adjustment",
                     phase="orchestration",
                     role="manager",
-                    tool="heuristic",
+                    tool="structural",
                 ):
                     ManagerAgent().ack_keyframe_adjustment(graph, adj_notes)
                 graph = self._store.save_graph(graph)
@@ -1297,12 +1130,11 @@ class GraphExecutor:
                     action="review_storyboard",
                     phase="orchestration",
                     role="manager",
-                    tool=("llm" if use_llm_orch else "heuristic"),
+                    tool="llm",
                 ):
                     sb_ack = await ManagerAgent().review_storyboard_once(
                         graph,
                         node_states=run.get("node_states"),
-                        use_llm=use_llm_orch,
                     )
                     traj.record(
                         agent_id="manager",
@@ -1445,14 +1277,13 @@ class GraphExecutor:
                 action="finalize",
                 phase="orchestration",
                 role="supervisor",
-                tool=("llm" if use_llm_orch else "heuristic"),
+                tool="llm",
             ):
                 supervisor_final = await SupervisorReviewer().finalize(
                     graph,
                     agent_feedback=agent_feedback,
                     manager_review={},
                     optimize_for=optimize_for,
-                    use_llm=use_llm_orch,
                     node_states=run.get("node_states"),
                 )
             with traj.span(
@@ -1460,7 +1291,7 @@ class GraphExecutor:
                 action="review",
                 phase="orchestration",
                 role="manager",
-                tool=("llm" if use_llm_orch else "heuristic"),
+                tool="llm",
             ):
                 manager_review = await ManagerAgent().review(
                     graph,
@@ -1468,7 +1299,6 @@ class GraphExecutor:
                     supervisor_plan=supervisor_plan if isinstance(supervisor_plan, dict) else {},
                     prior_feedback=None,
                     optimize_for=optimize_for,
-                    use_llm=use_llm_orch,
                     supervisor_report=supervisor_final,
                     node_states=run.get("node_states"),
                 )
@@ -1477,7 +1307,7 @@ class GraphExecutor:
                 action="dual_rate_final",
                 phase="orchestration",
                 role="manager",
-                tool=("llm" if use_llm_orch else "heuristic"),
+                tool="llm",
             ):
                 manager_review = await ManagerAgent().assign_dual_raters(
                     graph,
@@ -1485,7 +1315,6 @@ class GraphExecutor:
                     supervisor_final=supervisor_final,
                     manager_review=manager_review,
                     node_states=run.get("node_states"),
-                    use_llm=use_llm_orch,
                 )
                 traj.record(
                     agent_id="manager",
@@ -1545,8 +1374,7 @@ class GraphExecutor:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("Designer run %s failed: %s", run_id, exc)
-            run["status"] = RUN_STATUS_FAILED
-            run["updated_at"] = utc_now_ms()
+            _stamp_run_failure(run, exc)
             self._publish(run, on_update)
             self._store.save_run(run)
             rec = get_trajectory(run_id)
@@ -1556,7 +1384,7 @@ class GraphExecutor:
                     action="run_failed",
                     phase="system",
                     status="error",
-                    detail={"error": str(exc)},
+                    detail={"error": str(run.get("error") or exc)},
                 )
         finally:
             end_trajectory(run_id)
@@ -1664,7 +1492,6 @@ class GraphExecutor:
                 analysis=analysis,
                 title=str(graph.get("title") or "") or None,
                 optimize_for=str(meta.get("optimize_for") or "quality"),
-                ai_mode=True,
             )
             rebuilt["graph_id"] = graph.get("graph_id") or rebuilt.get("graph_id")
             rebuilt["project_id"] = graph.get("project_id") or rebuilt.get("project_id")
@@ -1674,7 +1501,6 @@ class GraphExecutor:
                 "approved_storyboard",
                 "user_prompt",
                 "manager_lock_ack",
-                "supervisor_owns_graph",
             ):
                 if key in meta and meta.get(key) is not None:
                     rmeta[key] = meta.get(key)
@@ -1700,7 +1526,7 @@ class GraphExecutor:
                 callback(deepcopy(saved))
             return saved, remaining, execution_predecessors(saved), sync_groups(saved)
 
-        if bool(meta.get("freeze_shot_topology") or meta.get("lean_pipeline")):
+        if bool(meta.get("freeze_shot_topology")):
             synced = apply_shot_generate_prompts(graph, prompts)
             if synced is graph:
                 return graph, remaining, execution_predecessors(graph), sync_groups(graph)
@@ -1758,7 +1584,6 @@ class GraphExecutor:
             analysis=analysis,
             title=str(graph.get("title") or "") or None,
             optimize_for=str(meta.get("optimize_for") or "quality"),
-            ai_mode=True,
         )
         rebuilt["graph_id"] = graph.get("graph_id") or rebuilt.get("graph_id")
         rebuilt["project_id"] = graph.get("project_id") or rebuilt.get("project_id")
@@ -1768,7 +1593,6 @@ class GraphExecutor:
             "approved_storyboard",
             "user_prompt",
             "manager_lock_ack",
-            "supervisor_owns_graph",
         ):
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)
@@ -1896,7 +1720,7 @@ class GraphExecutor:
     ) -> list | None:
         from jiuwenswarm.server.runtime.designer.handlers.common import role_output_text
         from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
-            storyboard_shots_or_default,
+            parse_storyboard_shots,
         )
         from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 
@@ -1921,10 +1745,7 @@ class GraphExecutor:
             run=run,
         )
         text = role_output_text(ctx, NODE_ROLE_STORYBOARD)
-        shots = storyboard_shots_or_default(
-            text,
-            str(graph.get("description") or graph.get("title") or ""),
-        )
+        shots = parse_storyboard_shots(text)
         return shots[:MAX_SHOT_CLIP_NODES]
 
     def _completed_storyboard_shot_count(
@@ -2128,11 +1949,6 @@ class GraphExecutor:
                     ACTIVITY_KIND_THINKING,
                 )
                 from jiuwenswarm.server.runtime.designer.activity import stage_text_for_node
-                from jiuwenswarm.server.runtime.designer.model_tools import (
-                    chat_model_billing_block,
-                    demote_config_to_handler,
-                )
-
                 # Regenerating this node itself retires the uploaded stand-in, so the
                 # new file can become the output. Downstream reads keep the stand-in
                 # until that happens.
@@ -2140,10 +1956,6 @@ class GraphExecutor:
                 if isinstance(live_cfg, dict) and live_cfg.pop("user_replaced_output", None):
                     node["config"] = live_cfg
                     self._store.save_graph(graph)
-                if chat_model_billing_block():
-                    live_cfg = node.setdefault("config", {})
-                    if isinstance(live_cfg, dict):
-                        demote_config_to_handler(live_cfg)
                 # User uploads are immutable source assets. Even if an older saved
                 # graph incorrectly says delegate=agent, never regenerate them.
                 uses_agent = (
@@ -2238,28 +2050,7 @@ class GraphExecutor:
                 if image_refs:
                     primary = image_refs[0]
                     refs = [image_refs[0]]
-            current = (run.get("node_states") or {}).get(node_id) or {}
-            kept = current.get("output_ref") if _usable_ref(current.get("output_ref")) else None
-            kept_refs = [ref for ref in (current.get("output_refs") or []) if _usable_ref(ref)]
-            if kept is not None and not kept_refs:
-                kept_refs = [kept]
-            incoming_uri = str((primary or {}).get("uri") or "") if primary else ""
-            kept_uri = str((kept or {}).get("uri") or "") if kept else ""
-            # Auto-accept new outputs — never pause the pipeline for one-by-one approval.
-            auto_accept = bool(
-                (graph.get("metadata") or {}).get("auto_accept_outputs", True)
-            )
-            pending = bool(
-                not auto_accept
-                and kept
-                and primary
-                and incoming_uri
-                and incoming_uri != kept_uri
-            )
-            if pending and (
-                node_pipeline(node) == NODE_ROLE_COMPOSE or _should_auto_promote(kept, primary)
-            ):
-                pending = False
+            # Always auto-accept new outputs (no one-by-one approval pause).
             async with lock:
                 self._set_node_state(
                     run,
@@ -2268,10 +2059,10 @@ class GraphExecutor:
                         "status": NODE_STATUS_COMPLETED,
                         "started_at": started_at,
                         "completed_at": utc_now_ms(),
-                        "output_ref": kept if pending else primary,
-                        "output_refs": kept_refs if pending else refs,
-                        "candidate_output_ref": primary if pending else None,
-                        "candidate_output_refs": refs if pending else [],
+                        "output_ref": primary,
+                        "output_refs": refs,
+                        "candidate_output_ref": None,
+                        "candidate_output_refs": [],
                         "error": None,
                         "blocked_by": [],
                     },
@@ -2375,7 +2166,7 @@ class GraphExecutor:
                         "error": _exception_text(exc),
                     },
                 )
-                run["status"] = RUN_STATUS_FAILED
+                _stamp_run_failure(run, exc)
             if traj is not None:
                 traj.record(
                     agent_id=node_id,
@@ -2521,7 +2312,6 @@ def _usable_ref(ref: object) -> bool:
 
 
 _TEXT_FALLBACK_KINDS = {"text", "table"}
-_MEDIA_KINDS = {"image", "video", "audio"}
 _MEDIA_SUFFIXES = (
     ".png",
     ".jpg",
@@ -2571,13 +2361,6 @@ def _published_media_output(state: object) -> bool:
     return _usable_ref(ref) and not _is_fallback_text_ref(ref)
 
 
-def _is_media_ref(ref: object) -> bool:
-    return _ref_kind(ref) in _MEDIA_KINDS
-
-
-def _should_auto_promote(kept: object, primary: object) -> bool:
-    """Replace fallback notes with a newly generated image/video instead of asking."""
-    return _is_fallback_text_ref(kept) and _is_media_ref(primary)
 
 
 def _node_by_id(graph: DesignerExecutionGraph, node_id: str) -> DesignerGraphNode:
@@ -2594,6 +2377,20 @@ def _exception_text(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "timed out"
     return type(exc).__name__
+
+
+def _stamp_run_failure(run: DesignerExecutionRun, exc: BaseException) -> None:
+    """Mark the run failed and attach a user-visible error for the Design UI toast."""
+    from jiuwenswarm.server.runtime.designer.model_tools import DesignerLlmError
+
+    run["status"] = RUN_STATUS_FAILED
+    run["updated_at"] = utc_now_ms()
+    if isinstance(exc, DesignerLlmError):
+        message = exc.user_message
+    else:
+        message = _exception_text(exc)
+    if message and not str(run.get("error") or "").strip():
+        run["error"] = message[:500]
 
 
 def _node_execute_timeout_sec(node: DesignerGraphNode) -> float:

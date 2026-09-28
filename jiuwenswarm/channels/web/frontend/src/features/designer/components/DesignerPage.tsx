@@ -150,9 +150,14 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
         </div>
       </header>
       {runError ? (
-        <p className="designer-page__error" data-testid="designer-error">
-          {runError}
-        </p>
+        <div
+          className="app-toast-wrapper app-toast-wrapper--top-center"
+          data-testid="designer-run-error-toast"
+        >
+          <div className="app-connection-toast" role="alert" data-testid="designer-error">
+            {runError}
+          </div>
+        </div>
       ) : null}
       {runWarning ? (
         <p className="designer-page__warning" data-testid="designer-warning">

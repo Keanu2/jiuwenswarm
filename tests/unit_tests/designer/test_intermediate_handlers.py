@@ -31,11 +31,9 @@ from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
     brief_logline,
     brief_story_focus,
     build_storyboard_llm_prompt,
-    fallback_brief,
-    fallback_storyboard,
     parse_storyboard_shots,
     shot_generate_prompt,
-    storyboard_shots_or_default,
+    parse_storyboard_shots,
 )
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 
@@ -433,14 +431,6 @@ def test_brief_duration_seconds_reads_user_request() -> None:
     assert brief_duration_seconds("no length stated") == 5
 
 
-def test_fallback_brief_and_storyboard_follow_requested_duration() -> None:
-    prompt = "Generate a 10-second video: a troop charges a red castle"
-    brief = fallback_brief(prompt)
-    assert "- Duration: 10 seconds" in brief
-    shots = parse_storyboard_shots(fallback_storyboard(brief))
-    assert shots[0]["timeline"] == "0.0-4.0s"
-    assert shots[1]["timeline"] == "4.0-10.0s"
-
 
 @pytest.mark.asyncio
 async def test_character_falls_back_to_notes_when_image_missing(
@@ -762,56 +752,13 @@ def test_parse_storyboard_shots_reads_table_rows() -> None:
     assert shots[1]["comment"] == ""
 
 
-def test_storyboard_shots_or_default_falls_back() -> None:
-    shots = storyboard_shots_or_default("没有表格", "雨夜")
-    assert len(shots) == 2
-    assert shots[0]["comment"]
-    assert shots[1]["comment"]
-    assert "雨夜" in shots[0]["comment"]
-    assert "neon" not in shots[0]["comment"].lower()
-    assert "puddle" not in shots[0]["comment"].lower()
+def test_parse_storyboard_shots_returns_empty_without_table() -> None:
+    shots = parse_storyboard_shots("没有表格")
+    assert shots == []
 
 
-def test_fallback_storyboard_follows_brief_not_stock_alley() -> None:
-    brief = (
-        "# Brief\n\n"
-        "- Logline: a train arrives at the station and a young man walks out to work\n"
-        "- Duration: 5 seconds\n"
-    )
-    text = fallback_storyboard(brief)
-    shots = parse_storyboard_shots(text)
-    joined = " ".join(
-        f"{shot['character_action']} {shot['scene_change']} {shot['comment']}" for shot in shots
-    )
-    assert brief_logline(brief).startswith("a train arrives")
-    assert "train" in joined
-    assert "young man" in joined or "work" in joined
-    assert "neon alley" not in joined
-    assert "\n" not in shots[0]["scene_change"]
 
 
-def test_fallback_storyboard_uses_brief_action_not_generate_boilerplate() -> None:
-    from jiuwenswarm.server.runtime.designer.handlers.text_nodes import fallback_brief
-
-    prompt = (
-        "generate a 480p video in 5 seconds, at least two cams, "
-        "a train arrive at center station and a young man walk out of the train "
-        "and ready for a new day's work"
-    )
-    focus = brief_story_focus(prompt)
-    assert "train" in focus
-    assert "480p" not in focus.lower()
-    brief = fallback_brief(prompt)
-    text = fallback_storyboard(brief)
-    shots = parse_storyboard_shots(text)
-    joined = " ".join(
-        f"{shot['character_action']} {shot['scene_change']} {shot['comment']}" for shot in shots
-    )
-    assert "train" in joined
-    assert "young man" in joined
-    assert "generate a 480p" not in joined.lower()
-    assert shots[0]["character_action"]
-    assert "train" in shots[0]["character_action"] or "train" in shots[0]["comment"]
 
 
 def test_parse_storyboard_shots_reads_comment_column() -> None:

@@ -458,11 +458,10 @@ def occupancy_clause_for_clip(
 
 
 def ensure_brief_cast(analysis: dict[str, Any], *, user_prompt: str = "") -> list[str]:
-    """If LLM/heuristic left only a placeholder Lead, re-extract cast from the brief."""
+    """Note thin placeholder cast; do not invent characters from regex heuristics."""
     notes: list[str] = []
     out = analysis if isinstance(analysis, dict) else {}
     characters = [c for c in (out.get("characters") or []) if isinstance(c, dict)]
-    prompt = (user_prompt or "").strip()
     thin = (
         len(characters) < 2
         or all(
@@ -472,20 +471,11 @@ def ensure_brief_cast(analysis: dict[str, Any], *, user_prompt: str = "") -> lis
             for c in characters
         )
     )
-    if not thin or not prompt:
-        return notes
-    try:
-        from jiuwenswarm.server.runtime.designer.script_analysis import (
-            _heuristic_characters,
+    if thin and (user_prompt or "").strip():
+        notes.append(
+            f"brief_cast_thin: {len(characters)} placeholder character(s); "
+            "LLM cast is authoritative (no heuristic rehydrate)."
         )
-
-        fresh = _heuristic_characters(prompt)
-    except Exception:  # noqa: BLE001
-        return notes
-    if len(fresh) <= len(characters):
-        return notes
-    out["characters"] = fresh
-    notes.append(f"brief_cast_rehydrate: {len(characters)} -> {len(fresh)} characters")
     return notes
 
 

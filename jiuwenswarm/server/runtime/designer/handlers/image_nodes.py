@@ -8,13 +8,11 @@ from pathlib import Path
 from shutil import copy2
 
 from jiuwenswarm.common.schema.designer_graph import (
-    NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER_DESIGN,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
     NODE_TYPE_IMAGE,
     NODE_TYPE_TEXT,
-    AssetRef,
     DesignerGraphNode,
     node_shot_index,
 )
@@ -23,7 +21,6 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
     collect_frame_reference_images,
     file_output_ref,
     graph_prompt,
-    role_output_image_path,
     role_output_image_paths,
     role_output_text,
     write_workspace_text,
@@ -36,7 +33,7 @@ from jiuwenswarm.server.runtime.designer.user_references import (
 from jiuwenswarm.server.runtime.designer.a2a_collab import collaboration_card
 from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
     StoryboardShot,
-    storyboard_shots_or_default,
+    parse_storyboard_shots,
 )
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
@@ -263,46 +260,6 @@ def _shot_frame_prompt(
     return lead
 
 
-def fallback_character_sheet(source: str) -> str:
-    return (
-        "# Character\n\n"
-        f"{source.strip()}\n\n"
-        "- Look: follow the subject in the Brief\n"
-        "- Costume / materials: match the specified style\n"
-        "- Image generation is unavailable; this sheet is the intermediate artifact\n"
-    )
-
-
-def fallback_scene_notes(source: str) -> str:
-    return (
-        "# Scene\n\n"
-        f"{source.strip()}\n\n"
-        "- Environment only, no people\n"
-        "- Image generation is unavailable; these notes are the intermediate artifact\n"
-    )
-
-
-def fallback_keyframe_script(source: str, shot_index: int = 1) -> str:
-    shots = storyboard_shots_or_default(source)
-    index = max(1, int(shot_index or 1))
-    shot = shots[index - 1] if index <= len(shots) else None
-    lines = [
-        "# Keyframe\n",
-        f"- This is the keyframe node for shot {index} only\n",
-    ]
-    if shot:
-        lines.append(
-            f"- Shot {shot['shot_no']} {shot['timeline']}: {shot['camera']} / {shot['move']}\n"
-            f"- Character: {shot['character_action']}\n"
-            f"- Scene: {shot['scene_change']}\n"
-        )
-        comment = str(shot.get("comment") or "").strip()
-        if comment:
-            lines.append(f"- Shot description: {comment}\n")
-    lines.append("- Image generation is unavailable; these notes are the intermediate artifact\n")
-    return "".join(lines)
-
-
 def _publish_shot_image(src: Path, *, stem: str) -> Path:
     dest = handler_io.get_agent_workspace_dir() / f"{stem}{src.suffix or '.png'}"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -311,18 +268,16 @@ def _publish_shot_image(src: Path, *, stem: str) -> Path:
     return dest.resolve()
 
 
-async def _image_or_notes(
+async def _require_image(
     *,
     prompt: str,
-    notes: str,
     stem: str,
-    kind_if_text: str,
     reference_images: list[str] | None = None,
     size: str = "1024x1024",
     max_tries: int = 2,
-    require_image: bool = True,
     ctx: NodeExecutionContext | None = None,
 ) -> NodeResult:
+    """Generate an image; fail closed when the image model returns nothing."""
     refs = [str(p) for p in (reference_images or []) if str(p).strip()]
     # Only pass real image files — markdown/extra stubs break DashScope uploads.
     _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
@@ -374,19 +329,8 @@ async def _image_or_notes(
             message="image generated",
         )
     error = str((generated or {}).get("error") or "").strip()
-    if require_image:
-        raise RuntimeError(
-            f"image_gen required but failed for {stem}: {error or 'no image_path'}"
-        )
-    path = write_workspace_text(stem, notes)
-    message = (
-        f"image_gen failed: {error}; wrote notes"
-        if error
-        else "image_gen unavailable, wrote notes"
-    )
-    return NodeResult(
-        output_ref=file_output_ref(path, kind=kind_if_text, mime_type="text/markdown"),
-        message=message,
+    raise RuntimeError(
+        f"image_gen required but failed for {stem}: {error or 'no image_path'}"
     )
 
 
@@ -449,11 +393,9 @@ class CharacterDesignNodeHandler:
             prompt = (
                 f"{prompt}\nUser reference slots (original files are visual authority):\n{roster}"
             )
-        result = await _image_or_notes(
+        result = await _require_image(
             prompt=prompt,
-            notes=fallback_character_sheet(source),
             stem=f"designer_character_{ctx.run_id}_{ctx.node_id}",
-            kind_if_text=NODE_TYPE_TEXT,
             size=size,
             max_tries=max_tries,
             reference_images=user_images or None,
@@ -535,11 +477,9 @@ class SceneNodeHandler:
                 f"{scene_prompt}\nUser reference slots (original files are visual authority):\n"
                 f"{roster}"
             )
-        result = await _image_or_notes(
+        result = await _require_image(
             prompt=scene_prompt,
-            notes=fallback_scene_notes(source),
             stem=f"designer_scene_{ctx.run_id}_{ctx.node_id}",
-            kind_if_text=NODE_TYPE_TEXT,
             size=size,
             max_tries=max_tries,
             reference_images=refs or None,
@@ -561,10 +501,7 @@ class FrameNodeHandler:
         keyframe_strategy = str(
             identity.get("keyframe_strategy") or cfg.get("keyframe_strategy") or ""
         )
-        meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
-        skip_scene_specs = bool(meta.get("skip_scene_specs"))
-        # Quality v5 compose-first: no scene specs; KF generates setting+cast.
-        allow_without_scene = skip_scene_specs or keyframe_strategy in {
+        allow_without_scene = keyframe_strategy in {
             "compose_from_solo_refs",
             "edit_prior_keyframe",
         }
@@ -614,7 +551,7 @@ class FrameNodeHandler:
         else:
             # Fail closed: no occupancy → no cast refs (scene specs only if present).
             refs = [str(p) for p in (all_scenes[:1] if all_scenes else [])]
-        shots = storyboard_shots_or_default(storyboard, visual)
+        shots = parse_storyboard_shots(storyboard)
         planned_action = str(cfg.get("shot_action") or generate.get("prompt") or "").strip()
         cast_names = [
             str(x).strip()

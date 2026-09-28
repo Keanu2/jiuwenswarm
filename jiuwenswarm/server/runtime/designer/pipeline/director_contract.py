@@ -160,11 +160,11 @@ _HARD_MAX_SHOTS = 16
 
 
 def is_placeholder_analysis(analysis: dict[str, Any] | None) -> bool:
-    """True when N came from the no-LLM fallback, not from a director decision."""
+    """True when analysis is not yet LLM-authored (empty source / test fixtures)."""
     data = analysis or {}
     if data.get("llm_pending"):
         return True
-    return str(data.get("source") or "") in {"", "heuristic", "heuristic_pending_llm"}
+    return str(data.get("source") or "") in {"", "heuristic"}
 
 
 def count_narrative_beats(prompt: str) -> int:
@@ -499,7 +499,6 @@ def _ensure_stay_on_leave_beats(
     needs_dual = bool(_STAY_SPEAK_RE.search(blob) or _action_has_exit(blob))
     if not needs_dual:
         return
-    by_id = {str(c.get("id")): c for c in characters if c.get("id")}
     stay_hints = (
         "father",
         "preach",
@@ -789,14 +788,17 @@ async def enrich_analysis_with_llm(
     *,
     timeout_sec: float = 60.0,
 ) -> dict[str, Any]:
-    """LLM director pass; falls back to heuristics on failure."""
+    """LLM director pass. Chat model is required; failures raise ``DesignerLlmError``."""
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        DesignerLlmError,
+        LLM_API_ERROR,
+        call_model_tool,
+        model_text_or_raise,
+    )
+
+    # Structural floor for merge — not a product substitute when the LLM fails.
     base = enrich_analysis_heuristically(prompt, analysis)
     try:
-        from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool
-        from jiuwenswarm.server.runtime.designer.script_analysis import _llm_configured
-
-        if not _llm_configured():
-            return base
         characters = base.get("characters") or []
         shots = base.get("shots") or []
         system = (
@@ -846,9 +848,7 @@ async def enrich_analysis_with_llm(
             optimize_for="quality",
             max_tokens=16384,
         )
-        text = str((result or {}).get("text") or "").strip()
-        if not text or not (result or {}).get("ok"):
-            return base
+        text = model_text_or_raise(result)
         # Extract JSON object (tolerate markdown fences / trailing chatter)
         fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.I)
         if fence:
@@ -856,16 +856,24 @@ async def enrich_analysis_with_llm(
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
-            return base
+            raise DesignerLlmError(
+                "Chat model did not return a usable director contract JSON.",
+                code=LLM_API_ERROR,
+            )
         raw = text[start : end + 1]
         try:
             parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            # Common truncation / trailing-comma failures → keep heuristic contract
-            logger.warning("Director LLM JSON parse failed; using heuristic contract")
-            return base
+        except json.JSONDecodeError as exc:
+            logger.warning("Director LLM JSON parse failed")
+            raise DesignerLlmError(
+                "Chat model returned invalid director contract JSON.",
+                code=LLM_API_ERROR,
+            ) from exc
         if not isinstance(parsed, dict):
-            return base
+            raise DesignerLlmError(
+                "Chat model did not return a usable director contract JSON.",
+                code=LLM_API_ERROR,
+            )
         valid = {str(c.get("id")) for c in characters if isinstance(c, dict) and c.get("id")}
         by_name: dict[str, str] = {}
         for ch in characters:
@@ -880,7 +888,10 @@ async def enrich_analysis_with_llm(
                 by_name[name.lower()] = cid
         new_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else None
         if not new_shots:
-            return base
+            raise DesignerLlmError(
+                "Chat model did not return any usable director contract shots.",
+                code=LLM_API_ERROR,
+            )
         budget = int(parsed.get("target_shot_count") or base.get("target_shot_count") or len(new_shots))
         budget = max(1, min(4, budget, infer_shot_budget(prompt, base)))
         norm: list[dict[str, Any]] = []
@@ -950,7 +961,10 @@ async def enrich_analysis_with_llm(
                     merged["keyframe_prompt"] = (kp + extra)[:500]
             norm.append(merged)
         if not norm:
-            return base
+            raise DesignerLlmError(
+                "Chat model did not return any usable director contract shots.",
+                code=LLM_API_ERROR,
+            )
         # Explicit multi-beat prompts can outrank a short LLM shot list.
         budget = max(budget, infer_shot_budget(prompt, base))
         norm = _expand_shots_to_budget(prompt, norm, characters, budget)
@@ -983,24 +997,24 @@ async def enrich_analysis_with_llm(
         except Exception:  # noqa: BLE001
             logger.info("apply_shot_scope skipped after director LLM", exc_info=True)
         return out
-    except Exception:  # noqa: BLE001
-        logger.info("Director LLM pass failed; using heuristic contract", exc_info=True)
-        return base
+    except DesignerLlmError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Director LLM pass failed", exc_info=True)
+        raise DesignerLlmError(
+            f"Chat model request failed during director contract: {exc}",
+            code=LLM_API_ERROR,
+        ) from exc
 
 
 async def apply_director_contract(
     prompt: str,
     analysis: dict[str, Any],
     *,
-    use_llm: bool = True,
     timeout_sec: float = 60.0,
 ) -> dict[str, Any]:
-    if use_llm:
-        out = await enrich_analysis_with_llm(
-            prompt, analysis, timeout_sec=timeout_sec
-        )
-    else:
-        out = enrich_analysis_heuristically(prompt, analysis)
+    """LLM director enrich + Plan A v2. Failures raise ``DesignerLlmError``."""
+    out = await enrich_analysis_with_llm(prompt, analysis, timeout_sec=timeout_sec)
     from jiuwenswarm.server.runtime.designer.pipeline.plan_a_v2 import (
         apply_plan_a_v2,
     )

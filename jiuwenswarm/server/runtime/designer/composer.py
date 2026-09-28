@@ -335,39 +335,24 @@ def compose_execution_graph(
     mode: OptimizeMode = "cost" if optimize_for == "cost" else "quality"
     from jiuwenswarm.server.runtime.designer.script_analysis import (
         analyze_creative_brief_sync,
-        heuristic_analysis,
-        _llm_configured,
     )
     from jiuwenswarm.server.runtime.designer.smart_graph import (
         apply_runtime_delegate,
         build_smart_video_graph,
     )
 
-    if _llm_configured():
-        try:
-            analysis = analyze_creative_brief_sync(
-                prompt, use_llm=True, timeout_sec=20.0
-            )
-        except Exception:  # noqa: BLE001
-            analysis = heuristic_analysis(prompt)
-    else:
-        analysis = heuristic_analysis(prompt)
+    # Blunt LLM call — credential/billing failures raise DesignerLlmError.
+    analysis = analyze_creative_brief_sync(prompt, timeout_sec=20.0)
     graph = build_smart_video_graph(
         project_id=project_id,
         prompt=prompt,
         analysis=analysis,
         title=title,
         optimize_for=mode,
-        ai_mode=_llm_configured(),
     )
     graph = apply_runtime_delegate(graph)
     meta = dict(graph.get("metadata") or {})
     meta["script_analysis"] = analysis
-    meta["script_analysis_mode"] = str(analysis.get("source") or "heuristic")
-    meta["pending_llm_analysis"] = bool(
-        _llm_configured() and str(analysis.get("source") or "") != "llm"
-    )
-    meta["auto_accept_outputs"] = True
     meta["scenario"] = "video"
     graph["metadata"] = meta
     return attach_skills_metadata(graph, prompt)

@@ -85,7 +85,55 @@ def _message_text(msg: Any) -> str:
 # label nodes as live chat agents. Cleared only when this process restarts.
 _chat_billing_block: str = ""
 _chat_confirmed: bool = False
-_chat_probe_done: bool = False
+
+# Stable error codes for Designer LLM failures. Adapter/RPC layers map these
+# onto the existing bootstrap_error / chat_error / runError UI surfaces —
+# callers should raise DesignerLlmError rather than inventing local reports.
+LLM_NOT_CONFIGURED = "LLM_NOT_CONFIGURED"
+LLM_BILLING = "LLM_BILLING"
+LLM_API_ERROR = "LLM_API_ERROR"
+LLM_REQUIRED = "LLM_REQUIRED"
+
+
+class DesignerLlmError(RuntimeError):
+    """User-visible Designer chat-model failure.
+
+    Nested helpers call ``call_model_tool`` bluntly and raise via
+    ``model_text_or_raise``. RPC entry points catch this and map onto the
+    existing bootstrap_error / chat_error / runError surfaces — no per-call
+    try/catch/report in business logic.
+    """
+
+    def __init__(self, message: str, *, code: str = LLM_API_ERROR) -> None:
+        super().__init__(message)
+        self.code = str(code or LLM_API_ERROR)
+        self.user_message = str(message or "Chat model request failed")[:500]
+
+    @classmethod
+    def from_call_result(cls, result: dict[str, Any] | None) -> "DesignerLlmError":
+        payload = result if isinstance(result, dict) else {}
+        detail = str(payload.get("error") or "Chat model request failed").strip()
+        code = str(payload.get("code") or "").strip()
+        if not code:
+            if payload.get("unavailable") or is_chat_payment_block(detail):
+                code = LLM_BILLING
+            elif "not configured" in detail.lower() or "no models configured" in detail.lower():
+                code = LLM_NOT_CONFIGURED
+            else:
+                code = LLM_API_ERROR
+        if code == LLM_BILLING:
+            message = (
+                f"Chat model unavailable (billing / insufficient credit): {detail}"
+            )
+        elif code == LLM_NOT_CONFIGURED:
+            message = (
+                detail
+                if detail
+                else "Chat model is not configured. Configure a model in Settings before using Design."
+            )
+        else:
+            message = f"Chat model request failed: {detail}"
+        return cls(message, code=code)
 
 
 def is_chat_payment_block(detail: object) -> bool:
@@ -108,6 +156,21 @@ def is_chat_payment_block(detail: object) -> bool:
     )
 
 
+def classify_llm_failure(detail: object) -> tuple[str, str]:
+    """Return ``(code, user_message)`` for a chat-model failure detail."""
+    text = str(detail or "").strip() or "Chat model request failed"
+    if is_chat_payment_block(detail) or is_chat_payment_block(text):
+        return LLM_BILLING, f"Chat model unavailable (billing / insufficient credit): {text}"[:500]
+    low = text.lower()
+    if (
+        "not configured" in low
+        or "no models configured" in low
+        or "no chat model credentials" in low
+    ):
+        return LLM_NOT_CONFIGURED, text[:500]
+    return LLM_API_ERROR, f"Chat model request failed: {text}"[:500]
+
+
 def chat_model_billing_block() -> str:
     """Non-empty when the chat account is known to be unpaid / 402."""
     return _chat_billing_block
@@ -122,22 +185,12 @@ def note_chat_model_unavailable(detail: object) -> bool:
     return True
 
 
-def demote_config_to_handler(cfg: dict[str, Any]) -> None:
-    """Stop treating this node as a live chat agent; handlers keep prewritten text."""
-    if not isinstance(cfg, dict):
-        return
-    cfg["delegate"] = "handler"
-    draft = cfg.get("draft_prewritten")
-    if draft and not str(cfg.get("prewritten") or "").strip():
-        cfg["prewritten"] = draft
-    cfg["skip_llm"] = True
-
 
 def llm_available() -> bool:
     """True when Settings has a usable chat model with credentials for Designer agents.
 
-    A recorded 402 / insufficient balance makes this False so graphs are not
-    stamped ``delegate=agent``.
+    A recorded 402 / insufficient balance makes this False so entry gates and
+    model calls fail closed with a billing error.
     """
     if _chat_billing_block:
         return False
@@ -171,63 +224,43 @@ def llm_available() -> bool:
     return bool(env_key and env_base)
 
 
-def ensure_chat_model_reachable() -> bool:
-    """Probe the chat model once. A 402 marks it unavailable for this process.
+def require_llm() -> None:
+    """Local credential-shape gate (Design analogue of Work/Code ``_has_valid_model_config``).
 
-    Unit tests skip the network probe (``PYTEST_CURRENT_TEST``). Image and video
-    vendors are not probed here.
+    Use only at user-visible RPC entry points (bootstrap / chat / Play) so a
+    missing model fails before expensive graph work. Nested helpers should
+    call ``call_model_tool`` bluntly and raise via ``model_text_or_raise`` —
+    including billing/402, which Work/Code also surfaces on the model call
+    rather than with a preflight network probe.
     """
-    global _chat_confirmed, _chat_probe_done
-    import os
-
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return llm_available()
-    if _chat_billing_block:
-        return False
-    if _chat_confirmed:
-        return True
+    block = chat_model_billing_block()
+    if block:
+        raise DesignerLlmError(
+            f"Chat model unavailable (billing / insufficient credit): {block}",
+            code=LLM_BILLING,
+        )
     if not llm_available():
-        return False
-    if _chat_probe_done:
-        return llm_available()
-    _chat_probe_done = True
-    try:
-        from openai import OpenAI
+        raise DesignerLlmError(
+            "Chat model is not configured. Configure a model in Settings before using Design.",
+            code=LLM_NOT_CONFIGURED,
+        )
 
-        models = list_configured_models()
-        chosen = pick_model_for_optimize("cost") or (models[0] if models else None)
-        if not isinstance(chosen, dict):
-            return llm_available()
-        api_key = (os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
-        api_base = resolve_env_vars(
-            str(chosen.get("api_base") or os.environ.get("API_BASE") or os.environ.get("OPENAI_API_BASE") or "")
-        ).strip()
-        model_name = resolve_env_vars(
-            str(chosen.get("model_name") or chosen.get("id") or os.environ.get("MODEL_NAME") or "")
-        ).strip()
-        if not api_key or not api_base or not model_name or api_base.startswith("https://example.com"):
-            return llm_available()
-        client = OpenAI(api_key=api_key, base_url=api_base, timeout=8.0)
-        try:
-            client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": "ok"}],
-                max_tokens=1,
-                temperature=0,
-            )
-        finally:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
-        _chat_confirmed = True
-        return True
-    except Exception as exc:  # noqa: BLE001
-        if note_chat_model_unavailable(exc):
-            logger.warning("chat model unavailable (billing): %s", exc)
-            return False
-        logger.info("chat model probe failed open: %s", exc)
-        return llm_available()
+
+def model_text_or_raise(result: dict[str, Any] | None) -> str:
+    """Return model text from ``call_model_tool``, or raise ``DesignerLlmError``."""
+    if not isinstance(result, dict):
+        raise DesignerLlmError("Chat model returned an empty response", code=LLM_API_ERROR)
+    if result.get("unavailable") or result.get("ok") is False or result.get("fallback"):
+        raise DesignerLlmError.from_call_result(result)
+    text = str(result.get("text") or "").strip()
+    if not text:
+        raise DesignerLlmError("Chat model returned an empty response", code=LLM_API_ERROR)
+    if text.startswith("[local-tool-fallback]"):
+        raise DesignerLlmError(
+            "Chat model credentials are missing; local fallback is disabled.",
+            code=LLM_NOT_CONFIGURED,
+        )
+    return text
 
 
 def list_configured_models() -> list[dict[str, Any]]:
@@ -363,6 +396,7 @@ async def call_model_tool(
         return {
             "ok": False,
             "unavailable": True,
+            "code": LLM_BILLING,
             "error": _chat_billing_block,
             "model": None,
             "text": "",
@@ -391,6 +425,7 @@ async def call_model_tool(
     if chosen is None:
         return {
             "ok": False,
+            "code": LLM_NOT_CONFIGURED,
             "error": "No models configured in Settings",
             "model": None,
             "text": "",
@@ -424,17 +459,17 @@ async def call_model_tool(
     model_name = resolve_env_vars(model_name)
 
     if not api_key or not api_base or api_base.startswith("https://example.com"):
-        # Soft-fail with a deterministic local plan so the pipeline remains usable.
-        text = (
-            f"[local-tool-fallback] model={model_name} optimize={optimize_for}\n"
-            f"{system.strip()}\n---\n{prompt.strip()[:1200]}"
-        )
         return {
-            "ok": True,
-            "fallback": True,
+            "ok": False,
+            "fallback": False,
+            "code": LLM_NOT_CONFIGURED,
+            "error": (
+                "No chat model credentials configured in Settings "
+                "(API_KEY / API_BASE required)."
+            ),
             "model": chosen.get("id"),
             "model_name": model_name,
-            "text": text,
+            "text": "",
         }
 
     try:
@@ -500,10 +535,12 @@ async def call_model_tool(
         return first
     except Exception as exc:  # noqa: BLE001
         blocked = note_chat_model_unavailable(exc)
+        code, _ = classify_llm_failure(exc)
         logger.warning("call_model_tool failed: %s", exc)
         return {
             "ok": False,
             "unavailable": blocked,
+            "code": LLM_BILLING if blocked else code,
             "error": str(exc),
             "model": chosen.get("id"),
             "model_name": model_name,

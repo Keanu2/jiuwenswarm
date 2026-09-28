@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from jiuwenswarm.server.runtime.designer.composer import (
     compose_execution_graph,
     detect_scenario,
+)
+from jiuwenswarm.server.runtime.designer.model_tools import (
+    DesignerLlmError,
+    LLM_NOT_CONFIGURED,
 )
 
 _NAPOLEON = (
@@ -18,22 +24,23 @@ def test_chinese_conjunction_is_not_multimodal() -> None:
     assert detect_scenario("雪山寒风以及戏剧性的逆光") == "video"
 
 
-def test_compose_does_not_dump_catalog_template(monkeypatch) -> None:
+def test_compose_fails_when_llm_not_configured(monkeypatch) -> None:
+    """Compose calls the LLM bluntly; missing credentials raise DesignerLlmError."""
+
+    async def fake_analyze(*_args, **_kwargs):
+        raise DesignerLlmError(
+            "Chat model is not configured. Configure a model in Settings before using Design.",
+            code=LLM_NOT_CONFIGURED,
+        )
+
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.script_analysis._llm_configured",
-        lambda: False,
+        "jiuwenswarm.server.runtime.designer.script_analysis.analyze_creative_brief",
+        fake_analyze,
     )
-    graph = compose_execution_graph(
-        project_id="proj_canvas01",
-        prompt=_NAPOLEON,
-        scenario="multimodal",
-    )
-    ids = {str(node.get("id") or "") for node in (graph.get("nodes") or [])}
-    assert "n_brief" in ids
-    assert "n_storyboard" in ids
-    assert any(nid.startswith("n_clip") for nid in ids)
-    assert "n_intent_brief" not in ids
-    assert not any(nid.startswith("n_multi_") for nid in ids)
-    meta = graph.get("metadata") or {}
-    assert str(meta.get("scenario") or "") == "video"
-    assert str(meta.get("bootstrap") or "").startswith("designer.graph.smart_video")
+    with pytest.raises(DesignerLlmError) as excinfo:
+        compose_execution_graph(
+            project_id="proj_canvas01",
+            prompt=_NAPOLEON,
+            scenario="multimodal",
+        )
+    assert excinfo.value.code == LLM_NOT_CONFIGURED

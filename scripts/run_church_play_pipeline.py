@@ -151,8 +151,8 @@ async def main() -> int:
         print(report["error"], file=sys.stderr)
         return 2
 
-    print("[church-play] analyze_creative_brief(use_llm=True)...", flush=True)
-    analysis = await analyze_creative_brief(PROMPT, use_llm=True, timeout_sec=60.0)
+    print("[church-play] analyze_creative_brief()...", flush=True)
+    analysis = await analyze_creative_brief(PROMPT, timeout_sec=60.0)
     # Keep load within image/video quotas: 3 cinematic beats cover the prompt.
     shots = list(analysis.get("shots") or [])
     if len(shots) > 3:
@@ -220,10 +220,6 @@ async def main() -> int:
     report["characters"] = [
         str(c.get("name") or c.get("id")) for c in (analysis.get("characters") or [])
     ]
-    if str(analysis.get("source") or "") != "llm":
-        report["notes"].append(
-            f"analysis source={analysis.get('source')!r} (continuing; prefer llm)"
-        )
 
     graph = build_smart_video_graph(
         project_id="pipeline_test_church",
@@ -231,7 +227,6 @@ async def main() -> int:
         analysis=analysis,
         title="Church Bible scene (pipeline test)",
         optimize_for=args.optimize_for,
-        ai_mode=True,
     )
     graph = apply_runtime_delegate(graph)
     graph = attach_skills_metadata(graph, PROMPT)
@@ -249,16 +244,10 @@ async def main() -> int:
         else:
             cfg.pop("force_handler", None)
             cfg["delegate"] = "agent"
-            cfg["skip_llm"] = False
             cfg["kind"] = "agent"
     meta = dict(graph.get("metadata") or {})
     meta["script_analysis"] = analysis
-    meta["script_analysis_mode"] = str(analysis.get("source") or "unknown")
-    meta["pending_llm_analysis"] = False
-    meta["auto_accept_outputs"] = True
-    meta["allow_still_clip_fallback"] = False
     meta["pipeline_test"] = "church_bible_play_spatial_v3_audio"
-    meta["ai_agent_pipeline"] = True
     meta["audio_intent"] = {
         "include_speech": True,
         "include_music": True,
@@ -311,13 +300,11 @@ async def main() -> int:
 
     g2 = store.get_graph(str(graph["graph_id"])) or graph
     meta2 = dict(g2.get("metadata") or {})
-    report["ai_agent_pipeline"] = bool(meta2.get("ai_agent_pipeline"))
     report["storyboard_reviewed"] = bool(meta2.get("storyboard_reviewed"))
     report["dual_rater_overall"] = (meta2.get("dual_rater_aggregate") or {}).get(
         "aggregated_overall"
     )
     report["last_feedback_path"] = meta2.get("last_feedback_path")
-    report["agent_runtime"] = meta2.get("agent_runtime")
 
     saved_videos: list[str] = []
     for path in _collect_compose_mp4(finished):

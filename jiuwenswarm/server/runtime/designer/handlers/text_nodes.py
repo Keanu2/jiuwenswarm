@@ -26,10 +26,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
     role_output_text,
     write_workspace_text,
 )
-from jiuwenswarm.server.runtime.designer.a2a_collab import (
-    collaboration_card,
-    review_storyboard_with_peers,
-)
+from jiuwenswarm.server.runtime.designer.a2a_collab import collaboration_card
 from jiuwenswarm.server.runtime.designer.subagent import complete_designer_node_text
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
@@ -284,12 +281,6 @@ def _parse_storyboard_hierarchical(text: str) -> list[StoryboardShot]:
     return shots
 
 
-def storyboard_shots_or_default(text: str, prompt: str = "") -> list[StoryboardShot]:
-    shots = parse_storyboard_shots(text)
-    if shots:
-        return shots
-    return parse_storyboard_shots(fallback_storyboard(prompt))
-
 
 def shot_generate_prompt(shot: StoryboardShot) -> str:
     """Turn one storyboard row into the keyframe/clip generate prompt."""
@@ -439,72 +430,6 @@ def brief_story_focus(prompt: str) -> str:
     return text.strip(" ,.")
 
 
-def fallback_brief(prompt: str) -> str:
-    duration = brief_duration_seconds(prompt)
-    focus = brief_story_focus(prompt) or prompt
-    return (
-        "# Brief\n\n"
-        f"**User prompt (verbatim intent):** {prompt}\n\n"
-        f"**Logline:** {focus[:280]}\n\n"
-        "- Cast: lock face/hair/body/costume per named character (solo sheets)\n"
-        "- Setting: follow the user description; keep architecture/lighting consistent\n"
-        "- Shot consistency: time-coherent actions (no reseating someone who already left)\n"
-        f"- Duration: {duration} seconds\n"
-        "- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
-    )
-
-
-def fallback_storyboard(prompt: str) -> str:
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
-        apply_shot_scope,
-        needs_duration_slicing,
-    )
-
-    duration = float(brief_duration_seconds(prompt))
-    focus = (brief_logline(prompt) or brief_story_focus(prompt) or prompt).strip()[:120]
-    if needs_duration_slicing(prompt):
-        scoped = apply_shot_scope({"shots": []}, prompt)
-        rows = []
-        for shot in scoped.get("shots") or []:
-            idx = int(shot.get("shot_index") or len(rows) + 1)
-            tl = str(shot.get("timeline") or "")
-            act = str(shot.get("action") or focus)[:120].replace("|", "/")
-            rows.append(
-                f"| {idx} | {tl} | medium / eye-level | hold | {act} | hold geography | {act} |"
-            )
-        if rows:
-            return (
-                "# Storyboard\n\n"
-                "## Storyboard\n\n"
-                f"| {_STORYBOARD_COLUMNS} |\n"
-                "| --- | --- | --- | --- | --- | --- | --- |\n"
-                + "\n".join(rows)
-                + "\n"
-            )
-    if duration <= 10:
-        mid = min(4.0, max(2.0, round(duration * 0.4, 1)))
-        rows = [
-            f"| 1 | 0.0-{mid:.1f}s | wide / establishing | slow push | {focus} | hold geography | {focus} |",
-            f"| 2 | {mid:.1f}-{duration:.1f}s | medium / eye-level | hold | {focus} | no reset of prior poses | {focus} |",
-        ]
-    else:
-        t1 = round(duration / 3, 1)
-        t2 = round(duration * 2 / 3, 1)
-        rows = [
-            f"| 1 | 0.0-{t1:.1f}s | wide / establishing | slow push | {focus} | hold geography | {focus} |",
-            f"| 2 | {t1:.1f}-{t2:.1f}s | medium / eye-level | hold | {focus} | no reset of prior poses | {focus} |",
-            f"| 3 | {t2:.1f}-{duration:.1f}s | close-up / eye-level | slow pan | {focus} | prior exits stay gone | {focus} |",
-        ]
-    return (
-        "# Storyboard\n\n"
-        "## Storyboard\n\n"
-        f"| {_STORYBOARD_COLUMNS} |\n"
-        "| --- | --- | --- | --- | --- | --- | --- |\n"
-        + "\n".join(rows)
-        + "\n"
-    )
-
-
 def _stamp_bible_on_text(text: str, ctx: NodeExecutionContext) -> str:
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
@@ -528,15 +453,6 @@ def _stamp_bible_on_text(text: str, ctx: NodeExecutionContext) -> str:
 class BriefNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         cfg = node_config(node)
-        prewritten = str(cfg.get("prewritten") or "").strip()
-        if prewritten or cfg.get("skip_llm"):
-            text = prewritten or fallback_brief(graph_prompt(ctx.graph, node))
-            text = _stamp_bible_on_text(text, ctx)
-            path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
-            return NodeResult(
-                output_ref=file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown"),
-                message="brief written (supervisor prewrite)",
-            )
         source = graph_prompt(ctx.graph, node)
         skill = str(cfg.get("skill_excerpt") or "")
         audio = (ctx.graph.get("metadata") or {}).get("audio_intent") or {}
@@ -545,18 +461,12 @@ class BriefNodeHandler:
             instruction = skill[:2500] + "\n\n" + instruction
         if audio:
             instruction += f"\nAudio policy: {audio}\n"
-        try:
-            text = await complete_designer_node_text(
-                instruction + source,
-                delegate=str(cfg.get("delegate") or ""),
-            )
-        except Exception:
-            text = ""
-        if not text:
-            text = (
-                str(cfg.get("draft_prewritten") or "").strip()
-                or fallback_brief(source)
-            )
+        text = await complete_designer_node_text(
+            instruction + source,
+            delegate=str(cfg.get("delegate") or ""),
+        )
+        if not str(text or "").strip():
+            raise RuntimeError("Chat model did not return a usable brief.")
         text = _stamp_bible_on_text(text, ctx)
         path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
         return NodeResult(
@@ -591,44 +501,7 @@ class StoryboardNodeHandler:
         import asyncio
 
         cfg = node_config(node)
-        prewritten = str(cfg.get("prewritten") or "").strip()
         planned = cfg.get("planned_shots")
-        # Supervisor-authored storyboard: never block on LLM / image understanding.
-        if prewritten or cfg.get("skip_llm"):
-            text = prewritten
-            if not text and isinstance(planned, list) and planned:
-                rows = [
-                    f"| {_STORYBOARD_COLUMNS} |",
-                    "| --- | --- | --- | --- | --- | --- | --- |",
-                ]
-                for i, shot in enumerate(planned[:_MAX_STORYBOARD_SHOTS], start=1):
-                    if not isinstance(shot, dict):
-                        continue
-                    lock = shot.get("continuity_lock") if isinstance(shot.get("continuity_lock"), dict) else {}
-                    cont = "; ".join(f"{k}={v}" for k, v in list(lock.items())[:3]) or "hold continuity"
-                    rows.append(
-                        "| {shot} | {tl} | {cam} | static | {action} | {cont} | {kf} |".format(
-                            shot=i,
-                            tl=str(shot.get("timeline") or f"{(i-1)*4:.1f}-{i*4:.1f}s"),
-                            cam=str(shot.get("camera") or "medium / eye-level"),
-                            action=str(shot.get("action") or shot.get("title") or "")[:120],
-                            cont=cont[:120],
-                            kf=str(shot.get("keyframe_prompt") or shot.get("action") or "")[:160],
-                        )
-                    )
-                text = "## Storyboard\n\n" + "\n".join(rows) + "\n"
-            if not text:
-                text = fallback_storyboard(
-                    role_output_text(ctx, NODE_ROLE_BRIEF) or graph_prompt(ctx.graph, node)
-                )
-            sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
-            text = _stamp_bible_on_text(text, ctx)
-            path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
-            return NodeResult(
-                output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),
-                message="storyboard written (supervisor prewrite)",
-            )
-
         source = role_output_text(ctx, NODE_ROLE_BRIEF) or graph_prompt(ctx.graph, node)
         alignment = _storyboard_alignment_context(ctx)
         planned_block = ""
@@ -636,27 +509,23 @@ class StoryboardNodeHandler:
             import json as _json
 
             planned_block = (
-                "\n\nPlanned shots from supervisor casting (honor these beats; expand camera detail):\n"
+                "\n\nPlanned shots from supervisor casting (honor these shots; expand camera detail):\n"
                 + _json.dumps(planned, ensure_ascii=False, indent=2)
                 + "\n"
             )
         prompt = _STORYBOARD_INSTRUCTION + source + planned_block
         if alignment:
             prompt = f"{prompt}\n\n{alignment}\n"
-        text = ""
-        try:
-            text = await asyncio.wait_for(
-                complete_designer_node_text(
-                    prompt,
-                    delegate=str(cfg.get("delegate") or ""),
-                    max_tokens=16384,
-                ),
-                timeout=45.0,
-            )
-        except Exception:
-            text = ""
-        if not text:
-            text = str(cfg.get("draft_prewritten") or "").strip() or fallback_storyboard(source)
+        text = await asyncio.wait_for(
+            complete_designer_node_text(
+                prompt,
+                delegate=str(cfg.get("delegate") or ""),
+                max_tokens=16384,
+            ),
+            timeout=45.0,
+        )
+        if not str(text or "").strip():
+            raise RuntimeError("Chat model did not return a usable storyboard.")
         sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
         text = _stamp_bible_on_text(text, ctx)
         path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)

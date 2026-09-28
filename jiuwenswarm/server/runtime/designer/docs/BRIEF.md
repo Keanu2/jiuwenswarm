@@ -39,10 +39,8 @@ n_brief
 |-------|---------|
 | `role` | `brief` |
 | `prompt` | User creative brief |
-| `prewritten` / `draft_prewritten` | Supervisor/heuristic markdown |
-| `skip_llm` | True when prewritten |
-| `tools` | `write_artifact` (± `call_model`) |
-| `delegate` | `agent` \| `handler` |
+| `tools` | `call_model`, `write_artifact` |
+| `delegate` | `agent` |
 | `skill_id` | `brief` |
 
 ---

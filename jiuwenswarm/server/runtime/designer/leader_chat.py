@@ -167,89 +167,6 @@ def _compose_or_sink_id(graph: DesignerExecutionGraph) -> str | None:
     return None
 
 
-def heuristic_leader_plan(
-    graph: DesignerExecutionGraph,
-    message: str,
-    *,
-    selected_node_id: str = "",
-    run_new_nodes: bool = False,
-) -> dict[str, Any]:
-    text = str(message or "").strip()
-    selected = _node_by_id(graph, selected_node_id) or _match_node(graph, text)
-    wants_run = message_asks_to_run(text, run_new_nodes=run_new_nodes)
-
-    if selected is not None and (_REFINE_HINT.search(text) or not _ADD_HINT.search(text)):
-        node = dict(selected)
-        cfg = dict(node.get("config") or {})
-        previous = str(cfg.get("prompt") or "").strip()
-        cfg["prompt"] = f"{previous}\n{text}".strip() if previous else text
-        node["config"] = cfg
-        upsert = [node]
-        mentioned_spec = bool(re.search(r"(brief|storyboard|分镜|剧本)", text, re.I))
-        if mentioned_spec:
-            for extra_id in ("n_brief", "n_storyboard"):
-                extra = _node_by_id(graph, extra_id)
-                if extra is None or extra.get("id") == node.get("id"):
-                    continue
-                extra_node = dict(extra)
-                extra_cfg = dict(extra_node.get("config") or {})
-                extra_prev = str(extra_cfg.get("prompt") or "").strip()
-                extra_cfg["prompt"] = f"{extra_prev}\n{text}".strip() if extra_prev else text
-                extra_node["config"] = extra_cfg
-                upsert.append(extra_node)
-        return {
-            "intent": "refine_node",
-            "summary": f"Updated {(node.get('label') or node.get('id'))} and will regenerate it.",
-            "thinking": f"refining {node.get('label') or node.get('id')}",
-            "patch": {"upsert_nodes": upsert},
-            "run_node_ids": [str(node.get("id") or "")],
-        }
-
-    if _ADD_HINT.search(text):
-        if _AUDIO_HINT.search(text):
-            node_type = NODE_TYPE_AUDIO
-            prefix = "n_audio"
-        elif _VIDEO_HINT.search(text):
-            node_type = NODE_TYPE_VIDEO
-            prefix = "n_video"
-        else:
-            node_type = NODE_TYPE_IMAGE
-            prefix = "n_image"
-        node_id = _next_node_id(graph, prefix)
-        sink = _compose_or_sink_id(graph)
-        node: dict[str, Any] = {
-            "id": node_id,
-            "type": node_type,
-            "label": _next_label(graph, node_type),
-            "config": {"role": node_type, "prompt": text},
-            "layout": _place_right(graph),
-        }
-        patch: dict[str, Any] = {"upsert_nodes": [node]}
-        if sink and _CONNECT_HINT.search(text):
-            patch["upsert_edges"] = [
-                {
-                    "id": f"e_{node_id}_{sink}",
-                    "source": node_id,
-                    "target": sink,
-                    "kind": "data",
-                }
-            ]
-        return {
-            "intent": "edit_graph",
-            "summary": f"Added {node['label']}" + (" and will run it." if wants_run else " without running it."),
-            "thinking": f"adding {node['label']}",
-            "patch": patch,
-            "run_node_ids": [node_id] if wants_run else [],
-        }
-
-    return {
-        "intent": "answer",
-        "summary": "Tell me which node to refine, or what to add/remove on the canvas.",
-        "thinking": "waiting for a graph edit or refine request",
-        "patch": {},
-        "run_node_ids": [],
-    }
-
 
 def _merge_prompt_updates(graph: DesignerExecutionGraph, plan: dict[str, Any]) -> dict[str, Any]:
     patch = dict(plan.get("patch") or {})
@@ -327,12 +244,15 @@ async def _llm_leader_plan(
     message: str,
     *,
     selected_node_id: str = "",
-) -> dict[str, Any] | None:
-    from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool, llm_available
+) -> dict[str, Any]:
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        DesignerLlmError,
+        LLM_API_ERROR,
+        call_model_tool,
+        model_text_or_raise,
+    )
     from jiuwenswarm.server.runtime.designer.script_analysis import _extract_json_object
 
-    if not llm_available():
-        return None
     meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
     snapshot = {
         "selected_node_id": selected_node_id,
@@ -360,13 +280,23 @@ async def _llm_leader_plan(
             optimize_for="quality",
             max_tokens=16384,
         )
-    except Exception:  # noqa: BLE001
+        text = model_text_or_raise(result)
+    except DesignerLlmError:
+        raise
+    except Exception as exc:  # noqa: BLE001
         logger.info("Leader chat model call failed", exc_info=True)
-        return None
-    if not isinstance(result, dict) or result.get("fallback") or not result.get("ok"):
-        return None
-    parsed = _extract_json_object(str(result.get("text") or ""))
-    return _sanitize_plan(parsed)
+        raise DesignerLlmError(
+            f"Chat model request failed while planning canvas edits: {exc}",
+            code=LLM_API_ERROR,
+        ) from exc
+    parsed = _extract_json_object(text)
+    plan = _sanitize_plan(parsed)
+    if plan.get("intent") == "answer" and not str(plan.get("summary") or "").strip():
+        raise DesignerLlmError(
+            "Chat model did not return a usable canvas edit plan.",
+            code=LLM_API_ERROR,
+        )
+    return plan
 
 
 async def run_leader_chat(
@@ -380,22 +310,17 @@ async def run_leader_chat(
     text = str(message or "").strip()
     _emit(progress, ACTIVITY_KIND_THINKING, "reading the canvas and your request")
     plan = await _llm_leader_plan(graph, text, selected_node_id=selected_node_id)
-    if plan is None:
-        _emit(progress, ACTIVITY_KIND_STAGE, "planning graph edits")
-        plan = heuristic_leader_plan(
-            graph,
-            text,
-            selected_node_id=selected_node_id,
-            run_new_nodes=run_new_nodes,
-        )
-    else:
-        thinking = str(plan.get("thinking") or "applying graph edits")
-        _emit(progress, ACTIVITY_KIND_THINKING, thinking)
-        if plan.get("intent") == "edit_graph" and not message_asks_to_run(text, run_new_nodes=run_new_nodes):
-            plan["run_node_ids"] = []
-        if plan.get("intent") == "refine_node" and not plan.get("run_node_ids") and selected_node_id:
-            plan["run_node_ids"] = [selected_node_id]
-    if plan.get("intent") == "edit_graph" and not message_asks_to_run(text, run_new_nodes=run_new_nodes):
+    thinking = str(plan.get("thinking") or "applying graph edits")
+    _emit(progress, ACTIVITY_KIND_THINKING, thinking)
+    if plan.get("intent") == "edit_graph" and not message_asks_to_run(
+        text, run_new_nodes=run_new_nodes
+    ):
+        plan["run_node_ids"] = []
+    if plan.get("intent") == "refine_node" and not plan.get("run_node_ids") and selected_node_id:
+        plan["run_node_ids"] = [selected_node_id]
+    if plan.get("intent") == "edit_graph" and not message_asks_to_run(
+        text, run_new_nodes=run_new_nodes
+    ):
         plan["run_node_ids"] = []
 
     _emit(progress, ACTIVITY_KIND_TOOL_CALL, "designer_graph_patch", tool="designer_graph_patch")

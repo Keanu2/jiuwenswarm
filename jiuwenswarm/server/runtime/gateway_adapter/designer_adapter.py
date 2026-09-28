@@ -41,6 +41,7 @@ from jiuwenswarm.common.work_mode import (
 )
 from jiuwenswarm.server.runtime.designer.executor import GraphExecutor
 from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
+from jiuwenswarm.server.runtime.designer.model_tools import DesignerLlmError
 from jiuwenswarm.server.runtime.gateway_adapter.base import (
     GatewayAdapter,
     build_error_response,
@@ -134,18 +135,6 @@ def _write_workspace_receipt(
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
-
-
-def _prefer_runtime_pipeline(graph: dict[str, Any]) -> dict[str, Any]:
-    """Prefer node agents + tools when an LLM is configured; else role handlers."""
-    from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
-
-    return apply_runtime_delegate(graph)
-
-
-# Back-compat alias
-def _prefer_handler_pipeline(graph: dict[str, Any]) -> dict[str, Any]:
-    return _prefer_runtime_pipeline(graph)
 
 
 def _ok_response(request: AgentRequest, payload: Any) -> AgentResponse:
@@ -886,15 +875,14 @@ def _bootstrap_graph(
     optimize_for = "cost" if optimize_raw.strip().lower() == "cost" else "quality"
     from pathlib import Path as _Path
 
-    from jiuwenswarm.server.runtime.designer.script_analysis import (
-        heuristic_analysis,
-        _llm_configured,
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        DesignerLlmError,
+        LLM_REQUIRED,
     )
     from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
     from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
     from jiuwenswarm.server.runtime.designer.user_references import (
         UserReferenceError,
-        analysis_prompt_with_references,
         attach_user_references_to_graph,
         normalize_user_references,
     )
@@ -908,52 +896,46 @@ def _bootstrap_graph(
         user_refs = normalize_user_references(raw_references, dest_dir=refs_dir)
     except UserReferenceError as exc:
         return None, str(exc), exc.code
-    analysis_prompt = analysis_prompt_with_references(prompt, user_refs)
 
     # Catalog templates must not be dumped onto the canvas. Supervisor/Leader
     # always owns topology via the smart video pipeline.
     if callable(on_progress):
         on_progress("thinking", "Supervisor · Reading brief")
     # Never call LLM from this sync thread (asyncio.run breaks AsyncOpenAI).
-    # Caller passes LLM analysis from the main event loop when available.
-    if analysis is None:
-        if callable(on_progress):
-            on_progress("stage", "Supervisor · Provisional cast skeleton")
-        analysis = heuristic_analysis(analysis_prompt)
-    if not isinstance(analysis, dict):
-        analysis = heuristic_analysis(analysis_prompt)
-    analysis_mode = str(analysis.get("source") or "heuristic")
+    # Caller must pass LLM analysis from the main event loop.
+    if not isinstance(analysis, dict) or str(analysis.get("source") or "") != "llm":
+        return (
+            None,
+            "Designer requires a successful LLM cast/shot analysis before building the graph.",
+            LLM_REQUIRED,
+        )
     if callable(on_progress):
         on_progress(
             "tool_call",
             "Supervisor · Materializing graph",
             "build_smart_video_graph",
         )
-    graph = _prefer_runtime_pipeline(
-        build_smart_video_graph(
-            project_id=project_id,
-            prompt=prompt,
-            analysis=analysis,
-            title=str(title).strip() if isinstance(title, str) else None,
-            optimize_for=optimize_for,
-            ai_mode=_llm_configured(),
+    try:
+        from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
+
+        graph = apply_runtime_delegate(
+            build_smart_video_graph(
+                project_id=project_id,
+                prompt=prompt,
+                analysis=analysis,
+                title=str(title).strip() if isinstance(title, str) else None,
+                optimize_for=optimize_for,
+            )
         )
-    )
+    except DesignerLlmError as exc:
+        return None, exc.user_message, exc.code
     meta = dict(graph.get("metadata") or {})
     meta["optimize_for"] = optimize_for
     meta["scenario"] = "video"
     meta["script_analysis"] = analysis
-    meta["script_analysis_mode"] = analysis_mode
-    meta["pending_llm_analysis"] = analysis_mode != "llm"
-    # One-pass Enter already authored the plan — no Play redesign pending.
-    meta["pending_supervisor_graph"] = False if analysis_mode == "llm" else bool(
-        _llm_configured()
-    )
-    meta["supervisor_composed_on_bootstrap"] = analysis_mode == "llm"
-    meta["supervisor_owns_graph"] = True
+    # Enter already authored Brief→Storyboard→Graph — skip Play redesign.
+    meta["supervisor_composed_on_bootstrap"] = True
     meta["freeze_shot_topology"] = False
-    meta["one_pass"] = analysis_mode == "llm"
-    meta["auto_accept_outputs"] = True
     if isinstance(analysis.get("scene_locks"), dict) and analysis["scene_locks"]:
         meta["scene_locks"] = analysis["scene_locks"]
     graph["metadata"] = meta
@@ -966,7 +948,7 @@ def _bootstrap_graph(
         )
         on_progress(
             "stage",
-            f"Supervisor · Graph materialised ({cast_n} solo cards, source={analysis_mode})",
+            f"Supervisor · Graph materialised ({cast_n} solo cards)",
         )
     if user_refs:
         graph = attach_user_references_to_graph(graph, user_refs)
@@ -1137,6 +1119,8 @@ def _choose_output(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str |
 async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
     from jiuwenswarm.server.runtime.designer.leader_chat import run_leader_chat
     from jiuwenswarm.server.runtime.designer.model_tools import (
+        DesignerLlmError,
+        require_llm,
         use_preferred_designer_model,
     )
 
@@ -1154,6 +1138,7 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
     run_new_nodes = bool(params.get("run_new_nodes") or params.get("runNewNodes"))
     progress = _leader_progress_callback(request)
     try:
+        require_llm()
         preferred_model = str((graph.get("metadata") or {}).get("model_name") or "")
         with use_preferred_designer_model(preferred_model):
             result = await run_leader_chat(
@@ -1163,6 +1148,8 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
                 run_new_nodes=run_new_nodes,
                 progress=progress,
             )
+    except DesignerLlmError as exc:
+        return None, exc.user_message, exc.code
     except DesignerGraphValidationError as exc:
         return None, str(exc), "BAD_REQUEST"
     except Exception as exc:  # noqa: BLE001
@@ -1258,7 +1245,10 @@ async def _bootstrap_graph_with_supervisor_impl(
 
     Never runs AsyncOpenAI inside ``asyncio.to_thread`` / ``asyncio.run``.
     """
-    from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        DesignerLlmError,
+        require_llm,
+    )
     from jiuwenswarm.server.runtime.designer.script_analysis import analyze_creative_brief
     from jiuwenswarm.server.runtime.designer.user_references import (
         analysis_prompt_with_references,
@@ -1269,7 +1259,12 @@ async def _bootstrap_graph_with_supervisor_impl(
     raw_references = params.get("references")
     if raw_references is None:
         raw_references = params.get("user_references")
-    analysis: dict[str, Any] | None = None
+    # One Work/Code-style local credential gate at the user-visible Enter boundary.
+    # Nested helpers call the model bluntly; billing/API failures raise there.
+    try:
+        require_llm()
+    except DesignerLlmError as exc:
+        return None, exc.user_message, exc.code
     try:
         user_refs_preview = (
             normalize_user_references(raw_references, dest_dir=None)
@@ -1280,41 +1275,33 @@ async def _bootstrap_graph_with_supervisor_impl(
         user_refs_preview = []
     analysis_prompt = analysis_prompt_with_references(prompt, user_refs_preview)
 
-    if llm_available():
-        if callable(on_progress):
-            on_progress("thinking", "Supervisor · Extracting cast and scenes (LLM)")
-        try:
-            analysis = await analyze_creative_brief(
-                analysis_prompt,
-                use_llm=True,
-                timeout_sec=120.0,
-                reference_images=[
-                    str(item.get("path") or "")
-                    for item in user_refs_preview
-                    if str(item.get("kind") or "") == "image"
-                    and str(item.get("path") or "").strip()
-                ],
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Async LLM analysis failed: %s", exc, exc_info=True)
-            analysis = None
-        if isinstance(analysis, dict) and str(analysis.get("source") or "") == "llm":
-            if callable(on_progress):
-                n = len(analysis.get("characters") or [])
-                on_progress(
-                    "stage",
-                    f"Supervisor · LLM cast locked ({n} characters)",
-                )
-        else:
-            if callable(on_progress):
-                on_progress(
-                    "thinking",
-                    "Supervisor · Analysis soft-failed; Manager chain will re-author via LLM",
-                )
-            if isinstance(analysis, dict) and analysis.get("llm_pending"):
-                pass
-            else:
-                analysis = None
+    if callable(on_progress):
+        on_progress("thinking", "Supervisor · Extracting cast and scenes (LLM)")
+    try:
+        analysis = await analyze_creative_brief(
+            analysis_prompt,
+            timeout_sec=120.0,
+            reference_images=[
+                str(item.get("path") or "")
+                for item in user_refs_preview
+                if str(item.get("kind") or "") == "image"
+                and str(item.get("path") or "").strip()
+            ],
+        )
+    except DesignerLlmError as exc:
+        return None, exc.user_message, exc.code
+    if not isinstance(analysis, dict) or str(analysis.get("source") or "") != "llm":
+        return (
+            None,
+            "Chat model did not return a usable cast/shot analysis.",
+            "LLM_API_ERROR",
+        )
+    if callable(on_progress):
+        n = len(analysis.get("characters") or [])
+        on_progress(
+            "stage",
+            f"Supervisor · LLM cast locked ({n} characters)",
+        )
 
     payload, error, code = await asyncio.to_thread(
         _bootstrap_graph,
@@ -1329,9 +1316,6 @@ async def _bootstrap_graph_with_supervisor_impl(
     if not isinstance(graph, dict):
         return payload, error, code
 
-    if not llm_available():
-        return payload, None, None
-
     from jiuwenswarm.server.runtime.designer.orchestration import ManagerAgent, SupervisorAgent
     from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
 
@@ -1343,16 +1327,16 @@ async def _bootstrap_graph_with_supervisor_impl(
     try:
         if callable(on_progress):
             on_progress("thinking", "Supervisor · Authoring brief (LLM)")
-        await SupervisorAgent().author_creative_brief(graph, use_llm=True)
+        await SupervisorAgent().author_creative_brief(graph)
         if callable(on_progress):
             on_progress("thinking", "Manager · Reviewing / approving brief")
-        await ManagerAgent().review_brief(graph, use_llm=True)
+        await ManagerAgent().review_brief(graph)
         if callable(on_progress):
             on_progress("thinking", "Supervisor · Designing storyboard (LLM)")
-        await SupervisorAgent().author_storyboard(graph, use_llm=True)
+        await SupervisorAgent().author_storyboard(graph)
         if callable(on_progress):
             on_progress("thinking", "Manager · Reviewing / approving storyboard")
-        await ManagerAgent().review_storyboard(graph, use_llm=True)
+        await ManagerAgent().review_storyboard(graph)
         if callable(on_progress):
             on_progress(
                 "tool_call",
@@ -1361,78 +1345,47 @@ async def _bootstrap_graph_with_supervisor_impl(
             )
         await SupervisorAgent().design_execution_graph(
             graph,
-            use_llm=True,
             optimize_for=optimize_for,
         )
         if callable(on_progress):
             on_progress("thinking", "Manager · Validating / approving graph + locks")
-        await ManagerAgent().validate_plan(graph, use_llm=True)
+        await ManagerAgent().validate_plan(graph)
         graph = apply_runtime_delegate(graph)
         meta = dict(graph.get("metadata") or {})
-        analysis_now = (
-            meta.get("script_analysis")
-            if isinstance(meta.get("script_analysis"), dict)
-            else {}
-        )
         cast_n = sum(
             1
             for n in (graph.get("nodes") or [])
             if str(n.get("id") or "").startswith("n_character")
         )
-        analysis_source = str(analysis_now.get("source") or "")
-        ack = meta.get("supervisor_graph_ack") if isinstance(meta.get("supervisor_graph_ack"), dict) else {}
-        story_ack = (
-            meta.get("supervisor_storyboard_ack")
-            if isinstance(meta.get("supervisor_storyboard_ack"), dict)
-            else {}
-        )
-        truly_llm = analysis_source == "llm" or str(ack.get("source") or "") == "llm" or (
-            str(story_ack.get("source") or "") == "llm" and cast_n >= 1
-        )
-        meta["pending_llm_analysis"] = not truly_llm
-        meta["pending_supervisor_graph"] = not truly_llm
-        meta["supervisor_composed_on_bootstrap"] = truly_llm
-        meta["script_analysis_mode"] = "llm" if truly_llm else (
-            analysis_source or str(meta.get("script_analysis_mode") or "heuristic")
-        )
-        meta["agent_runtime_bootstrap"] = {
-            "analysis": "analyze_creative_brief via call_model_tool",
-            "orchestration": (
-                "Supervisor brief → Manager approve → Supervisor storyboard → "
-                "Manager approve → Supervisor graph → Manager validate/locks"
-            ),
-            "leaves": "NodeAgentHost / openjiuwen tools on Play",
-        }
-        meta["one_pass"] = False
-        meta["enter_approval_chain"] = True
+        meta["supervisor_composed_on_bootstrap"] = True
         graph["metadata"] = meta
         if callable(on_progress):
             on_progress(
                 "stage",
-                f"Manager · Approved — {cast_n} solo cards (mode={meta['script_analysis_mode']})",
+                f"Manager · Approved — {cast_n} solo cards",
             )
         saved = _store.save_graph(graph)
         payload = dict(payload)
         payload["graph"] = dict(saved)
         return payload, None, None
-    except Exception as exc:  # noqa: BLE001
+    except DesignerLlmError as exc:
         logger.info(
-            "Supervisor bootstrap approval chain failed; keeping graph: %s",
+            "Supervisor bootstrap approval chain failed (LLM): %s",
             exc,
             exc_info=True,
         )
-        meta = dict(graph.get("metadata") or {})
-        meta["pending_supervisor_graph"] = False
-        meta["supervisor_composed_on_bootstrap"] = True
-        meta["enter_approval_chain"] = True
-        graph["metadata"] = meta
-        try:
-            saved = _store.save_graph(graph)
-            payload = dict(payload)
-            payload["graph"] = dict(saved)
-        except Exception:  # noqa: BLE001
-            pass
-        return payload, None, None
+        return None, exc.user_message, exc.code
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "Supervisor bootstrap approval chain failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return (
+            None,
+            f"Supervisor/Manager approval chain failed: {exc}",
+            "LLM_API_ERROR",
+        )
 
 
 class DesignerAdapter(GatewayAdapter):
@@ -1531,6 +1484,9 @@ class DesignerAdapter(GatewayAdapter):
                     f"unsupported method: {method}",
                     code="NOT_IMPLEMENTED",
                 )
+        except DesignerLlmError as exc:
+            logger.warning("[DesignerAdapter] %s LLM failed: %s", method, exc)
+            return build_error_response(request, exc.user_message, code=exc.code)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[DesignerAdapter] %s failed: %s", method, exc)
             return build_error_response(request, str(exc), code="INTERNAL_ERROR")

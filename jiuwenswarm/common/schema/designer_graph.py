@@ -473,6 +473,10 @@ class DesignerExecutionRun(TypedDict, total=False):
     created_at: int
     updated_at: int
     metadata: dict[str, Any]
+    # User-visible failure message for async run failures (e.g. DesignerLlmError).
+    error: str | None
+    warning: str | None
+    warnings: list[str]
 
 
 # ── Validation / normalization ────────────────────────────────────────────────
@@ -1781,7 +1785,7 @@ def normalize_execution_run(raw: Any) -> DesignerExecutionRun:
     now = utc_now_ms()
     created_at = raw.get("created_at")
     updated_at = raw.get("updated_at")
-    return {
+    out: DesignerExecutionRun = {
         "schema_version": RUN_SCHEMA_VERSION,
         "run_id": run_id,
         "graph_id": graph_id,
@@ -1792,6 +1796,25 @@ def normalize_execution_run(raw: Any) -> DesignerExecutionRun:
         "created_at": int(created_at) if isinstance(created_at, int) else now,
         "updated_at": int(updated_at) if isinstance(updated_at, int) else now,
     }
+    error = raw.get("error")
+    if isinstance(error, str) and error.strip():
+        out["error"] = error.strip()[:500]
+    warning = raw.get("warning")
+    if isinstance(warning, str) and warning.strip():
+        out["warning"] = warning.strip()[:500]
+    raw_warnings = raw.get("warnings")
+    if isinstance(raw_warnings, list):
+        warnings = [
+            str(item).strip()
+            for item in raw_warnings
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if warnings:
+            out["warnings"] = warnings[:8]
+    metadata = raw.get("metadata")
+    if isinstance(metadata, dict):
+        out["metadata"] = dict(metadata)
+    return out
 
 
 def initial_node_states(graph: DesignerExecutionGraph) -> dict[str, DesignerNodeState]:

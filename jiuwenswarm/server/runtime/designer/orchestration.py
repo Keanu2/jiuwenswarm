@@ -6,11 +6,9 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from jiuwenswarm.common.schema.designer_graph import (
-    AssetRef,
     DesignerExecutionGraph,
     DesignerGraphNode,
     node_pipeline,
@@ -141,29 +139,16 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
             notes.append(f"{node.get('id')}: continuity locks available for planned shots")
         node["config"] = cfg
 
-    # Refresh storyboard draft with continuity column when present.
+    # Keep the storyboard agent's structured shot plan current.
     if shot_locks:
-        try:
-            from jiuwenswarm.server.runtime.designer.smart_graph import (
-                _write_storyboard_markdown,
-            )
-
-            shots = list((analysis.get("shots") or []))
-            characters = list((analysis.get("characters") or []))
-            if shots:
-                sb_md = _write_storyboard_markdown(shots, characters)
-                for node in graph.get("nodes") or []:
-                    cfg = dict(node.get("config") or {})
-                    if _role_key(node) != "storyboard":
-                        continue
-                    if cfg.get("skip_llm"):
-                        cfg["prewritten"] = sb_md
-                    else:
-                        cfg["draft_prewritten"] = sb_md
-                    cfg["planned_shots"] = shots
-                    node["config"] = cfg
-        except Exception:  # noqa: BLE001
-            logger.info("storyboard continuity refresh skipped", exc_info=True)
+        shots = list(analysis.get("shots") or [])
+        if shots:
+            for node in graph.get("nodes") or []:
+                cfg = dict(node.get("config") or {})
+                if _role_key(node) != "storyboard":
+                    continue
+                cfg["planned_shots"] = shots
+                node["config"] = cfg
 
     meta = dict(graph.get("metadata") or {})
     meta["continuity_locks"] = {str(k): v for k, v in shot_locks.items()}
@@ -260,8 +245,6 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
     )
 
     notes: list[str] = []
-    meta0 = dict(graph.get("metadata") or {})
-    skip_scene_specs = bool(meta0.get("skip_scene_specs"))
     # Drop unused combined cast sheets that never feed a frame/clip.
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
     edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
@@ -304,7 +287,7 @@ def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
         for e in (graph.get("edges") or [])
         if isinstance(e, dict)
     }
-    master_id = "n_scene" if "n_scene" in ids and not skip_scene_specs else ""
+    master_id = "n_scene" if "n_scene" in ids else ""
     if master_id:
         for n in list(graph.get("nodes") or []):
             if not isinstance(n, dict):
@@ -522,18 +505,6 @@ def _manager_reedit_artifacts_after_prune(
             lines.append("")
         sb_md = "\n".join(lines).strip() + "\n"
         meta["approved_storyboard"] = sb_md
-        for n in graph.get("nodes") or []:
-            if not isinstance(n, dict):
-                continue
-            if str(n.get("id") or "") != "n_storyboard" and _role_key(n) != "storyboard":
-                continue
-            cfg = dict(n.get("config") or {})
-            if cfg.get("prewritten") is not None:
-                cfg["prewritten"] = sb_md
-            if cfg.get("draft_prewritten") is not None:
-                cfg["draft_prewritten"] = sb_md
-            n["config"] = cfg
-            notes.append("reedit_storyboard_node")
         notes.append("reedit_approved_storyboard")
 
     # Brief: keep detail, stamp counts for surviving topology.
@@ -555,17 +526,6 @@ def _manager_reedit_artifacts_after_prune(
             brief = brief.split("## Manager prune sync")[0].rstrip()
         meta["approved_brief"] = (brief + stamp).strip() + "\n"
         notes.append("reedit_approved_brief")
-        for n in graph.get("nodes") or []:
-            if not isinstance(n, dict):
-                continue
-            if str(n.get("id") or "") != "n_brief" and _role_key(n) != "brief":
-                continue
-            cfg = dict(n.get("config") or {})
-            if cfg.get("prewritten") is not None:
-                cfg["prewritten"] = meta["approved_brief"]
-            if cfg.get("draft_prewritten") is not None:
-                cfg["draft_prewritten"] = meta["approved_brief"]
-            n["config"] = cfg
 
     # Stamp occupancy / already_done onto surviving frame+clip nodes.
     by_idx = {
@@ -1075,17 +1035,17 @@ class SupervisorAgent:
     """Assigns tasks / tools / models for every node agent (one-pass, no loop)."""
 
     def onboard_user_added_nodes(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
-        """When the user adds canvas nodes: promote to LLM agents (if available),
-        decide tools, and let Manager lock-check media prompts.
+        """When the user adds canvas nodes: promote to LLM agents, decide tools,
+        and let Manager lock-check media prompts.
 
         Edges stay as the user drew them. Never deletes user_added orphans.
+        Chat credentials are gated at Enter/chat/Play entry — never demote to
+        handler when the model is missing.
         """
-        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
         from jiuwenswarm.server.runtime.designer.smart_graph import (
             find_non_contributing_node_ids,
         )
 
-        use_agents = bool(llm_available())
         notes: list[str] = []
         onboarded: list[str] = []
         notes.extend(note_user_canvas_edits(graph))
@@ -1103,26 +1063,18 @@ class SupervisorAgent:
             cfg["kind"] = "agent"
             cfg["tools"] = tools
             cfg["user_added"] = True
-            if use_agents:
-                cfg.pop("force_handler", None)
-                cfg["delegate"] = "agent"
-                cfg["skip_llm"] = False
-                if cfg.get("prewritten") and not cfg.get("draft_prewritten"):
-                    cfg["draft_prewritten"] = cfg.pop("prewritten")
-                else:
-                    cfg.pop("prewritten", None)
-                if not str(cfg.get("supervisor_task") or "").strip():
-                    cfg["supervisor_task"] = (
-                        f"User-added {role or node.get('type') or 'node'} agent. "
-                        f"Use tools {', '.join(tools)}. "
-                        "Respect film-wide aspect_lock, style_lock, spatial_lock, and "
-                        "costume/identity locks. Use only the edges the user connected. "
-                        "Do not invent upstream or downstream links."
-                    )[:800]
-                notes.append(f"agent:{nid}")
-            else:
-                cfg["delegate"] = "handler"
-                notes.append(f"handler_no_llm:{nid}")
+            cfg.pop("force_handler", None)
+            cfg.pop("skip_llm", None)
+            cfg["delegate"] = "agent"
+            if not str(cfg.get("supervisor_task") or "").strip():
+                cfg["supervisor_task"] = (
+                    f"User-added {role or node.get('type') or 'node'} agent. "
+                    f"Use tools {', '.join(tools)}. "
+                    "Respect film-wide aspect_lock, style_lock, spatial_lock, and "
+                    "costume/identity locks. Use only the edges the user connected. "
+                    "Do not invent upstream or downstream links."
+                )[:800]
+            notes.append(f"agent:{nid}")
             notes.append(f"unwired_until_user:{nid}")
 
             node["config"] = cfg
@@ -1178,7 +1130,6 @@ class SupervisorAgent:
             meta.pop("contribution_warning", None)
         result = {
             "ok": True,
-            "use_agents": use_agents,
             "onboarded": onboarded,
             "orphans": orphans,
             "notes": notes[:80],
@@ -1187,111 +1138,6 @@ class SupervisorAgent:
         meta["supervisor_user_node_onboard"] = result
         graph["metadata"] = meta
         return result
-
-    def plan_fast(
-        self,
-        graph: DesignerExecutionGraph,
-        *,
-        optimize_for: str,
-        prior_feedback: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Deterministic plan — no LLM. Use prior_feedback only when caller opts in (rerun)."""
-        models = list_configured_models()
-        model_ids = [str(m.get("id")) for m in models]
-        nodes = graph.get("nodes") or []
-        mode = "cost" if optimize_for == "cost" else "quality"
-        directives: dict[str, Any] = {}
-        for node in nodes:
-            nid = str(node.get("id") or "")
-            if not nid:
-                continue
-            role = _role_key(node)
-            label = str(node.get("label") or nid)
-            tools = _tools_for_node(node)
-            modality_agents = ((graph.get("metadata") or {}).get("modality_plan") or {}).get(
-                "agents"
-            ) or {}
-            mod_entry = modality_agents.get(nid) if isinstance(modality_agents, dict) else None
-            if isinstance(mod_entry, dict) and isinstance(mod_entry.get("tools"), list):
-                tools = [str(t) for t in mod_entry["tools"] if str(t).strip()]
-            prefer_image = any("image" in t for t in tools) or role in {
-                "character",
-                "character_design",
-                "scene",
-                "frame",
-                "keyframe",
-            }
-            preferred = _pick_model(models, optimize_for=mode, prefer_image=prefer_image)
-            if preferred and preferred not in model_ids and model_ids:
-                preferred = model_ids[0]
-            task = f"Execute {label} ({role or node.get('type')}) with tools {', '.join(tools)}"
-            if prior_feedback:
-                hint = suggestion_for_node(prior_feedback, nid)
-                if hint:
-                    task = f"{task}. Rerun constraint: {hint}"
-            rating_mod = str(
-                (mod_entry or {}).get("rating_modality")
-                or ((graph.get("metadata") or {}).get("rating_modality"))
-                or "text_only"
-            )
-            directives[nid] = {
-                "optimize_for": mode,
-                "preferred_model": preferred,
-                "task": task,
-                "tools": tools,
-                "rating_modality": rating_mod,
-            }
-        rating_global = str(
-            ((graph.get("metadata") or {}).get("modality_plan") or {}).get(
-                "global_rating_modality"
-            )
-            or (graph.get("metadata") or {}).get("rating_modality")
-            or "text_only"
-        )
-        notes = (
-            f"One-pass fast plan; rating_modality={rating_global}. "
-            "Tools/models assigned per node from manager capability decision when present."
-        )
-        if prior_feedback:
-            final = prior_feedback.get("final") or {}
-            plan_hint = str(final.get("improvement_plan") or final.get("summary") or "")
-            if plan_hint:
-                notes = f"{notes} Rerun guidance: {plan_hint[:800]}"
-        plan = {
-            "optimize_for_global": mode,
-            "node_directives": directives,
-            "notes": notes,
-            "planner_model": "deterministic",
-            "one_pass": True,
-            "rating_modality": rating_global,
-        }
-        for node in nodes:
-            nid = str(node.get("id") or "")
-            cfg = dict(node.get("config") or {})
-            d = directives.get(nid) or {}
-            cfg["optimize_for"] = d.get("optimize_for", mode)
-            cfg["preferred_model"] = d.get("preferred_model", "")
-            cfg["supervisor_task"] = d.get("task", "")
-            cfg["tools"] = d.get("tools") or _tools_for_node(node)
-            cfg["rating_modality"] = d.get("rating_modality") or rating_global
-            cfg["kind"] = "agent"
-            if prior_feedback:
-                hint = suggestion_for_node(prior_feedback, nid)
-                if hint:
-                    cfg["rerun_suggestion"] = hint
-            node["config"] = cfg
-        meta = dict(graph.get("metadata") or {})
-        meta["supervisor_plan"] = plan
-        meta["one_pass"] = True
-        if rating_global:
-            meta["rating_modality"] = rating_global
-        graph["metadata"] = meta
-        audio_assign = assign_audio_node_agents(graph)
-        plan["audio_assignment"] = audio_assign
-        meta = dict(graph.get("metadata") or {})
-        meta["supervisor_plan"] = plan
-        graph["metadata"] = meta
-        return plan
 
     def adjust_clips_after_keyframes(
         self,
@@ -1379,13 +1225,13 @@ class SupervisorAgent:
         *,
         optimize_for: str,
         prior_feedback: dict[str, Any] | None,
-        use_llm: bool = False,
     ) -> dict[str, Any]:
-        # Default: fast deterministic plan. LLM plan only when explicitly requested (rare).
-        if not use_llm:
-            return self.plan_fast(
-                graph, optimize_for=optimize_for, prior_feedback=prior_feedback
-            )
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
+        )
+
         models = list_configured_models()
         model_ids = [str(m.get("id")) for m in models]
         nodes = graph.get("nodes") or []
@@ -1453,7 +1299,13 @@ class SupervisorAgent:
             optimize_for=optimize_for,
             max_tokens=32768,
         )
-        parsed = _extract_json_object(str(result.get("text") or "")) or {}
+        text = model_text_or_raise(result)
+        parsed = _extract_json_object(text) or {}
+        if not parsed:
+            raise DesignerLlmError(
+                "Chat model did not return a usable supervisor plan.",
+                code=LLM_API_ERROR,
+            )
         directives: dict[str, Any] = {}
         raw_dirs = parsed.get("node_directives") if isinstance(parsed, dict) else None
         if isinstance(raw_dirs, dict):
@@ -1521,111 +1373,15 @@ class SupervisorAgent:
         graph["metadata"] = meta
         return plan
 
-    async def author_plan_one_pass(
-        self,
-        prompt: str,
-        *,
-        optimize_for: str = "quality",
-        reference_images: list[str] | None = None,
-        timeout_sec: float = 120.0,
-    ) -> dict[str, Any]:
-        """Single Supervisor LLM call: brief + storyboard + cast + occupancy + scene_locks."""
-        from jiuwenswarm.server.runtime.designer.script_analysis import (
-            _normalize_llm_analysis,
-            heuristic_analysis,
-        )
-
-        base = heuristic_analysis(prompt)
-        system = (
-            "You are the Designer Supervisor. ONE JSON plan for Enter (schema plan.v1). "
-            "Stay faithful to the user prompt — do not invent plot or people. "
-            "Extract EVERY named human into characters[]. "
-            "Shots MUST have setting_id (new place/meet/leave/exterior → new setting_id). "
-            "Per shot REQUIRED: on_screen (visible only), offscreen, cast_actions, "
-            "featured_cast_ids, setting_id, action, camera, timeline, keyframe_prompt, view_key. "
-            "NEVER put later-meet cast into earlier on_screen. "
-            "Include scene_locks[setting_id]={scene_name,lighting,objects,crowd,coherence_rule,views}. "
-            "Include brief_markdown and storyboard_markdown for UI. "
-            "Max 8 shots. Output ONLY one JSON object. Schema: "
-            '{"schema":"plan.v1","characters":[{"id":"char_1","name":"...","description":"..."}],'
-            '"scenes":[{"id":"set_1","name":"...","description":"..."}],'
-            '"shots":[{"shot_index":1,"timeline":"0-5s","camera":"...","action":"...",'
-            '"on_screen":["char_1"],"offscreen":[],"cast_actions":{"char_1":"..."},'
-            '"featured_cast_ids":["char_1"],"setting_id":"set_1","view_key":"front",'
-            '"keyframe_prompt":"..."}],'
-            '"scene_locks":{"set_1":{"scene_name":"...","lighting":"...","objects":[],'
-            '"crowd":"...","coherence_rule":"...","views":{"front":"..."}}},'
-            '"audio":{"include_speech":false,"include_music":false},'
-            '"brief_markdown":"...","storyboard_markdown":"...","notes":"..."}'
-        )
-        payload: dict[str, Any] = {
-            "user_prompt": prompt[:3000],
-            "rule": (
-                "Occupancy is authoritative. Each shot's on_screen lists ONLY people "
-                "visible in that beat; later-meet cast stay offscreen until their beat."
-            ),
-        }
-        if reference_images:
-            payload["reference_image_count"] = len(reference_images)
-
-        async def _call(*, reinforce: bool = False) -> dict[str, Any] | None:
-            sys_msg = system
-            body = dict(payload)
-            if reinforce:
-                sys_msg = (
-                    "Output ONLY one JSON object starting with '{'. "
-                    "Required keys: characters, shots, scene_locks, brief_markdown, "
-                    "storyboard_markdown. Every shot needs non-empty on_screen + setting_id."
-                )
-                body["retry"] = True
-            result = await call_model_tool(
-                prompt=json.dumps(body, ensure_ascii=False),
-                system=sys_msg,
-                optimize_for=optimize_for,
-                max_tokens=65536,
-            )
-            parsed = _extract_json_object(str(result.get("text") or "")) or {}
-            if not isinstance(parsed, dict) or not parsed:
-                return None
-            # Prefer shared normalizer when possible; preserve extra plan fields.
-            norm = _normalize_llm_analysis(parsed, base)
-            if not isinstance(norm, dict):
-                return None
-            for key in (
-                "scene_locks",
-                "brief_markdown",
-                "storyboard_markdown",
-                "notes",
-                "audio",
-                "scenes",
-            ):
-                if key in parsed and parsed[key] is not None:
-                    norm[key] = parsed[key]
-            if isinstance(parsed.get("scenes"), list) and parsed["scenes"]:
-                norm["scenes"] = parsed["scenes"]
-            norm["source"] = "llm"
-            norm["schema"] = "plan.v1"
-            return norm
-
-        try:
-            plan = await _call(reinforce=False)
-            if plan is None:
-                plan = await _call(reinforce=True)
-        except Exception:  # noqa: BLE001
-            logger.info("author_plan_one_pass LLM failed", exc_info=True)
-            plan = None
-        if not isinstance(plan, dict):
-            base["source"] = "heuristic"
-            base["schema"] = "plan.v1"
-            base["llm_pending"] = False
-            return base
-        return plan
-
     async def author_creative_brief(
-        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+        self, graph: DesignerExecutionGraph
     ) -> dict[str, Any]:
-        """LLM-author a detailed brief onto n_brief; heuristic fallback only if LLM fails."""
-        from jiuwenswarm.server.runtime.designer.smart_graph import _write_brief_markdown
+        """LLM-author a detailed brief onto n_brief. Failures raise ``DesignerLlmError``."""
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
+        )
 
         meta = dict(graph.get("metadata") or {})
         analysis = (
@@ -1642,59 +1398,65 @@ class SupervisorAgent:
         )
         user_prompt = str(graph.get("description") or "")
         brief_md = ""
-        source = "heuristic"
-        notes = "Heuristic brief from script analysis."
-        if use_llm:
-            try:
-                system = (
-                    "You are the Designer Supervisor. Author a detailed creative brief "
-                    "for a short film. Cover: character identity locks (face/hair/body/costume), "
-                    "scene geography (spatial lock), motion consistency, time-coherent continuity "
-                    "(do not undo a completed beat on a later shot), "
-                    "shot-view coverage for every named beat, audio policy. "
-                    "Stay faithful to the user prompt — do not invent plot. "
-                    "Respond with markdown brief only (no JSON wrapper)."
+        source = "llm"
+        notes = "Supervisor LLM authored creative brief."
+        try:
+            system = (
+                "You are the Designer Supervisor. Author a detailed creative brief "
+                "for a short film. Cover: character identity locks (face/hair/body/costume), "
+                "scene geography (spatial lock), motion consistency, time-coherent continuity "
+                "(do not undo a completed beat on a later shot), "
+                "shot-view coverage for every named beat, audio policy. "
+                "Stay faithful to the user prompt — do not invent plot. "
+                "Respond with markdown brief only (no JSON wrapper)."
+            )
+            result = await call_model_tool(
+                prompt=json.dumps(
+                    {
+                        "user_prompt": user_prompt,
+                        "characters": characters,
+                        "scenes": scenes,
+                        "shots": analysis.get("shots"),
+                        "audio": audio,
+                        "spatial_lock": meta.get("spatial_lock"),
+                        "supervisor_brief_notes": meta.get("supervisor_brief_notes")
+                        or ((meta.get("supervisor_plan") or {}).get("brief_notes")),
+                    },
+                    ensure_ascii=False,
+                ),
+                system=system,
+                optimize_for="quality",
+                max_tokens=32768,
+            )
+            text = model_text_or_raise(result)
+            if len(text) <= 80:
+                raise DesignerLlmError(
+                    "Chat model returned an empty or too-short creative brief.",
+                    code=LLM_API_ERROR,
                 )
-                result = await call_model_tool(
-                    prompt=json.dumps(
-                        {
-                            "user_prompt": user_prompt,
-                            "characters": characters,
-                            "scenes": scenes,
-                            "shots": analysis.get("shots"),
-                            "audio": audio,
-                            "spatial_lock": meta.get("spatial_lock"),
-                            "supervisor_brief_notes": meta.get("supervisor_brief_notes")
-                            or ((meta.get("supervisor_plan") or {}).get("brief_notes")),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    system=system,
-                    optimize_for="quality",
-                    max_tokens=32768,
-                )
-                text = str(result.get("text") or "").strip()
-                if text and len(text) > 80 and not text.startswith("[local-tool-fallback]"):
-                    brief_md = text if text.lstrip().startswith("#") else f"# Brief\n\n{text}"
-                    source = "llm"
-                    notes = "Supervisor LLM authored creative brief."
-            except Exception:  # noqa: BLE001
-                logger.info("Supervisor author_creative_brief LLM failed", exc_info=True)
+            brief_md = text if text.lstrip().startswith("#") else f"# Brief\n\n{text}"
+            source = "llm"
+            notes = "Supervisor LLM authored creative brief."
+        except DesignerLlmError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Supervisor author_creative_brief LLM failed", exc_info=True)
+            raise DesignerLlmError(
+                f"Chat model request failed while authoring the brief: {exc}",
+                code=LLM_API_ERROR,
+            ) from exc
         if not brief_md:
-            brief_md = _write_brief_markdown(user_prompt, characters, scenes, audio)
-            source = "heuristic"
-            notes = "Heuristic brief (LLM unavailable or failed)."
+            raise DesignerLlmError(
+                "Designer requires LLM to author the creative brief.",
+                code=LLM_API_ERROR,
+            )
 
         stamped = False
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
             if _role_key(node) != "brief" and str(node.get("id") or "") != "n_brief":
                 continue
-            if cfg.get("skip_llm"):
-                cfg["prewritten"] = brief_md
-            else:
-                cfg["draft_prewritten"] = brief_md
-                cfg["prewritten"] = brief_md
+            cfg.pop("skip_llm", None)
             cfg["kind"] = "agent"
             node["config"] = cfg
             stamped = True
@@ -1711,9 +1473,14 @@ class SupervisorAgent:
         return dict(meta["supervisor_brief_ack"])
 
     async def author_storyboard(
-        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+        self, graph: DesignerExecutionGraph
     ) -> dict[str, Any]:
-        """From approved brief + script_analysis, author storyboard markdown + planned_shots."""
+        """LLM-author storyboard markdown + planned_shots. Failures raise."""
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
+        )
         from jiuwenswarm.server.runtime.designer.smart_graph import _write_storyboard_markdown
 
         meta = dict(graph.get("metadata") or {})
@@ -1727,161 +1494,171 @@ class SupervisorAgent:
         user_prompt = str(graph.get("description") or "")
         approved_brief = str(meta.get("approved_brief") or "")[:4000]
         sb_md = ""
-        source = "heuristic"
-        notes = "Heuristic storyboard from planned shots."
-        if use_llm:
-            try:
-                system = (
-                    "You are the Designer Supervisor (Director). Author a hierarchical "
-                    "storyboard: Scene (setting_id) → Keyframes/shots. FIRST list every "
-                    "named human as characters[] (id, name, description) — one solo card "
-                    "each. NOT every character appears in every scene. "
-                    "Different setting_id = DIFFERENT place (distinct architecture). "
-                    "Group shots by setting_id. Shots are consecutive TIME windows that "
-                    "concatenate to the film — each action is THAT window in FULL DETAIL "
-                    "(blocking, speech, wardrobe, camera); do not paste the entire user "
-                    "prompt into every shot; do not restage the whole story from a new "
-                    "camera unless the user asked for same-moment coverage. "
-                    "Keep language_lock and exact speech_line. "
-                    "First shot of each setting: "
-                    "keyframe_strategy=compose_from_solo_refs — composer places ONLY "
-                    "on_screen cast with cast_actions (who is doing what). "
-                    "Later same setting: edit_prior_keyframe (architecture locked); "
-                    "storyboard updates on_screen / offscreen / cast_actions. "
-                    "offscreen = in this scene but not in frame; never draw them. "
-                    "Cast absent from a setting must not appear there. "
-                    "NO scene specs. Crowd/extras persist across same-setting shots "
-                    "unless they exit. Each shot needs timeline, camera, action, "
-                    "on_screen, offscreen, cast_actions, featured_cast_ids, setting_id, "
-                    "start_state {pose,seats,facing,on_screen,offscreen}, "
-                    "end_state {pose,seats,facing,exited,speech_done,on_screen}, "
-                    "continuity_lock, keyframe_prompt, exiting_character_ids, "
-                    "speech_by_character (map character_id→exact spoken line for This shot; "
-                    "empty {} if silent), speech_line (joined fallback). "
-                    "Same setting_id: next shot start_state MUST match prior end_state. "
-                    "Shots are self-contained continuity windows — do not rely on prior "
-                    "clip media. Film-wide locks: language_lock (e.g. en/zh — ALL dialogue in that "
-                    "language), bgm_lock {mood,style,instruments,continuity,rule}, "
-                    "include_speech, include_music. "
-                    "Respond JSON only: "
-                    '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
-                    '"shots":[{"shot_index":1,"timeline":"0-5s","camera":"...",'
-                    '"action":"...","on_screen":["char_1"],"offscreen":["char_2"],'
-                    '"featured_cast_ids":["char_1"],"cast_actions":{"char_1":"preaching"},'
-                    '"ensemble_cast_ids":["char_1","char_2"],"setting_id":"set_1",'
-                    '"keyframe_strategy":"compose_from_solo_refs",'
-                    '"start_state":{"pose":"...","seats":{},"facing":"..."},'
-                    '"end_state":{"pose":"...","exited":[],"speech_done":"..."},'
-                    '"continuity_lock":{"forbid":"..."},"keyframe_prompt":"...",'
-                    '"exiting_character_ids":[],'
-                    '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
-                    '"language_lock":"en",'
-                    '"bgm_lock":{"mood":"...","style":"...","instruments":"...",'
-                    '"continuity":"same bed","rule":"non-vocal underscore"},'
-                    '"include_speech":true,"include_music":true,'
-                    '"storyboard_markdown":"...","notes":"...","target_shot_count":N,'
-                    '"skip_scene_specs":false}'
-                )
-                result = await call_model_tool(
-                    prompt=json.dumps(
+        source = "llm"
+        notes = "Supervisor LLM authored storyboard."
+        try:
+            system = (
+                "You are the Designer Supervisor (Director). Author a hierarchical "
+                "storyboard: Scene (setting_id) → Keyframes/shots. FIRST list every "
+                "named human as characters[] (id, name, description) — one solo card "
+                "each. NOT every character appears in every scene. "
+                "Different setting_id = DIFFERENT place (distinct architecture). "
+                "Group shots by setting_id. Shots are consecutive TIME windows that "
+                "concatenate to the film — each action is THAT window in FULL DETAIL "
+                "(blocking, speech, wardrobe, camera); do not paste the entire user "
+                "prompt into every shot; do not restage the whole story from a new "
+                "camera unless the user asked for same-moment coverage. "
+                "Keep language_lock and exact speech_line. "
+                "First shot of each setting: "
+                "keyframe_strategy=compose_from_solo_refs — composer places ONLY "
+                "on_screen cast with cast_actions (who is doing what). "
+                "Later same setting: edit_prior_keyframe (architecture locked); "
+                "storyboard updates on_screen / offscreen / cast_actions. "
+                "offscreen = in this scene but not in frame; never draw them. "
+                "Cast absent from a setting must not appear there. "
+                "NO scene specs. Crowd/extras persist across same-setting shots "
+                "unless they exit. Each shot needs timeline, camera, action, "
+                "on_screen, offscreen, cast_actions, featured_cast_ids, setting_id, "
+                "start_state {pose,seats,facing,on_screen,offscreen}, "
+                "end_state {pose,seats,facing,exited,speech_done,on_screen}, "
+                "continuity_lock, keyframe_prompt, exiting_character_ids, "
+                "speech_by_character (map character_id→exact spoken line for This shot; "
+                "empty {} if silent), speech_line (joined fallback). "
+                "Same setting_id: next shot start_state MUST match prior end_state. "
+                "Shots are self-contained continuity windows — do not rely on prior "
+                "clip media. Film-wide locks: language_lock (e.g. en/zh — ALL dialogue in that "
+                "language), bgm_lock {mood,style,instruments,continuity,rule}, "
+                "include_speech, include_music. "
+                "Respond JSON only: "
+                '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
+                '"shots":[{"shot_index":1,"timeline":"0-5s","camera":"...",'
+                '"action":"...","on_screen":["char_1"],"offscreen":["char_2"],'
+                '"featured_cast_ids":["char_1"],"cast_actions":{"char_1":"preaching"},'
+                '"ensemble_cast_ids":["char_1","char_2"],"setting_id":"set_1",'
+                '"keyframe_strategy":"compose_from_solo_refs",'
+                '"start_state":{"pose":"...","seats":{},"facing":"..."},'
+                '"end_state":{"pose":"...","exited":[],"speech_done":"..."},'
+                '"continuity_lock":{"forbid":"..."},"keyframe_prompt":"...",'
+                '"exiting_character_ids":[],'
+                '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
+                '"language_lock":"en",'
+                '"bgm_lock":{"mood":"...","style":"...","instruments":"...",'
+                '"continuity":"same bed","rule":"non-vocal underscore"},'
+                '"include_speech":true,"include_music":true,'
+                '"storyboard_markdown":"...","notes":"...","target_shot_count":N}'
+            )
+            result = await call_model_tool(
+                prompt=json.dumps(
+                    {
+                        "user_prompt": user_prompt,
+                        "approved_brief": approved_brief,
+                        "characters": characters,
+                        "shots": shots,
+                        "spatial_lock": meta.get("spatial_lock"),
+                        "rule": "Multi-shot storyboard required when multiple beats exist.",
+                    },
+                    ensure_ascii=False,
+                ),
+                system=system,
+                optimize_for="quality",
+                max_tokens=65536,
+            )
+            text = model_text_or_raise(result)
+            parsed = _extract_json_object(text) or {}
+            llm_chars = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
+            if llm_chars:
+                cleaned_chars: list[dict[str, Any]] = []
+                for i, raw in enumerate(llm_chars, start=1):
+                    if not isinstance(raw, dict):
+                        continue
+                    cid = str(raw.get("id") or f"char_{i}").strip() or f"char_{i}"
+                    name = str(raw.get("name") or cid).strip() or cid
+                    cleaned_chars.append(
                         {
-                            "user_prompt": user_prompt,
-                            "approved_brief": approved_brief,
-                            "characters": characters,
-                            "shots": shots,
-                            "spatial_lock": meta.get("spatial_lock"),
-                            "rule": "Multi-shot storyboard required when multiple beats exist.",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    system=system,
-                    optimize_for="quality",
-                    max_tokens=65536,
-                )
-                parsed = _extract_json_object(str(result.get("text") or "")) or {}
-                llm_chars = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
-                if llm_chars:
-                    cleaned_chars: list[dict[str, Any]] = []
-                    for i, raw in enumerate(llm_chars, start=1):
-                        if not isinstance(raw, dict):
-                            continue
-                        cid = str(raw.get("id") or f"char_{i}").strip() or f"char_{i}"
-                        name = str(raw.get("name") or cid).strip() or cid
-                        cleaned_chars.append(
-                            {
-                                "id": cid,
-                                "name": name,
-                                "description": str(raw.get("description") or name)[:600],
-                            }
+                            "id": cid,
+                            "name": name,
+                            "description": str(raw.get("description") or name)[:600],
+                        }
+                    )
+                if cleaned_chars:
+                    characters = cleaned_chars
+                    analysis["characters"] = characters
+                    analysis["source"] = "llm"
+                    source = "llm"
+                    notes = "Supervisor LLM authored cast + storyboard."
+            llm_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else []
+            if llm_shots:
+                cleaned: list[dict[str, Any]] = []
+                for i, raw in enumerate(llm_shots, start=1):
+                    if not isinstance(raw, dict):
+                        continue
+                    shot = dict(raw)
+                    shot["shot_index"] = int(shot.get("shot_index") or i)
+                    if not str(shot.get("timeline") or "").strip():
+                        shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
+                    if isinstance(shot.get("continuity_lock"), dict):
+                        shot["continuity_lock"] = {
+                            str(k): str(v) for k, v in shot["continuity_lock"].items()
+                        }
+                    elif str(shot.get("action") or "").strip():
+                        shot["continuity_lock"] = _infer_continuity_lock(
+                            str(shot.get("action") or "")
                         )
-                    if cleaned_chars:
-                        characters = cleaned_chars
-                        analysis["characters"] = characters
-                        analysis["source"] = "llm"
-                        source = "llm"
-                        notes = "Supervisor LLM authored cast + storyboard."
-                llm_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else []
-                if llm_shots:
-                    cleaned: list[dict[str, Any]] = []
-                    for i, raw in enumerate(llm_shots, start=1):
-                        if not isinstance(raw, dict):
-                            continue
-                        shot = dict(raw)
-                        shot["shot_index"] = int(shot.get("shot_index") or i)
-                        if not str(shot.get("timeline") or "").strip():
-                            shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
-                        if isinstance(shot.get("continuity_lock"), dict):
-                            shot["continuity_lock"] = {
-                                str(k): str(v) for k, v in shot["continuity_lock"].items()
-                            }
-                        elif str(shot.get("action") or "").strip():
-                            shot["continuity_lock"] = _infer_continuity_lock(
-                                str(shot.get("action") or "")
-                            )
-                        if isinstance(shot.get("speech_by_character"), dict):
-                            shot["speech_by_character"] = {
-                                str(k): str(v)[:280]
-                                for k, v in shot["speech_by_character"].items()
-                                if str(v).strip()
-                            }
-                        if shot.get("speech_line"):
-                            shot["speech_line"] = str(shot.get("speech_line"))[:500]
-                        cleaned.append(shot)
-                    if cleaned:
-                        shots = cleaned
-                        source = "llm"
-                        analysis["source"] = "llm"
-                        notes = str(parsed.get("notes") or "Supervisor LLM authored storyboard.")[
-                            :1000
-                        ]
-                # Film-wide audio locks from Supervisor storyboard JSON.
-                audio = dict(analysis.get("audio") or {})
-                if parsed.get("language_lock"):
-                    analysis["language_lock"] = str(parsed.get("language_lock"))[:16]
-                    audio["language_lock"] = analysis["language_lock"]
-                if isinstance(parsed.get("bgm_lock"), dict):
-                    analysis["bgm_lock"] = {
-                        str(k): str(v)[:280] for k, v in parsed["bgm_lock"].items()
-                    }
-                    audio["bgm_lock"] = analysis["bgm_lock"]
-                if "include_speech" in parsed:
-                    audio["include_speech"] = bool(parsed.get("include_speech"))
-                if "include_music" in parsed:
-                    audio["include_music"] = bool(parsed.get("include_music"))
-                if audio.get("include_speech") and audio.get("include_music"):
-                    audio["policy"] = "speech_and_music"
-                elif audio.get("include_speech"):
-                    audio["policy"] = "speech"
-                elif audio.get("include_music"):
-                    audio["policy"] = audio.get("policy") or "optional_music"
-                analysis["audio"] = audio
-                md_candidate = str(parsed.get("storyboard_markdown") or "").strip()
-                if md_candidate and len(md_candidate) > 40:
-                    sb_md = md_candidate
+                    if isinstance(shot.get("speech_by_character"), dict):
+                        shot["speech_by_character"] = {
+                            str(k): str(v)[:280]
+                            for k, v in shot["speech_by_character"].items()
+                            if str(v).strip()
+                        }
+                    if shot.get("speech_line"):
+                        shot["speech_line"] = str(shot.get("speech_line"))[:500]
+                    cleaned.append(shot)
+                if cleaned:
+                    shots = cleaned
                     source = "llm"
                     analysis["source"] = "llm"
-            except Exception:  # noqa: BLE001
-                logger.info("Supervisor author_storyboard LLM failed", exc_info=True)
+                    notes = str(parsed.get("notes") or "Supervisor LLM authored storyboard.")[
+                        :1000
+                    ]
+            # Film-wide audio locks from Supervisor storyboard JSON.
+            audio = dict(analysis.get("audio") or {})
+            if parsed.get("language_lock"):
+                analysis["language_lock"] = str(parsed.get("language_lock"))[:16]
+                audio["language_lock"] = analysis["language_lock"]
+            if isinstance(parsed.get("bgm_lock"), dict):
+                analysis["bgm_lock"] = {
+                    str(k): str(v)[:280] for k, v in parsed["bgm_lock"].items()
+                }
+                audio["bgm_lock"] = analysis["bgm_lock"]
+            if "include_speech" in parsed:
+                audio["include_speech"] = bool(parsed.get("include_speech"))
+            if "include_music" in parsed:
+                audio["include_music"] = bool(parsed.get("include_music"))
+            if audio.get("include_speech") and audio.get("include_music"):
+                audio["policy"] = "speech_and_music"
+            elif audio.get("include_speech"):
+                audio["policy"] = "speech"
+            elif audio.get("include_music"):
+                audio["policy"] = audio.get("policy") or "optional_music"
+            analysis["audio"] = audio
+            md_candidate = str(parsed.get("storyboard_markdown") or "").strip()
+            if md_candidate and len(md_candidate) > 40:
+                sb_md = md_candidate
+                source = "llm"
+                analysis["source"] = "llm"
+            if source != "llm":
+                raise DesignerLlmError(
+                    "Chat model did not return a usable storyboard.",
+                    code=LLM_API_ERROR,
+                )
+        except DesignerLlmError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Supervisor author_storyboard LLM failed", exc_info=True)
+            raise DesignerLlmError(
+                f"Chat model request failed while authoring the storyboard: {exc}",
+                code=LLM_API_ERROR,
+            ) from exc
 
         from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
         from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import apply_shot_scope
@@ -1911,6 +1688,12 @@ class SupervisorAgent:
             analysis["shots"] = shots
             meta["script_analysis"] = analysis
         if not sb_md:
+            if source != "llm" or not shots:
+                raise DesignerLlmError(
+                    "Chat model did not return a usable storyboard.",
+                    code=LLM_API_ERROR,
+                )
+            # LLM returned shots/cast but omitted markdown — draft hint only.
             sb_md = _write_storyboard_markdown(shots, characters)
 
         stamped = False
@@ -1918,12 +1701,7 @@ class SupervisorAgent:
             cfg = dict(node.get("config") or {})
             if _role_key(node) != "storyboard" and str(node.get("id") or "") != "n_storyboard":
                 continue
-            if cfg.get("skip_llm"):
-                cfg["prewritten"] = sb_md
-            else:
-                cfg["draft_prewritten"] = sb_md
-                cfg.pop("prewritten", None)
-                cfg["skip_llm"] = False
+            cfg.pop("skip_llm", None)
             cfg["planned_shots"] = shots
             cfg["kind"] = "agent"
             cfg["delegate"] = "agent"
@@ -2001,7 +1779,6 @@ class SupervisorAgent:
         self,
         graph: DesignerExecutionGraph,
         *,
-        use_llm: bool = True,
         optimize_for: str = "quality",
     ) -> dict[str, Any]:
         """Supervisor owns flexible multi-shot topology from Brief+Storyboard.
@@ -2012,6 +1789,11 @@ class SupervisorAgent:
         from jiuwenswarm.server.runtime.designer.smart_graph import (
             apply_runtime_delegate,
             build_smart_video_graph,
+        )
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
         )
 
         meta = dict(graph.get("metadata") or {})
@@ -2028,150 +1810,166 @@ class SupervisorAgent:
         source = "storyboard"
         notes = ""
 
-        if use_llm:
+        try:
+            system = (
+                "You are the Designer Supervisor (Director). Design the execution graph "
+                "from the approved Brief + Storyboard. Return JSON only. "
+                "MUST include characters[] — every named human gets one solo identity "
+                "card (id, name, description). NOT every character in every scene. "
+                "MUST include shots[] grouped by setting_id (distinct places). "
+                "Shots are consecutive TIME windows that concatenate to the film. "
+                "Each shot.action is THAT window only — do not paste the user prompt "
+                "into every clip. "
+                "If requested runtime exceeds Wan max (15s), use "
+                "ceil(duration/15) sequential clips (hard max 16) with contiguous timelines. "
+                "Otherwise YOU own target_shot_count (prefer ≤8, hard max 16). "
+                "One clip = one continuous beat ≤15s. New KF on hard cut, new setting, "
+                "wardrobe/prop change, or on-screen cast change. "
+                "Qwen KF: lock identity+wardrobe; ≤2–3 people with refs; one variable "
+                "per new KF. Honor explicit N-shot / N分镜 as a HARD ceiling. "
+                "First KF of each setting: compose_from_solo_refs with on_screen + "
+                "cast_actions (composer decides who appears and what they are doing). "
+                "Later same setting: edit_prior_keyframe (architecture locked). "
+                "offscreen stay out of frame. "
+                "Scene specs ARE required — environment-only Qwen stills. "
+                "Each shot: shot_index, timeline, camera, action, on_screen, offscreen, "
+                "cast_actions, featured_cast_ids, ensemble_cast_ids, setting_id, "
+                "keyframe_prompt, exiting_character_ids, keyframe_strategy. "
+                "Schema: "
+                '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
+                '"shots":[...],"target_shot_count":N,"include_speech":bool,'
+                '"include_music":bool,"notes":"..."}'
+            )
+            from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
+                infer_shot_budget,
+            )
+
+            shot_ceiling = infer_shot_budget(user_prompt, analysis)
+            result = await call_model_tool(
+                prompt=json.dumps(
+                    {
+                        "user_prompt": user_prompt,
+                        "approved_brief": approved_brief,
+                        "approved_storyboard": approved_sb,
+                        "characters": characters,
+                        "current_shots": shots,
+                        "target_shot_count": shot_ceiling or analysis.get("target_shot_count"),
+                        "rule": (
+                            "Decide shot count wisely: prefer fewer; merge same-cast "
+                            "continuous motion into one beat. Explicit N-shot / "
+                            "target_shot_count from the user is a hard ceiling. Soft prefer "
+                            "≤8 shots. All solo cast cards before keyframes; compose "
+                            "first KF per setting_id; edit_prior only within the same "
+                            "setting_id. Per-shot on_screen is authoritative for who "
+                            "appears — not every solo in every frame."
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                system=system,
+                optimize_for=optimize_for,
+                max_tokens=65536,
+            )
+            text = model_text_or_raise(result)
+            parsed = _extract_json_object(text)
+            if parsed is None:
+                raise DesignerLlmError(
+                    "Chat model did not return valid execution graph JSON.",
+                    code=LLM_API_ERROR,
+                )
+            llm_chars = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
+            cleaned_chars: list[dict[str, Any]] = []
+            for i, raw in enumerate(llm_chars, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                cid = str(raw.get("id") or f"char_{i}").strip() or f"char_{i}"
+                name = str(raw.get("name") or cid).strip() or cid
+                cleaned_chars.append(
+                    {
+                        "id": cid,
+                        "name": name,
+                        "description": str(raw.get("description") or name)[:600],
+                    }
+                )
+            if not cleaned_chars:
+                raise DesignerLlmError(
+                    "Chat model did not return usable characters while designing "
+                    "the execution graph.",
+                    code=LLM_API_ERROR,
+                )
+            characters = cleaned_chars
+            analysis["characters"] = characters
+            analysis["source"] = "llm"
+            source = "llm"
+            llm_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else []
+            cleaned: list[dict[str, Any]] = []
+            for i, raw in enumerate(llm_shots, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                shot = dict(raw)
+                shot["shot_index"] = int(shot.get("shot_index") or i)
+                if not str(shot.get("timeline") or "").strip():
+                    shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
+                cleaned.append(shot)
+            if not cleaned:
+                raise DesignerLlmError(
+                    "Chat model did not return usable shots while designing "
+                    "the execution graph.",
+                    code=LLM_API_ERROR,
+                )
+            shots = cleaned
+            source = "llm"
+            analysis["source"] = "llm"
+            notes = str(parsed.get("notes") or "")[:1000]
+            from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
+                _HARD_MAX_SHOTS,
+                _SOFT_MAX_SHOTS,
+                _explicit_shot_count_from_prompt,
+            )
+
+            explicit_n = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
             try:
-                system = (
-                    "You are the Designer Supervisor (Director). Design the execution graph "
-                    "from the approved Brief + Storyboard. Return JSON only. "
-                    "MUST include characters[] — every named human gets one solo identity "
-                    "card (id, name, description). NOT every character in every scene. "
-                    "MUST include shots[] grouped by setting_id (distinct places). "
-                    "Shots are consecutive TIME windows that concatenate to the film. "
-                    "Each shot.action is THAT window only — do not paste the user prompt "
-                    "into every clip. "
-                    "If requested runtime exceeds Wan max (15s), use "
-                    "ceil(duration/15) sequential clips (hard max 16) with contiguous timelines. "
-                    "Otherwise YOU own target_shot_count (prefer ≤8, hard max 16). "
-                    "One clip = one continuous beat ≤15s. New KF on hard cut, new setting, "
-                    "wardrobe/prop change, or on-screen cast change. "
-                    "Qwen KF: lock identity+wardrobe; ≤2–3 people with refs; one variable "
-                    "per new KF. Honor explicit N-shot / N分镜 as a HARD ceiling. "
-                    "First KF of each setting: compose_from_solo_refs with on_screen + "
-                    "cast_actions (composer decides who appears and what they are doing). "
-                    "Later same setting: edit_prior_keyframe (architecture locked). "
-                    "offscreen stay out of frame. skip_scene_specs=false "
-                    "(scene specs ARE required — environment-only Qwen stills). "
-                    "Each shot: shot_index, timeline, camera, action, on_screen, offscreen, "
-                    "cast_actions, featured_cast_ids, ensemble_cast_ids, setting_id, "
-                    "keyframe_prompt, exiting_character_ids, keyframe_strategy. "
-                    "Schema: "
-                    '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
-                    '"shots":[...],"target_shot_count":N,"include_speech":bool,'
-                    '"include_music":bool,"skip_scene_specs":false,"notes":"..."}'
-                )
-                from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-                    infer_shot_budget,
-                )
+                llm_tsc = int(parsed.get("target_shot_count") or 0)
+            except (TypeError, ValueError):
+                llm_tsc = 0
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+                needs_duration_slicing as _nds,
+            )
 
-                shot_ceiling = infer_shot_budget(user_prompt, analysis)
-                result = await call_model_tool(
-                    prompt=json.dumps(
-                        {
-                            "user_prompt": user_prompt,
-                            "approved_brief": approved_brief,
-                            "approved_storyboard": approved_sb,
-                            "characters": characters,
-                            "current_shots": shots,
-                            "target_shot_count": shot_ceiling or analysis.get("target_shot_count"),
-                            "rule": (
-                                "Decide shot count wisely: prefer fewer; merge same-cast "
-                                "continuous motion into one shot. Explicit N-shot / "
-                                "target_shot_count from the user is a hard ceiling. Soft prefer "
-                                "≤8 shots. All solo cast cards before keyframes; compose "
-                                "first KF per setting_id; edit_prior only within the same "
-                                "setting_id. Per-shot on_screen is authoritative for who "
-                                "appears — not every solo in every frame."
-                            ),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    system=system,
-                    optimize_for=optimize_for,
-                    max_tokens=65536,
-                )
-                parsed = _extract_json_object(str(result.get("text") or "")) or {}
-                llm_chars = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
-                if llm_chars:
-                    cleaned_chars: list[dict[str, Any]] = []
-                    for i, raw in enumerate(llm_chars, start=1):
-                        if not isinstance(raw, dict):
-                            continue
-                        cid = str(raw.get("id") or f"char_{i}").strip() or f"char_{i}"
-                        name = str(raw.get("name") or cid).strip() or cid
-                        cleaned_chars.append(
-                            {
-                                "id": cid,
-                                "name": name,
-                                "description": str(raw.get("description") or name)[:600],
-                            }
-                        )
-                    if cleaned_chars:
-                        characters = cleaned_chars
-                        analysis["characters"] = characters
-                        analysis["source"] = "llm"
-                        source = "llm"
-                llm_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else []
-                cleaned: list[dict[str, Any]] = []
-                for i, raw in enumerate(llm_shots, start=1):
-                    if not isinstance(raw, dict):
-                        continue
-                    shot = dict(raw)
-                    shot["shot_index"] = int(shot.get("shot_index") or i)
-                    if not str(shot.get("timeline") or "").strip():
-                        shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
-                    cleaned.append(shot)
-                if cleaned:
-                    shots = cleaned
-                    source = "llm"
-                    analysis["source"] = "llm"
-                    notes = str(parsed.get("notes") or "")[:1000]
-                    from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-                        _HARD_MAX_SHOTS,
-                        _SOFT_MAX_SHOTS,
-                        _explicit_shot_count_from_prompt,
-                    )
+            # LLM redesign owns N; explicit user language is the only hard ceiling
+            # unless requested runtime exceeds Wan max (then sequential slice count).
+            if _nds(user_prompt):
+                cap = _HARD_MAX_SHOTS
+                keep = min(cap, max(llm_tsc, explicit_n, len(shots), 1))
+                shots = shots[:keep]
+            elif explicit_n >= 1:
+                shots = shots[: min(explicit_n, _HARD_MAX_SHOTS)]
+            else:
+                cap = min(_SOFT_MAX_SHOTS, _HARD_MAX_SHOTS)
+                keep = min(cap, llm_tsc) if llm_tsc >= 1 else min(cap, len(shots))
+                shots = shots[:keep]
+            for i, sh in enumerate(shots, start=1):
+                sh["shot_index"] = i
+            analysis["target_shot_count"] = len(shots)
+            audio = dict(analysis.get("audio") or {})
+            if "include_speech" in parsed:
+                audio["include_speech"] = bool(parsed.get("include_speech"))
+            if "include_music" in parsed:
+                audio["include_music"] = bool(parsed.get("include_music"))
+            if audio.get("include_speech") and audio.get("include_music"):
+                audio["policy"] = "speech_and_music"
+            analysis["audio"] = audio
+            analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
+        except DesignerLlmError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Supervisor design_execution_graph LLM failed", exc_info=True)
+            raise DesignerLlmError(
+                f"Chat model request failed while designing the execution graph: {exc}",
+                code=LLM_API_ERROR,
+            ) from exc
 
-                    explicit_n = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
-                    try:
-                        llm_tsc = int(parsed.get("target_shot_count") or 0)
-                    except (TypeError, ValueError):
-                        llm_tsc = 0
-                    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
-                        needs_duration_slicing as _nds,
-                    )
-
-                    # LLM redesign owns N; explicit user language is the only hard ceiling
-                    # unless requested runtime exceeds Wan max (then sequential slice count).
-                    if _nds(user_prompt):
-                        cap = _HARD_MAX_SHOTS
-                        keep = min(cap, max(llm_tsc, explicit_n, len(shots), 1))
-                        shots = shots[:keep]
-                    elif explicit_n >= 1:
-                        shots = shots[: min(explicit_n, _HARD_MAX_SHOTS)]
-                    else:
-                        cap = min(_SOFT_MAX_SHOTS, _HARD_MAX_SHOTS)
-                        keep = min(cap, llm_tsc) if llm_tsc >= 1 else min(cap, len(shots))
-                        shots = shots[:keep]
-                    for i, sh in enumerate(shots, start=1):
-                        sh["shot_index"] = i
-                    analysis["target_shot_count"] = len(shots)
-                    audio = dict(analysis.get("audio") or {})
-                    if "include_speech" in parsed:
-                        audio["include_speech"] = bool(parsed.get("include_speech"))
-                    if "include_music" in parsed:
-                        audio["include_music"] = bool(parsed.get("include_music"))
-                    if audio.get("include_speech") and audio.get("include_music"):
-                        audio["policy"] = "speech_and_music"
-                    analysis["audio"] = audio
-                    if parsed.get("skip_scene_specs") is not None:
-                        # Scene cards are required (empty plates + R2V). Ignore LLM skips.
-                        analysis["skip_scene_specs"] = False
-                        analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
-            except Exception:  # noqa: BLE001
-                logger.info("Supervisor design_execution_graph LLM failed; using storyboard shots", exc_info=True)
-                notes = "LLM graph design failed; materializing from storyboard shots."
-
-        # Final clamp even on non-LLM path — soft max unless user asked for explicit N.
+        # Final clamp — soft max unless user asked for explicit N.
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
                 _HARD_MAX_SHOTS,
@@ -2206,17 +2004,16 @@ class SupervisorAgent:
         except Exception:  # noqa: BLE001
             pass
         if not shots:
-            shots = [
-                {
-                    "shot_index": 1,
-                    "action": user_prompt[:300],
-                    "camera": "medium / eye-level",
-                    "character_ids": [str(characters[0].get("id"))] if characters else ["char_1"],
-                    "keyframe_prompt": user_prompt[:300],
-                    "timeline": "0.0-5.0s",
-                    "setting_id": "set_1",
-                }
-            ]
+            from jiuwenswarm.server.runtime.designer.model_tools import (
+                DesignerLlmError,
+                LLM_API_ERROR,
+            )
+
+            raise DesignerLlmError(
+                "Chat model did not return any usable shots while designing "
+                "the execution graph.",
+                code=LLM_API_ERROR,
+            )
         analysis["shots"] = shots
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
@@ -2250,10 +2047,7 @@ class SupervisorAgent:
                 old_solos,
                 len(new_humans),
             )
-            meta["pending_llm_analysis"] = False
-            meta["pending_supervisor_graph"] = False
             meta["supervisor_composed_on_bootstrap"] = True
-            meta["graph_designed_by_supervisor"] = False
             meta["supervisor_graph_ack"] = {
                 "ok": True,
                 "source": "kept_prior_cast",
@@ -2276,7 +2070,6 @@ class SupervisorAgent:
             analysis=analysis,
             title=str(graph.get("title") or "") or None,
             optimize_for=optimize_for,
-            ai_mode=True,
         )
         rebuilt["graph_id"] = old_id or rebuilt.get("graph_id")
         rebuilt["project_id"] = project_id
@@ -2286,7 +2079,6 @@ class SupervisorAgent:
             "approved_storyboard",
             "user_prompt",
             "capability_plan",
-            "agent_runtime",
             "use_prior_feedback",
             "prior_feedback",
             "last_improvement_plan",
@@ -2297,10 +2089,7 @@ class SupervisorAgent:
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)
         rmeta["script_analysis"] = analysis
-        rmeta["supervisor_owns_graph"] = True
         rmeta["freeze_shot_topology"] = False
-        rmeta["lean_pipeline"] = False
-        rmeta["graph_designed_by_supervisor"] = True
         rmeta["supervisor_graph_ack"] = {
             "ok": True,
             "source": source,
@@ -2321,109 +2110,6 @@ class SupervisorAgent:
         graph.clear()
         graph.update(rebuilt)
         return dict(rmeta["supervisor_graph_ack"])
-
-
-class NodeAgent:
-    """One agent per graph node; tools: call_model + read_upstream."""
-
-    async def run(
-        self,
-        node: DesignerGraphNode,
-        *,
-        graph: DesignerExecutionGraph,
-        run_id: str,
-        upstream_outputs: dict[str, AssetRef | None] | None,
-        prior_feedback: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        cfg = dict(node.get("config") or {})
-        node_id = str(node.get("id") or "")
-        optimize_for = str(cfg.get("optimize_for") or "quality")
-        preferred = str(cfg.get("preferred_model") or "") or None
-        suggestion = suggestion_for_node(prior_feedback, node_id)
-        upstream = upstream_outputs or {}
-        upstream_summary = {
-            k: (v or {}) for k, v in upstream.items() if isinstance(k, str)
-        }
-
-        system = (
-            f"You are {cfg.get('agent_name') or 'a Designer node agent'} "
-            f"(id={cfg.get('agent_id') or node_id}). "
-            "You may use tools conceptually: call_model (any Settings model) and read_upstream. "
-            "Produce the artifact for your node. "
-            "End with JSON: "
-            '{"self_score":0-10,"notes":"...","suggestion_for_next":"...","artifact_summary":"..."}'
-        )
-        prompt = json.dumps(
-            {
-                "node_id": node_id,
-                "label": node.get("label"),
-                "type": node.get("type"),
-                "user_prompt": cfg.get("prompt") or graph.get("description"),
-                "supervisor_task": cfg.get("supervisor_task"),
-                "optimize_for": optimize_for,
-                "preferred_model": preferred,
-                "available_tools": cfg.get("tools") or ["call_model", "read_upstream"],
-                "upstream": upstream_summary,
-                "rerun_suggestion": suggestion,
-            },
-            ensure_ascii=False,
-        )
-        tool = await call_model_tool(
-            prompt=prompt,
-            system=system,
-            optimize_for=optimize_for,
-            preferred_model=preferred,
-            max_tokens=8192,
-        )
-        parsed = _extract_json_object(str(tool.get("text") or "")) or {}
-        self_score = _clamp_score(parsed.get("self_score"), default=6)
-        notes = str(parsed.get("notes") or "")
-        suggestion_next = str(parsed.get("suggestion_for_next") or "")
-        artifact = str(parsed.get("artifact_summary") or tool.get("text") or "")[:4000]
-
-        output_ref: AssetRef = {
-            "kind": str(node.get("type") or "text"),
-            "uri": f"designer://agent/{run_id}/{node_id}",
-            "label": str(node.get("label") or node_id),
-            "mime_type": "application/json",
-        }
-        return {
-            "output_ref": output_ref,
-            "message": f"{cfg.get('agent_name') or node_id} via {tool.get('model')}",
-            "feedback": {
-                "agent_id": cfg.get("agent_id"),
-                "agent_name": cfg.get("agent_name"),
-                "self_score": self_score,
-                "notes": notes,
-                "suggestion_for_next": suggestion_next,
-                "model_used": tool.get("model"),
-                "artifact_summary": artifact,
-            },
-            "payload": {
-                "tool_result": tool,
-                "artifact_summary": artifact,
-            },
-        }
-
-
-def _heuristic_node_score(
-    node_id: str,
-    *,
-    agent_feedback: dict[str, dict[str, Any]],
-    node_states: dict[str, Any] | None,
-) -> tuple[int, str]:
-    fb = agent_feedback.get(node_id) or {}
-    if "self_score" in fb:
-        return _clamp_score(fb.get("self_score"), 6), str(fb.get("notes") or "")
-    state = (node_states or {}).get(node_id) or {}
-    status = str(state.get("status") or "")
-    if status == "completed" and state.get("output_ref"):
-        return 7, "Completed with output"
-    if status == "completed":
-        return 6, "Completed"
-    if status == "failed":
-        return 2, str(state.get("error") or "failed")
-    return 5, status or "unknown"
 
 
 def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
@@ -2528,23 +2214,15 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
             shot["character_ids"] = focus
     meta["script_analysis"] = analysis
 
-    # Refresh prewritten storyboard so the UI table matches corrected focus cast.
-    try:
-        from jiuwenswarm.server.runtime.designer.smart_graph import _write_storyboard_markdown
-
-        planned = list(analysis.get("shots") or [])
-        if planned:
-            sb_md = _write_storyboard_markdown(planned, characters)
-            for node in graph.get("nodes") or []:
-                cfg = dict(node.get("config") or {})
-                if _role_key(node) != "storyboard":
-                    continue
-                cfg["prewritten"] = sb_md
-                cfg["planned_shots"] = planned
-                node["config"] = cfg
-                notes.append(f"{node.get('id')}: storyboard refreshed from cast-focus fixes")
-    except Exception:  # noqa: BLE001
-        pass
+    planned = list(analysis.get("shots") or [])
+    if planned:
+        for node in graph.get("nodes") or []:
+            cfg = dict(node.get("config") or {})
+            if _role_key(node) != "storyboard":
+                continue
+            cfg["planned_shots"] = planned
+            node["config"] = cfg
+            notes.append(f"{node.get('id')}: storyboard plan refreshed from cast-focus fixes")
 
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
@@ -2889,29 +2567,20 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             "view_key": cfg.get("view_key"),
             "spatial_lock": cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else None,
             "occupancy": cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else None,
-            "skip_scene_specs": False,
             "scene_continuity_mode": "scene_card_plus_clip_shots",
             "scene_specs": bible,
             "all_solo_node_ids": list(all_solo_ids),
         }
         cfg["identity_refs"] = identity_refs
-        cfg["skip_scene_specs"] = False
         if names:
             cfg["cast_names"] = identity_refs["cast_names"]
         # Sensible LLM-style node names (Brief: … / Scene N: Shot M: …).
         from jiuwenswarm.server.runtime.designer.node_labels import (
             derive_shot_name,
-            derive_story_name,
-            label_character,
             label_clip,
             label_shot,
         )
 
-        story_name = derive_story_name(
-            analysis=analysis,
-            prompt=str(graph.get("description") or ""),
-            graph_title=str(graph.get("title") or ""),
-        )
         scene_n = setting_num.get(setting_id, 1)
         shot_i = int(cfg.get("shot_index") or 0)
         # Per-setting shot ordinal from film order.
@@ -3052,7 +2721,6 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         }
     )
     meta["consistency_plan"] = plan
-    meta["skip_scene_specs"] = False
     meta["scene_continuity_mode"] = "scene_card_plus_clip_shots"
     meta["scene_masters"] = dict(scene_master_by_setting)
     meta["scene_locks"] = dict(scene_locks)
@@ -3087,7 +2755,6 @@ class ManagerAgent:
         """Gate every frame/clip media prompt against locks + prior handoff / already_done."""
         from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
             collect_prior_clip_prompts,
-            handoff_clause_for_prompt,
         )
         from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
             architecture_clause_from_bible,
@@ -3338,9 +3005,6 @@ class ManagerAgent:
                 str(c.get("id")): str(c.get("name") or c.get("id"))
                 for c in (analysis_cast.get("characters") or [])
                 if isinstance(c, dict) and c.get("id")
-            }
-            allowed_names = {
-                id_to_name.get(cid, cid).lower() for cid in config_on_screen
             }
             allowed_ids = set(config_on_screen)
             prompt_l = prompt.lower()
@@ -4131,7 +3795,7 @@ class ManagerAgent:
             "lock_gate": cfg.get("manager_lock_gate"),
         }
 
-    def validate_plan_fast(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
+    def validate_plan_structure(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
         """One-time start gate: modality + shot distinctness + cast + spatial continuity."""
         meta = dict(graph.get("metadata") or {})
         modality = meta.get("modality_plan")
@@ -4160,11 +3824,9 @@ class ManagerAgent:
             )
         except Exception:  # noqa: BLE001
             pass
-        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
-
-        # Prune unused nodes + keep graph coherent for compose; enforce agents when LLM up.
+        # Prune unused nodes + keep graph coherent for compose; stamp agents.
         prune_notes = _manager_prune_and_cohere(graph)
-        agent_notes = self._enforce_leaf_agents(graph, use_agents=llm_available())
+        agent_notes = self._enforce_leaf_agents(graph)
         # Re-apply audio agent policy after modality (backends may clear force_handler).
         audio_assign = assign_audio_node_agents(graph)
         # Second prune after audio assign (speech/music may be omitted).
@@ -4213,7 +3875,7 @@ class ManagerAgent:
                 f"Ensure={len(ensure_notes.get('notes') or [])}. "
                 f"{str((modality or {}).get('reason') or '')[:400]}"
             ),
-            "source": "heuristic",
+            "source": "structural",
         }
         meta = dict(graph.get("metadata") or {})
         meta["manager_plan_ack"] = ack
@@ -4221,11 +3883,13 @@ class ManagerAgent:
         return ack
 
     def ensure_agents_and_prune(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
-        """For every node: kind=agent, tools via _tools_for_node, delegate=agent when LLM up."""
-        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+        """Stamp creative nodes as agents; force_handler uploads stay handlers.
+
+        Chat credentials are gated at Enter/chat/Play. This only stamps topology —
+        missing credentials surface on the first ``call_model_tool``.
+        """
         from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
 
-        use_agents = bool(llm_available())
         notes: list[str] = []
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
@@ -4239,20 +3903,14 @@ class ManagerAgent:
             if list(cfg.get("tools") or []) != tools:
                 notes.append(f"tools:{nid}")
             cfg["tools"] = tools
-            if use_agents:
-                cfg.pop("force_handler", None)
-                cfg["delegate"] = "agent"
-                cfg["skip_llm"] = False
-                if cfg.get("prewritten") and not cfg.get("draft_prewritten"):
-                    cfg["draft_prewritten"] = cfg.pop("prewritten")
-                else:
-                    cfg.pop("prewritten", None)
+            if cfg.get("force_handler"):
+                cfg["delegate"] = "handler"
+                cfg["skip_llm"] = True
+                notes.append(f"force_handler:{nid}")
             else:
-                from jiuwenswarm.server.runtime.designer.model_tools import (
-                    demote_config_to_handler,
-                )
-
-                demote_config_to_handler(cfg)
+                cfg.pop("force_handler", None)
+                cfg.pop("skip_llm", None)
+                cfg["delegate"] = "agent"
             node["config"] = cfg
 
         pruned = prune_non_contributing_nodes(graph)
@@ -4305,7 +3963,6 @@ class ManagerAgent:
             "ok": True,
             "notes": notes[:60],
             "pruned": list(pruned),
-            "use_agents": use_agents,
         }
         meta = dict(graph.get("metadata") or {})
         meta["manager_ensure_agents"] = result
@@ -4356,10 +4013,8 @@ class ManagerAgent:
         graph["metadata"] = meta
         return dict(meta["manager_contribution_audit"])
 
-    def _enforce_leaf_agents(
-        self, graph: DesignerExecutionGraph, *, use_agents: bool
-    ) -> list[str]:
-        """Every leaf is an LLM agent with tools when models exist (framework rule)."""
+    def _enforce_leaf_agents(self, graph: DesignerExecutionGraph) -> list[str]:
+        """Every leaf is an LLM agent with tools (uploads stay force_handler)."""
         notes: list[str] = []
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
@@ -4373,136 +4028,21 @@ class ManagerAgent:
             if list(cfg.get("tools") or []) != tools:
                 notes.append(f"tools:{nid}")
             cfg["tools"] = tools
-            if use_agents:
-                cfg.pop("force_handler", None)
-                cfg["delegate"] = "agent"
-                cfg["skip_llm"] = False
-                if cfg.get("prewritten") and not cfg.get("draft_prewritten"):
-                    cfg["draft_prewritten"] = cfg.pop("prewritten")
-                else:
-                    cfg.pop("prewritten", None)
-            else:
+            if cfg.get("force_handler"):
                 cfg["delegate"] = "handler"
+                cfg["skip_llm"] = True
+                notes.append(f"force_handler:{nid}")
+            else:
+                cfg.pop("force_handler", None)
+                cfg.pop("skip_llm", None)
+                cfg["delegate"] = "agent"
             node["config"] = cfg
         return notes
 
-    async def patch_plan_one_pass(
-        self,
-        plan: dict[str, Any],
-        *,
-        user_prompt: str,
-        optimize_for: str = "quality",
-    ) -> dict[str, Any]:
-        """One Manager LLM fidelity patch on plan JSON — occupancy/setting/locks only."""
-        out = dict(plan)
-        if not user_prompt.strip():
-            return out
-        system = (
-            "You are the Designer Manager. Diff-only fidelity patch on plan.v1. "
-            "Do NOT invent characters or plot. Do NOT paste the full user_prompt into actions. "
-            "Fix: empty on_screen, wrong setting_id inheritance across meet/leave/exterior, "
-            "cast bleed (later people into early on_screen), missing scene_locks, "
-            "desynced character_ids vs on_screen (update on_screen/character_ids/occupancy together). "
-            "Respond JSON only: "
-            '{"ok":true,"characters":[...],"shots":[...],"scene_locks":{...},'
-            '"brief_markdown":"...","storyboard_markdown":"...","notes":"..."} '
-            "Omit unchanged top-level keys; include full shots[] if any shot changes."
-        )
-        try:
-            result = await call_model_tool(
-                prompt=json.dumps(
-                    {
-                        "user_prompt": user_prompt[:2000],
-                        "plan": {
-                            "characters": out.get("characters") or [],
-                            "shots": out.get("shots") or [],
-                            "scenes": out.get("scenes") or [],
-                            "scene_locks": out.get("scene_locks") or {},
-                            "brief_markdown": str(out.get("brief_markdown") or "")[:2000],
-                            "storyboard_markdown": str(out.get("storyboard_markdown") or "")[:2000],
-                        },
-                    },
-                    ensure_ascii=False,
-                ),
-                system=system,
-                optimize_for=optimize_for,
-                max_tokens=32768,
-            )
-            parsed = _extract_json_object(str(result.get("text") or "")) or {}
-        except Exception:  # noqa: BLE001
-            logger.info("patch_plan_one_pass LLM failed", exc_info=True)
-            parsed = {}
-        if not isinstance(parsed, dict) or not parsed:
-            return out
-        # Never invent cast — only allow subset/rename of existing ids unless Supervisor had none.
-        existing_ids = {
-            str(c.get("id") or "")
-            for c in (out.get("characters") or [])
-            if isinstance(c, dict) and c.get("id")
-        }
-        if isinstance(parsed.get("characters"), list) and parsed["characters"]:
-            cleaned_chars: list[dict[str, Any]] = []
-            for i, raw in enumerate(parsed["characters"], start=1):
-                if not isinstance(raw, dict):
-                    continue
-                cid = str(raw.get("id") or f"char_{i}").strip() or f"char_{i}"
-                if existing_ids and cid not in existing_ids:
-                    continue
-                cleaned_chars.append(
-                    {
-                        "id": cid,
-                        "name": str(raw.get("name") or cid).strip() or cid,
-                        "description": str(raw.get("description") or "")[:600],
-                    }
-                )
-            if cleaned_chars:
-                out["characters"] = cleaned_chars
-                existing_ids = {str(c.get("id")) for c in cleaned_chars}
-        if isinstance(parsed.get("shots"), list) and parsed["shots"]:
-            cleaned_shots: list[dict[str, Any]] = []
-            for i, raw in enumerate(parsed["shots"], start=1):
-                if not isinstance(raw, dict):
-                    continue
-                shot = dict(raw)
-                shot["shot_index"] = int(shot.get("shot_index") or i)
-                on_screen = [
-                    str(x)
-                    for x in (
-                        shot.get("on_screen")
-                        or shot.get("visible_cast_ids")
-                        or shot.get("featured_cast_ids")
-                        or []
-                    )
-                    if str(x) and (not existing_ids or str(x) in existing_ids)
-                ]
-                shot["on_screen"] = on_screen
-                shot["visible_cast_ids"] = list(on_screen)
-                shot["character_ids"] = list(on_screen)
-                off = [
-                    str(x)
-                    for x in (shot.get("offscreen") or shot.get("off_screen_cast_ids") or [])
-                    if str(x) and str(x) not in on_screen
-                    and (not existing_ids or str(x) in existing_ids)
-                ]
-                shot["offscreen"] = off
-                shot["off_screen_cast_ids"] = off
-                if not str(shot.get("setting_id") or "").strip():
-                    shot["setting_id"] = f"set_{i}"
-                cleaned_shots.append(shot)
-            if cleaned_shots:
-                out["shots"] = cleaned_shots
-        if isinstance(parsed.get("scene_locks"), dict) and parsed["scene_locks"]:
-            out["scene_locks"] = parsed["scene_locks"]
-        for key in ("brief_markdown", "storyboard_markdown", "notes"):
-            if isinstance(parsed.get(key), str) and parsed[key].strip():
-                out[key] = parsed[key]
-        out["manager_patched"] = True
-        return out
-
     async def review_brief(
-        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+        self, graph: DesignerExecutionGraph
     ) -> dict[str, Any]:
-        """One-pass fidelity check of approved brief vs user prompt; patch if needed."""
+        """One-pass LLM fidelity check of approved brief vs user prompt; patch if needed."""
         meta = dict(graph.get("metadata") or {})
         user_prompt = str(graph.get("description") or "")
         brief = str(meta.get("approved_brief") or "")
@@ -4514,12 +4054,12 @@ class ManagerAgent:
         characters = list(analysis.get("characters") or [])
         ack: dict[str, Any] = {
             "ok": True,
-            "source": "heuristic",
+            "source": "llm",
             "notes": "Brief fidelity pass.",
             "patched": [],
         }
         patched: list[str] = []
-        # Heuristic: ensure each character name appears in the brief.
+        # Structural pre-check: ensure each character name appears in the brief.
         missing: list[str] = []
         low = brief.lower()
         for c in characters:
@@ -4539,51 +4079,57 @@ class ManagerAgent:
             )[:8000]
             patched.append("shot_views")
 
-        if use_llm:
-            try:
-                system = (
-                    "You are the Designer Manager. Review the creative brief once for fidelity "
-                    "to the user prompt. Flag missing characters or insufficient shot views. "
-                    "Patch the brief markdown if needed — do not invent new plot. "
-                    "Respond JSON only: "
-                    '{"ok":true,"patched_brief_markdown":"...","notes":"...","issues":["..."]}'
-                )
-                result = await call_model_tool(
-                    prompt=json.dumps(
-                        {
-                            "user_prompt": user_prompt,
-                            "brief": brief[:6000],
-                            "characters": characters,
-                            "shots": analysis.get("shots"),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    system=system,
-                    optimize_for="quality",
-                    max_tokens=32768,
-                )
-                parsed = _extract_json_object(str(result.get("text") or "")) or {}
-                patched_md = str(parsed.get("patched_brief_markdown") or "").strip()
-                if patched_md and len(patched_md) > 80:
-                    brief = patched_md[:8000]
-                    patched.append("llm_brief")
-                    ack["source"] = "llm"
-                ack["notes"] = str(parsed.get("notes") or ack["notes"])[:1000]
-                ack["issues"] = list(parsed.get("issues") or [])[:20]
-            except Exception:  # noqa: BLE001
-                logger.info("Manager review_brief LLM failed; keeping heuristic", exc_info=True)
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
+        )
 
-        for node in graph.get("nodes") or []:
-            cfg = dict(node.get("config") or {})
-            if _role_key(node) != "brief" and str(node.get("id") or "") != "n_brief":
-                continue
-            if cfg.get("skip_llm"):
-                cfg["prewritten"] = brief
-            else:
-                cfg["draft_prewritten"] = brief
-                cfg["prewritten"] = brief
-            node["config"] = cfg
-            break
+        try:
+            system = (
+                "You are the Designer Manager. Review the creative brief once for fidelity "
+                "to the user prompt. Flag missing characters or insufficient shot views. "
+                "Patch the brief markdown if needed — do not invent new plot. "
+                "Respond JSON only: "
+                '{"ok":true,"patched_brief_markdown":"...","notes":"...","issues":["..."]}'
+            )
+            result = await call_model_tool(
+                prompt=json.dumps(
+                    {
+                        "user_prompt": user_prompt,
+                        "brief": brief[:6000],
+                        "characters": characters,
+                        "shots": analysis.get("shots"),
+                    },
+                    ensure_ascii=False,
+                ),
+                system=system,
+                optimize_for="quality",
+                max_tokens=32768,
+            )
+            text = model_text_or_raise(result)
+            parsed = _extract_json_object(text)
+            if parsed is None:
+                raise DesignerLlmError(
+                    "Chat model did not return valid brief review JSON.",
+                    code=LLM_API_ERROR,
+                )
+            patched_md = str(parsed.get("patched_brief_markdown") or "").strip()
+            if patched_md and len(patched_md) > 80:
+                brief = patched_md[:8000]
+                patched.append("llm_brief")
+                ack["source"] = "llm"
+            ack["notes"] = str(parsed.get("notes") or ack["notes"])[:1000]
+            ack["issues"] = list(parsed.get("issues") or [])[:20]
+        except DesignerLlmError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Manager review_brief LLM failed", exc_info=True)
+            raise DesignerLlmError(
+                f"Chat model request failed while reviewing the brief: {exc}",
+                code=LLM_API_ERROR,
+            ) from exc
+
         meta["approved_brief"] = brief
         ack["patched"] = patched[:20]
         meta["manager_brief_ack"] = ack
@@ -4591,7 +4137,7 @@ class ManagerAgent:
         return ack
 
     async def review_storyboard(
-        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+        self, graph: DesignerExecutionGraph
     ) -> dict[str, Any]:
         """Pre-run one-pass storyboard fidelity + enhancements (crowd, beauty, duration, continuity)."""
         meta = dict(graph.get("metadata") or {})
@@ -4601,7 +4147,7 @@ class ManagerAgent:
         meta.pop("storyboard_reviewed", None)
         graph["metadata"] = meta
         ack = await self.review_storyboard_once(
-            graph, node_states=None, use_llm=use_llm
+            graph, node_states=None
         )
         meta = dict(graph.get("metadata") or {})
         meta["storyboard_pre_reviewed"] = True
@@ -4616,7 +4162,6 @@ class ManagerAgent:
         graph: DesignerExecutionGraph,
         *,
         node_states: dict[str, Any] | None,
-        use_llm: bool = False,
     ) -> dict[str, Any]:
         """After storyboard completes: fidelity + enhancement + continuity (one shot, no loop)."""
         meta = dict(graph.get("metadata") or {})
@@ -4627,11 +4172,11 @@ class ManagerAgent:
         user_prompt = str(graph.get("description") or "")
         ack: dict[str, Any] = {
             "ok": True,
-            "source": "heuristic",
+            "source": "llm",
             "notes": "Storyboard continuity + duration pass.",
             "patched": [],
         }
-        # Heuristic continuity: mark leave/stand forbids on later shots when earlier action implies it.
+        # Structural continuity: mark leave/stand forbids on later shots when earlier action implies it.
         leave_markers = ("leave", "leaves", "stood", "stands up", "gets up", "rising")
         left_chars: list[str] = []
         for shot in shots:
@@ -4659,87 +4204,104 @@ class ManagerAgent:
             # later-meet cast into early beats. Sparse actions stay sparse;
             # LLM shot_fixes below may enrich without copying the whole brief.
 
-        if use_llm:
-            try:
-                system = (
-                    "You are the Designer Manager. Review the storyboard once for best quality "
-                    "while remaining completely faithful to the user prompt, approved brief, and "
-                    "story beats (no new plot). Fix missing characters/views, enhance sparse shots "
-                    "(crowd, atmosphere), set shot durations, enforce time-coherent continuity, and "
-                    "keep geography locked (same landmarks/layout/light across views). "
-                    "Also approve/enforce film audio locks: language_lock (one language for all "
-                    "speech), per-shot speech_by_character (exact lines or {} if silent), and "
-                    "film-wide bgm_lock. Respond JSON only: "
-                    '{"ok":true,"shot_fixes":[{"shot_index":1,"action":"...","camera":"...",'
-                    '"timeline":"0-5s","continuity_lock":{"forbid":"..."},'
-                    '"character_ids":["char_1"],'
-                    '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
-                    '"language_lock":"en",'
-                    '"bgm_lock":{"mood":"...","style":"...","rule":"..."},'
-                    '"include_speech":true,"include_music":true,"notes":"..."}'
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
+        )
+
+        try:
+            system = (
+                "You are the Designer Manager. Review the storyboard once for best quality "
+                "while remaining completely faithful to the user prompt, approved brief, and "
+                "story beats (no new plot). Fix missing characters/views, enhance sparse shots "
+                "(crowd, atmosphere), set shot durations, enforce time-coherent continuity, and "
+                "keep geography locked (same landmarks/layout/light across views). "
+                "Also approve/enforce film audio locks: language_lock (one language for all "
+                "speech), per-shot speech_by_character (exact lines or {} if silent), and "
+                "film-wide bgm_lock. Respond JSON only: "
+                '{"ok":true,"shot_fixes":[{"shot_index":1,"action":"...","camera":"...",'
+                '"timeline":"0-5s","continuity_lock":{"forbid":"..."},'
+                '"character_ids":["char_1"],'
+                '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
+                '"language_lock":"en",'
+                '"bgm_lock":{"mood":"...","style":"...","rule":"..."},'
+                '"include_speech":true,"include_music":true,"notes":"..."}'
+            )
+            result = await call_model_tool(
+                prompt=json.dumps(
+                    {
+                        "user_prompt": user_prompt,
+                        "shots": shots,
+                        "brief_hint": meta.get("supervisor_brief_notes") or "",
+                    },
+                    ensure_ascii=False,
+                ),
+                system=system,
+                optimize_for="quality",
+                max_tokens=32768,
+            )
+            text = model_text_or_raise(result)
+            parsed = _extract_json_object(text)
+            if parsed is None:
+                raise DesignerLlmError(
+                    "Chat model did not return valid storyboard review JSON.",
+                    code=LLM_API_ERROR,
                 )
-                result = await call_model_tool(
-                    prompt=json.dumps(
-                        {
-                            "user_prompt": user_prompt,
-                            "shots": shots,
-                            "brief_hint": meta.get("supervisor_brief_notes") or "",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    system=system,
-                    optimize_for="quality",
-                    max_tokens=32768,
-                )
-                parsed = _extract_json_object(str(result.get("text") or "")) or {}
-                for fix in parsed.get("shot_fixes") or []:
-                    if not isinstance(fix, dict):
+            for fix in parsed.get("shot_fixes") or []:
+                if not isinstance(fix, dict):
+                    continue
+                try:
+                    idx = int(fix.get("shot_index") or 0)
+                except (TypeError, ValueError):
+                    continue
+                for shot in shots:
+                    if int(shot.get("shot_index") or 0) != idx:
                         continue
-                    try:
-                        idx = int(fix.get("shot_index") or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    for shot in shots:
-                        if int(shot.get("shot_index") or 0) != idx:
-                            continue
-                        for key in ("action", "camera", "timeline", "keyframe_prompt", "speech_line"):
-                            if fix.get(key):
-                                shot[key] = str(fix[key])[:600]
-                        if isinstance(fix.get("continuity_lock"), dict):
-                            shot["continuity_lock"] = {
-                                str(k): str(v) for k, v in fix["continuity_lock"].items()
-                            }
-                        if isinstance(fix.get("character_ids"), list):
-                            shot["character_ids"] = [str(x) for x in fix["character_ids"] if str(x)]
-                        if isinstance(fix.get("speech_by_character"), dict):
-                            shot["speech_by_character"] = {
-                                str(k): str(v)[:280]
-                                for k, v in fix["speech_by_character"].items()
-                                if str(v).strip()
-                            }
-                        patched.append(f"llm:shot{idx}")
-                if parsed.get("language_lock"):
-                    analysis["language_lock"] = str(parsed.get("language_lock"))[:16]
-                    patched.append("language_lock")
-                if isinstance(parsed.get("bgm_lock"), dict):
-                    analysis["bgm_lock"] = {
-                        str(k): str(v)[:280] for k, v in parsed["bgm_lock"].items()
-                    }
-                    patched.append("bgm_lock")
-                audio = dict(analysis.get("audio") or {})
-                if "include_speech" in parsed:
-                    audio["include_speech"] = bool(parsed.get("include_speech"))
-                if "include_music" in parsed:
-                    audio["include_music"] = bool(parsed.get("include_music"))
-                if parsed.get("language_lock"):
-                    audio["language_lock"] = str(parsed.get("language_lock"))[:16]
-                if isinstance(parsed.get("bgm_lock"), dict):
-                    audio["bgm_lock"] = analysis.get("bgm_lock")
-                analysis["audio"] = audio
-                ack["source"] = "llm"
-                ack["notes"] = str(parsed.get("notes") or ack["notes"])[:1000]
-            except Exception:  # noqa: BLE001
-                logger.info("Manager storyboard LLM review failed; keeping heuristic", exc_info=True)
+                    for key in ("action", "camera", "timeline", "keyframe_prompt", "speech_line"):
+                        if fix.get(key):
+                            shot[key] = str(fix[key])[:600]
+                    if isinstance(fix.get("continuity_lock"), dict):
+                        shot["continuity_lock"] = {
+                            str(k): str(v) for k, v in fix["continuity_lock"].items()
+                        }
+                    if isinstance(fix.get("character_ids"), list):
+                        shot["character_ids"] = [str(x) for x in fix["character_ids"] if str(x)]
+                    if isinstance(fix.get("speech_by_character"), dict):
+                        shot["speech_by_character"] = {
+                            str(k): str(v)[:280]
+                            for k, v in fix["speech_by_character"].items()
+                            if str(v).strip()
+                        }
+                    patched.append(f"llm:shot{idx}")
+            if parsed.get("language_lock"):
+                analysis["language_lock"] = str(parsed.get("language_lock"))[:16]
+                patched.append("language_lock")
+            if isinstance(parsed.get("bgm_lock"), dict):
+                analysis["bgm_lock"] = {
+                    str(k): str(v)[:280] for k, v in parsed["bgm_lock"].items()
+                }
+                patched.append("bgm_lock")
+            audio = dict(analysis.get("audio") or {})
+            if "include_speech" in parsed:
+                audio["include_speech"] = bool(parsed.get("include_speech"))
+            if "include_music" in parsed:
+                audio["include_music"] = bool(parsed.get("include_music"))
+            if parsed.get("language_lock"):
+                audio["language_lock"] = str(parsed.get("language_lock"))[:16]
+            if isinstance(parsed.get("bgm_lock"), dict):
+                audio["bgm_lock"] = analysis.get("bgm_lock")
+            analysis["audio"] = audio
+            ack["source"] = "llm"
+            ack["notes"] = str(parsed.get("notes") or ack["notes"])[:1000]
+        except DesignerLlmError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Manager storyboard LLM review failed", exc_info=True)
+            raise DesignerLlmError(
+                f"Chat model request failed while reviewing the storyboard: {exc}",
+                code=LLM_API_ERROR,
+            ) from exc
 
         from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
         from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import apply_shot_scope
@@ -4755,14 +4317,16 @@ class ManagerAgent:
         if shots:
             analysis["shots"] = shots
             meta["script_analysis"] = analysis
+            from jiuwenswarm.server.runtime.designer.smart_graph import (
+                _write_storyboard_markdown,
+            )
+
+            meta["approved_storyboard"] = _write_storyboard_markdown(
+                shots,
+                list(analysis.get("characters") or []),
+            )
             # Patch storyboard + downstream frame/clip configs once.
             try:
-                from jiuwenswarm.server.runtime.designer.smart_graph import (
-                    _write_storyboard_markdown,
-                )
-
-                characters = list(analysis.get("characters") or [])
-                sb_md = _write_storyboard_markdown(shots, characters)
                 from jiuwenswarm.server.runtime.designer.audio_locks import (
                     stamp_audio_fields_on_clip_config,
                 )
@@ -4771,10 +4335,6 @@ class ManagerAgent:
                     cfg = dict(node.get("config") or {})
                     role = _role_key(node)
                     if role == "storyboard":
-                        if cfg.get("skip_llm"):
-                            cfg["prewritten"] = sb_md
-                        else:
-                            cfg["draft_prewritten"] = sb_md
                         cfg["planned_shots"] = shots
                         node["config"] = cfg
                         continue
@@ -4818,7 +4378,6 @@ class ManagerAgent:
                     chain_prior_speech_across_clips(graph)
                 except Exception:  # noqa: BLE001
                     logger.debug("chain_prior_speech_across_clips failed", exc_info=True)
-                meta["approved_storyboard"] = sb_md
             except Exception:  # noqa: BLE001
                 logger.info("Manager storyboard patch of leaf configs failed", exc_info=True)
 
@@ -4837,15 +4396,23 @@ class ManagerAgent:
         return ack
 
     async def validate_plan(
-        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+        self, graph: DesignerExecutionGraph
     ) -> dict[str, Any]:
-        """Validate supervisor brief/shots/graph once. LLM when available; else heuristic."""
-        ack = self.validate_plan_fast(graph)
-        if not use_llm:
-            return ack
+        """Validate supervisor brief/shots/graph once via LLM (structural fast pass first)."""
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            LLM_NOT_CONFIGURED,
+            model_text_or_raise,
+        )
+
+        ack = self.validate_plan_structure(graph)
         models = list_configured_models()
         if not models:
-            return ack
+            raise DesignerLlmError(
+                "Chat model is not configured. Configure a model in Settings before using Design.",
+                code=LLM_NOT_CONFIGURED,
+            )
         analysis = (graph.get("metadata") or {}).get("script_analysis") or {}
         system = (
             "You are the Designer Manager Agent. Validate once (no loops) for best cinematic "
@@ -4894,7 +4461,7 @@ class ManagerAgent:
                     }
                     for n in (graph.get("nodes") or [])
                 ],
-                "heuristic_ack": ack,
+                "structural_ack": ack,
             },
             ensure_ascii=False,
         )
@@ -4905,10 +4472,21 @@ class ManagerAgent:
                 optimize_for="quality",
                 max_tokens=32768,
             )
-            parsed = _extract_json_object(str(result.get("text") or "")) or {}
-        except Exception:  # noqa: BLE001
-            logger.info("Manager LLM validate_plan failed; keeping heuristic ack", exc_info=True)
-            return ack
+            text = model_text_or_raise(result)
+            parsed = _extract_json_object(text) or {}
+            if not parsed:
+                raise DesignerLlmError(
+                    "Chat model did not return a usable plan validation.",
+                    code=LLM_API_ERROR,
+                )
+        except DesignerLlmError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Manager LLM validate_plan failed", exc_info=True)
+            raise DesignerLlmError(
+                f"Chat model request failed while validating the plan: {exc}",
+                code=LLM_API_ERROR,
+            ) from exc
 
         # Apply one-shot shot_fixes into analysis + frame/clip configs (no re-loop).
         fixes = parsed.get("shot_fixes") if isinstance(parsed.get("shot_fixes"), list) else []
@@ -4982,25 +4560,12 @@ class ManagerAgent:
             meta = dict(graph.get("metadata") or {})
             meta["script_analysis"] = analysis
             graph["metadata"] = meta
-            try:
-                from jiuwenswarm.server.runtime.designer.smart_graph import (
-                    _write_storyboard_markdown,
-                )
-
-                characters = list(analysis.get("characters") or [])
-                sb_md = _write_storyboard_markdown(shots, characters)
-                for node in graph.get("nodes") or []:
-                    cfg = dict(node.get("config") or {})
-                    if _role_key(node) != "storyboard":
-                        continue
-                    if cfg.get("skip_llm"):
-                        cfg["prewritten"] = sb_md
-                    else:
-                        cfg["draft_prewritten"] = sb_md
-                    cfg["planned_shots"] = shots
-                    node["config"] = cfg
-            except Exception:  # noqa: BLE001
-                pass
+            for node in graph.get("nodes") or []:
+                cfg = dict(node.get("config") or {})
+                if _role_key(node) != "storyboard":
+                    continue
+                cfg["planned_shots"] = shots
+                node["config"] = cfg
 
         # Re-stamp continuity + identity + spatial after LLM fixes; prune unused nodes.
         if isinstance(parsed.get("spatial_lock"), dict):
@@ -5099,81 +4664,6 @@ class ManagerAgent:
         graph["metadata"] = meta
         return ack
 
-    def review_fast(
-        self,
-        graph: DesignerExecutionGraph,
-        *,
-        agent_feedback: dict[str, dict[str, Any]],
-        supervisor_plan: dict[str, Any] | None,
-        supervisor_report: dict[str, Any] | None,
-        node_states: dict[str, Any] | None,
-        optimize_for: str,
-        vision_notes: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        scores: dict[str, int] = {}
-        suggestions: dict[str, str] = {}
-        rating_mod = str(
-            (graph.get("metadata") or {}).get("rating_modality")
-            or ((graph.get("metadata") or {}).get("modality_plan") or {}).get(
-                "global_rating_modality"
-            )
-            or "text_only"
-        )
-        vision_used = bool(vision_notes)
-        for node in graph.get("nodes") or []:
-            nid = str(node.get("id") or "")
-            if not nid:
-                continue
-            score, note = _heuristic_node_score(
-                nid, agent_feedback=agent_feedback, node_states=node_states
-            )
-            # Blend supervisor node rating when present
-            sup_score = ((supervisor_report or {}).get("scores") or {}).get(nid)
-            if sup_score is not None:
-                score = _clamp_score(round((score + _clamp_score(sup_score)) / 2), score)
-            vnote = (vision_notes or {}).get(nid) or ""
-            if vnote:
-                low = vnote.lower()
-                if any(
-                    w in low for w in ("mismatch", "wrong", "unrelated", "blank", "empty")
-                ):
-                    score = _clamp_score(score - 2, score)
-                    note = (note + " | vision: " + vnote[:200]).strip(" |")
-                elif any(w in low for w in ("match", "consistent", "clear", "good")):
-                    score = _clamp_score(score + 1, score)
-            scores[nid] = score
-            if score < 6:
-                suggestions[nid] = note or "Improve artifact quality on next Run again"
-        vals = [v for k, v in scores.items() if k != "overall"]
-        overall = int(round(sum(vals) / max(1, len(vals)))) if vals else 6
-        # Rate the supervisor plan itself
-        plan_notes = str((supervisor_plan or {}).get("notes") or "")
-        supervisor_score = 8 if (supervisor_plan or {}).get("node_directives") else 5
-        scores["supervisor"] = supervisor_score
-        scores["overall"] = overall
-        suggestions["global"] = (
-            "Stored for Run again only — not applied in this pass. "
-            f"Supervisor: {plan_notes[:400]}"
-        )
-        return {
-            "scores": scores,
-            "summary": (
-                f"Manager review ({rating_mod}"
-                f"{', vision used' if vision_used else ''}). "
-                f"Overall {overall}/10. Supervisor {supervisor_score}/10. Optimize={optimize_for}."
-            )[:3000],
-            "pipeline_notes": (
-                f"One-pass ratings → runs/ + trajectory. rating_modality={rating_mod}. "
-                "Text-only only when models/tools lack image/video understanding."
-            ),
-            "suggestions": suggestions,
-            "manager_model": "heuristic+vision" if vision_used else "heuristic",
-            "rates_supervisor": True,
-            "rating_modality": rating_mod,
-            "vision_used": vision_used,
-            "vision_notes": vision_notes or {},
-        }
-
     async def review(
         self,
         graph: DesignerExecutionGraph,
@@ -5182,7 +4672,6 @@ class ManagerAgent:
         supervisor_plan: dict[str, Any] | None,
         prior_feedback: dict[str, Any] | None,
         optimize_for: str,
-        use_llm: bool = False,
         supervisor_report: dict[str, Any] | None = None,
         node_states: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -5203,16 +4692,12 @@ class ManagerAgent:
                 ans = await inspect_image_for_rating(path, q)
                 if ans:
                     vision_notes[nid] = ans
-        if not use_llm:
-            return self.review_fast(
-                graph,
-                agent_feedback=agent_feedback,
-                supervisor_plan=supervisor_plan,
-                supervisor_report=supervisor_report,
-                node_states=node_states,
-                optimize_for=optimize_for,
-                vision_notes=vision_notes or None,
-            )
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
+        )
+
         _ = prior_feedback
         system = (
             "You are the Designer Manager Agent. Review the whole pipeline. "
@@ -5240,7 +4725,13 @@ class ManagerAgent:
             optimize_for="quality",
             max_tokens=32768,
         )
-        parsed = _extract_json_object(str(result.get("text") or "")) or {}
+        text = model_text_or_raise(result)
+        parsed = _extract_json_object(text) or {}
+        if not parsed:
+            raise DesignerLlmError(
+                "Chat model did not return a usable manager review.",
+                code=LLM_API_ERROR,
+            )
         scores_raw = parsed.get("scores") if isinstance(parsed.get("scores"), dict) else {}
         scores: dict[str, int] = {}
         for node in graph.get("nodes") or []:
@@ -5253,7 +4744,7 @@ class ManagerAgent:
         )
         return {
             "scores": scores,
-            "summary": str(parsed.get("summary") or result.get("text") or "")[:3000],
+            "summary": str(parsed.get("summary") or text)[:3000],
             "pipeline_notes": str(parsed.get("pipeline_notes") or "")[:2000],
             "suggestions": parsed.get("suggestions")
             if isinstance(parsed.get("suggestions"), dict)
@@ -5273,7 +4764,6 @@ class ManagerAgent:
         supervisor_final: dict[str, Any],
         manager_review: dict[str, Any],
         node_states: dict[str, Any] | None,
-        use_llm: bool = False,
     ) -> dict[str, Any]:
         """Assign two independent rating agents; aggregate for Run-again feedback only."""
         base_payload = {
@@ -5294,63 +4784,57 @@ class ManagerAgent:
             '"feedback_nodes":{"<id>":"..."},'
             '"feedback_supervisor":"...","feedback_manager":"...","graph_design":"..."}'
         )
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
+        )
+
         raters: list[dict[str, Any]] = []
-        if use_llm:
-            for label in ("rater_a", "rater_b"):
-                try:
-                    result = await call_model_tool(
-                        prompt=json.dumps({**base_payload, "rater_id": label}, ensure_ascii=False),
-                        system=system,
-                        optimize_for="quality",
-                        max_tokens=8192,
+        for label in ("rater_a", "rater_b"):
+            try:
+                result = await call_model_tool(
+                    prompt=json.dumps({**base_payload, "rater_id": label}, ensure_ascii=False),
+                    system=system,
+                    optimize_for="quality",
+                    max_tokens=8192,
+                )
+                rtext = model_text_or_raise(result)
+                parsed = _extract_json_object(rtext) or {}
+                if not parsed:
+                    raise DesignerLlmError(
+                        f"Chat model did not return usable dual-rater output ({label}).",
+                        code=LLM_API_ERROR,
                     )
-                    parsed = _extract_json_object(str(result.get("text") or "")) or {}
-                    raters.append(
-                        {
-                            "id": label,
-                            "overall": float(parsed.get("overall") or 0),
-                            "node_scores": parsed.get("node_scores")
-                            if isinstance(parsed.get("node_scores"), dict)
-                            else {},
-                            "feedback_nodes": parsed.get("feedback_nodes")
-                            if isinstance(parsed.get("feedback_nodes"), dict)
-                            else {},
-                            "feedback_supervisor": str(parsed.get("feedback_supervisor") or "")[:800],
-                            "feedback_manager": str(parsed.get("feedback_manager") or "")[:800],
-                            "graph_design": str(parsed.get("graph_design") or "")[:800],
-                            "model": result.get("model"),
-                        }
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.info("Dual rater %s failed", label, exc_info=True)
+                raters.append(
+                    {
+                        "id": label,
+                        "overall": float(parsed.get("overall") or 0),
+                        "node_scores": parsed.get("node_scores")
+                        if isinstance(parsed.get("node_scores"), dict)
+                        else {},
+                        "feedback_nodes": parsed.get("feedback_nodes")
+                        if isinstance(parsed.get("feedback_nodes"), dict)
+                        else {},
+                        "feedback_supervisor": str(parsed.get("feedback_supervisor") or "")[:800],
+                        "feedback_manager": str(parsed.get("feedback_manager") or "")[:800],
+                        "graph_design": str(parsed.get("graph_design") or "")[:800],
+                        "model": result.get("model"),
+                    }
+                )
+            except DesignerLlmError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Dual rater %s failed", label, exc_info=True)
+                raise DesignerLlmError(
+                    f"Chat model request failed for dual rater {label}: {exc}",
+                    code=LLM_API_ERROR,
+                ) from exc
         if not raters:
-            # Heuristic dual notes when LLM unavailable.
-            # TODO: remove this entire heuristic fallback path (temporary until dual-rater
-            # always has an LLM). graph_design wording below is stale (still mentions
-            # keyframes); do not invest in keeping it accurate.
-            overall = float((manager_review or {}).get("scores", {}).get("overall") or 5)
-            raters = [
-                {
-                    "id": "rater_a",
-                    "overall": overall,
-                    "node_scores": {},
-                    "feedback_nodes": {},
-                    "feedback_supervisor": "Prefer real video clips and prune non-contributing nodes.",
-                    "feedback_manager": "Keep brief/storyboard fidelity gates strict.",
-                    "graph_design": "Brief→storyboard→solo cast+scenes→keyframes→clips→compose.",
-                    "model": "heuristic",
-                },
-                {
-                    "id": "rater_b",
-                    "overall": max(0.0, overall - 0.5),
-                    "node_scores": {},
-                    "feedback_nodes": {},
-                    "feedback_supervisor": "Strengthen continuity locks across shots.",
-                    "feedback_manager": "Aggregate rater feedback only on Run again.",
-                    "graph_design": "Ensure speech/music always feed compose when present.",
-                    "model": "heuristic",
-                },
-            ]
+            raise DesignerLlmError(
+                "Chat model did not return dual-rater feedback.",
+                code=LLM_API_ERROR,
+            )
         overalls = [float(r.get("overall") or 0) for r in raters]
         agg_overall = sum(overalls) / max(1, len(overalls))
         # Merge node feedback from both raters.
@@ -5407,7 +4891,6 @@ class ManagerAgent:
         supervisor_final: dict[str, Any],
         manager_review: dict[str, Any],
         node_states: dict[str, Any] | None,
-        use_llm: bool = False,
     ) -> dict[str, Any]:
         """Public alias: two independent raters → dual_raters + aggregated_recommendations."""
         return await self.dual_rate_final(
@@ -5416,81 +4899,11 @@ class ManagerAgent:
             supervisor_final=supervisor_final,
             manager_review=manager_review,
             node_states=node_states,
-            use_llm=use_llm,
         )
 
 
 class SupervisorReviewer:
     """Writes per-node report + ratings after one-pass execution (no re-run loop)."""
-
-    def finalize_fast(
-        self,
-        graph: DesignerExecutionGraph,
-        *,
-        agent_feedback: dict[str, dict[str, Any]],
-        node_states: dict[str, Any] | None,
-        optimize_for: str,
-        vision_notes: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        scores: dict[str, int] = {}
-        suggestions: dict[str, str] = {}
-        reports: dict[str, str] = {}
-        self_scores: list[int] = []
-        rating_mod = str(
-            (graph.get("metadata") or {}).get("rating_modality")
-            or ((graph.get("metadata") or {}).get("modality_plan") or {}).get(
-                "global_rating_modality"
-            )
-            or "text_only"
-        )
-        vision_used = bool(vision_notes)
-        for node in graph.get("nodes") or []:
-            nid = str(node.get("id") or "")
-            if not nid:
-                continue
-            score, note = _heuristic_node_score(
-                nid, agent_feedback=agent_feedback, node_states=node_states
-            )
-            fb = agent_feedback.get(nid) or {}
-            vnote = (vision_notes or {}).get(nid) or ""
-            if vnote:
-                low = vnote.lower()
-                if any(
-                    w in low for w in ("mismatch", "wrong", "unrelated", "blank", "empty")
-                ):
-                    score = _clamp_score(score - 2, score)
-                elif any(w in low for w in ("match", "consistent", "clear", "good")):
-                    score = _clamp_score(score + 1, score)
-                note = (note + " | vision: " + vnote[:180]).strip(" |")
-            reports[nid] = str(
-                fb.get("artifact_summary") or fb.get("notes") or note
-            )[:1500]
-            scores[nid] = score
-            self_scores.append(score)
-            if score < 6:
-                suggestions[nid] = note or "Retry with clearer task constraints"
-        overall = int(round(sum(self_scores) / max(1, len(self_scores)))) if self_scores else 6
-        scores["overall"] = overall
-        suggestions["global"] = (
-            "One-pass complete. Use Run again to apply these ratings as constraints."
-        )
-        return {
-            "scores": scores,
-            "node_reports": reports,
-            "summary": (
-                f"Supervisor finalize ({rating_mod}"
-                f"{', vision used' if vision_used else ''}). "
-                f"Overall {overall}/10. Optimize={optimize_for}."
-            )[:3000],
-            "suggestions": suggestions,
-            "aggregated_score": overall,
-            "improvement_plan": suggestions["global"],
-            "supervisor_model": "heuristic+vision" if vision_used else "heuristic",
-            "optimize_for": optimize_for,
-            "rating_modality": rating_mod,
-            "vision_used": vision_used,
-            "vision_notes": vision_notes or {},
-        }
 
     async def finalize(
         self,
@@ -5499,7 +4912,6 @@ class SupervisorReviewer:
         agent_feedback: dict[str, dict[str, Any]],
         manager_review: dict[str, Any],
         optimize_for: str,
-        use_llm: bool = False,
         node_states: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         vision_notes: dict[str, str] = {}
@@ -5518,15 +4930,12 @@ class SupervisorReviewer:
                 ans = await inspect_image_for_rating(path, q)
                 if ans:
                     vision_notes[nid] = ans
-        if not use_llm:
-            # Fast path does not need manager_review; manager runs after supervisor report.
-            return self.finalize_fast(
-                graph,
-                agent_feedback=agent_feedback,
-                node_states=node_states,
-                optimize_for=optimize_for,
-                vision_notes=vision_notes or None,
-            )
+        from jiuwenswarm.server.runtime.designer.model_tools import (
+            DesignerLlmError,
+            LLM_API_ERROR,
+            model_text_or_raise,
+        )
+
         _ = manager_review
         system = (
             "You are the Designer Supervisor closing the run. "
@@ -5555,7 +4964,13 @@ class SupervisorReviewer:
             optimize_for="quality",
             max_tokens=32768,
         )
-        parsed = _extract_json_object(str(result.get("text") or "")) or {}
+        text = model_text_or_raise(result)
+        parsed = _extract_json_object(text) or {}
+        if not parsed:
+            raise DesignerLlmError(
+                "Chat model did not return a usable supervisor finalize report.",
+                code=LLM_API_ERROR,
+            )
         scores_raw = parsed.get("scores") if isinstance(parsed.get("scores"), dict) else {}
         scores: dict[str, int] = {}
         self_scores: list[int] = []
@@ -5609,7 +5024,6 @@ async def write_run_feedback(
     payload = {
         "schema_version": "designer-feedback.v1",
         "optimize_for": optimize_for,
-        "one_pass": True,
         "agents": agent_feedback,
         "supervisor_plan": supervisor_plan or {},
         "supervisor": {
@@ -5652,7 +5066,7 @@ async def write_run_feedback(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    path = save_feedback(graph_id, run_id, payload)
+    save_feedback(graph_id, run_id, payload)
     meta = dict(graph.get("metadata") or {})
     meta["last_feedback_path"] = str(report_path)
     meta["last_feedback_run_id"] = run_id

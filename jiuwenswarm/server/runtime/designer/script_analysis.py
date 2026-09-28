@@ -1,8 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Analyze user prompts into cast, shots, scenes, and audio for smart graph build.
 
-Prefer LLM when configured models are available; otherwise use general heuristics
-(not scenario-specific templates).
+LLM is required for production analysis. ``heuristic_analysis`` is retained only as a
+unit-test helper for cast/shot parsing fixtures — never called on the product path.
 """
 
 from __future__ import annotations
@@ -96,7 +96,6 @@ def _strip_prompt_filler(text: str) -> str:
 
 def _contextual_character_name(role: str, clause: str, *, another: bool = False) -> str:
     """General labels from role + optional 'another' / motion cues (domain-agnostic)."""
-    role_l = role.lower()
     cl = clause.lower()
     base = _title_case_label(role)
     if another or re.search(r"\b(?:another|second|other)\b", cl):
@@ -886,7 +885,6 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         "scenes": scenes,
         "shots": shots,
         "audio": audio,
-        "skip_scene_specs": False,
         "scene_continuity_mode": "scene_card_plus_clip_shots",
         "summary": (
             f"{len(characters)} characters, {len(scenes)} scenes, {len(shots)} shots, "
@@ -895,15 +893,6 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         **decisions,
     }
     return ensure_audio_locks_on_analysis(payload, prompt)
-
-
-def _llm_configured() -> bool:
-    try:
-        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
-
-        return llm_available()
-    except Exception:  # noqa: BLE001
-        return False
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -1020,7 +1009,8 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
             }
         )
     if not norm_scenes:
-        norm_scenes = list(base.get("scenes") or [])
+        # Derive placeholder scenes from shot setting_ids after the shot loop if needed.
+        norm_scenes = []
     norm_shots: list[dict[str, Any]] = []
     for i, sh in enumerate(shots[:_MAX_SHOTS], start=1):
         if not isinstance(sh, dict):
@@ -1106,6 +1096,15 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
 
         entry["title"] = derive_shot_name(entry, fallback_index=i)
         norm_shots.append(entry)
+    if not norm_scenes and norm_shots:
+        seen: dict[str, str] = {}
+        for sh in norm_shots:
+            sid = str(sh.get("setting_id") or "").strip() or "set_1"
+            if sid not in seen:
+                seen[sid] = sid
+        norm_scenes = [
+            {"id": sid, "name": sid, "description": ""} for sid in seen
+        ]
     if not norm_shots:
         return None
     audio = parsed.get("audio") if isinstance(parsed.get("audio"), dict) else base.get("audio")
@@ -1191,7 +1190,6 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         "scenes": norm_scenes,
         "shots": norm_shots,
         "audio": audio,
-        "skip_scene_specs": False,
         "scene_continuity_mode": "scene_card_plus_clip_shots",
         "summary": str(parsed.get("summary") or "")[:500]
         or f"{len(norm_chars)} characters, {len(norm_shots)} shots",
@@ -1209,19 +1207,28 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
 async def analyze_creative_brief(
     prompt: str,
     *,
-    use_llm: bool = True,
     timeout_sec: float = _DEFAULT_LLM_TIMEOUT_SEC,
     reference_images: list[str] | None = None,
 ) -> dict[str, Any]:
-    """LLM cast/shot analysis when models are available; else general heuristics."""
-    base = heuristic_analysis(prompt)
-    if not use_llm or not _llm_configured():
-        return base
+    """LLM cast/shot analysis. Designer requires a configured chat model."""
+    from jiuwenswarm.server.runtime.designer.model_tools import (
+        DesignerLlmError,
+        LLM_API_ERROR,
+        call_model_tool,
+        model_text_or_raise,
+    )
+
+    # Minimal merge context — never invent cast/shots via heuristic_analysis.
+    base = {
+        "user_prompt": prompt,
+        "summary": (prompt or "")[:500],
+        "scenes": [],
+        "audio": {},
+    }
 
     short_clip, target_duration_sec = _prompt_mentions_duration(prompt)
     duration_sec = target_duration_sec or 6
     try:
-        from jiuwenswarm.server.runtime.designer.model_tools import call_model_tool
 
         from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             WAN_MAX_CLIP_SEC,
@@ -1279,22 +1286,10 @@ async def analyze_creative_brief(
             '"action":"...","camera":"...","on_screen":["char_1"],'
             '"offscreen":[],"cast_actions":{"char_1":"..."},"featured_cast_ids":["char_1"],'
             '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s"}],'
-            '"skip_scene_specs":false,"target_shot_count":N'
+            '"target_shot_count":N'
             + (f',"target_duration_sec":{duration_sec}' if target_duration_sec else "")
             + "}"
         )
-        user_payload = {
-            "user_prompt": prompt[:3000],
-            "instructions": (
-                "JSON only. Every named human must appear in characters[]. "
-                "Shots are consecutive time windows (not camera coverage of the same plot). "
-                "Each action is THAT window in full detail (blocking, speech, wardrobe). "
-                "Do not paste the entire user_prompt into every action. "
-                "Set target_shot_count = len(shots). "
-                "Each shot title MUST be a 2–4 word description of the shot "
-                "(any language; e.g. 'Open Door', 'Quiet Glance', '离开房间') — never 'Shot 1'."
-            ),
-        }
 
         async def _call(*, reinforce_json: bool = False) -> dict[str, Any] | None:
             """Return normalized LLM analysis, or None on soft failure (caller retries)."""
@@ -1310,7 +1305,7 @@ async def analyze_creative_brief(
                     '"shots":[{"shot_index":1,"action":"...","camera":"...",'
                     '"character_ids":["char_1"],"ensemble_cast_ids":["char_1"],'
                     '"featured_cast_ids":["char_1"],"setting_id":"set_1",'
-                    '"keyframe_prompt":"...","timeline":"0-5s"}],"skip_scene_specs":false}'
+                    '"keyframe_prompt":"...","timeline":"0-5s"}]}'
                 )
                 payload["retry"] = True
             result = await call_model_tool(
@@ -1320,23 +1315,9 @@ async def analyze_creative_brief(
                 max_tokens=32768,
                 images=list(reference_images or []) or None,
             )
-            if result.get("unavailable"):
-                marked = dict(base)
-                marked["source"] = "heuristic"
-                marked["llm_pending"] = False
-                marked["chat_unavailable"] = str(result.get("error") or "402")[:300]
-                logger.info("LLM script analysis unavailable (billing); using heuristic")
-                return marked
-            if result.get("fallback"):
-                logger.info("LLM script analysis used local fallback")
-                return None
-            if not result.get("ok"):
-                logger.info(
-                    "LLM script analysis tool err=%s; soft-fail",
-                    result.get("error"),
-                )
-                return None
-            text = str(result.get("text") or "")
+            if result.get("unavailable") or result.get("ok") is False or result.get("fallback"):
+                raise DesignerLlmError.from_call_result(result)
+            text = model_text_or_raise(result)
             parsed = _extract_json_object(text)
             if not parsed:
                 logger.info(
@@ -1376,40 +1357,37 @@ async def analyze_creative_brief(
             return normalized
 
         # Prefer LLM; one reinforce if first reply empty/non-JSON (max 2 attempts).
-        # A 402 is terminal: do not spend the second attempt on a dead balance.
+        # Billing / credential failures raise immediately (no second attempt).
         first = await asyncio.wait_for(_call(), timeout=max(3.0, float(timeout_sec)))
-        if isinstance(first, dict) and (
-            first.get("source") == "llm" or first.get("chat_unavailable")
-        ):
+        if isinstance(first, dict) and first.get("source") == "llm":
             return first
         remaining = max(8.0, float(timeout_sec) * 0.4)
         second = await asyncio.wait_for(_call(reinforce_json=True), timeout=remaining)
         if isinstance(second, dict) and second.get("source") == "llm":
             return second
-        # LLM configured but both attempts failed — mark pending so Supervisor re-authors.
-        pending = dict(base)
-        pending["source"] = "heuristic_pending_llm"
-        pending["llm_pending"] = True
-        logger.info("LLM script analysis exhausted retries; marking heuristic_pending_llm")
-        return pending
-    except asyncio.TimeoutError:
-        logger.info("LLM script analysis timed out after %.1fs; marking pending", timeout_sec)
-        pending = dict(base)
-        pending["source"] = "heuristic_pending_llm"
-        pending["llm_pending"] = True
-        return pending
+        raise DesignerLlmError(
+            "Chat model did not return a usable cast/shot analysis.",
+            code=LLM_API_ERROR,
+        )
+    except DesignerLlmError:
+        raise
+    except asyncio.TimeoutError as exc:
+        logger.info("LLM script analysis timed out after %.1fs", timeout_sec)
+        raise DesignerLlmError(
+            f"Chat model timed out after {timeout_sec:.0f}s during script analysis.",
+            code=LLM_API_ERROR,
+        ) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.info("LLM script analysis failed, marking pending: %s", exc)
-        pending = dict(base)
-        pending["source"] = "heuristic_pending_llm"
-        pending["llm_pending"] = True
-        return pending
+        logger.info("LLM script analysis failed: %s", exc)
+        raise DesignerLlmError(
+            f"Chat model request failed during script analysis: {exc}",
+            code=LLM_API_ERROR,
+        ) from exc
 
 
 def analyze_creative_brief_sync(
     prompt: str,
     *,
-    use_llm: bool = True,
     timeout_sec: float = _DEFAULT_LLM_TIMEOUT_SEC,
     reference_images: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1419,7 +1397,6 @@ def analyze_creative_brief_sync(
         return asyncio.run(
             analyze_creative_brief(
                 prompt,
-                use_llm=use_llm,
                 timeout_sec=timeout_sec,
                 reference_images=reference_images,
             )

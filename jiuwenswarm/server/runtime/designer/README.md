@@ -43,7 +43,7 @@ designer.graph.bootstrap
 | File | Responsibility |
 |------|----------------|
 | `smart_graph.py` | Build quality.v5 DAG: brief → storyboard → solos → empty scenes → clips → compose (**no clip→clip**) |
-| `script_analysis.py` | LLM/heuristic cast, scenes, shots, occupancy |
+| `script_analysis.py` | LLM cast, scenes, shots, occupancy (`heuristic_analysis` is test-only) |
 | `orchestration.py` | Supervisor / Manager; storyboard start/end authoring; leaf prompt rewrite; ratings |
 | `executor.py` | Ready-queue scheduler (concurrency ≤3); storyboard→clip sync; compose hard-wait |
 | `node_agent.py` | Leaf DeepAgent tools (`call_image_model` → `generate_designer_image`, `call_video_model`, `ffmpeg_compose`) |

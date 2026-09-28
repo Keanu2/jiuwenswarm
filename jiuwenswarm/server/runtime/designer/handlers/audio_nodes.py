@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -74,13 +75,15 @@ def _synthesize_bed(dest: Path, *, duration: float, kind: str) -> bool:
         str(dest.resolve()),
     ]
     try:
-        proc = subprocess.run(
-            [ffmpeg, *args],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            creationflags=_CREATE_NO_WINDOW,
-        )
+        kwargs: dict[str, object] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 20,
+        }
+        # CREATE_NO_WINDOW is Windows-only; passing it on Linux/macOS/WSL raises.
+        if os.name == "nt":
+            kwargs["creationflags"] = _CREATE_NO_WINDOW
+        proc = subprocess.run([ffmpeg, *args], **kwargs)
         return proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 0
     except Exception:  # noqa: BLE001
         logger.info("ffmpeg audio bed failed", exc_info=True)

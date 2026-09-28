@@ -559,7 +559,6 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     out["experiment_plan"] = "A"
     out["plan_a_version"] = "v12"
     out["skip_domain_role_locks"] = True
-    out["skip_scene_specs"] = False
     out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
     # Repair cast/props BEFORE compose policy so human leads stay heroes
     # and brand mascots stay on-device UI (not free-flying characters).
@@ -591,7 +590,6 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         enforce_setting_transitions(out)
     except Exception:  # noqa: BLE001
         out["keyframe_policy"] = "scene_card_plus_clip_shots"
-        out["skip_scene_specs"] = False
         out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
 
     # Identity / bleed clauses on featured (camera-focus) cast after ensemble stamp.
@@ -666,7 +664,6 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         "aspect": (out.get("aspect_lock") or {}).get("ratio"),
         "has_axis_lock": bool(out.get("axis_lock")),
         "keyframe_policy": out.get("keyframe_policy"),
-        "skip_scene_specs": bool(out.get("skip_scene_specs")),
         "has_production_bible": bool(out.get("production_bible")),
         "cast_prop_repair": list(
             (out.get("director_contract") or {}).get("cast_prop_repair") or []

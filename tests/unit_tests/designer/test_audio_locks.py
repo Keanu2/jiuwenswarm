@@ -106,7 +106,6 @@ def test_music_node_always_created_when_brief_wants_bgm(monkeypatch) -> None:
                 }
             ],
         },
-        ai_mode=False,
     )
     ids = [str(n.get("id") or "") for n in graph["nodes"]]
     assert "n_music" in ids
@@ -147,7 +146,6 @@ def test_supervisor_keeps_music_node_without_music_backend(monkeypatch) -> None:
             "scenes": [{"id": "scene_1", "name": "office"}],
             "shots": [{"shot_index": 1, "action": "monologue", "character_ids": ["char_1"]}],
         },
-        ai_mode=False,
     )
     assign_audio_node_agents(graph)
     ids = [str(n.get("id") or "") for n in graph["nodes"]]
@@ -193,7 +191,6 @@ def test_tts_node_is_never_created_even_when_backend_exists(monkeypatch) -> None
                 }
             ],
         },
-        ai_mode=False,
     )
     assign_audio_node_agents(graph)
     ids = [str(n.get("id") or "") for n in graph["nodes"]]

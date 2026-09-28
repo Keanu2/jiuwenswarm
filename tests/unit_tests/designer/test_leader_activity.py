@@ -17,7 +17,6 @@ from jiuwenswarm.server.runtime.designer.activity import (
 )
 from jiuwenswarm.server.runtime.designer.leader_chat import (
     apply_leader_plan,
-    heuristic_leader_plan,
     message_asks_to_run,
 )
 
@@ -144,61 +143,68 @@ def _sample_graph() -> dict:
     }
 
 
-def test_heuristic_refine_selected_node_reruns() -> None:
+def test_apply_leader_plan_refine_selected_node() -> None:
     graph = _sample_graph()
-    plan = heuristic_leader_plan(
-        graph,
-        "把角色改得更赛博",
-        selected_node_id="n_character",
-    )
-    assert plan["intent"] == "refine_node"
-    assert plan["run_node_ids"] == ["n_character"]
+    plan = {
+        "intent": "refine_node",
+        "summary": "Updated Character",
+        "patch": {
+            "upsert_nodes": [
+                {
+                    "id": "n_character",
+                    "type": "image",
+                    "label": "Character",
+                    "config": {"role": "character_design", "prompt": "把角色改得更赛博"},
+                }
+            ]
+        },
+        "run_node_ids": ["n_character"],
+    }
     next_graph, run_ids, summary = apply_leader_plan(graph, plan)
     assert run_ids == ["n_character"]
     char = next(node for node in next_graph["nodes"] if node["id"] == "n_character")
     assert "赛博" in str(char["config"]["prompt"])
-    assert "Updated" in summary or "Image" in summary
+    assert "Updated" in summary or "Character" in summary
 
 
-def test_heuristic_add_node_does_not_run_by_default() -> None:
+def test_apply_leader_plan_add_node_without_run() -> None:
     graph = _sample_graph()
-    plan = heuristic_leader_plan(graph, "加一个配乐节点接到成片，先别生成")
-    assert plan["intent"] == "edit_graph"
-    assert plan["run_node_ids"] == []
+    plan = {
+        "intent": "edit_graph",
+        "summary": "Added audio",
+        "patch": {
+            "upsert_nodes": [
+                {
+                    "id": "n_audio_1",
+                    "type": "audio",
+                    "label": "Audio",
+                    "config": {"role": "audio", "prompt": "配乐"},
+                }
+            ],
+            "upsert_edges": [
+                {
+                    "id": "e_audio_compose",
+                    "source": "n_audio_1",
+                    "target": "n_compose",
+                    "kind": "data",
+                }
+            ],
+        },
+        "run_node_ids": [],
+    }
     next_graph, run_ids, _summary = apply_leader_plan(graph, plan)
     assert run_ids == []
     types = {node["type"] for node in next_graph["nodes"]}
     assert "audio" in types
-    audio_id = next(node["id"] for node in next_graph["nodes"] if node["type"] == "audio")
     assert any(
-        edge.get("source") == audio_id and edge.get("target") == "n_compose"
+        edge.get("source") == "n_audio_1" and edge.get("target") == "n_compose"
         for edge in next_graph.get("edges") or []
     )
 
 
-def test_heuristic_add_image_does_not_wire_into_video_sink() -> None:
-    graph = _sample_graph()
-    plan = heuristic_leader_plan(graph, "加一个图")
-    assert plan["intent"] == "edit_graph"
-    next_graph, _run_ids, _summary = apply_leader_plan(graph, plan)
-    image_ids = [
-        node["id"]
-        for node in next_graph["nodes"]
-        if node["type"] == "image" and node["id"] != "n_character"
-    ]
-    assert image_ids
-    added = image_ids[0]
-    assert not any(
-        edge.get("source") == added and edge.get("target") == "n_compose"
-        for edge in next_graph.get("edges") or []
-    )
-
-
-def test_heuristic_add_node_runs_when_asked() -> None:
-    graph = _sample_graph()
-    plan = heuristic_leader_plan(graph, "加一个配乐节点并生成")
-    assert plan["run_node_ids"]
+def test_message_asks_to_run_detects_generate_intent() -> None:
     assert message_asks_to_run("加一个配乐节点并生成") is True
+    assert message_asks_to_run("加一个配乐节点接到成片，先别生成") is False
 
 
 def test_tool_result_activity_text_keeps_progress_lines_readable() -> None:

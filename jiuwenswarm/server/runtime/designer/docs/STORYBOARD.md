@@ -39,11 +39,9 @@ Also appends the **Production Lock Bible** for leaf context.
 | `role` | `storyboard` |
 | `prompt` | User prompt |
 | `planned_shots` | Shot list from analysis / Supervisor |
-| `prewritten` / `draft_prewritten` | Markdown table or hierarchical scenes |
-| `skip_llm` | True when Supervisor/heuristic prewrite |
 | `inputs` | `["n_brief"]` |
-| `tools` | `write_artifact` (± `call_model`) |
-| `delegate` | `agent` \| `handler` |
+| `tools` | `call_model`, `write_artifact` |
+| `delegate` | `agent` |
 | `skill_id` | `storyboard` |
 
 ### Per-shot fields (required for continuity)
@@ -79,7 +77,7 @@ Storyboard ready
         ↓
 StoryboardNodeHandler  OR  agent
         ↓
-prewritten / planned_shots / LLM storyboard
+planned_shots + LLM storyboard
   ensure_shot_start_end_states
   sync_shot_nodes_from_storyboard_markdown → clip configs
   stamp Production Lock Bible

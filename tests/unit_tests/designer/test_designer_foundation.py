@@ -46,6 +46,8 @@ def _handler_graph(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
     for node in graph.get("nodes") or []:
         config = node.setdefault("config", {})
         config["delegate"] = CONFIG_DELEGATE_HANDLER
+        config["force_handler"] = True
+        config["skip_llm"] = True
     return graph
 from jiuwenswarm.server.runtime.designer.executor import GraphExecutor
 from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
@@ -136,8 +138,12 @@ def stub_clip_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_concat,
     )
     monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.model_tools.require_llm",
+        lambda: None,
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.server.runtime.designer.model_tools.llm_available",
-        lambda: False,
+        lambda: True,
     )
 
 
@@ -566,36 +572,28 @@ async def test_mock_executor_completes_run(
     )
     character = node_states["n_character"]
     storyboard = node_states["n_storyboard"]
-    frame = node_states["n_frame_1"]
+    scene = node_states["n_scene"]
     assert str(character.get("output_ref", {}).get("uri") or "").startswith("file:")
     assert str(storyboard.get("output_ref", {}).get("uri") or "").startswith("file:")
-    assert len(frame.get("output_refs") or []) == 1
-    assert node_states["n_frame_2"].get("output_ref", {}).get("kind") == NODE_TYPE_IMAGE
-    assert node_states["n_frame_3"].get("output_ref", {}).get("kind") == NODE_TYPE_IMAGE
+    assert scene.get("output_ref", {}).get("kind") == NODE_TYPE_IMAGE
     clip = node_states["n_clip_1"]
     assert clip.get("output_ref", {}).get("kind") == NODE_TYPE_VIDEO
     assert str(clip.get("output_ref", {}).get("label") or "").endswith(".mp4")
-    assert node_states["n_clip_2"].get("output_ref", {}).get("kind") == NODE_TYPE_VIDEO
-    assert node_states["n_clip_3"].get("output_ref", {}).get("kind") == NODE_TYPE_VIDEO
     compose = node_states["n_compose"]
     assert compose.get("output_ref", {}).get("kind") == NODE_TYPE_VIDEO
     assert str(compose.get("output_ref", {}).get("label") or "").endswith(".mp4")
-    assert (character.get("started_at") or 0) <= (frame.get("started_at") or 0)
-    assert (storyboard.get("started_at") or 0) <= (frame.get("started_at") or 0)
-    assert (frame.get("completed_at") or 0) <= (clip.get("started_at") or 0)
-    assert (node_states["n_clip_3"].get("completed_at") or 0) <= (compose.get("started_at") or 0)
+    assert (character.get("started_at") or 0) <= (clip.get("started_at") or 0)
+    assert (storyboard.get("started_at") or 0) <= (clip.get("started_at") or 0)
+    assert (scene.get("completed_at") or 0) <= (clip.get("started_at") or 0)
+    assert (clip.get("completed_at") or 0) <= (compose.get("started_at") or 0)
     saved_graph = designer_store.get_graph(graph["graph_id"])
     assert saved_graph is not None
     assert [node["id"] for node in saved_graph["nodes"] if node_pipeline(node) == NODE_ROLE_CLIP] == [
         "n_clip_1",
-        "n_clip_2",
-        "n_clip_3",
     ]
-    assert [node["id"] for node in saved_graph["nodes"] if node_pipeline(node) == NODE_ROLE_FRAME] == [
-        "n_frame_1",
-        "n_frame_2",
-        "n_frame_3",
-    ]
+    assert not any(
+        node_pipeline(node) == NODE_ROLE_FRAME for node in saved_graph["nodes"]
+    )
 
 
 def test_normalize_drops_legacy_keyframe_chain() -> None:
@@ -814,9 +812,26 @@ def test_bootstrap_treats_default_project_as_create(designer_store: DesignerGrap
 
     monkeypatch.setattr(adapter.project_store, "create_or_restore_project", fake_create)
 
+    analysis = {
+        "source": "llm",
+        "characters": [{"id": "char_1", "name": "Traveler", "description": "coat"}],
+        "scenes": [{"id": "set_1", "name": "Station", "description": "platform"}],
+        "shots": [
+            {
+                "shot_index": 1,
+                "action": "walks onto the platform",
+                "camera": "medium",
+                "on_screen": ["char_1"],
+                "setting_id": "set_1",
+                "timeline": "0-5s",
+            }
+        ],
+        "target_shot_count": 1,
+    }
     payload, error, code = adapter._bootstrap_graph(
         {"prompt": "火车站短片", "project_id": "default"},
         "web",
+        analysis,
     )
     assert error is None
     assert code is None

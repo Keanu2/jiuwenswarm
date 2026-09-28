@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Canvas node labels — LLM/heuristic story names, never modality Image/Video N."""
+"""Canvas node labels — story names from analysis / brief, never modality Image/Video N."""
 
 from __future__ import annotations
 

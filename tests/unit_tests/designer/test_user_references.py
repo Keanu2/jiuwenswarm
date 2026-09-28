@@ -213,7 +213,6 @@ def test_music_node_survives_without_music_backend(monkeypatch: pytest.MonkeyPat
         prompt="a hero climbs a ridge",
         analysis=analysis,
         optimize_for="quality",
-        ai_mode=True,
     )
 
     assert "n_music" in {str(node.get("id")) for node in graph["nodes"]}
@@ -235,10 +234,6 @@ def test_bootstrap_graph_registers_user_references(
 
     monkeypatch.setattr(adapter, "_store", designer_store)
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.script_analysis._llm_configured",
-        lambda: False,
-    )
-    monkeypatch.setattr(
         adapter.project_store,
         "get_project_by_id",
         lambda project_id, cache_bust=False: SimpleNamespace(
@@ -251,6 +246,23 @@ def test_bootstrap_graph_registers_user_references(
     (tmp_path / "proj").mkdir()
     image = tmp_path / "hero.png"
     image.write_bytes(_png_bytes())
+    # Sync bootstrap only materializes; LLM analysis is produced on the event loop.
+    analysis = {
+        "source": "llm",
+        "characters": [{"id": "char_1", "name": "Hero", "description": "reference cast"}],
+        "scenes": [{"id": "set_1", "name": "Set", "description": "location"}],
+        "shots": [
+            {
+                "shot_index": 1,
+                "action": "stands",
+                "camera": "medium",
+                "on_screen": ["char_1"],
+                "setting_id": "set_1",
+                "timeline": "0-5s",
+            }
+        ],
+        "target_shot_count": 1,
+    }
     payload, error, code = adapter._bootstrap_graph(
         {
             "prompt": "按参考图做一个短片",
@@ -265,6 +277,7 @@ def test_bootstrap_graph_registers_user_references(
             ],
         },
         "web",
+        analysis,
     )
     assert error is None
     assert code is None
@@ -504,7 +517,6 @@ async def test_analyze_creative_brief_sends_reference_images(
             ),
         }
 
-    monkeypatch.setattr(analysis, "_llm_configured", lambda: True)
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.designer.model_tools.call_model_tool",
         fake_call_model_tool,
@@ -515,7 +527,6 @@ async def test_analyze_creative_brief_sends_reference_images(
     )
     result = await analysis.analyze_creative_brief(
         "按参考图做一个短片",
-        use_llm=True,
         timeout_sec=5.0,
         reference_images=[str(image)],
     )

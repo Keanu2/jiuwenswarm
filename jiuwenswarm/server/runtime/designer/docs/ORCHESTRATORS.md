@@ -26,7 +26,7 @@ UI Play
   → designer_adapter.start_run
   → GraphExecutor._execute_wave_run
        → ManagerAgent.decide_capabilities
-       → SupervisorAgent.plan / plan_fast (if needed)
+       → SupervisorAgent.plan (if needed)
        → ManagerAgent.validate_plan / prune / identity patches
        → continuous ready waves:
             for each ready leaf (clips concurrent when deps ready):

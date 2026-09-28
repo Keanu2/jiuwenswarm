@@ -235,7 +235,7 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
       </div>
       {error ? (
         <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="designer-landing-error-toast">
-          <div className="app-session-toast" role="alert">{error}</div>
+          <div className="app-connection-toast" role="alert">{error}</div>
         </div>
       ) : null}
     </section>

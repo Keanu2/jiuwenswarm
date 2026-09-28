@@ -27,7 +27,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
     uploaded_material_image_paths,
 )
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
-from jiuwenswarm.server.runtime.designer.handlers.image_nodes import _image_or_notes
+from jiuwenswarm.server.runtime.designer.handlers.image_nodes import _require_image
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 from jiuwenswarm.server.runtime.designer.user_references import (
     user_reference_image_paths,
@@ -83,14 +83,11 @@ class ImageNodeHandler:
         if payload:
             prompt = f"{prompt.rstrip()}\n\n{payload}".strip()
         refs = _upstream_images(ctx, node)
-        return await _image_or_notes(
+        return await _require_image(
             prompt=prompt,
-            notes=prompt,
             stem=f"designer_image_{ctx.run_id}_{ctx.node_id}",
-            kind_if_text=NODE_TYPE_IMAGE,
             size=_image_size_from_ctx(ctx, node),
             max_tries=4,
-            require_image=True,
             reference_images=[str(path) for path in refs] or None,
             ctx=ctx,
         )
