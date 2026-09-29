@@ -195,8 +195,7 @@
       "resizeHint": "Drag the bottom-right corner to resize this node"
     },
     "edge": {
-      "delete": "Delete connection",
-      "generate": "Generate target node"
+      "delete": "Delete connection"
     },
     "recentGraphs": "Recent graphs",
     "hasVideo": "Has shot",

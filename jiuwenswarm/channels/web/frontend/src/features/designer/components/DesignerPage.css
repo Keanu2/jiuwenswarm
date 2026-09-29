@@ -1722,7 +1722,6 @@ textarea.designer-node-toolbar__param-input {
   gap: 8px;
 }
 
-.designer-edge-generate,
 .designer-edge-delete {
   display: inline-flex;
   align-items: center;
@@ -1735,27 +1734,6 @@ textarea.designer-node-toolbar__param-input {
   color: #fff;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
   cursor: pointer;
-}
-
-.designer-edge-generate {
-  background: #1e88e5;
-}
-
-.designer-edge-generate:hover:not(:disabled) {
-  background: #1565c0;
-}
-
-.designer-edge-generate:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.designer-edge-generate:focus-visible {
-  outline: 2px solid #90caf9;
-  outline-offset: 2px;
-}
-
-.designer-edge-delete {
   background: #e53935;
 }
 

@@ -195,8 +195,7 @@
       "resizeHint": "拖动右下角调整节点大小"
     },
     "edge": {
-      "delete": "删除连线",
-      "generate": "生成目标节点"
+      "delete": "删除连线"
     },
     "recentGraphs": "最近设计图",
     "hasVideo": "已有成片",
