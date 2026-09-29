@@ -479,7 +479,7 @@ def stamp_shot_states_on_clip_cfg(
 
 
 def start_end_story_lines(cfg: dict[str, Any] | None) -> list[str]:
-    """Positive story-form lines from start_state / end_state for Wan bodies."""
+    """Opening placement from start_state. Finished action poses stay off the video body."""
     cfg = cfg if isinstance(cfg, dict) else {}
     lines: list[str] = []
     action = str(cfg.get("shot_action") or cfg.get("action") or "")
@@ -500,12 +500,6 @@ def start_end_story_lines(cfg: dict[str, Any] | None) -> list[str]:
                 lines.append(f"{cid} begins at {place}.")
         elif str(anchor).strip():
             lines.append(f"{cid} begins at {anchor}.")
-    if (
-        end.get("pose")
-        and end.get("pose") != start.get("pose")
-        and not _is_action_restatement(str(end["pose"]), action)
-    ):
-        lines.append(str(end["pose"]).rstrip(".") + ".")
     irreversible = _short(str(cfg.get("irreversible") or end.get("irreversible") or ""), limit=160)
     if irreversible and not _is_action_restatement(irreversible, action):
         lines.append(f"By the last frame, {irreversible.rstrip('.')}.")
