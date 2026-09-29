@@ -962,15 +962,14 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 def _prompt_mentions_duration(prompt: str) -> tuple[bool, int | None]:
-    """Detect duration cues; return (fits_in_one_wan_clip, target_duration_sec)."""
+    """Detect duration cues; return (has_explicit_runtime, target_duration_sec)."""
     from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
-        WAN_MAX_CLIP_SEC,
         requested_film_duration_sec,
     )
 
     dur = requested_film_duration_sec(prompt)
     if dur is not None:
-        return dur <= WAN_MAX_CLIP_SEC, dur
+        return True, dur
     low = (prompt or "").lower()
     if re.search(r"\b(short|one[- ]shot|single[- ]shot|movie clip|6s)\b", low):
         return True, 6
@@ -1338,12 +1337,6 @@ async def analyze_creative_brief(
     duration_sec = target_duration_sec or 6
     try:
 
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
-            WAN_MAX_CLIP_SEC,
-            needs_duration_slicing,
-            sequential_shot_count,
-        )
-
         story_enrichment_rule = (
             "Treat explicit user facts and constraints as authoritative. When the request is "
             "sparse (for example only a topic, format, and duration), creatively develop the "
@@ -1360,29 +1353,17 @@ async def analyze_creative_brief(
             "Each shot.action describes ONLY that window — do not paste the user prompt "
             "into actions and do not restage the whole story from a new camera "
             "(angle coverage only if the user asked for multi-cam / same-moment angles). "
-            f"One clip = one continuous shot, duration ≤{WAN_MAX_CLIP_SEC}s (Wan max). "
             "New setting_id / hard cut / wardrobe / on-screen cast change → new shot. "
             "Qwen KF: lock identity+wardrobe; first setting KF = compose_from_solo_refs, "
             "later same setting = edit_prior_keyframe; prefer ≤2–3 people with refs. "
-            "Wan prompt = This shot's motion+camera only. "
-            "Explicit user N-shot / N分镜 is a HARD ceiling unless requested runtime "
-            f"exceeds {WAN_MAX_CLIP_SEC}s, then use ceil(duration/{WAN_MAX_CLIP_SEC}) "
-            "sequential clips (hard max 16). "
+            "Clip prompt = this shot's motion and camera only. "
+            "Explicit user N-shot / N分镜 is a HARD ceiling (hard max 16). "
         )
         if target_duration_sec:
-            if needs_duration_slicing(prompt):
-                n_clips = sequential_shot_count(int(duration_sec))
-                duration_rule = (
-                    f"Requested runtime {duration_sec}s exceeds Wan max {WAN_MAX_CLIP_SEC}s. "
-                    f"Set target_duration_sec={duration_sec}; use at least {n_clips} sequential "
-                    f"clips, and use more distinct clips when the developed content needs them. "
-                    f"Every clip must be 2–{WAN_MAX_CLIP_SEC}s with contiguous timelines. "
-                    "Each clip covers only its own advancing story window."
-                )
-            else:
-                duration_rule = (
-                    f"Film ~{duration_sec}s total: set target_duration_sec={duration_sec}. "
-                )
+            duration_rule = (
+                f"Film ~{duration_sec}s total: set target_duration_sec={duration_sec}. "
+                "Each clip covers only its own advancing story window and may be as long as that window."
+            )
         else:
             duration_rule = ""
         # Compact schema — long prompts make deepseek-flash return prose/empty.

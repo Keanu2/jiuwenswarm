@@ -85,13 +85,13 @@ def test_minimax_h3_ref2va_form_without_size_uses_adaptive_canvas() -> None:
     assert form.extra_params["duration"] == 4.0
 
 
-def test_minimax_h3_duration_is_clamped_to_the_4_15s_contract() -> None:
+def test_minimax_h3_duration_keeps_the_4s_floor_and_requested_length() -> None:
     spec = _h3_spec()
     low = spec.build(VllmOmniVideoInputs(size=None, duration=1, resolution=None, has_references=False))
     high = spec.build(VllmOmniVideoInputs(size=None, duration=30, resolution=None, has_references=False))
 
     assert low.extra_params is not None and low.extra_params["duration"] == 4.0
-    assert high.extra_params is not None and high.extra_params["duration"] == 15.0
+    assert high.extra_params is not None and high.extra_params["duration"] == 30.0
 
 
 def test_generic_video_form_never_builds_extra_params() -> None:

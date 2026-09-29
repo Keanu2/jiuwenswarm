@@ -625,7 +625,7 @@ def _invoke_minimax_video_generation_sync(
     if not model_name:
         raise ValueError("video model is required (configure models.video_gen)")
     is_max = model_name.lower().endswith("-max")
-    duration_int = _clamp_duration(duration, minimum=5 if is_max else 4, maximum=15)
+    duration_int = max(5 if is_max else 4, int(duration))
     ratio = _size_to_ratio(size, default="16:9")
     resol = _normalize_minimax_resolution(resolution, size)
     if is_max and resol == "2K":
@@ -1355,7 +1355,7 @@ async def generate_video(
         duration_int = int(duration)
     except (TypeError, ValueError):
         duration_int = 5
-    duration_int = max(1, min(duration_int, 15))
+    duration_int = max(1, duration_int)
 
     result = await _invoke_model_video_generation(
         prompt,

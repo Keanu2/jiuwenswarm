@@ -229,8 +229,7 @@ def _parse_size(size: str | None) -> tuple[int, int] | None:
 _MINIMAX_H3_NUM_INFERENCE_STEPS = 50  # matches the reference accuracy workloads
 _MINIMAX_H3_FLOW_SHIFT = 12.0  # video sigma shift
 _MINIMAX_H3_AUDIO_FLOW_SHIFT = 3.0  # audio sigma shift; H3 output always has audio
-_MINIMAX_H3_MIN_DURATION_SECONDS = 4.0  # H3 output contract: 4-15 s at 24 FPS
-_MINIMAX_H3_MAX_DURATION_SECONDS = 15.0
+_MINIMAX_H3_MIN_DURATION_SECONDS = 4.0  # H3 output floor; no upper duration cap
 _MINIMAX_H3_SHORT_EDGE = 768  # H3 shape policy requires exactly 768 when used
 _MINIMAX_H3_NAMED_RATIOS: tuple[tuple[int, int], ...] = (
     (21, 9),
@@ -291,10 +290,7 @@ def _build_minimax_h3_video_form(inputs: VllmOmniVideoInputs) -> VllmOmniVideoFo
         if inputs.duration is None
         else float(inputs.duration)
     )
-    duration = max(
-        _MINIMAX_H3_MIN_DURATION_SECONDS,
-        min(_MINIMAX_H3_MAX_DURATION_SECONDS, duration),
-    )
+    duration = max(_MINIMAX_H3_MIN_DURATION_SECONDS, duration)
     extra_params = {
         "task": task,
         "duration": duration,

@@ -1,8 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Per-clip plot scope: this storyboard window only — never the full user prompt.
 
-A/B apply to every film. C (Wan-max time slicing) only when the user asked for a
-runtime longer than one Wan clip.
+A clip keeps the duration of its own timeline. Runtime longer than 15s does not
+force a split, and generation is not shortened to that old model cap.
 """
 
 from __future__ import annotations
@@ -13,10 +13,10 @@ from typing import Any
 
 from jiuwenswarm.common.schema.designer_graph import MAX_SHOT_CLIP_NODES
 
-# DashScope Wan clip duration accepted by video_tools (_invoke_model_video_generation).
+# Historical single-clip cap (DashScope Wan / MiniMax 15s). No longer applied:
+# a clip uses its timeline length, and long films are not split to fit 15s.
 WAN_MAX_CLIP_SEC = 15
 MIN_CLIP_SEC = 2
-MAX_FILM_SEC = MAX_SHOT_CLIP_NODES * WAN_MAX_CLIP_SEC
 
 _STOP = frozenset(
     """
@@ -55,7 +55,7 @@ def clamp_clip_duration(seconds: int | float | None, *, default: int = 5) -> int
         raw = int(round(float(seconds if seconds is not None else default)))
     except (TypeError, ValueError):
         raw = int(default)
-    return max(MIN_CLIP_SEC, min(WAN_MAX_CLIP_SEC, raw if raw > 0 else int(default)))
+    return max(MIN_CLIP_SEC, raw if raw > 0 else int(default))
 
 
 def duration_from_timeline(timeline: str, *, default: int = 5) -> int:
@@ -107,8 +107,9 @@ def requested_film_duration_sec(prompt: str) -> int | None:
 
 
 def needs_duration_slicing(prompt: str, *, wan_max: int = WAN_MAX_CLIP_SEC) -> bool:
-    dur = requested_film_duration_sec(prompt)
-    return bool(dur is not None and int(dur) > int(wan_max))
+    """Long runtime no longer forces extra clips. The 15s cap is not applied."""
+    del prompt, wan_max
+    return False
 
 
 def sequential_shot_count(
@@ -123,14 +124,12 @@ def sequential_shot_count(
 
 
 def film_duration_for_graph(prompt: str, analysis: dict[str, Any] | None = None) -> int:
-    """Runtime used for brief/storyboard totals. Caps at what 16 Wan clips can hold."""
+    """Runtime used for brief/storyboard totals. Uses the requested length as-is."""
     asked = requested_film_duration_sec(prompt)
     if asked:
-        if asked <= WAN_MAX_CLIP_SEC:
-            return asked
-        return min(asked, MAX_FILM_SEC)
+        return int(asked)
     raw = (analysis or {}).get("target_duration_sec") if isinstance(analysis, dict) else None
-    if isinstance(raw, (int, float)) and 1 <= int(raw) <= MAX_FILM_SEC:
+    if isinstance(raw, (int, float)) and 1 <= int(raw) <= 3600:
         return int(raw)
     return 0
 
@@ -379,13 +378,14 @@ def apply_shot_scope(
     *,
     wan_max: int = WAN_MAX_CLIP_SEC,
 ) -> dict[str, Any]:
-    """A/B always. C only when requested runtime > Wan max."""
+    """Keep each shot's own window. Do not split a long film into ≤15s clips."""
     out = dict(analysis or {})
     prompt = str(user_prompt or out.get("user_prompt") or "").strip()
     shots = [dict(s) for s in (out.get("shots") or []) if isinstance(s, dict)]
     coverage = user_asked_coverage(prompt)
     asked = requested_film_duration_sec(prompt)
-    slicing = bool(asked is not None and int(asked) > int(wan_max))
+    # The old path split any runtime above wan_max into ≤15s clips. That cap is off.
+    slicing = False and bool(asked is not None and int(asked) > int(wan_max))
 
     if slicing and asked:
         # The Wan limit determines the minimum number of clips, not the desired

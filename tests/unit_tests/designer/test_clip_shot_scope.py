@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
-    WAN_MAX_CLIP_SEC,
     apply_shot_scope,
     looks_like_full_story_restatement,
     needs_duration_slicing,
@@ -36,10 +35,10 @@ def test_requested_duration_minutes_and_seconds() -> None:
     assert brief_duration_seconds("a 5 minute film") == 300
 
 
-def test_c_only_when_longer_than_wan_max() -> None:
+def test_long_runtime_does_not_force_a_clip_split() -> None:
     assert needs_duration_slicing("10-second video") is False
     assert needs_duration_slicing("15 second film") is False
-    assert needs_duration_slicing("5 minute video") is True
+    assert needs_duration_slicing("5 minute video") is False
     assert needs_duration_slicing(LONG_STORY) is False
     assert sequential_shot_count(300) == 16
     assert sequential_shot_count(45) == 3
@@ -48,21 +47,18 @@ def test_c_only_when_longer_than_wan_max() -> None:
 def test_infer_budget_does_not_slice_short_films() -> None:
     assert infer_shot_budget("Make a 3-shot 15 second vertical video", {}) == 3
     n = infer_shot_budget("Create a 5 minute film of a family conversation", {})
-    assert n == sequential_shot_count(300)
-    assert n > 1
+    assert n == 1
+    assert n < sequential_shot_count(300)
 
 
-def test_apply_shot_scope_slices_long_runtime() -> None:
+def test_apply_shot_scope_keeps_a_long_runtime_in_one_clip() -> None:
     out = apply_shot_scope(
         {"shots": [{"shot_index": 1, "action": LONG_STORY, "shot_relation": "angle_variant"}]},
         "5 minute video. " + LONG_STORY,
     )
-    assert out["duration_slicing"] is True
-    assert len(out["shots"]) == sequential_shot_count(300)
-    first_end = float(str(out["shots"][0]["timeline"]).split("-")[1].replace("s", ""))
-    assert first_end <= WAN_MAX_CLIP_SEC + 0.01
-    starts = [float(s["timeline"].split("-")[0]) for s in out["shots"]]
-    assert starts == sorted(starts)
+    assert out["duration_slicing"] is False
+    assert len(out["shots"]) == 1
+    assert out["target_duration_sec"] == 300
     assert out["shots"][0]["shot_relation"] != "angle_variant"
 
 
@@ -78,17 +74,12 @@ def test_apply_shot_scope_preserves_richer_authored_plan_for_30_seconds() -> Non
         "Create a 30 second video for a Christmas product celebration.",
     )
 
-    assert out["duration_slicing"] is True
+    assert out["duration_slicing"] is False
     assert len(out["shots"]) == 4
     assert [shot["action"] for shot in out["shots"]] == [
         shot["action"] for shot in shots
     ]
-    assert [shot["timeline"] for shot in out["shots"]] == [
-        "0.0-7.0s",
-        "7.0-14.0s",
-        "14.0-22.0s",
-        "22.0-30.0s",
-    ]
+    assert out["target_duration_sec"] == 30
 
 
 def test_apply_shot_scope_skips_c_when_under_wan_max() -> None:
