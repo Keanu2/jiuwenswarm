@@ -33,8 +33,9 @@ def test_ensure_shot_start_end_chains_same_setting() -> None:
     assert out[0]["start_state"]
     assert out[0]["end_state"]
     assert out[1]["start_state"]
-    # Shot 2 start inherits shot 1 end pose when not authored.
-    assert out[1]["start_state"].get("pose") or out[1]["start_state"].get("speech_done") is not None
+    # Shot 2 keeps the spoken result, and does not replay shot 1's motion.
+    assert out[1]["start_state"].get("speech_done") == "Oh no!"
+    assert "turns to the calendar" not in str(out[1]["start_state"].get("pose") or "")
     assert not validate_storyboard_state_chain(out)
 
 
@@ -53,3 +54,51 @@ def test_stamp_clears_continuity_clip_node() -> None:
     assert "continuity_clip_node_id" not in cfg
     assert cfg.get("start_state")
     assert cfg.get("seat_anchors")
+
+
+def test_story_curve_keeps_one_climax_and_carries_the_end() -> None:
+    from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
+        ensure_shot_start_end_states,
+        start_end_story_lines,
+        stamp_shot_states_on_clip_cfg,
+    )
+
+    shots = ensure_shot_start_end_states(
+        [
+            {
+                "shot_index": 1,
+                "setting_id": "set_1",
+                "action": "A wrapped box lands beneath the tree.",
+                "irreversible": "The wrapped box rests under the tree.",
+                "emotion": "climax",
+                "on_screen": ["char_1"],
+                "cast_states": {"char_1": {"wardrobe": "red sweater", "presence": "on_screen"}},
+            },
+            {
+                "shot_index": 2,
+                "setting_id": "set_1",
+                "action": "The family opens the box together.",
+                "emotion": "climax",
+                "on_screen": ["char_1"],
+                "cast_states": {"char_1": {"wardrobe": "red coat", "presence": "on_screen"}},
+            },
+            {
+                "shot_index": 3,
+                "setting_id": "set_1",
+                "action": "They toast with the product on the table.",
+                "on_screen": ["char_1"],
+            },
+        ]
+    )
+
+    assert [shot["emotion"] for shot in shots].count("climax") == 1
+    assert shots[1]["emotion"] == "climax"
+    assert "lands beneath" not in " ".join(shots[1].get("do_not_replay") or [])
+    assert shots[1]["start_state"].get("pose") == "The wrapped box rests under the tree."
+    assert "lands beneath" not in str(shots[1]["start_state"].get("pose"))
+    assert any("red coat" in change for change in shots[1]["wardrobe_changes"])
+    lines = start_end_story_lines(stamp_shot_states_on_clip_cfg({}, shot=shots[1]))
+    assert any("single climax" in line for line in lines)
+    assert any("red coat" in line for line in lines)
+    assert "lands beneath" not in " ".join(lines)
+    assert not any("already finished" in line for line in lines)

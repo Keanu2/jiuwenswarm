@@ -515,16 +515,18 @@ def pose_holds_from_events(
 ) -> list[str]:
     """Positive opening holds so the next clip does not restage finished beats."""
     holds: list[str] = []
+    prior = str(prior_action or "").strip().lower()
     for item in events or []:
         kind = str(item.get("type") or "").strip().lower()
         if kind not in {"beat", "onset"}:
             continue
         hold = _hold_from_beat_note(str(item.get("already_done") or ""))
-        if hold and hold not in holds:
-            holds.append(hold)
-    if not holds and prior_action and (_BEAT_RE.search(prior_action) or _ONSET_RE.search(prior_action)):
-        clause = str(prior_action).strip().rstrip(".")[:160]
-        holds.append(f"Already past: {clause}.")
+        if not hold or hold in holds:
+            continue
+        low = hold.lower()
+        if "already past:" in low or (prior and prior in low):
+            continue
+        holds.append(hold)
     return holds[:8]
 
 

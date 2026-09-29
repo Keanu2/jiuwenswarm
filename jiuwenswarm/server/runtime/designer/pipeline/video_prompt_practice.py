@@ -637,8 +637,18 @@ def _continuity_story_lines(cfg: dict[str, Any]) -> list[str]:
                 cfg["pose_holds"] = holds
         except Exception:  # noqa: BLE001
             holds = []
+    prior_action = str(cfg.get("previous_clip_action") or "")
+    this_action = str(cfg.get("shot_action") or cfg.get("action") or "")
+    try:
+        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
+            _is_action_restatement,
+        )
+    except Exception:  # noqa: BLE001
+        _is_action_restatement = None  # type: ignore[assignment]
     for hold in holds[:4]:
         text = hold if hold.endswith(".") else hold + "."
+        if _is_action_restatement and _is_action_restatement(text, prior_action, this_action):
+            continue
         if text and not _BAD_DIRECTIVE.search(text) and text not in lines:
             lines.append(text)
 

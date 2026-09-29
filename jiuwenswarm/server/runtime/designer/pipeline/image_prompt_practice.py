@@ -16,6 +16,28 @@ _BAD = re.compile(
     r"\bstyle lock\b|\bspatial lock\b|\baspect lock\b|\btime of day lock\b|"
     r"\bclothing lock\b|\bstaging lock\b|\bfor example\b|\be\.g\.\b)"
 )
+_SETTING_ID = re.compile(r"(?i)^(set|scene|setting)[_\s-]?\d+$")
+_INSTRUCTION_PLACE = re.compile(
+    r"(?i)("
+    r"keep one coherent|one coherent interior|coherent scene|primary setting|"
+    r"^setting$|static objects locked|no scene specs|never invent|as appropriate"
+    r")"
+)
+_PLACEHOLDER_PROP = re.compile(
+    r"(?i)("
+    r"primary landmark|architecture massing|secondary props|floor/ground plane|"
+    r"background depth cues|that define the scene|locked landmarks|as appropriate"
+    r")"
+)
+_EXTERIOR = (
+    "rooftop", "terrace", "balcony", "street", "outdoor", "exterior", "sky",
+    "garden", "courtyard", "beach", "park", "天台", "阳台", "户外", "室外",
+    "街道", "院子", "天空",
+)
+_INTERIOR = (
+    "room", "kitchen", "office", "interior", "bedroom", "hallway", "hall",
+    "室内", "房间", "厨房", "客厅", "办公室",
+)
 
 
 def _cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
@@ -61,13 +83,67 @@ def _aspect_phrase(cfg: dict[str, Any], graph: dict[str, Any] | None) -> str:
     return ", ".join(bits)
 
 
+def _visual_lighting(text: str) -> str:
+    """Drop planner clauses. Keep only the light the image can show."""
+    body = re.split(r"(?i)\b(?:do not|don't|never|forbid)\b", str(text or ""), maxsplit=1)[0]
+    body = re.sub(
+        r"(?i)\s*;?\s*keep\s+[\w /+-]+\s+across\s+same-setting\s+shots",
+        "",
+        body,
+    )
+    body = re.sub(r"(?i)\s*;?\s*no relight mid-scene", "", body)
+    return body.strip(" ,;.—-")
+
+
+def visual_place_name(text: Any) -> str:
+    """A place the image model can draw. Setting ids and lock sentences are not places."""
+    raw = str(text or "").strip()
+    raw = re.sub(r"(?i)^(set|scene|setting)[_\s-]?\d+\s*[:.\-]\s*", "", raw).strip()
+    if not raw or _SETTING_ID.match(raw) or _INSTRUCTION_PLACE.search(raw):
+        return ""
+    if _PLACEHOLDER_PROP.search(raw) or _BAD.search(raw):
+        return ""
+    return raw.split(".")[0].strip()[:160]
+
+
+def visual_prop_list(raw: Any) -> list[str]:
+    """Concrete props only. Planner placeholders are not objects in the frame."""
+    if isinstance(raw, str):
+        parts = re.split(r"[,;\n，、]+", raw)
+    elif isinstance(raw, list):
+        parts = list(raw)
+    else:
+        parts = []
+    out: list[str] = []
+    for item in parts:
+        text = str(item or "").strip()
+        if (
+            not text
+            or _BAD.search(text)
+            or _PLACEHOLDER_PROP.search(text)
+            or _INSTRUCTION_PLACE.search(text)
+        ):
+            continue
+        if text not in out:
+            out.append(text[:160])
+    return out[:6]
+
+
+def _enclosure_phrase(place: str) -> str:
+    text = str(place or "")
+    low = text.lower()
+    if any(word in text or word in low for word in _EXTERIOR):
+        return "Exterior, with the ground and the open background."
+    if any(word in text or word in low for word in _INTERIOR):
+        return "Interior of this place."
+    return ""
+
+
 def _tod_phrase(cfg: dict[str, Any]) -> str:
     tod = cfg.get("time_of_day_lock") if isinstance(cfg.get("time_of_day_lock"), dict) else {}
     bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
     label = str((tod or {}).get("time_of_day") or bible.get("time_of_day") or "").strip()
-    lighting = str((tod or {}).get("lighting") or bible.get("lighting") or "").strip()
-    lighting = re.split(r"(?i)\b(?:do not|don't|never|forbid)\b", lighting, maxsplit=1)[0]
-    lighting = lighting.strip(" ,;.—-")
+    lighting = _visual_lighting(str((tod or {}).get("lighting") or bible.get("lighting") or ""))
     if label and label.lower() != "unspecified":
         if lighting and label.lower() in lighting.lower():
             return lighting.rstrip(".") + "."
@@ -81,22 +157,23 @@ def _tod_phrase(cfg: dict[str, Any]) -> str:
 
 def _scene_phrase(cfg: dict[str, Any]) -> str:
     bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
-    place = str(bible.get("scene_name") or bible.get("place") or "").strip()
-    if place:
-        return place.split(".")[0].strip()[:120]
     spatial = cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else {}
-    for key in ("architecture", "setting", "static_rule"):
-        val = str((spatial or {}).get(key) or "").strip()
-        if val:
-            return val[:160]
-    return "the empty room"
+    for raw in (
+        bible.get("description"),
+        bible.get("scene_name"),
+        bible.get("place"),
+        bible.get("architecture"),
+        (spatial or {}).get("architecture"),
+    ):
+        place = visual_place_name(raw)
+        if place:
+            return place
+    return ""
 
 
 def _props_phrase(cfg: dict[str, Any]) -> str:
     bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
-    objects = bible.get("objects") if isinstance(bible.get("objects"), list) else []
-    props = [str(x).strip() for x in objects[:6] if str(x).strip() and not _BAD.search(str(x))]
-    return ", ".join(props)
+    return ", ".join(visual_prop_list(bible.get("objects")))
 
 
 def looks_like_lock_essay(prompt: str) -> bool:
@@ -123,21 +200,19 @@ def compose_scene_specs_prompt(
     props = _props_phrase(cfg)
     look = _style_look(cfg)
     aspect = _aspect_phrase(cfg, graph)
-    bits = [
-        f"Empty scene specs of {place}: furniture, walls, windows, light, and props only.",
-        "Clear establishing view of the room as a single photograph.",
-    ]
+    bits = [f"{place}." if place else "One empty setting."]
+    enclosure = _enclosure_phrase(place)
+    if enclosure:
+        bits.append(enclosure)
+    bits.append("The setting is empty.")
     if tod:
         bits.append(tod if tod.endswith(".") else tod + ".")
     if props:
-        bits.append(f"Visible props include {props}.")
+        bits.append(f"Visible props: {props}.")
     spatial = cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else {}
-    arch = str((spatial or {}).get("architecture") or "").strip()
+    arch = visual_place_name((spatial or {}).get("architecture"))
     if arch and arch.casefold() not in place.casefold():
-        clean = re.split(r"(?i)\b(?:do not|don't|never|forbid)\b", arch, maxsplit=1)[0]
-        clean = clean.strip(" ,;.—-")
-        if clean and not _BAD.search(clean):
-            bits.append(clean.rstrip(".") + ".")
+        bits.append(arch.rstrip(".") + ".")
     if look and not _BAD.search(look):
         bits.append(f"{look}.")
     if aspect:

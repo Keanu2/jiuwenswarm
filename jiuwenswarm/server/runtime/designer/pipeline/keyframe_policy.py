@@ -511,14 +511,16 @@ def build_scene_specs_for_setting(
         except Exception:  # noqa: BLE001
             lighting_raw = "motivated key light with stable direction; no relight mid-scene"
     lighting = str(lighting_raw or "motivated key light with stable direction; no relight mid-scene").strip()
-    objects = shot.get("scene_objects") if isinstance(shot.get("scene_objects"), list) else []
-    if not objects:
-        objects = [
-            "primary landmark / architecture massing",
-            "secondary props that define the scene",
-            "floor/ground plane continuity",
-            "background depth cues (walls/trees/skyline as appropriate)",
-        ]
+    from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
+        visual_place_name,
+        visual_prop_list,
+    )
+
+    named = visual_place_name(scene_name) or visual_place_name(
+        str(shot.get("setting_description") or "")
+    )
+    place_bit = named or (place_bit if visual_place_name(place_bit) else "")
+    objects = visual_prop_list(shot.get("scene_objects"))
     view_defs = {
         "front": f"VIEW front: facing primary landmark of `{setting_id}`; show full width of locked props.",
         "left": "VIEW left: 90° left of front; same objects must remain fixed — no new props.",

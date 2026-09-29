@@ -228,9 +228,8 @@ def merge_storyboard_continuity(
         beat_note = f"shot {p.get('shot_index')}: {action}"
         if beat_note not in beat_done:
             beat_done.append(beat_note)
-        hold = f"Already past: {action.rstrip('.')}."
-        if hold not in holds:
-            holds.append(hold)
+        # The previous action stays on already_done for the continuity check.
+        # It is not an opening hold: quoting it makes the next clip replay that tail.
     out["beat_done"] = beat_done[:16]
     out["pose_holds"] = holds[:8]
 
@@ -280,7 +279,9 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
             "write a NEW prompt for THIS storyboard row; never paste prior Wan text):"
         )
     if action_done:
-        lines.append(f"- Prior action finished: {action_done}")
+        lines.append(
+            "- Prior action is already finished. Open on the resulting still, then play only this shot."
+        )
     speech_done = str(
         end.get("speech_done") or cfg.get("previous_clip_speech") or ""
     ).strip()
@@ -290,6 +291,13 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
     if done:
         lines.append("- Already done: " + "; ".join(done[:8]))
     holds = [str(x).strip() for x in (cfg.get("pose_holds") or end.get("pose_holds") or []) if str(x).strip()]
+    holds = [
+        hold
+        for hold in holds
+        if "already past:" not in hold.lower()
+        and "after this shot" not in hold.lower()
+        and (not action_done or action_done.lower() not in hold.lower())
+    ]
     if holds:
         lines.append("- Opening holds: " + "; ".join(holds[:6]))
     seats = cfg.get("seat_anchors") if isinstance(cfg.get("seat_anchors"), dict) else {}

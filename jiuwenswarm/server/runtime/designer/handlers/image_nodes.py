@@ -122,11 +122,7 @@ def _scene_prompt(source: str, *, derive_from_master: bool = False, composed: bo
             "not a studio lineup. One instance per person. One clear image.\n"
             f"{source}"
         )
-    return (
-        "Empty scene specs: furniture, walls, windows, light, and props only. "
-        "Clear establishing view of the room as a single photograph. One clear image.\n"
-        f"{source}"
-    )
+    return str(source or "").strip()
 
 
 def _strip_markdown_tables(text: str) -> str:

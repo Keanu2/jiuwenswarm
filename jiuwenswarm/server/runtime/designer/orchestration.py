@@ -1499,6 +1499,10 @@ class Director:
                 "speech_by_character (map character_id→exact spoken line for This shot; "
                 "empty {} if silent), speech_line (joined fallback). "
                 "Same setting_id: next shot start_state MUST match prior end_state. "
+                "Exactly one shot has emotion=climax. Each shot includes irreversible "
+                "(what is newly true at the last frame) and cast_states "
+                "{id:{wardrobe,emotion,presence}}. Face stays the character sheet; "
+                "change wardrobe or emotion only when this shot's story changes them. "
                 "Shots are self-contained continuity windows — do not rely on prior "
                 "clip media. Film-wide locks: language_lock (e.g. en/zh — ALL dialogue in that "
                 "language), bgm_lock {mood,style,instruments,continuity,rule}, "
@@ -2285,7 +2289,7 @@ class Director:
         except Exception:  # noqa: BLE001
             pass
 
-        if spatial and "SPATIAL LOCK" not in prompt:
+        if spatial and "SPATIAL LOCK" not in prompt and role != "scene":
             prompt = (
                 prompt
                 + "\nSPATIAL LOCK: "

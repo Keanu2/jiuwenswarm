@@ -1163,6 +1163,18 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         }
         if cast_actions:
             entry["cast_actions"] = cast_actions
+        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
+            emotion_label,
+        )
+
+        labeled = emotion_label(sh.get("emotion") or sh.get("beat"))
+        if labeled:
+            entry["emotion"] = labeled
+        irreversible = str(sh.get("irreversible") or "").strip()
+        if irreversible:
+            entry["irreversible"] = irreversible[:160]
+        if isinstance(sh.get("cast_states"), dict) and sh.get("cast_states"):
+            entry["cast_states"] = sh["cast_states"]
         if strategy in {"compose_from_solo_refs", "edit_prior_keyframe"}:
             entry["keyframe_strategy"] = strategy
         from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
@@ -1285,6 +1297,11 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         decisions["target_shot_count"] = max(1, min(len(norm_shots) or ceiling, _MAX_SHOTS))
     if len(norm_shots) > int(decisions["target_shot_count"]):
         norm_shots = norm_shots[: int(decisions["target_shot_count"])]
+    from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
+        ensure_shot_start_end_states,
+    )
+
+    norm_shots = ensure_shot_start_end_states(norm_shots)
     out: dict[str, Any] = {
         "schema_version": "designer-script-analysis.v1",
         "source": "llm",
@@ -1347,6 +1364,10 @@ async def analyze_creative_brief(
             "Create enough distinct visual shots to earn the requested runtime; every shot must "
             "advance the idea, reveal new information, or change the emotional state. No filler, "
             "duplicate actions, or same-moment camera coverage presented as new content. "
+            "Use one emotion curve and exactly one climax. Each shot needs emotion "
+            "(setup, rise, climax, or release) and irreversible (what is newly true at the end). "
+            "The next shot starts from the previous end. cast_states may change wardrobe or "
+            "emotion for that shot; face identity stays the character description. "
         )
         shot_count_rule = (
             "Shots are consecutive TIME windows that concatenate to the film. "
@@ -1401,7 +1422,9 @@ async def analyze_creative_brief(
             '"shots":[{"shot_index":1,"title":"2-4 word beat name NEVER Shot N",'
             '"action":"...","camera":"...","on_screen":["char_1"],'
             '"offscreen":[],"cast_actions":{"char_1":"..."},"featured_cast_ids":["char_1"],'
-            '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s"}],'
+            '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s",'
+            '"emotion":"setup","irreversible":"what is newly true at the end",'
+            '"cast_states":{"char_1":{"wardrobe":"","emotion":"","presence":"on_screen"}}}],'
             '"target_shot_count":N'
             + (f',"target_duration_sec":{duration_sec}' if target_duration_sec else "")
             + (

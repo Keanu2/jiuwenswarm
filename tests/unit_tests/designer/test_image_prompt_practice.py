@@ -35,13 +35,60 @@ def test_compose_scene_plate_positive() -> None:
     }
     text = compose_scene_specs_prompt(cfg=cfg, seed="")
     low = text.lower()
-    assert "empty environment" in low or "furniture" in low
+    assert "office" in low
+    assert "interior" in low
+    assert "desk" in low and "chair" in low
     assert "dusk" in low or "soft dusk" in low
     assert "photoreal" in low
+    assert "the setting is empty" in low
     assert "STYLE LOCK" not in text
+    assert "SPATIAL LOCK" not in text
     assert "do not" not in low
-    assert "no people" not in low
     assert "forbid" not in low
+
+
+def test_scene_plate_skips_ids_placeholders_and_planner_rules() -> None:
+    from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
+        compose_scene_specs_prompt,
+    )
+
+    cfg = {
+        "role": "scene",
+        "style_lock": {"look": "flat illustrated color"},
+        "scene_specs": {
+            "scene_name": "set_1",
+            "description": "A city rooftop with a low parapet.",
+            "objects": [
+                "primary landmark / architecture massing",
+                "round table",
+                "background depth cues (walls/trees/skyline as appropriate)",
+            ],
+            "lighting": "dusk / golden-hour warmth; long shadows; keep dusk across same-setting shots",
+        },
+        "spatial_lock": {
+            "setting": "set_1",
+            "architecture": "keep one coherent place",
+            "static_rule": "Never invent an empty environment plate.",
+        },
+        "time_of_day_lock": {
+            "time_of_day": "dusk",
+            "lighting": "dusk / golden-hour warmth; long shadows; keep dusk across same-setting shots",
+        },
+    }
+    text = compose_scene_specs_prompt(cfg=cfg, seed="")
+    low = text.lower()
+    assert "rooftop" in low
+    assert "exterior" in low
+    assert "round table" in low
+    assert "set_1" not in low
+    assert "primary landmark" not in low
+    assert "skyline" not in low
+    assert "keep one coherent place" not in low
+    assert "keep dusk" not in low
+    assert "never" not in low
+    assert "spatial lock" not in low
+    assert "room" not in low
+    assert "illustrated" in low
 
 
 def test_compose_character_sheet_positive() -> None:

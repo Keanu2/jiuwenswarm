@@ -1158,9 +1158,10 @@ def build_smart_video_graph(
         base = dict(spatial_lock)
         base["setting"] = sid_s
         if str(scene_text).strip():
-            base["architecture"] = str(scene_text).strip()[:400]
+            text = str(scene_text).strip()[:400]
+            base["architecture"] = text
             base["static_rule"] = (
-                f"SETTING `{sid_s}` place lock: {str(place).strip()[:220]}. "
+                f"SETTING `{sid_s}` place lock: {text[:220]}. "
                 "Same-setting edits keep this architecture; other setting_ids must look different."
             )
         spatial_by_setting[sid_s] = base
@@ -1299,6 +1300,7 @@ def build_smart_video_graph(
             )
             from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
                 compose_scene_specs_prompt,
+                visual_place_name,
             )
 
             tod = infer_time_of_day_lock(
@@ -1313,24 +1315,25 @@ def build_smart_video_graph(
                 tod["time_of_day"] = str(scene_specs_setting.get("time_of_day"))
             if isinstance(scene_specs_setting, dict) and scene_specs_setting.get("lighting"):
                 tod["lighting"] = str(scene_specs_setting.get("lighting"))
+            place_name = visual_place_name(
+                (scene_specs_setting or {}).get("scene_name")
+            ) or visual_place_name(env_desc)
             seed_cfg = {
                 "role": NODE_ROLE_SCENE,
                 "setting_id": sid,
                 "scene_specs": {
                     **(scene_specs_setting or {}),
-                    "scene_name": (scene_specs_setting or {}).get("scene_name") or env_desc,
+                    "scene_name": place_name,
                 },
                 "spatial_lock": shot_spatial_scene,
                 "time_of_day_lock": tod,
+                "style_lock": dict(film_style) if isinstance(film_style, dict) else {},
                 "image_size": _IMAGE_SIZE,
             }
             scene_prompt = compose_scene_specs_prompt(cfg=seed_cfg, graph=None, seed="")
         except Exception:  # noqa: BLE001
             tod = {}
-            scene_prompt = (
-                f"Empty environment plate of {env_desc or sid}: furniture, walls, "
-                "windows, light, and props only. One clear image."
-            )
+            scene_prompt = "One empty setting. The setting is empty. One clear image."
         _ = (opening_cast, opening_action, ensemble_nids, lock_line_scene)
         scene_inputs = ["n_brief", "n_storyboard"]
         nodes.append(
