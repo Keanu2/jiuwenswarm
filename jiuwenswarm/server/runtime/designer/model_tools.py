@@ -527,12 +527,20 @@ async def call_model_tool(
                         "system_prompt": system,
                         "input": request_input,
                     },
-                ):
+                ) as span_payload:
                     resp = await client.chat.completions.create(**request_input)
-                choice = resp.choices[0] if resp.choices else None
-                msg = choice.message if choice is not None else None
-                text = _message_text(msg)
-                finish = str(getattr(choice, "finish_reason", None) or "")
+                    choice = resp.choices[0] if resp.choices else None
+                    msg = choice.message if choice is not None else None
+                    text = _message_text(msg)
+                    finish = str(getattr(choice, "finish_reason", None) or "")
+                    span_payload["output"] = text
+                    span_payload["finish_reason"] = finish or None
+                    span_payload["response_model"] = resp.model
+                    if resp.usage is not None:
+                        span_payload["usage"] = {
+                            "input_tokens": resp.usage.prompt_tokens,
+                            "output_tokens": resp.usage.completion_tokens,
+                        }
                 if not text:
                     return {
                         "ok": False,

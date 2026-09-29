@@ -34,6 +34,6 @@ If no chat model is configured, the same methods use deterministic heuristics (`
 | Storyboard rows | Character, scene, and shot nodes |
 | Node configs (`director_task`, locks, prompts) | Leaf agents and handlers |
 | Approved media prompt | The image or video call for that node |
-| Feedback bundle under `runs/` | The next Play, only if the user runs again |
+| Feedback under `<data dir>/agent/designer/feedback/` | The next Play, only if the user runs again |
 
 The director does not call the image or video model for every leaf. Leaf nodes do that after the gate.

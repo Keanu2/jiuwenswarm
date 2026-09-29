@@ -1481,9 +1481,9 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
                     detail={"input": deepcopy(kwargs)},
                 )
                 if trajectory is not None
-                else nullcontext()
+                else nullcontext({})
             )
-            with tool_span:
+            with tool_span as span_payload:
                 if toolkit.completed is not None and name == "designer_node_run":
                     return (
                         "already completed this node; scheduler will start remaining graph nodes"
@@ -1496,6 +1496,7 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
                     force=True,
                 )
                 result = await func(**kwargs)
+                span_payload["output"] = result
                 _emit_ctx_activity(
                     toolkit.ctx,
                     ACTIVITY_KIND_TOOL_CALL,
@@ -2021,10 +2022,11 @@ class NodeAgentHost:
                 "system_prompt": self._agent_system_prompts.get(key, system_prompt),
                 "input": deepcopy(invoke_input),
             },
-        ):
+        ) as span_payload:
             result = invoke(invoke_input, session=session)
             if hasattr(result, "__await__"):
                 result = await result
+            span_payload["output"] = result
         if toolkit.completed is not None:
             completed = toolkit.completed
             # Guarantee required media family even when agent completed with text/PNG only.

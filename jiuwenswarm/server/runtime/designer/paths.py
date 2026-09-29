@@ -1,17 +1,23 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Resolve Designer catalog + skills + reports/trajectory package directory."""
+"""Resolve Designer catalog + skills package and trajectory directories."""
 
 from __future__ import annotations
 
+import hashlib
+import re
 from functools import lru_cache
 from pathlib import Path
 
-# Current package name (catalog + skills + reports + trajectory).
+from jiuwenswarm.common.utils import get_user_workspace_dir
+from jiuwenswarm.common.work_mode import is_default_project_id
+
+# Local catalog package name; trajectories live under the data dir instead.
 _PACKAGE_DIRNAME = "designer_catalog_skills_reports_trajectory"
 # Older checkouts may still use the previous folder name.
 _LEGACY_PACKAGE_DIRNAMES = ("designer_catalog_and_skills",)
 _CATALOG_JSON = "designer_node_catalog.json"
 _CATALOG_TXT = "designer_node_catalog.txt"
+_SAFE_TRAJECTORY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 def _repo_roots() -> list[Path]:
@@ -24,7 +30,7 @@ def _repo_roots() -> list[Path]:
 
 @lru_cache(maxsize=1)
 def designer_package_dir() -> Path:
-    """Directory holding catalog JSON/TXT, skills/, and runs/ (reports + trajectory)."""
+    """Directory holding the local catalog JSON/TXT."""
     names = (_PACKAGE_DIRNAME, *_LEGACY_PACKAGE_DIRNAMES)
     for root in _repo_roots():
         for name in names:
@@ -47,31 +53,31 @@ def skills_dir() -> Path:
 
     Scenario, director, agent, subject, and style files live next to this
     package. The gitignored ``designer_catalog_skills_reports_trajectory``
-    directory is for local catalogs, reports, and trajectory only.
+    directory is for local catalogs only.
     """
     return Path(__file__).resolve().parent / "skills"
 
 
-def runs_dir() -> Path:
-    """Per-run trajectory + director report bundles."""
-    path = designer_package_dir() / "runs"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+def design_trajectory_dir() -> Path:
+    """Sibling of the session trajectory store under ``<data dir>/.trace``."""
+    return get_user_workspace_dir() / ".trace" / "designer"
 
 
-def run_bundle_path(graph_id: str, run_id: str) -> Path:
-    directory = runs_dir() / graph_id
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"{run_id}.json"
+def design_trajectory_key(project_id: str | None, graph_id: str) -> str:
+    """File stem shared by every run of one design project.
+
+    A design project owns exactly one graph, so the project id (visible in the
+    URL) identifies it. Graphs outside a real project fall back to the graph id.
+    """
+    raw = str(graph_id or "").strip() if is_default_project_id(project_id) else str(project_id).strip()
+    if _SAFE_TRAJECTORY_KEY.fullmatch(raw):
+        return raw
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def latest_run_bundle_path(graph_id: str) -> Path | None:
-    directory = runs_dir() / graph_id
-    if not directory.is_dir():
-        return None
-    files = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    # Prefer real run bundles over the latest.json pointer.
-    for path in files:
-        if path.name != "latest.json":
-            return path
-    return None
+def design_otlp_trajectory_path(key: str) -> Path:
+    return design_trajectory_dir() / f"{key}.otlp.jsonl"
+
+
+def design_record_trajectory_path(key: str) -> Path:
+    return design_trajectory_dir() / f"{key}.design.jsonl"

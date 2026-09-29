@@ -803,9 +803,10 @@ async def complete_designer_text(prompt: str, *, max_tokens: int = 8192) -> str:
             "system_prompt": "",
             "input": invoke_input,
         },
-    ):
+    ) as span_payload:
         response = await model.invoke(**invoke_input)
-    content = getattr(response, "content", response)
+        content = getattr(response, "content", response)
+        span_payload["output"] = content
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):

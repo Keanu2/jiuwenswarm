@@ -5083,9 +5083,7 @@ async def write_run_feedback(
     director_final: dict[str, Any],
     optimize_for: str,
 ) -> str:
-    """Persist report under package runs/ (primary) and mirror to agent feedback store."""
-    from jiuwenswarm.server.runtime.designer.paths import run_bundle_path
-
+    """Persist the run report in the feedback store read by Run again."""
     graph_id = str(graph.get("graph_id") or "")
     payload = {
         "schema_version": "designer-feedback.v1",
@@ -5128,17 +5126,11 @@ async def write_run_feedback(
             "apply_on": "run_again_only",
         },
     }
-    # Primary report path lives next to trajectory under the package runs/ folder.
-    report_path = run_bundle_path(graph_id, f"{run_id}.report")
-    report_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    save_feedback(graph_id, run_id, payload)
+    feedback_path = save_feedback(graph_id, run_id, payload)
     meta = dict(graph.get("metadata") or {})
-    meta["last_feedback_path"] = str(report_path)
+    meta["last_feedback_path"] = str(feedback_path)
     meta["last_feedback_run_id"] = run_id
     meta["last_aggregated_score"] = director_final.get("aggregated_score")
-    meta["last_report_path"] = str(report_path)
+    meta.pop("last_report_path", None)
     graph["metadata"] = meta
-    return str(report_path)
+    return str(feedback_path)

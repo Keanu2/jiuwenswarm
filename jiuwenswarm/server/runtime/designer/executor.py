@@ -928,6 +928,7 @@ class GraphExecutor:
     ) -> None:
         run_id = run["run_id"]
         graph_id = str(graph.get("graph_id") or "")
+        from jiuwenswarm.server.runtime.designer.feedback import load_latest_feedback
         from jiuwenswarm.server.runtime.designer.orchestration import (
             Director,
             write_run_feedback,
@@ -936,7 +937,6 @@ class GraphExecutor:
             begin_trajectory,
             end_trajectory,
             get_trajectory,
-            load_prior_feedback,
         )
 
         optimize_for = str((graph.get("metadata") or {}).get("optimize_for") or "quality")
@@ -948,7 +948,7 @@ class GraphExecutor:
         single_node_rerun = bool((run.get("metadata") or {}).get("single_node_rerun"))
         prior: dict[str, Any] | None = None
         if use_prior:
-            prior = load_prior_feedback(graph_id)
+            prior = load_latest_feedback(graph_id)
             if prior:
                 meta = dict(graph.get("metadata") or {})
                 meta["prior_feedback"] = prior
@@ -966,6 +966,7 @@ class GraphExecutor:
         traj = begin_trajectory(
             graph_id,
             run_id,
+            project_id=str(graph.get("project_id") or ""),
             meta={
                 "scenario": (graph.get("metadata") or {}).get("scenario"),
                 "optimize_for": optimize_for,

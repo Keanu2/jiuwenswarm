@@ -29,7 +29,12 @@ def feedback_path(graph_id: str, run_id: str) -> Path:
 
 def latest_feedback_path(graph_id: str) -> Path | None:
     directory = _feedback_dir(graph_id)
-    files = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # ``latest.json`` is a pointer file left behind by older versions.
+    files = sorted(
+        (p for p in directory.glob("*.json") if p.name != "latest.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     return files[0] if files else None
 
 
@@ -61,10 +66,6 @@ def save_feedback(graph_id: str, run_id: str, payload: dict[str, Any]) -> Path:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
-    # Pointer for quick lookup
-    latest = _feedback_dir(graph_id) / "latest.json"
-    with latest.open("w", encoding="utf-8") as fh:
-        json.dump({"path": str(path), "run_id": run_id}, fh, ensure_ascii=False, indent=2)
     return path
 
 
