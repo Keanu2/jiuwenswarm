@@ -3,10 +3,7 @@ import { webClient } from '../../services/webClient';
 import { isDesignerPreviewGraph } from './designerBootstrapGraph';
 import { designerGraphClient } from './designerGraphClient';
 import { useDesignerStore } from './designerStore';
-import {
-  derivePrimaryAction,
-  type DesignerRunPrimaryAction,
-} from './designerLayerRun';
+import { derivePrimaryAction, type DesignerRunPrimaryAction } from './designerLayerRun';
 import { isActiveDesignerRun, designerRunFailureMessage } from './designerRunView';
 import {
   DESIGNER_LEADER_NODE_ID,
@@ -37,10 +34,8 @@ type DesignerRunStore = {
   resetForGraph: (graph: DesignerExecutionGraph | null) => void;
   getPrimaryAction: (graph: DesignerExecutionGraph | null) => DesignerRunPrimaryAction;
   advance: (graph: DesignerExecutionGraph) => Promise<void>;
-  rerunCurrentLayer: (graph: DesignerExecutionGraph) => Promise<void>;
   rerunNode: (graph: DesignerExecutionGraph, nodeId: string) => Promise<void>;
   restart: (graph: DesignerExecutionGraph) => Promise<void>;
-  pause: () => Promise<void>;
   cancel: (graph: DesignerExecutionGraph | null) => Promise<void>;
   patchNodeOutput: (nodeId: string, outputRef: AssetRef) => void;
   chooseOutput: (nodeId: string, choice: 'original' | 'new') => Promise<void>;
@@ -151,22 +146,11 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
     if (run && !isActiveDesignerRun(run.status)) {
       const graph = useDesignerStore.getState().domainGraph;
       const primary = get().primaryAction;
-      const hasPending = Object.values(run.node_states || {}).some(
-        (s) => s?.status === DESIGNER_NODE_STATUS_PENDING,
-      );
-      const hasFailed = Object.values(run.node_states || {}).some(
-        (s) => s?.status === DESIGNER_NODE_STATUS_FAILED,
-      );
+      const hasPending = Object.values(run.node_states || {}).some((s) => s?.status === DESIGNER_NODE_STATUS_PENDING);
+      const hasFailed = Object.values(run.node_states || {}).some((s) => s?.status === DESIGNER_NODE_STATUS_FAILED);
       // A ComfyUI generate leaves the rest of the canvas pending on purpose.
       const scoped = Boolean(run.metadata?.scope_node_ids?.length);
-      if (
-        graph &&
-        hasPending &&
-        !hasFailed &&
-        !scoped &&
-        primary === 'continue' &&
-        run.status !== 'cancelled'
-      ) {
+      if (graph && hasPending && !hasFailed && !scoped && primary === 'continue' && run.status !== 'cancelled') {
         const key = `${run.run_id}:${Object.keys(run.node_states || {}).length}`;
         if (autoContinueKey !== key) {
           autoContinueKey = key;
@@ -248,12 +232,8 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       // repeated Continue clicks between layers / asset approvals.
       if (primary === 'retry_failed') {
         const failedId =
-          currentLayerNodeIds.find(
-            (nodeId) => nodeStates[nodeId]?.status === DESIGNER_NODE_STATUS_FAILED,
-          ) ??
-          Object.keys(nodeStates).find(
-            (nodeId) => nodeStates[nodeId]?.status === DESIGNER_NODE_STATUS_FAILED,
-          );
+          currentLayerNodeIds.find((nodeId) => nodeStates[nodeId]?.status === DESIGNER_NODE_STATUS_FAILED) ??
+          Object.keys(nodeStates).find((nodeId) => nodeStates[nodeId]?.status === DESIGNER_NODE_STATUS_FAILED);
         result = failedId
           ? await designerGraphClient.startRun({
               graphId: graph.graph_id,
@@ -266,8 +246,7 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
       } else {
         result = await designerGraphClient.startRun({ graphId: graph.graph_id });
       }
-      const warning =
-        String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
+      const warning = String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
       get().applyRun(result.run);
       if (warning) {
         set({ runWarning: warning });
@@ -275,13 +254,6 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
     } catch (error) {
       set({ runError: error instanceof Error ? error.message : String(error) });
     }
-  },
-
-  rerunCurrentLayer: async (graph) => {
-    const state = get();
-    const nodeId = state.currentLayerNodeIds[0];
-    if (!nodeId) return;
-    await get().rerunNode(graph, nodeId);
   },
 
   rerunNode: async (graph, nodeId) => {
@@ -295,8 +267,7 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
         runId: run?.run_id,
         nodeId,
       });
-      const warning =
-        String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
+      const warning = String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
       get().applyRun(result.run);
       if (warning) {
         set({ runWarning: warning });
@@ -312,23 +283,11 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
     set({ runError: null, runWarning: null });
     try {
       const result = await designerGraphClient.startRun({ graphId: graph.graph_id });
-      const warning =
-        String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
+      const warning = String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
       get().applyRun(result.run);
       if (warning) {
         set({ runWarning: warning });
       }
-    } catch (error) {
-      set({ runError: error instanceof Error ? error.message : String(error) });
-    }
-  },
-
-  pause: async () => {
-    const runId = get().run?.run_id;
-    if (!runId || !get().isRunning) return;
-    try {
-      const result = await designerGraphClient.pauseRun(runId);
-      get().applyRun(result.run);
     } catch (error) {
       set({ runError: error instanceof Error ? error.message : String(error) });
     }
@@ -425,13 +384,10 @@ export function bindDesignerRuntime(): () => void {
   const matches = (run?: DesignerExecutionRun) => {
     const current = useDesignerRunStore.getState().run;
     const graphId = useDesignerStore.getState().domainGraph?.graph_id;
-    return Boolean(
-      run?.run_id && (run.run_id === current?.run_id || (graphId && run.graph_id === graphId)),
-    );
+    return Boolean(run?.run_id && (run.run_id === current?.run_id || (graphId && run.graph_id === graphId)));
   };
   const offRun = webClient.on('designer.run.updated', ({ payload }) => {
-    const run =
-      (payload as { run?: DesignerExecutionRun }).run ?? (payload as DesignerExecutionRun);
+    const run = (payload as { run?: DesignerExecutionRun }).run ?? (payload as DesignerExecutionRun);
     if (matches(run)) useDesignerRunStore.getState().applyRun(run);
   });
   const offNode = webClient.on('designer.node.updated', ({ payload }) => {
@@ -439,9 +395,7 @@ export function bindDesignerRuntime(): () => void {
     if (matches(run)) useDesignerRunStore.getState().applyRun(run as DesignerExecutionRun);
   });
   const offLeader = webClient.on('designer.leader.activity', ({ payload }) => {
-    const activity =
-      (payload as { activity?: DesignerNodeActivity }).activity ??
-      (payload as DesignerNodeActivity);
+    const activity = (payload as { activity?: DesignerNodeActivity }).activity ?? (payload as DesignerNodeActivity);
     if (activity && typeof activity === 'object') {
       useDesignerRunStore.getState().applyLeaderActivity({
         kind: String(activity.kind || 'stage'),

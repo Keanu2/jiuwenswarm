@@ -1,11 +1,5 @@
 import { Loader2, Paperclip, SendHorizontal, X } from 'lucide-react';
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type KeyboardEvent,
-} from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { chatDesignerGraph } from '../designerEntry';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
@@ -13,7 +7,6 @@ import { useDesignerStore } from '../designerStore';
 import { designerActivityText } from '../designerActivity';
 import { selectLeaderPeek, useDesignerRunStore } from '../designerRunStore';
 import { useDesignerChatStore } from '../designerChatStore';
-import { useDesignerOptimizeStore } from '../designerOptimizeStore';
 import {
   DESIGNER_REF_LIMITS,
   designerReferenceKindFromMime,
@@ -50,9 +43,7 @@ export function DesignerEmptyState({
           {variant === 'error' ? t('designer.loadErrorTitle') : t('designer.emptyTitle')}
         </h2>
         <p className="designer-page__state-desc">
-          {variant === 'error'
-            ? errorMessage || t('designer.loadErrorFallback')
-            : t('designer.emptyDescription')}
+          {variant === 'error' ? errorMessage || t('designer.loadErrorFallback') : t('designer.emptyDescription')}
         </p>
       </div>
     </div>
@@ -101,8 +92,6 @@ export function DesignerChatPanel() {
   const bootstrapPhase = useDesignerChatStore((state) => state.bootstrapPhase);
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const selectedNodeId = useDesignerStore((state) => state.selectedNodeId);
-  const optimizeFor = useDesignerOptimizeStore((state) => state.optimizeFor);
-  const setOptimizeFor = useDesignerOptimizeStore((state) => state.setOptimizeFor);
   const bodyRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState('');
@@ -210,8 +199,7 @@ export function DesignerChatPanel() {
           if (item.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(item.previewUrl);
         });
         setAttachments([]);
-        const existingGraph =
-          domainGraph && !isDesignerPreviewGraph(domainGraph) ? domainGraph : null;
+        const existingGraph = domainGraph && !isDesignerPreviewGraph(domainGraph) ? domainGraph : null;
         if (existingGraph?.graph_id) {
           return chatDesignerGraph({
             graphId: existingGraph.graph_id,
@@ -227,15 +215,7 @@ export function DesignerChatPanel() {
       .finally(() => {
         setSending(false);
       });
-  }, [
-    attachments,
-    chatBusy,
-    domainGraph,
-    draft,
-    optimizeFor,
-    selectedNodeId,
-    t,
-  ]);
+  }, [attachments, chatBusy, domainGraph, draft, selectedNodeId, t]);
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -279,25 +259,6 @@ export function DesignerChatPanel() {
 
       {tab === 'assistant' ? (
         <>
-          <div className="designer-chat-panel__optimize" data-testid="designer-optimize-toggle">
-            <span className="designer-chat-panel__optimize-label">Optimize</span>
-            <div className="designer-chat-panel__optimize-group" role="group" aria-label="Optimize for">
-              <button
-                type="button"
-                className={`designer-chat-panel__optimize-btn${optimizeFor === 'cost' ? ' is-active' : ''}`}
-                onClick={() => setOptimizeFor('cost')}
-              >
-                Cost
-              </button>
-              <button
-                type="button"
-                className={`designer-chat-panel__optimize-btn${optimizeFor === 'quality' ? ' is-active' : ''}`}
-                onClick={() => setOptimizeFor('quality')}
-              >
-                Quality
-              </button>
-            </div>
-          </div>
           <div className="designer-chat-panel__body" ref={bodyRef} data-testid="designer-chat-panel-body">
             {messages.length === 0 ? (
               <p className="designer-chat-panel__empty">{t('designer.chat.emptyHint')}</p>

@@ -1,4 +1,4 @@
-import { ChevronDown, Loader2, Pause, Play, RefreshCcwDot, RotateCcw, RotateCw, SkipForward, Square } from 'lucide-react';
+import { ChevronDown, Loader2, Play, RefreshCcwDot, RotateCcw, SkipForward, Square } from 'lucide-react';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useClickOutside } from '../../../components/CronPanel/useClickOutside';
@@ -18,9 +18,7 @@ export function DesignerRunControl({ graph, disabled = false }: DesignerRunContr
   const currentLayerNodeIds = useDesignerRunStore((state) => state.currentLayerNodeIds);
   const runStatus = useDesignerRunStore((state) => state.run?.status ?? null);
   const advance = useDesignerRunStore((state) => state.advance);
-  const rerunCurrentLayer = useDesignerRunStore((state) => state.rerunCurrentLayer);
   const restart = useDesignerRunStore((state) => state.restart);
-  const pause = useDesignerRunStore((state) => state.pause);
   const cancel = useDesignerRunStore((state) => state.cancel);
 
   const primaryAction = useMemo(
@@ -41,35 +39,19 @@ export function DesignerRunControl({ graph, disabled = false }: DesignerRunContr
 
   const controlDisabled = disabled || !graph || graph.nodes.length === 0;
   const busy = isRunning;
-  const canPause = busy;
   const canCancel =
-    !controlDisabled &&
-    (busy ||
-      runStatus === 'running' ||
-      runStatus === 'paused' ||
-      currentLayerNodeIds.length > 0);
+    !controlDisabled && (busy || runStatus === 'running' || runStatus === 'paused' || currentLayerNodeIds.length > 0);
 
   const onPrimary = useCallback(() => {
     if (!graph || controlDisabled || busy) return;
     void advance(graph);
   }, [advance, busy, controlDisabled, graph]);
 
-  const onRerunCurrent = useCallback(() => {
-    if (!graph || controlDisabled || busy) return;
-    setMenuOpen(false);
-    void rerunCurrentLayer(graph);
-  }, [busy, controlDisabled, graph, rerunCurrentLayer]);
-
   const onRestart = useCallback(() => {
     if (!graph || controlDisabled || busy) return;
     setMenuOpen(false);
     void restart(graph);
   }, [busy, controlDisabled, graph, restart]);
-
-  const onPause = useCallback(() => {
-    if (!canPause) return;
-    void pause();
-  }, [canPause, pause]);
 
   const onCancel = useCallback(() => {
     if (!canCancel) return;
@@ -85,14 +67,7 @@ export function DesignerRunControl({ graph, disabled = false }: DesignerRunContr
           ? t('designer.run.running')
           : t('designer.run.execute');
 
-  const PrimaryIcon =
-    primaryAction === 'continue'
-      ? SkipForward
-      : primaryAction === 'retry_failed'
-        ? RotateCcw
-        : Play;
-
-  const canRerunCurrent = !controlDisabled && !busy && currentLayerNodeIds.length > 0;
+  const PrimaryIcon = primaryAction === 'continue' ? SkipForward : primaryAction === 'retry_failed' ? RotateCcw : Play;
 
   return (
     <div
@@ -135,17 +110,6 @@ export function DesignerRunControl({ graph, disabled = false }: DesignerRunContr
             <button
               type="button"
               role="menuitem"
-              className="designer-run-control__menu-item"
-              disabled={!canRerunCurrent}
-              onClick={onRerunCurrent}
-              data-testid="designer-run-control-rerun-current"
-            >
-              <RotateCw size={14} aria-hidden />
-              <span>{t('designer.run.rerunCurrent')}</span>
-            </button>
-            <button
-              type="button"
-              role="menuitem"
               className="designer-run-control__menu-item designer-run-control__menu-item--warning"
               disabled={busy}
               onClick={onRestart}
@@ -158,16 +122,6 @@ export function DesignerRunControl({ graph, disabled = false }: DesignerRunContr
         ) : null}
       </div>
 
-      <button
-        type="button"
-        className="designer-run-control__secondary"
-        disabled={!canPause}
-        onClick={onPause}
-        data-testid="designer-run-control-pause"
-      >
-        <Pause size={14} aria-hidden />
-        <span>{t('designer.run.pause')}</span>
-      </button>
       <button
         type="button"
         className="designer-run-control__secondary"

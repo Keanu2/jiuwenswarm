@@ -43,13 +43,11 @@ export const designerWorkspaceClient = {
       },
       { timeoutMs: 20 * 60 * 1000 },
     ),
-  get: (projectId: string) =>
-    webRequest<DesignerWorkspace>('designer.workspace.get', { project_id: projectId }),
+  get: (projectId: string) => webRequest<DesignerWorkspace>('designer.workspace.get', { project_id: projectId }),
 };
 
 export const designerGraphClient = {
-  get: (graphId: string) =>
-    webRequest<{ graph: DesignerExecutionGraph }>('designer.graph.get', { graph_id: graphId }),
+  get: (graphId: string) => webRequest<{ graph: DesignerExecutionGraph }>('designer.graph.get', { graph_id: graphId }),
 
   list: (projectId?: string) =>
     webRequest<{ graphs: DesignerExecutionGraph[]; summaries?: DesignerGraphSummary[] }>(
@@ -66,12 +64,7 @@ export const designerGraphClient = {
       patch,
     }),
 
-  chat: (params: {
-    graphId: string;
-    message: string;
-    selectedNodeId?: string;
-    runNewNodes?: boolean;
-  }) =>
+  chat: (params: { graphId: string; message: string; selectedNodeId?: string; runNewNodes?: boolean }) =>
     webRequest<{
       graph: DesignerExecutionGraph;
       summary?: string;
@@ -96,7 +89,6 @@ export const designerGraphClient = {
     projectId?: string;
     projectDir?: string;
     workMode?: 'work' | 'code';
-    optimizeFor?: 'cost' | 'quality';
     scenario?: string;
     references?: Array<Record<string, unknown>>;
   }) =>
@@ -109,11 +101,8 @@ export const designerGraphClient = {
         ...(params.projectId ? { project_id: params.projectId } : {}),
         ...(params.projectDir ? { project_dir: params.projectDir } : {}),
         ...(params.workMode ? { work_mode: params.workMode } : {}),
-        ...(params.optimizeFor ? { optimize_for: params.optimizeFor } : {}),
         ...(params.scenario ? { scenario: params.scenario } : {}),
-        ...(params.references && params.references.length > 0
-          ? { references: params.references }
-          : {}),
+        ...(params.references && params.references.length > 0 ? { references: params.references } : {}),
       },
       { timeoutMs: 20 * 60 * 1000 },
     ),
@@ -135,11 +124,7 @@ export const designerGraphClient = {
       ...(params.graphId ? { graph_id: params.graphId } : {}),
     }),
 
-  pauseRun: (runId: string) =>
-    webRequest<{ run: DesignerExecutionRun }>('designer.run.pause', { run_id: runId }),
-
-  cancelRun: (runId: string) =>
-    webRequest<{ run: DesignerExecutionRun }>('designer.run.cancel', { run_id: runId }),
+  cancelRun: (runId: string) => webRequest<{ run: DesignerExecutionRun }>('designer.run.cancel', { run_id: runId }),
 
   chooseOutput: (params: { runId: string; nodeId: string; choice: 'original' | 'new' }) =>
     webRequest<{ run: DesignerExecutionRun }>('designer.run.choose_output', {

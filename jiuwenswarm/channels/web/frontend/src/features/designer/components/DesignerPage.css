@@ -875,48 +875,6 @@
   color: var(--color-danger, #c0392b);
 }
 
-.designer-chat-panel__optimize {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--color-border-default);
-  background: color-mix(in srgb, var(--color-surface-card) 88%, transparent);
-}
-
-.designer-chat-panel__optimize-label {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--color-text-secondary);
-}
-
-.designer-chat-panel__optimize-group {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 999px;
-  background: var(--color-surface-shell);
-  border: 1px solid var(--color-border-default);
-}
-
-.designer-chat-panel__optimize-btn {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 999px;
-  cursor: pointer;
-}
-
-.designer-chat-panel__optimize-btn.is-active {
-  background: var(--color-text-primary);
-  color: var(--color-surface-card);
-}
-
 .designer-node__meta {
   display: flex;
   flex-wrap: wrap;
@@ -973,8 +931,7 @@
   display: grid;
   place-items: center;
   transform-style: preserve-3d;
-  background:
-    linear-gradient(135deg, rgba(140, 180, 255, 0.85), rgba(80, 110, 190, 0.75));
+  background: linear-gradient(135deg, rgba(140, 180, 255, 0.85), rgba(80, 110, 190, 0.75));
   border: 1px solid rgba(255, 255, 255, 0.35);
   border-radius: 10px;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
@@ -1192,8 +1149,14 @@
   display: block;
   width: 10px;
   height: 10px;
-  background:
-    linear-gradient(135deg, transparent 0 42%, var(--color-text-muted) 42% 52%, transparent 52% 62%, var(--color-text-muted) 62% 72%, transparent 72%);
+  background: linear-gradient(
+    135deg,
+    transparent 0 42%,
+    var(--color-text-muted) 42% 52%,
+    transparent 52% 62%,
+    var(--color-text-muted) 62% 72%,
+    transparent 72%
+  );
   pointer-events: none;
 }
 
@@ -1918,7 +1881,10 @@ textarea.designer-node-toolbar__param-input {
   border-radius: 16px;
   background: color-mix(in srgb, var(--color-surface-card) 96%, transparent);
   box-shadow: var(--effect-shadow-lg);
-  transition: width 0.2s ease, height 0.2s ease, bottom 0.2s ease;
+  transition:
+    width 0.2s ease,
+    height 0.2s ease,
+    bottom 0.2s ease;
 }
 
 .designer-page__materials--collapsed {
@@ -1940,7 +1906,6 @@ textarea.designer-node-toolbar__param-input {
   font-size: 12px;
   color: var(--color-feedback-danger, #cf1322);
 }
-
 
 .designer-page__error {
   margin: 0;
@@ -2223,7 +2188,6 @@ textarea.designer-node-toolbar__param-input {
   line-height: 1.5;
 }
 
-
 .designer-material-viewer {
   position: fixed;
   inset: 0;
@@ -2352,7 +2316,6 @@ textarea.designer-node-toolbar__param-input {
   white-space: pre-wrap;
   text-align: left;
 }
-
 
 .designer-revision-chooser {
   position: fixed;

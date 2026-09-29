@@ -2,7 +2,6 @@ import { useWorkspaceStore } from '../../stores';
 import { useDesignerStore } from './designerStore';
 import { useDesignerChatStore } from './designerChatStore';
 import { designerGraphClient } from './designerGraphClient';
-import { useDesignerOptimizeStore } from './designerOptimizeStore';
 import { useDesignerRunStore } from './designerRunStore';
 import type { DesignerBootstrapReference, DesignerStoredReference } from './designerReferences';
 
@@ -24,7 +23,6 @@ export type LaunchDesignerFromTaskParams = {
   projectId?: string;
   projectDir?: string;
   workMode?: 'work' | 'code';
-  optimizeFor?: 'cost' | 'quality';
   scenario?: string;
   references?: DesignerBootstrapReference[];
   /** Navigate to Design nav before/while bootstrap runs. */
@@ -44,7 +42,6 @@ export async function bootstrapDesignerFromChat(params: {
   projectId?: string;
   projectDir?: string;
   workMode?: 'work' | 'code';
-  optimizeFor?: 'cost' | 'quality';
   scenario?: string;
   references?: DesignerBootstrapReference[];
   thinkingText?: string;
@@ -66,14 +63,8 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
   const references = params.references || [];
   if (!prompt && references.length === 0) return;
 
-  const optimizeFor =
-    params.optimizeFor ?? useDesignerOptimizeStore.getState().optimizeFor ?? 'quality';
-  const thinkingText =
-    params.thinkingText ??
-    `Decomposing your request into an agentic ${optimizeFor}-optimized design graph…`;
-  const doneText =
-    params.doneText ??
-    'Director composed the workflow. Tweak nodes or hit Play when ready.';
+  const thinkingText = params.thinkingText ?? 'Decomposing your request into an agentic design graph…';
+  const doneText = params.doneText ?? 'Director composed the workflow. Tweak nodes or hit Play when ready.';
   const errorText = params.errorText ?? 'Failed to compose the design workflow. Please retry.';
 
   const designerStore = useDesignerStore.getState();
@@ -118,7 +109,6 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
       projectId: params.projectId,
       projectDir: params.projectDir,
       workMode: params.workMode,
-      optimizeFor,
       scenario: params.scenario,
       references,
     });
@@ -135,7 +125,7 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
     const nodeCount = graph.nodes.length;
     useDesignerChatStore.getState().appendMessage({
       role: 'assistant',
-      content: `${doneText}\n\nScenario: ${scenario} · Nodes: ${nodeCount} · Optimize: ${optimizeFor}`,
+      content: `${doneText}\n\nScenario: ${scenario} · Nodes: ${nodeCount}`,
       kind: 'bootstrap_done',
     });
     useDesignerChatStore.getState().setBootstrapPhase('done');

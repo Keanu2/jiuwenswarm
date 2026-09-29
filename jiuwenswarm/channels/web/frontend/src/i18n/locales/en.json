@@ -116,9 +116,7 @@
       "retryFailed": "Retry failed nodes",
       "running": "Running…",
       "moreActions": "More run actions",
-      "rerunCurrent": "Rerun current nodes",
-      "restart": "Restart workflow",
-      "pause": "Pause",
+      "restart": "Rerun workflow",
       "cancel": "Cancel"
     },
     "subtitle": "Creation execution canvas",
