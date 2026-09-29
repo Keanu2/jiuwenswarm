@@ -31,68 +31,109 @@ _CROSS_RE = re.compile(
     re.I,
 )
 _VERTICAL_RE = re.compile(
-    r"\b(?:vertical|9\s*[:x]\s*16|tiktok|reels|shorts|portrait\s+video)\b", re.I
+    r"\b(?:vertical|9\s*[:x]\s*16|tiktok|reels|shorts|portrait\s+video)\b|竖屏",
+    re.I,
 )
-_SQUARE_RE = re.compile(r"\b(?:1\s*[:x]\s*1|square\s+(?:frame|video))\b", re.I)
-
-# DashScope Wan documented 480P sizes. Unofficial 854*480 is often ignored → 720/1080.
-WAN_480P_LANDSCAPE = "832*480"
-WAN_480P_PORTRAIT = "480*832"
-WAN_480P_SQUARE = "480*480"
-
-
-def lock_clip_480p(size: str | None = None, resolution: str | None = None) -> tuple[str, str]:
-    """Force Designer clips to Wan 480P. Portrait/square follow the given size."""
-    raw = str(size or "").strip().replace("x", "*").replace("X", "*")
-    ratio = "16:9"
-    if "*" in raw:
-        try:
-            width_s, height_s = raw.split("*", 1)
-            width, height = int(width_s), int(height_s)
-            if width > 0 and height > 0:
-                if height > width * 1.15:
-                    ratio = "9:16"
-                elif abs(width - height) / max(width, height) < 0.08:
-                    ratio = "1:1"
-        except ValueError:
-            pass
-    sizes = {
-        "9:16": WAN_480P_PORTRAIT,
-        "1:1": WAN_480P_SQUARE,
-        "16:9": WAN_480P_LANDSCAPE,
-    }
-    _ = resolution
-    return sizes[ratio], "480P"
+_SQUARE_RE = re.compile(
+    r"\b(?:1\s*[:x]\s*1|square\s+(?:frame|video|format)|square\s+\d{3,4}\s*p)\b",
+    re.I,
+)
+_ULTRAWIDE_RE = re.compile(r"\b(?:21\s*[:x]\s*9|cinemascope|ultrawide)\b", re.I)
 
 
 def infer_aspect_lock(prompt: str) -> dict[str, str]:
-    """One aspect for every sheet, keyframe, and clip in the film."""
+    """One aspect for the film. Resolution is set only when the user asked for one."""
+    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
+        resolution_mentioned,
+        size_for_resolution,
+    )
+
     text = prompt or ""
     if _VERTICAL_RE.search(text):
-        return {
-            "ratio": "9:16",
-            # ~1K budget (portrait): keep short side near 480–576, not 2K.
-            "image_size": "576x1024",
-            "video_size": WAN_480P_PORTRAIT,
-            "video_resolution": "480P",
-            "rule": "EVERY still and clip MUST be 9:16 portrait at ~1K/480P. Do not letterbox, crop to 16:9, or square-crop.",
-        }
-    if _SQUARE_RE.search(text):
-        return {
-            "ratio": "1:1",
-            "image_size": "1K",
-            "video_size": WAN_480P_SQUARE,
-            "video_resolution": "480P",
-            "rule": "EVERY still and clip MUST be 1:1 at 1K/480P. Do not change aspect mid-film.",
-        }
-    return {
-        "ratio": "16:9",
-        # ~1K stills; clips use documented Wan 480P (832*480), not 720/1080.
-        "image_size": "1024x576",
-        "video_size": WAN_480P_LANDSCAPE,
-        "video_resolution": "480P",
-        "rule": "EVERY still and clip MUST be 16:9 landscape at ~1K/480P. Do not square-crop or switch to 9:16.",
+        ratio = "9:16"
+        image_size = "576x1024"
+        rule = "EVERY still and clip MUST be 9:16 portrait. Do not letterbox or crop to 16:9."
+    elif _SQUARE_RE.search(text):
+        ratio = "1:1"
+        image_size = "1K"
+        rule = "EVERY still and clip MUST be 1:1. Do not change aspect mid-film."
+    elif _ULTRAWIDE_RE.search(text):
+        ratio = "21:9"
+        image_size = "1792x768"
+        rule = "EVERY still and clip MUST stay 21:9. Do not crop to 16:9."
+    else:
+        ratio = "16:9"
+        image_size = "1024x576"
+        rule = "EVERY still and clip MUST be 16:9 landscape. Do not square-crop or switch to 9:16."
+    asked = resolution_mentioned(text)
+    lock = {
+        "ratio": ratio,
+        "image_size": image_size,
+        "video_resolution": asked,
+        "rule": rule,
     }
+    if asked:
+        lock["video_size"] = size_for_resolution(asked if asked != "4K" else "1080P", ratio)
+        lock["video_resolution"] = "1080P" if asked == "4K" else asked
+    return lock
+
+
+def resolve_clip_video_format(
+    *,
+    ratio: str = "16:9",
+    user_resolution: str = "",
+    director_resolution: str = "",
+) -> tuple[str, str]:
+    """Pixel size and tier. User request wins, then the director, then the model default."""
+    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
+        active_video_capacity,
+        size_for_resolution,
+        snap_resolution,
+    )
+
+    cap = active_video_capacity()
+    chosen = snap_resolution(user_resolution or director_resolution, cap)
+    return size_for_resolution(chosen, ratio), chosen
+
+
+def video_format_for_node(
+    graph: dict[str, Any] | None,
+    cfg: dict[str, Any] | None = None,
+    aspect: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Resolution for a shot, clip, or other video node on this graph."""
+    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
+        resolution_mentioned,
+    )
+
+    graph = graph if isinstance(graph, dict) else {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    chosen_aspect = aspect if isinstance(aspect, dict) else {}
+    if not chosen_aspect:
+        raw = cfg.get("aspect_lock")
+        chosen_aspect = raw if isinstance(raw, dict) else {}
+    if not chosen_aspect:
+        raw = meta.get("aspect_lock")
+        chosen_aspect = raw if isinstance(raw, dict) else {}
+    if not chosen_aspect:
+        raw = analysis.get("aspect_lock")
+        chosen_aspect = raw if isinstance(raw, dict) else {}
+    user_text = str(
+        graph.get("description") or meta.get("user_prompt") or analysis.get("user_prompt") or ""
+    )
+    director = str(
+        cfg.get("video_resolution")
+        or chosen_aspect.get("video_resolution")
+        or analysis.get("video_resolution")
+        or ""
+    )
+    return resolve_clip_video_format(
+        ratio=str(chosen_aspect.get("ratio") or "16:9"),
+        user_resolution=resolution_mentioned(user_text),
+        director_resolution=director,
+    )
 
 
 def infer_time_of_day_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]:
@@ -336,7 +377,7 @@ def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | N
         bits.append(
             f"ASPECT LOCK: {aspect.get('ratio')} — {aspect.get('rule')} "
             f"(image_size={aspect.get('image_size') or ''}; "
-            f"video={aspect.get('video_size') or ''} @ {aspect.get('video_resolution') or '480P'})."
+            f"video={aspect.get('video_size') or ''} @ {aspect.get('video_resolution') or 'director resolution'})."
         )
     if axis:
         named = []
@@ -412,6 +453,12 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
     if not aspect:
         aspect = infer_aspect_lock(str(graph.get("description") or meta.get("user_prompt") or ""))
         analysis["aspect_lock"] = aspect
+    vsize, vres = video_format_for_node(graph, aspect=aspect)
+    aspect = dict(aspect)
+    aspect["video_size"] = vsize
+    aspect["video_resolution"] = vres
+    analysis["aspect_lock"] = aspect
+    analysis["video_resolution"] = vres
     style = analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else {}
     if not style:
         style = meta.get("style_lock") if isinstance(meta.get("style_lock"), dict) else {}

@@ -136,8 +136,9 @@ When correcting leaf agents / drafting node prompts:
   scene prompt handoff — do not edit prior keyframe images as the primary ref.
 - Clip: DETAILED Wan R2V prompt with the brief/storyboard STYLE LOCK + CONTACT lock
   + set/orientation + cast/prop locks (not STYLE HOLD alone).
-- NON-NEGOTIABLE film-wide locks on EVERY keyframe AND clip: aspect_lock (same ratio /
-  ~1K stills / 480P video), style_lock, spatial_lock, costume/identity, occupancy, screen axis.
+- NON-NEGOTIABLE film-wide locks on EVERY keyframe AND clip: aspect_lock (one ratio;
+  stills at the chosen image size; video at the user or director resolution),
+  style_lock, spatial_lock, costume/identity, occupancy, screen axis.
 - If agents ignore storyboard facing/objects/speech OR drop any lock, rewrite
   director_task / generate.prompt once (no loops).
 """.strip()
@@ -148,7 +149,7 @@ Director one-pass corrections (locks bind ALL agents — leaf rewrites cannot dr
 - Require camera_rig + screen_positions + speech_line; stamp setting_id + keyframe_strategy.
 - BEFORE media calls: gate every frame/keyframe/clip prompt for aspect_lock, style_lock,
   spatial_lock, costume/identity, occupancy, and prior continuity; re-inject missing locks.
-- Stamp image_size from aspect_lock on stills and video_size/video_resolution=480P on clips.
+- Stamp image_size from aspect_lock on stills and the user or director video_size/video_resolution on clips.
 - Graph = brief→storyboard→solo cast→scene specs→R2V shots→compose.
 - Prune only true orphans; every kept node must reach compose.
 """.strip()

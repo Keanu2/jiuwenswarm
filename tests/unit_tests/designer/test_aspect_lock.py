@@ -3,11 +3,10 @@
 from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import infer_aspect_lock
 
 
-def test_infer_aspect_lock_defaults_landscape_480():
+def test_infer_aspect_lock_does_not_force_480_when_user_is_silent():
     lock = infer_aspect_lock("a short film about a baker")
     assert lock["ratio"] == "16:9"
-    assert lock["video_size"] == "854*480"
-    assert lock["video_resolution"] == "480P"
+    assert lock["video_resolution"] == ""
 
 
 def test_infer_aspect_lock_honors_portrait_and_1080p():
@@ -20,7 +19,7 @@ def test_infer_aspect_lock_honors_portrait_and_1080p():
 def test_infer_aspect_lock_honors_square_720p():
     lock = infer_aspect_lock("1:1 square frame 720p")
     assert lock["ratio"] == "1:1"
-    assert lock["video_size"] == "720*720"
+    assert lock["video_size"] == "960*960"
     assert lock["video_resolution"] == "720P"
 
 

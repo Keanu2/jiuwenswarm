@@ -112,12 +112,23 @@ class VideoNodeHandler:
         if payload:
             prompt = f"{prompt.rstrip()}\n\n{payload}".strip()
         refs = [str(path) for path in _upstream_images(ctx, node)]
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
+            video_format_for_node,
+        )
+
+        video_size, video_res = video_format_for_node(
+            ctx.graph if isinstance(ctx.graph, dict) else {},
+            cfg,
+        )
         generated = await generate_clip_video(
             prompt,
             save_dir=str(graph_workspace_dir(ctx.graph)),
             reference_images=refs or None,
             reference_file=first_connected_video_file(videos),
             force_reference_mode=bool(refs or videos),
+            size=video_size,
+            resolution=video_res,
         )
         path = Path(str(generated.get("video_path") or ""))
         if not path.is_file():

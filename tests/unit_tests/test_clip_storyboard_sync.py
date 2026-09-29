@@ -201,12 +201,3 @@ def test_last_frame_clause_does_not_override_storyboard_plot():
     assert "storyboard shot" in low
     assert "continue from this pose" not in low
     assert "primary start blocking" not in low
-
-
-def test_lock_clip_480p_uses_documented_wan_size():
-    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import lock_clip_480p
-
-    assert lock_clip_480p("854*480", "480P") == ("832*480", "480P")
-    assert lock_clip_480p("1280*720", "720P") == ("832*480", "480P")
-    assert lock_clip_480p("480*854", None) == ("480*832", "480P")
-    assert lock_clip_480p("480*480", "4K") == ("480*480", "480P")

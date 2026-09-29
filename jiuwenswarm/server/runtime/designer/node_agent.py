@@ -1237,6 +1237,15 @@ class DesignerGraphToolkit:
                     else None
                 )
             )
+            from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
+                video_format_for_node,
+            )
+
+            video_size, video_res = video_format_for_node(
+                graph,
+                cfg,
+                meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else None,
+            )
             result = await generate_clip_video(
                 prompt=text,
                 save_dir=str(self._media_save_dir()),
@@ -1247,12 +1256,8 @@ class DesignerGraphToolkit:
                 audio=True if want_audio else False,
                 model=None,
                 force_reference_mode=True,
-                size=str(cfg.get("video_size") or (meta.get("aspect_lock") or {}).get("video_size") or ""),
-                resolution=str(
-                    cfg.get("video_resolution")
-                    or (meta.get("aspect_lock") or {}).get("video_resolution")
-                    or ""
-                ),
+                size=video_size,
+                resolution=video_res,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("call_video_model failed: %s", exc, exc_info=True)

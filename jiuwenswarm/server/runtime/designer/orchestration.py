@@ -2570,17 +2570,14 @@ class Director:
                     changed = True
             if role == "clip":
                 from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-                    lock_clip_480p,
+                    video_format_for_node,
                 )
 
-                vsize, vres = lock_clip_480p(
-                    aspect.get("video_size") or cfg.get("video_size"),
-                    aspect.get("video_resolution") or cfg.get("video_resolution"),
-                )
+                vsize, vres = video_format_for_node(graph, cfg, aspect if isinstance(aspect, dict) else None)
                 if str(cfg.get("video_size") or "") != vsize or str(cfg.get("video_resolution") or "") != vres:
                     cfg["video_size"] = vsize
                     cfg["video_resolution"] = vres
-                    notes.append("stamp_video_aspect_480p")
+                    notes.append("stamp_video_resolution")
                     changed = True
             ratio = str(aspect.get("ratio") or "").strip()
             rule = str(aspect.get("rule") or "").strip()

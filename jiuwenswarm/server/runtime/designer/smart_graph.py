@@ -944,6 +944,35 @@ def build_smart_video_graph(
         pass
     # Continuity: scene specs + on-screen solos; storyboard start/end owns continuity.
     analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
+    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
+        infer_aspect_lock,
+        resolve_clip_video_format,
+    )
+    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
+        resolution_mentioned,
+    )
+
+    aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
+    if not aspect:
+        aspect = infer_aspect_lock(prompt_text)
+    asked_res = resolution_mentioned(prompt_text)
+    if asked_res:
+        analysis["video_resolution"] = asked_res
+    elif not str(analysis.get("video_resolution") or "").strip():
+        analysis["video_resolution"] = str(aspect.get("video_resolution") or "")
+    film_video_size, film_video_res = resolve_clip_video_format(
+        ratio=str(aspect.get("ratio") or "16:9"),
+        user_resolution=asked_res,
+        director_resolution=str(
+            analysis.get("video_resolution") or aspect.get("video_resolution") or ""
+        ),
+    )
+    analysis["video_resolution"] = film_video_res
+    analysis["video_size"] = film_video_size
+    aspect = dict(aspect)
+    aspect["video_size"] = film_video_size
+    aspect["video_resolution"] = film_video_res
+    analysis["aspect_lock"] = aspect
 
     # Quality path: solo identity sheets only — keyframes compose multi-person.
     prefer_combined = False
@@ -1737,6 +1766,8 @@ def build_smart_video_graph(
             "first_of_setting": first_of_setting,
             "composed_scene": False,
             "style_lock": dict(film_style),
+            "video_size": film_video_size,
+            "video_resolution": film_video_res,
             "generate": {"prompt": shot_prompt_body},
             "max_video_calls": 1,
             "inputs": clip_inputs,

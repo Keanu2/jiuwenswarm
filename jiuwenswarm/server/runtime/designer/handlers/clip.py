@@ -888,11 +888,20 @@ async def generate_clip_video(
     except Exception:
         logger.debug("Failed to apply video_gen model config from yaml", exc_info=True)
 
-    # Cost-save default: documented Wan 480P (832*480). Unofficial 854*480 is ignored by the API.
-    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import lock_clip_480p
+    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
+        resolve_clip_video_format,
+    )
     from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import clamp_clip_duration
 
-    video_size, video_res = lock_clip_480p(size, resolution)
+    if size or resolution:
+        video_size, video_res = resolve_clip_video_format(
+            user_resolution=str(resolution or ""),
+            director_resolution=str(resolution or ""),
+        )
+        if size and "*" in str(size).replace("x", "*").replace("X", "*"):
+            video_size = str(size).replace("x", "*").replace("X", "*")
+    else:
+        video_size, video_res = resolve_clip_video_format()
     clamped_duration = clamp_clip_duration(duration, default=5)
     resolved_model = (str(model).strip() or None) if model else None
     tool_input = {
@@ -1025,12 +1034,11 @@ class ClipNodeHandler:
         if not aspect:
             meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
-        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import lock_clip_480p
-
-        video_size, video_res = lock_clip_480p(
-            cfg.get("video_size") or (aspect or {}).get("video_size"),
-            cfg.get("video_resolution") or (aspect or {}).get("video_resolution"),
+        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
+            video_format_for_node,
         )
+
+        video_size, video_res = video_format_for_node(graph, cfg, aspect if isinstance(aspect, dict) else None)
         from jiuwenswarm.server.runtime.designer.user_references import (
             user_reference_video_path,
         )
