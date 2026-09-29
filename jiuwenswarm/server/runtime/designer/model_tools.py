@@ -520,21 +520,37 @@ async def call_model_tool(
     try:
         from openai import AsyncOpenAI
 
-        async def _once(*, temperature: float) -> dict[str, Any]:
+        async def _once(*, temperature: float, attempt: int) -> dict[str, Any]:
             # Large plans need more wall time than the old 90s default.
             client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=1200.0)
             try:
                 user_content = vision_user_content(prompt, images)
-                resp = await client.chat.completions.create(
-                    model=model_name,
-                    messages=[
+                request_input = {
+                    "model": model_name,
+                    "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user_content},
                     ],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    extra_body=_thinking_disabled_extra_body(),
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "extra_body": _thinking_disabled_extra_body(),
+                }
+                from jiuwenswarm.server.runtime.designer.trajectory import (
+                    current_trajectory_span,
                 )
+
+                with current_trajectory_span(
+                    action="agent_call",
+                    phase="inference",
+                    detail={
+                        "agent_type": "chat_model",
+                        "attempt": attempt,
+                        "prompt": prompt,
+                        "system_prompt": system,
+                        "input": request_input,
+                    },
+                ):
+                    resp = await client.chat.completions.create(**request_input)
                 choice = resp.choices[0] if resp.choices else None
                 msg = choice.message if choice is not None else None
                 text = _message_text(msg)
@@ -565,7 +581,10 @@ async def call_model_tool(
                 except Exception:  # noqa: BLE001
                     pass
 
-        first = await _once(temperature=0.4 if optimize_for == "quality" else 0.7)
+        first = await _once(
+            temperature=0.4 if optimize_for == "quality" else 0.7,
+            attempt=1,
+        )
         if first.get("ok"):
             _chat_confirmed = True
             return first
@@ -576,7 +595,7 @@ async def call_model_tool(
                 first.get("finish_reason"),
                 max_tokens,
             )
-            return await _once(temperature=0.2)
+            return await _once(temperature=0.2, attempt=2)
         return first
     except Exception as exc:  # noqa: BLE001
         blocked = note_chat_model_unavailable(exc)

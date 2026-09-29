@@ -9,7 +9,9 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, Iterator
 
 from jiuwenswarm.common.schema.designer_graph import utc_now_ms
@@ -20,10 +22,27 @@ from jiuwenswarm.server.runtime.designer.paths import (
 
 logger = logging.getLogger(__name__)
 
-TRAJECTORY_SCHEMA = "designer-trajectory.v1"
+TRAJECTORY_SCHEMA = "designer-trajectory.v2"
 
 _lock = threading.RLock()
 _active: dict[str, "TrajectoryRecorder"] = {}
+
+
+@dataclass(frozen=True)
+class TrajectoryScope:
+    """Agent identity inherited by nested model and tool calls."""
+
+    recorder: "TrajectoryRecorder"
+    agent_id: str
+    role: str
+    phase: str
+    action: str
+
+
+_current_scope: ContextVar[TrajectoryScope | None] = ContextVar(
+    "designer_trajectory_scope",
+    default=None,
+)
 
 
 class TrajectoryRecorder:
@@ -47,6 +66,7 @@ class TrajectoryRecorder:
                 "role": role,
                 "total_ms": 0.0,
                 "tool_calls": 0,
+                "agent_calls": 0,
                 "events": [],
             },
         )
@@ -75,7 +95,7 @@ class TrajectoryRecorder:
             "tool": tool,
             "duration_ms": duration_ms,
             "status": status,
-            "detail": detail or {},
+            "detail": deepcopy(detail or {}),
         }
         with _lock:
             self.events.append(event)
@@ -83,8 +103,10 @@ class TrajectoryRecorder:
             bucket["events"].append(event)
             if duration_ms is not None:
                 bucket["total_ms"] = float(bucket.get("total_ms") or 0.0) + float(duration_ms)
-            if tool:
+            if action == "tool_call":
                 bucket["tool_calls"] = int(bucket.get("tool_calls") or 0) + 1
+            if action == "agent_call":
+                bucket["agent_calls"] = int(bucket.get("agent_calls") or 0) + 1
 
     @contextmanager
     def span(
@@ -98,8 +120,17 @@ class TrajectoryRecorder:
         detail: dict[str, Any] | None = None,
     ) -> Iterator[dict[str, Any]]:
         started = time.perf_counter()
-        payload: dict[str, Any] = dict(detail or {})
+        payload: dict[str, Any] = deepcopy(detail or {})
         status = "ok"
+        token = _current_scope.set(
+            TrajectoryScope(
+                recorder=self,
+                agent_id=agent_id,
+                role=role,
+                phase=phase,
+                action=action,
+            )
+        )
         try:
             yield payload
         except Exception as exc:  # noqa: BLE001
@@ -107,6 +138,7 @@ class TrajectoryRecorder:
             payload["error"] = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            _current_scope.reset(token)
             duration_ms = (time.perf_counter() - started) * 1000.0
             self.record(
                 agent_id=agent_id,
@@ -181,6 +213,37 @@ def begin_trajectory(graph_id: str, run_id: str, *, meta: dict[str, Any] | None 
 def get_trajectory(run_id: str) -> TrajectoryRecorder | None:
     with _lock:
         return _active.get(run_id)
+
+
+def get_current_trajectory_scope() -> TrajectoryScope | None:
+    """Return the active agent scope for this async execution context."""
+    return _current_scope.get()
+
+
+@contextmanager
+def current_trajectory_span(
+    *,
+    action: str,
+    tool: str | None = None,
+    detail: dict[str, Any] | None = None,
+    phase: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Record a nested call when executing inside a Designer trajectory span."""
+    scope = get_current_trajectory_scope()
+    if scope is None:
+        yield deepcopy(detail or {})
+        return
+    nested_detail = deepcopy(detail or {})
+    nested_detail.setdefault("parent_action", scope.action)
+    with scope.recorder.span(
+        agent_id=scope.agent_id,
+        action=action,
+        phase=phase or scope.phase,
+        role=scope.role,
+        tool=tool,
+        detail=nested_detail,
+    ) as payload:
+        yield payload
 
 
 def end_trajectory(run_id: str) -> str | None:

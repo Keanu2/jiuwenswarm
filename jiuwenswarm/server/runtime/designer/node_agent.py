@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
@@ -1457,23 +1459,45 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
         properties: dict[str, Any] | None = None,
     ) -> Any:
         async def wrapped(**kwargs: Any) -> Any:
-            if toolkit.completed is not None and name == "designer_node_run":
-                return "already completed this node; scheduler will start remaining graph nodes"
-            _emit_ctx_activity(
-                toolkit.ctx,
-                ACTIVITY_KIND_TOOL_CALL,
-                f"calling {name}",
-                tool=name,
-                force=True,
+            from jiuwenswarm.server.runtime.designer.trajectory import get_trajectory
+
+            trajectory = get_trajectory(toolkit.ctx.run_id)
+            tool_span = (
+                trajectory.span(
+                    agent_id=toolkit.ctx.node_id,
+                    action="tool_call",
+                    phase="tool",
+                    role=str(
+                        node_pipeline(_node_from_ctx(toolkit.ctx))
+                        or node_role(_node_from_ctx(toolkit.ctx))
+                        or toolkit.ctx.node_id
+                    ),
+                    tool=name,
+                    detail={"input": deepcopy(kwargs)},
+                )
+                if trajectory is not None
+                else nullcontext()
             )
-            result = await func(**kwargs)
-            _emit_ctx_activity(
-                toolkit.ctx,
-                ACTIVITY_KIND_TOOL_CALL,
-                _tool_result_activity_text(name, result),
-                tool=name,
-            )
-            return result
+            with tool_span:
+                if toolkit.completed is not None and name == "designer_node_run":
+                    return (
+                        "already completed this node; scheduler will start remaining graph nodes"
+                    )
+                _emit_ctx_activity(
+                    toolkit.ctx,
+                    ACTIVITY_KIND_TOOL_CALL,
+                    f"calling {name}",
+                    tool=name,
+                    force=True,
+                )
+                result = await func(**kwargs)
+                _emit_ctx_activity(
+                    toolkit.ctx,
+                    ACTIVITY_KIND_TOOL_CALL,
+                    _tool_result_activity_text(name, result),
+                    tool=name,
+                )
+                return result
 
         card = ToolCard(
             name=name,
@@ -1777,6 +1801,7 @@ class NodeAgentHost:
         self._spawner = spawner
         self._runner = runner
         self._agents: dict[str, Any] = {}
+        self._agent_system_prompts: dict[str, str] = {}
 
     def agent_key(self, run_id: str, node_id: str) -> str:
         return f"designer:{run_id}:{node_id}"
@@ -1785,6 +1810,7 @@ class NodeAgentHost:
         prefix = f"designer:{run_id}:"
         for key in [item for item in self._agents if item.startswith(prefix)]:
             self._agents.pop(key, None)
+            self._agent_system_prompts.pop(key, None)
 
     async def execute(
         self,
@@ -1967,6 +1993,7 @@ class NodeAgentHost:
                 if hasattr(maybe, "__await__"):
                     await maybe
             self._agents[key] = agent
+            self._agent_system_prompts[key] = system_prompt
 
         invoke = getattr(agent, "invoke", None)
         if not callable(invoke):
@@ -1975,9 +2002,24 @@ class NodeAgentHost:
         from openjiuwen.core.session.agent import Session
 
         session = Session(session_id=key, card=getattr(agent, "card", None))
-        result = invoke({"query": query, "conversation_id": key}, session=session)
-        if hasattr(result, "__await__"):
-            result = await result
+        invoke_input = {"query": query, "conversation_id": key}
+        from jiuwenswarm.server.runtime.designer.trajectory import (
+            current_trajectory_span,
+        )
+
+        with current_trajectory_span(
+            action="agent_call",
+            phase="agent",
+            detail={
+                "agent_type": "deep_agent",
+                "prompt": query,
+                "system_prompt": self._agent_system_prompts.get(key, system_prompt),
+                "input": deepcopy(invoke_input),
+            },
+        ):
+            result = invoke(invoke_input, session=session)
+            if hasattr(result, "__await__"):
+                result = await result
         if toolkit.completed is not None:
             completed = toolkit.completed
             # Guarantee required media family even when agent completed with text/PNG only.

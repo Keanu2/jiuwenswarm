@@ -246,17 +246,39 @@ class ComfyuiImageNodeHandler:
         request = comfyui_request(node)
         refs = _collect_references(ctx, node)
         _stage(ctx, "calling vLLM-Omni image model")
-        result = await _invoke_model_image_generation(
-            _prompt(ctx, node),
-            size=request.size or "1024x1024",
-            reference_images=refs.images or None,
-            max_tries=1,
-            model_override=request.model or None,
-            provider_override="vllm-omni",
-            api_base_override=request.api_base or None,
-            negative_prompt=request.negative_prompt,
+        prompt = _prompt(ctx, node)
+        tool_input = {
+            "prompt": prompt,
+            "size": request.size or "1024x1024",
+            "reference_images": refs.images or None,
+            "max_tries": 1,
+            "model_override": request.model or None,
+            "provider_override": "vllm-omni",
+            "api_base_override": request.api_base or None,
+            "negative_prompt": request.negative_prompt,
             **request.extra_fields,
+        }
+        from jiuwenswarm.server.runtime.designer.trajectory import (
+            current_trajectory_span,
         )
+
+        with current_trajectory_span(
+            action="tool_call",
+            tool="image_generation",
+            phase="tool",
+            detail={"input": tool_input},
+        ):
+            result = await _invoke_model_image_generation(
+                prompt,
+                size=request.size or "1024x1024",
+                reference_images=refs.images or None,
+                max_tries=1,
+                model_override=request.model or None,
+                provider_override="vllm-omni",
+                api_base_override=request.api_base or None,
+                negative_prompt=request.negative_prompt,
+                **request.extra_fields,
+            )
         if not isinstance(result, dict) or not result.get("image_path"):
             error = str((result or {}).get("error") or "no image_path")
             raise RuntimeError(f"vLLM-Omni image generation failed: {error}")
@@ -296,16 +318,37 @@ class ComfyuiVideoNodeHandler:
         if request.extra_params:
             options["extra_params"] = request.extra_params
         _stage(ctx, "calling vLLM-Omni video model")
-        result = await _invoke_model_video_generation(
-            _prompt(ctx, node),
-            size=request.size or "1280*720",
-            duration=request.duration or 5,
-            reference_images=refs.images or None,
-            model=request.model or None,
-            provider_override="vllm-omni",
-            api_base_override=request.api_base or None,
+        prompt = _prompt(ctx, node)
+        tool_input = {
+            "prompt": prompt,
+            "size": request.size or "1280*720",
+            "duration": request.duration or 5,
+            "reference_images": refs.images or None,
+            "model": request.model or None,
+            "provider_override": "vllm-omni",
+            "api_base_override": request.api_base or None,
             **options,
+        }
+        from jiuwenswarm.server.runtime.designer.trajectory import (
+            current_trajectory_span,
         )
+
+        with current_trajectory_span(
+            action="tool_call",
+            tool="video_generation",
+            phase="tool",
+            detail={"input": tool_input},
+        ):
+            result = await _invoke_model_video_generation(
+                prompt,
+                size=request.size or "1280*720",
+                duration=request.duration or 5,
+                reference_images=refs.images or None,
+                model=request.model or None,
+                provider_override="vllm-omni",
+                api_base_override=request.api_base or None,
+                **options,
+            )
         if "error" in result:
             raise RuntimeError(str(result["error"]))
         path = _into_workspace(ctx, str(result.get("video_path") or ""))

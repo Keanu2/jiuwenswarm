@@ -893,19 +893,42 @@ async def generate_clip_video(
     from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import clamp_clip_duration
 
     video_size, video_res = lock_clip_480p(size, resolution)
-
-    result = await _invoke_model_video_generation(
-        prompt,
-        size=video_size,
-        resolution=video_res,
-        first_frame=first_frame,
-        reference_images=reference_images,
-        reference_file=reference_file,
-        duration=clamp_clip_duration(duration, default=5),
-        audio=audio,
-        model=(str(model).strip() or None) if model else None,
-        force_reference_mode=force_reference_mode,
+    clamped_duration = clamp_clip_duration(duration, default=5)
+    resolved_model = (str(model).strip() or None) if model else None
+    tool_input = {
+        "prompt": prompt,
+        "size": video_size,
+        "resolution": video_res,
+        "first_frame": first_frame,
+        "reference_images": reference_images,
+        "reference_file": reference_file,
+        "duration": clamped_duration,
+        "audio": audio,
+        "model": resolved_model,
+        "force_reference_mode": force_reference_mode,
+    }
+    from jiuwenswarm.server.runtime.designer.trajectory import (
+        current_trajectory_span,
     )
+
+    with current_trajectory_span(
+        action="tool_call",
+        tool="video_generation",
+        phase="tool",
+        detail={"input": tool_input},
+    ):
+        result = await _invoke_model_video_generation(
+            prompt,
+            size=video_size,
+            resolution=video_res,
+            first_frame=first_frame,
+            reference_images=reference_images,
+            reference_file=reference_file,
+            duration=clamped_duration,
+            audio=audio,
+            model=resolved_model,
+            force_reference_mode=force_reference_mode,
+        )
     if "error" in result:
         raise RuntimeError(str(result["error"]))
 

@@ -785,12 +785,27 @@ async def complete_designer_text(prompt: str, *, max_tokens: int = 8192) -> str:
         model_client_config=ModelClientConfig(**kwargs),
         model_config=request,
     )
-    response = await model.invoke(
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4,
-        max_tokens=max_tokens,
-        model=model_name,
+    invoke_input = {
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.4,
+        "max_tokens": max_tokens,
+        "model": model_name,
+    }
+    from jiuwenswarm.server.runtime.designer.trajectory import (
+        current_trajectory_span,
     )
+
+    with current_trajectory_span(
+        action="agent_call",
+        phase="inference",
+        detail={
+            "agent_type": "chat_model",
+            "prompt": prompt,
+            "system_prompt": "",
+            "input": invoke_input,
+        },
+    ):
+        response = await model.invoke(**invoke_input)
     content = getattr(response, "content", response)
     if isinstance(content, str):
         return content.strip()
@@ -890,15 +905,31 @@ async def generate_designer_image(
     for attempt in range(1, attempts + 1):
         async with sem:
             try:
-                result = await asyncio.wait_for(
-                    _invoke_model_image_generation(
-                        prompt,
-                        size=size,
-                        reference_images=refs or None,
-                        max_tries=1,
-                    ),
-                    timeout=max(60.0, float(timeout_sec or 1200.0)),
+                tool_input = {
+                    "prompt": prompt,
+                    "size": size,
+                    "reference_images": refs or None,
+                    "max_tries": 1,
+                }
+                from jiuwenswarm.server.runtime.designer.trajectory import (
+                    current_trajectory_span,
                 )
+
+                with current_trajectory_span(
+                    action="tool_call",
+                    tool="image_generation",
+                    phase="tool",
+                    detail={"attempt": attempt, "input": tool_input},
+                ):
+                    result = await asyncio.wait_for(
+                        _invoke_model_image_generation(
+                            prompt,
+                            size=size,
+                            reference_images=refs or None,
+                            max_tries=1,
+                        ),
+                        timeout=max(60.0, float(timeout_sec or 1200.0)),
+                    )
             except asyncio.TimeoutError:
                 last_error = f"image_gen timed out after {int(timeout_sec or 1200)}s"
                 logger.info("Designer image generation timed out (attempt %s/%s)", attempt, attempts)
