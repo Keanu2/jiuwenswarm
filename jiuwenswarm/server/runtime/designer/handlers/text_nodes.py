@@ -34,6 +34,10 @@ _BRIEF_INSTRUCTION = """Turn the request below into an executable short-film Bri
 Write English Markdown with these sections:
 - User prompt (verbatim intent)
 - Logline
+- Creative concept (specific interpretation and promise; fill unspecified details creatively)
+- Narrative / content arc (setup or hook → development/turn → payoff or CTA)
+- Timed shot plan spanning the full requested duration; every shot adds new content, no filler or repetition
+- Script / speech plan (speaker + timing + exact concise dialogue/voiceover when useful; explicitly visual-only if stronger; honor silence)
 - Cast (solo identity locks — face, hair, body, FULL costume for EACH character; never concatenate)
 - Setting / scene geography, lighting, landmarks, opening blocking (who sits/stands where)
 - Language / speech lock (film language; exact lines if the user gave them)
@@ -44,6 +48,8 @@ Write English Markdown with these sections:
 - Production specs (style, axis, occupancy, wardrobe) — copy locks, do not drop them
 - What to avoid
 Preserve every named character and shot from the user prompt in FULL DETAIL. Output Markdown only.
+Explicit user facts and constraints are authoritative. For a sparse request, develop a coherent
+story, celebration, advertisement, or other fitting concept rather than stretching one premise.
 
 Request:
 """
@@ -61,6 +67,9 @@ Shot | Timeline | Camera | Move | Character action | Shot consistency | Comment
 
 Rules:
 - Cover every major shot from the user prompt (typically 3-5 shots; duration ~12-24s total unless brief says shorter)
+- Materialize every beat in the Brief's narrative/content arc; fill the full requested duration
+- Every row advances action, information, product proof, or emotion; no filler, repeated action, or duplicate coverage
+- Preserve the arc's setup/hook, development/turn, and payoff/CTA as applicable
 - Timeline as start-end seconds, e.g. 0.0-4.0s — durations must sum coherently
 - Camera is shot size + angle, e.g. wide/establishing, medium/eye-level, close-up/eye-level, medium/slow pan
 - Move is push/pull/pan/dolly/static and speed
@@ -72,7 +81,7 @@ Rules:
   row or the user prompt asks to repeat it; posture/facing/location locks)
 - Comment is the composed-scene prompt: subjects, composition, light, action instant,
   environment — ready for image gen (composed scene with all opening-cast characters in the scene)
-- Language: keep speech_line exact; empty = silent
+- Language: keep every planned speech_line exact and visibly associate speaker, line, and timing with its row; empty = silent
 - Enhance sparse prompts: crowd, atmosphere, lighting, wardrobe detail — without inventing new lead characters
 - Do not invent a new world that contradicts the brief
 

@@ -1336,11 +1336,24 @@ class Director:
         try:
             system = (
                 "You are the Designer Director. Author a detailed creative brief "
-                "for a short film. Cover: character identity locks (face/hair/body/costume), "
+                "for a short-form video. Explicit user facts and constraints are authoritative. "
+                "When the request is sparse, creatively develop unspecified content into a "
+                "specific, coherent concept instead of restating or stretching the premise. "
+                "The brief MUST include: Creative concept; Narrative/content arc; a timed shot "
+                "plan spanning the full requested duration; and Script/speech plan. "
+                "For narrative or celebration content, build setup → development/turn → payoff. "
+                "For advertising, build hook → desire/problem → demonstration/proof → payoff/CTA. "
+                "Each timed shot must add new action, information, or emotion—no filler, repeated "
+                "action, or duplicate camera coverage. In Script/speech plan, write concise exact "
+                "dialogue or voiceover lines with speaker and timing when speech improves the "
+                "concept; explicitly choose visual-only storytelling when it does not. Never add "
+                "speech when the user requested silence. Also cover: character identity locks "
+                "(face/hair/body/costume), "
                 "scene geography (spatial lock), motion consistency, time-coherent continuity "
-                "(do not undo a completed beat on a later shot), "
-                "shot-view coverage for every named beat, audio policy. "
-                "Stay faithful to the user prompt — do not invent plot. "
+                "(do not undo a completed shot on a later shot), "
+                "shot-view coverage for every named shot, audio policy. "
+                "Preserve all explicit people, places, brand facts, claims, and requested events; "
+                "creative enrichment may fill only details the user left unspecified. "
                 "Respond with markdown brief only (no JSON wrapper)."
             )
             result = await call_model_tool(
@@ -1425,7 +1438,8 @@ class Director:
         characters = list(analysis.get("characters") or [])
         shots = list(analysis.get("shots") or [])
         user_prompt = str(graph.get("description") or "")
-        approved_brief = str(meta.get("approved_brief") or "")[:4000]
+        # Keep the enriched timed shot and speech sections available to storyboard authoring.
+        approved_brief = str(meta.get("approved_brief") or "")[:12000]
         sb_md = ""
         source = ""
         notes = "Director LLM authored storyboard."
@@ -1441,7 +1455,16 @@ class Director:
                 "(blocking, speech, wardrobe, camera); do not paste the entire user "
                 "prompt into every shot; do not restage the whole story from a new "
                 "camera unless the user asked for same-moment coverage. "
-                "Keep language_lock and exact speech_line. "
+                "Materialize the Brief's entire narrative/content arc and timed shot plan into "
+                "these structured shots. Every shot must advance the story, message, product "
+                "demonstration, or emotional state; no filler, repeated action, or cosmetic "
+                "coverage used to consume runtime. Ensure the timelines span the requested "
+                "duration and preserve setup/hook, development, and payoff/CTA as applicable. "
+                "Materialize the Brief's Script/speech plan as exact speech_by_character and "
+                "speech_line values in the appropriate shots. Keep language_lock and exact "
+                "wording; use empty speech fields for deliberately silent shots and never add "
+                "speech when the user requested silence. The human-readable storyboard_markdown "
+                "must also show each exact spoken line or voiceover in its timed shot. "
                 "First shot of each setting: "
                 "keyframe_strategy=compose_from_solo_refs — composer places ONLY "
                 "on_screen cast with cast_actions (who is doing what). "
@@ -1737,8 +1760,8 @@ class Director:
         shots = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
         characters = list(analysis.get("characters") or [])
         user_prompt = str(graph.get("description") or meta.get("user_prompt") or "")
-        approved_brief = str(meta.get("approved_brief") or "")[:5000]
-        approved_sb = str(meta.get("approved_storyboard") or "")[:5000]
+        approved_brief = str(meta.get("approved_brief") or "")[:12000]
+        approved_sb = str(meta.get("approved_storyboard") or "")[:16000]
         source = "storyboard"
         notes = ""
 
@@ -1751,11 +1774,15 @@ class Director:
                 "MUST include shots[] grouped by setting_id (distinct places). "
                 "Shots are consecutive TIME windows that concatenate to the film. "
                 "Each shot.action is THAT window only — do not paste the user prompt "
-                "into every clip. "
+                "into every clip. Preserve every distinct narrative/content shot from the "
+                "approved storyboard; each action must advance the story or message, not repeat "
+                "an earlier action as filler or alternate coverage. Preserve exact per-shot "
+                "speech_by_character and speech_line from the storyboard. "
                 "If requested runtime exceeds Wan max (15s), use "
-                "ceil(duration/15) sequential clips (hard max 16) with contiguous timelines. "
+                "at least ceil(duration/15) sequential clips (hard max 16) with contiguous "
+                "timelines; retain more storyboard clips when they provide distinct content. "
                 "Otherwise YOU own target_shot_count (prefer ≤8, hard max 16). "
-                "One clip = one continuous beat ≤15s. New KF on hard cut, new setting, "
+                "One clip = one continuous shot ≤15s. New KF on hard cut, new setting, "
                 "wardrobe/prop change, or on-screen cast change. "
                 "Qwen KF: lock identity+wardrobe; ≤2–3 people with refs; one variable "
                 "per new KF. Honor explicit N-shot / N分镜 as a HARD ceiling. "
@@ -1766,10 +1793,13 @@ class Director:
                 "Scene specs ARE required — environment-only Qwen stills. "
                 "Each shot: shot_index, timeline, camera, action, on_screen, offscreen, "
                 "cast_actions, featured_cast_ids, ensemble_cast_ids, setting_id, "
-                "keyframe_prompt, exiting_character_ids, keyframe_strategy. "
+                "keyframe_prompt, exiting_character_ids, keyframe_strategy, "
+                "speech_by_character, speech_line. "
                 "Schema: "
                 '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
-                '"shots":[...],"target_shot_count":N,"include_speech":bool,'
+                '"shots":[{"shot_index":1,"timeline":"0-5s","action":"...",'
+                '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
+                '"target_shot_count":N,"include_speech":bool,'
                 '"include_music":bool,"notes":"..."}'
             )
             from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
@@ -3380,7 +3410,9 @@ class Director:
                 missing.append(name)
         if missing:
             extra = "\n".join(f"- **{n}:** must appear with identity lock" for n in missing)
-            brief = (brief.rstrip() + "\n\n**Director cast fidelity:**\n" + extra + "\n")[:8000]
+            brief = (brief.rstrip() + "\n\n**Director cast fidelity:**\n" + extra + "\n")[
+                :12000
+            ]
             patched.append("cast_names")
         # Heuristic: mention multi-view / shot coverage when prompt is long.
         if len(user_prompt) > 120 and "shot" not in low and "view" not in low:
@@ -3388,7 +3420,7 @@ class Director:
                 brief.rstrip()
                 + "\n\n**Shot views:** cover establishing, mid, reaction close-ups "
                 "for every major prompt beat.\n"
-            )[:8000]
+            )[:12000]
             patched.append("shot_views")
 
         from jiuwenswarm.server.runtime.designer.model_tools import (
@@ -3400,8 +3432,13 @@ class Director:
         try:
             system = (
                 "You are the Designer Director. Review the creative brief once for fidelity "
-                "to the user prompt. Flag missing characters or insufficient shot views. "
-                "Patch the brief markdown if needed — do not invent new plot. "
+                "to explicit user facts and constraints. The authored brief is allowed to "
+                "creatively fill details that a sparse request left unspecified. Preserve its "
+                "creative concept, narrative/content arc, timed shot plan, and script/speech "
+                "plan; do not remove an enriched shot merely because it was not stated verbatim "
+                "in the user prompt. Flag missing characters, insufficient shot views, or content "
+                "that contradicts explicit user facts. Patch only to repair those issues; do not "
+                "introduce a conflicting or unrelated plot, cast, claim, or geography. "
                 "Respond JSON only: "
                 '{"ok":true,"patched_brief_markdown":"...","notes":"...","issues":["..."]}'
             )
@@ -3409,7 +3446,7 @@ class Director:
                 prompt=json.dumps(
                     {
                         "user_prompt": user_prompt,
-                        "brief": brief[:6000],
+                        "brief": brief[:12000],
                         "characters": characters,
                         "shots": analysis.get("shots"),
                     },
@@ -3428,7 +3465,7 @@ class Director:
                 )
             patched_md = str(parsed.get("patched_brief_markdown") or "").strip()
             if patched_md and len(patched_md) > 80:
-                brief = patched_md[:8000]
+                brief = patched_md[:12000]
                 patched.append("llm_brief")
                 ack["source"] = "llm"
             ack["notes"] = str(parsed.get("notes") or ack["notes"])[:1000]
@@ -3526,8 +3563,12 @@ class Director:
         try:
             system = (
                 "You are the Designer Director. Review the storyboard once for best quality "
-                "while remaining completely faithful to the user prompt, approved brief, and "
-                "story beats (no new plot). Fix missing characters/views, enhance sparse shots "
+                "using explicit user facts plus the approved enriched Brief and story shots as "
+                "joint authority. Preserve the Brief's developed arc, distinct timed shots, and "
+                "exact speech plan; do not reject approved enrichment merely because a sparse "
+                "user prompt did not state it verbatim. Do not introduce a conflicting or "
+                "unrelated plot, cast, claim, or geography. Fix missing characters/views, "
+                "enhance sparse shots "
                 "(crowd, atmosphere), set shot durations, enforce time-coherent continuity, and "
                 "keep geography locked (same landmarks/layout/light across views). "
                 "Also approve/enforce film audio locks: language_lock (one language for all "
@@ -3545,6 +3586,10 @@ class Director:
                 prompt=json.dumps(
                     {
                         "user_prompt": user_prompt,
+                        "approved_brief": str(meta.get("approved_brief") or "")[:12000],
+                        "approved_storyboard": str(
+                            meta.get("approved_storyboard") or ""
+                        )[:16000],
                         "shots": shots,
                         "brief_hint": meta.get("director_brief_notes") or "",
                     },
@@ -3729,11 +3774,15 @@ class Director:
         analysis = (graph.get("metadata") or {}).get("script_analysis") or {}
         system = (
             "You are the Designer Director Agent. Validate once (no loops) for best cinematic "
-            "quality while remaining completely faithful to the user prompt, brief, and "
-            "storyboard — do not invent plot, cast, or geography. Check: "
-            "(1) each shot's character_ids match that beat's focus subjects, "
-            "(2) later beats do not reuse the wrong earlier cast, "
-            "(3) enough shots cover every major character and prompt beat, "
+            "quality. Explicit user facts and constraints are authoritative; the approved "
+            "enriched Brief, Storyboard, and structured shots are authoritative for details the "
+            "user left unspecified. Preserve their creative arc, distinct timed shots, and exact "
+            "speech plan. Do not reject approved enrichment merely because it was not stated "
+            "verbatim in a sparse user prompt, and do not introduce a conflicting or unrelated "
+            "plot, cast, claim, or geography. Check: "
+            "(1) each shot's character_ids match that shot's focus subjects, "
+            "(2) later shots do not reuse the wrong earlier cast, "
+            "(3) enough shots cover every major character and prompt shot, "
             "(4) brief/storyboard are comprehensive enough for keyframe and shot prompting, "
             "(5) SPATIAL CONSISTENCY: motion + geography — landmarks/layout/light must "
             "match the master scene specs across shot views (edit/ref, not new buildings), "
@@ -3752,6 +3801,12 @@ class Director:
         prompt = json.dumps(
             {
                 "user_prompt": graph.get("description"),
+                "approved_brief": str(
+                    (graph.get("metadata") or {}).get("approved_brief") or ""
+                )[:12000],
+                "approved_storyboard": str(
+                    (graph.get("metadata") or {}).get("approved_storyboard") or ""
+                )[:16000],
                 "script_analysis": analysis,
                 "continuity_locks": (graph.get("metadata") or {}).get("continuity_locks"),
                 "spatial_lock": (graph.get("metadata") or {}).get("spatial_lock"),

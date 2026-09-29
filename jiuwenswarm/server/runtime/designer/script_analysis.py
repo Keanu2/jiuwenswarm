@@ -1311,12 +1311,23 @@ async def analyze_creative_brief(
             sequential_shot_count,
         )
 
+        story_enrichment_rule = (
+            "Treat explicit user facts and constraints as authoritative. When the request is "
+            "sparse (for example only a topic, format, and duration), creatively develop the "
+            "unspecified content into a coherent video concept instead of repeating the premise. "
+            "Give the film a clear progression and payoff: for narrative/celebration content use "
+            "setup → development/turn → climax or emotional payoff; for advertising use "
+            "hook → desire/problem → product demonstration or proof → payoff/CTA. "
+            "Create enough distinct visual shots to earn the requested runtime; every shot must "
+            "advance the idea, reveal new information, or change the emotional state. No filler, "
+            "duplicate actions, or same-moment camera coverage presented as new content. "
+        )
         shot_count_rule = (
             "Shots are consecutive TIME windows that concatenate to the film. "
             "Each shot.action describes ONLY that window — do not paste the user prompt "
             "into actions and do not restage the whole story from a new camera "
             "(angle coverage only if the user asked for multi-cam / same-moment angles). "
-            f"One clip = one continuous beat, duration ≤{WAN_MAX_CLIP_SEC}s (Wan max). "
+            f"One clip = one continuous shot, duration ≤{WAN_MAX_CLIP_SEC}s (Wan max). "
             "New setting_id / hard cut / wardrobe / on-screen cast change → new shot. "
             "Qwen KF: lock identity+wardrobe; first setting KF = compose_from_solo_refs, "
             "later same setting = edit_prior_keyframe; prefer ≤2–3 people with refs. "
@@ -1330,9 +1341,10 @@ async def analyze_creative_brief(
                 n_clips = sequential_shot_count(int(duration_sec))
                 duration_rule = (
                     f"Requested runtime {duration_sec}s exceeds Wan max {WAN_MAX_CLIP_SEC}s. "
-                    f"Set target_duration_sec={duration_sec} and target_shot_count={n_clips}. "
-                    f"Use {n_clips} sequential clips of ≤{WAN_MAX_CLIP_SEC}s with contiguous "
-                    "timelines. Each clip covers only its window."
+                    f"Set target_duration_sec={duration_sec}; use at least {n_clips} sequential "
+                    f"clips, and use more distinct clips when the developed content needs them. "
+                    f"Every clip must be 2–{WAN_MAX_CLIP_SEC}s with contiguous timelines. "
+                    "Each clip covers only its own advancing story window."
                 )
             else:
                 duration_rule = (
@@ -1342,7 +1354,9 @@ async def analyze_creative_brief(
             duration_rule = ""
         # Compact schema — long prompts make deepseek-flash return prose/empty.
         system = (
-            "You are the Designer Director. Domain-agnostic: use only places/people from the prompt. "
+            "You are the Designer Director. Domain-agnostic. "
+            + story_enrichment_rule
+            + "Do not alter explicit people, places, brand facts, claims, or requested events. "
             "Extract EVERY named human into characters[]. Anonymous crowd is not a character. "
             "Each character description MUST lock wardrobe garments: shirt/top style+color, "
             "trousers/skirt/bottom style+color, footwear, outerwear/accessories if any "
@@ -1391,6 +1405,9 @@ async def analyze_creative_brief(
             if reinforce_json:
                 sys_msg = (
                     "Output ONLY one JSON object starting with '{'. "
+                    + story_enrichment_rule
+                    + "The shots must be distinct, sequential content shots that fill the "
+                    "requested duration without repetition. "
                     '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
                     '"shots":[{"shot_index":1,"action":"...","camera":"...",'
                     '"character_ids":["char_1"],"ensemble_cast_ids":["char_1"],'

@@ -388,6 +388,9 @@ def apply_shot_scope(
     slicing = bool(asked is not None and int(asked) > int(wan_max))
 
     if slicing and asked:
+        # The Wan limit determines the minimum number of clips, not the desired
+        # narrative beat count. Preserve a richer authored plan when every clip
+        # can still satisfy the model's minimum duration.
         n = sequential_shot_count(int(asked), wan_max=wan_max)
         explicit = 0
         try:
@@ -400,6 +403,14 @@ def apply_shot_scope(
             explicit = 0
         if explicit >= 1 and explicit * int(wan_max) >= int(asked):
             n = min(explicit, MAX_SHOT_CLIP_NODES)
+        elif shots:
+            max_by_min_duration = max(1, int(asked) // MIN_CLIP_SEC)
+            authored_n = min(
+                len(shots),
+                max_by_min_duration,
+                MAX_SHOT_CLIP_NODES,
+            )
+            n = max(n, authored_n)
         film_sec = min(int(asked), n * int(wan_max))
         beats = _beat_list_from_prompt(prompt, n)
         template = dict(shots[0]) if shots else {}

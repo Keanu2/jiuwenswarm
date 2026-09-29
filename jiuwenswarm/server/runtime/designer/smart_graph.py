@@ -962,7 +962,7 @@ def build_smart_video_graph(
                     "Author a DETAILED creative brief from the user prompt: every named "
                     "character with wardrobe/face locks, scene geography, language/speech, "
                     "opening blocking, motion/consistency rules, shot-view coverage, audio. "
-                    "Preserve every named beat. Obey and include the PRODUCTION LOCK SPECS."
+                    "Preserve every named shot. Obey and include the PRODUCTION LOCK SPECS."
                 ),
             },
             "layout": {"x": 40, "y": 220, "width": 260, "height": 140},
@@ -983,9 +983,12 @@ def build_smart_video_graph(
         "delegate": "agent",
         "director_task": (
             "Build a time-coherent DETAILED storyboard from the approved brief: "
-            "per-shot duration, camera/view, on-screen cast, full blocking/action, "
+            "materialize its full narrative/content arc and timed speech plan; every shot "
+            "must advance action, information, product proof, or emotion without filler, "
+            "repeated action, or duplicate coverage. Include per-shot duration, camera/view, "
+            "on-screen cast, full blocking/action, "
             "exact speech_line, language lock, consistency forbids "
-            "(do not undo a completed beat). Each row is THAT window in full detail — "
+            "(do not undo a completed shot). Each row is THAT window in full detail — "
             "not a camera restage of the whole prompt, and not a stripped one-liner."
         ),
         "tools": ["call_model", "write_artifact"],

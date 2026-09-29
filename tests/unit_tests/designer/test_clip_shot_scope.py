@@ -66,6 +66,31 @@ def test_apply_shot_scope_slices_long_runtime() -> None:
     assert out["shots"][0]["shot_relation"] != "angle_variant"
 
 
+def test_apply_shot_scope_preserves_richer_authored_plan_for_30_seconds() -> None:
+    shots = [
+        {"shot_index": 1, "action": "A wrapped box lands beneath the tree."},
+        {"shot_index": 2, "action": "Family members follow a trail of glowing ornaments."},
+        {"shot_index": 3, "action": "They discover the product inside and try it together."},
+        {"shot_index": 4, "action": "The room opens into a joyful celebration and brand payoff."},
+    ]
+    out = apply_shot_scope(
+        {"shots": shots},
+        "Create a 30 second video for a Christmas product celebration.",
+    )
+
+    assert out["duration_slicing"] is True
+    assert len(out["shots"]) == 4
+    assert [shot["action"] for shot in out["shots"]] == [
+        shot["action"] for shot in shots
+    ]
+    assert [shot["timeline"] for shot in out["shots"]] == [
+        "0.0-7.0s",
+        "7.0-14.0s",
+        "14.0-22.0s",
+        "22.0-30.0s",
+    ]
+
+
 def test_apply_shot_scope_skips_c_when_under_wan_max() -> None:
     shots = [
         {"shot_index": 1, "action": "Dad sits by the window", "shot_relation": "hard_cut"},
