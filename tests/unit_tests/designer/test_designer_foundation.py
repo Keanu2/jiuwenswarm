@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -702,6 +703,50 @@ async def test_rerun_single_node_keeps_upstream_outputs(
             },
         }
         executor.create_rerun(graph, source_run=unfinished, node_id="n_clip_1")
+
+
+@pytest.mark.asyncio
+async def test_continue_after_failure_retries_failed_node(
+    designer_store: DesignerGraphStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.model_tools.require_llm", lambda: None
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.model_tools.require_media_models",
+        lambda **_: None,
+    )
+    graph = designer_store.save_graph(
+        _handler_graph(build_bootstrap_graph(project_id="proj_continue_failed", prompt="continue")),
+    )
+    executor = GraphExecutor(designer_store)
+    scheduled: dict[str, dict] = {}
+
+    async def capture(graph, run, *, on_update):
+        scheduled.update(deepcopy(run["node_states"]))
+
+    monkeypatch.setattr(executor, "_execute_run", capture)
+    run = executor.create_run(graph)
+    for state in run["node_states"].values():
+        state["status"] = NODE_STATUS_COMPLETED
+    run["status"] = "failed"
+    run["error"] = "insufficient credit"
+    run["node_states"]["n_clip_1"] = {
+        "status": "failed",
+        "error": "insufficient credit",
+        "output_ref": None,
+    }
+    run["node_states"]["n_clip_2"] = {"status": "pending"}
+    designer_store.save_run(run)
+
+    await executor.start_run(run["run_id"])
+    await executor._tasks[run["run_id"]]
+
+    assert scheduled["n_clip_1"]["status"] == "pending"
+    assert not scheduled["n_clip_1"].get("error")
+    assert scheduled["n_clip_2"]["status"] == "pending"
+    assert scheduled["n_brief"]["status"] == NODE_STATUS_COMPLETED
 
 
 @pytest.mark.asyncio

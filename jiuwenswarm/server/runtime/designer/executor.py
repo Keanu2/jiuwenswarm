@@ -469,6 +469,13 @@ class GraphExecutor:
             )
             if not pending:
                 return run
+        if run["status"] == RUN_STATUS_FAILED:
+            # Continue after a failure (e.g. out of credit) retries the failed
+            # nodes too; the scheduler only picks up pending ones.
+            states = run.setdefault("node_states", {})
+            for node_id, state in graph_node_states(run).items():
+                if isinstance(state, dict) and state.get("status") == NODE_STATUS_FAILED:
+                    states[node_id] = _parked_node_state(state)
         graph = self._require_graph(run["graph_id"])
         from jiuwenswarm.server.runtime.designer.model_tools import (
             require_llm,
