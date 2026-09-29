@@ -684,6 +684,7 @@ def test_compose_keeps_prior_prompt_continuity() -> None:
             "Dad from Image 1, wearing navy sweater, is walking to the door."
         ),
         "previous_clip_action": "Dad walks to the door",
+        "already_done": ["Dad walked to the door"],
         "seat_anchors": {"Dad": {"pose": "seated", "screen": "screen-left"}},
         "scene_specs": {
             "place": "kitchen",
@@ -736,44 +737,7 @@ def test_exited_cast_omitted_until_returned() -> None:
     assert "Child" not in text
     assert "do not" not in text.lower()
 
-def test_cross_setting_does_not_pull_prior_wan_prompt() -> None:
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
-        ensure_prior_clip_story_on_cfg,
-    )
-
-    graph = {
-        "nodes": [
-            {
-                "id": "n_clip_1",
-                "config": {
-                    "role": "clip",
-                    "shot_index": 1,
-                    "setting_id": "set_dining",
-                    "last_wan_prompt": "Image 1 is Father.\nFather sits at the table.",
-                    "shot_action": "Father sits at the table",
-                    "seat_anchors": {"Father": {"pose": "seated"}},
-                },
-            },
-            {
-                "id": "n_clip_2",
-                "config": {
-                    "role": "clip",
-                    "shot_index": 2,
-                    "setting_id": "set_garden",
-                    "continuity_clip_node_id": "n_clip_1",
-                    "previous_clip_wan_prompt": "stale dining prompt",
-                    "seat_anchors": {"Father": {"pose": "seated"}},
-                },
-            },
-        ]
-    }
-    out = ensure_prior_clip_story_on_cfg(dict(graph["nodes"][1]["config"]), graph)
-    assert not str(out.get("previous_clip_wan_prompt") or "").strip()
-    assert not out.get("seat_anchors")
-    assert out.get("previous_clip_handoff_ready") is False
-
-
-def test_same_setting_pulls_prior_wan_prompt() -> None:
+def test_prior_clip_story_pull_does_not_copy_prior_wan_prompt() -> None:
     from jiuwenswarm.server.runtime.designer.pipeline.clip_story_state import (
         ensure_prior_clip_story_on_cfg,
     )
@@ -802,5 +766,6 @@ def test_same_setting_pulls_prior_wan_prompt() -> None:
         ]
     }
     out = ensure_prior_clip_story_on_cfg(dict(graph["nodes"][1]["config"]), graph)
-    assert "Father sits" in str(out.get("previous_clip_wan_prompt") or "")
-
+    assert "continuity_clip_node_id" not in out
+    assert not out.get("previous_clip_wan_prompt")
+    assert out["setting_id"] == "set_dining"

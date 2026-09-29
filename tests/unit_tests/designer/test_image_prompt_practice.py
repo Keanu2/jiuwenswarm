@@ -123,6 +123,7 @@ def test_continue_line_does_not_paste_prior_wan() -> None:
         "costume_lock": "Mother: dusty rose blouse",
         "previous_clip_wan_prompt": prior,
         "previous_clip_action": "Mother listens",
+        "already_done": ["Mother listened to the news"],
         "scene_specs": {"scene_name": "the warm dining room", "lighting": "warm light"},
         "style_lock": {"look": "photoreal cinematic"},
     }

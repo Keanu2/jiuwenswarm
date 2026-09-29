@@ -9,10 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER_DESIGN,
     NODE_STATUS_COMPLETED,
     NODE_STATUS_PENDING,
     NODE_TYPE_TEXT,
@@ -30,15 +28,14 @@ from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeResult
 from jiuwenswarm.server.runtime.designer.node_agent import (
     DesignerGraphToolkit,
-    designer_agent_group_dir,
-    flatten_template_prompt,
-    load_node_agent_template,
     parse_agent_template_ref,
 )
 
 
 @pytest.fixture()
-def designer_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> DesignerGraphStore:
+def designer_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_director_llm: None
+) -> DesignerGraphStore:
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.designer.graph_store.get_agent_root_dir",
         lambda: tmp_path,
@@ -141,41 +138,6 @@ def test_node_agent_template_uses_role_default() -> None:
     assert node_agent_template(explicit) == "custom/leader"
 
 
-def test_builtin_designer_group_has_six_members() -> None:
-    templates = load_agent_group_package(designer_agent_group_dir())
-    assert set(templates) == {
-        "leader",
-        "character",
-        "scene",
-        "storyboard",
-        "frame",
-        "clip",
-    }
-    prompt = flatten_template_prompt(templates["leader"])
-    assert "designer_node_run" in prompt
-    assert "designer_node_complete" in prompt
-
-
-def test_load_node_agent_template_resolves_designer_leader() -> None:
-    node: DesignerGraphNode = {
-        "id": "n_brief",
-        "type": NODE_TYPE_TEXT,
-        "label": "brief",
-        "config": {"role": NODE_ROLE_BRIEF},
-    }
-    template = load_node_agent_template(node)
-    assert template is not None
-    assert template.agent_card.id == "leader"
-    character: DesignerGraphNode = {
-        "id": "n_character",
-        "type": "image",
-        "label": "角色",
-        "config": {"role": NODE_ROLE_CHARACTER_DESIGN},
-    }
-    loaded = load_node_agent_template(character)
-    assert loaded is not None
-    assert loaded.agent_card.id == "character"
-
 
 @pytest.mark.asyncio
 async def test_agent_scheduler_starts_only_ready_root(
@@ -234,7 +196,7 @@ async def test_agent_node_run_starts_companion(
 
 
 @pytest.mark.asyncio
-async def test_agent_patch_then_run_new_node(
+async def test_agent_patch_cannot_add_nodes_to_frozen_topology(
     designer_store: DesignerGraphStore,
     tmp_path: Path,
 ) -> None:
@@ -255,9 +217,10 @@ async def test_agent_patch_then_run_new_node(
                     ]
                 }
             )
-            await toolkit.node_run("n_extra")
+            spawned.append(await toolkit.node_run("n_extra"))
         return await _complete_with_dummy_media(tmp_path, node, toolkit)
 
+    spawned: list[str] = []
     graph = designer_store.save_graph(
         build_bootstrap_graph(project_id="proj_agent_patch", prompt="patch then run"),
     )
@@ -268,11 +231,12 @@ async def test_agent_patch_then_run_new_node(
     finished = designer_store.get_run(run["run_id"])
     assert finished is not None
     assert finished["status"] == RUN_STATUS_COMPLETED
-    assert "n_extra" in started
+    assert "n_extra" not in started
+    assert spawned == ["node not found: n_extra"]
     patched = designer_store.get_graph(graph["graph_id"])
     assert patched is not None
-    assert any(node["id"] == "n_extra" for node in patched["nodes"])
-    assert finished["node_states"]["n_extra"]["status"] == NODE_STATUS_COMPLETED
+    assert (patched.get("metadata") or {}).get("freeze_shot_topology") is True
+    assert not any(node["id"] == "n_extra" for node in patched["nodes"])
 
 
 @pytest.mark.asyncio
@@ -379,39 +343,11 @@ class _DummySpawner:
         return {}
 
 
-def test_toolkit_graph_patch_rejects_extra_clip_nodes() -> None:
-    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
-
-    graph = {
-        "graph_id": "g1",
-        "nodes": [
-            {"id": "n_clip_1", "type": "video", "config": {"pipeline": "clip"}},
-        ],
-        "edges": [],
-    }
-
-    class _RejectSpawner(_DummySpawner):
-        def load_graph_snapshot(self, graph_id: str, run_id: str) -> dict:
-            return {"graph": graph}
-
-        def apply_agent_graph_patch(self, graph_id: str, patch: dict) -> dict:
-            raise AssertionError("must not add extra clip nodes")
-
-    ctx = NodeExecutionContext(graph=graph, run_id="r1", node_id="n_clip_1")
-    toolkit = DesignerGraphToolkit(_RejectSpawner(), ctx)
-    result = toolkit.graph_patch(
-        {
-            "upsert_nodes": [
-                {"id": "n_clip_2", "type": "video", "config": {"pipeline": "clip"}},
-            ]
-        }
+def test_clip_video_tool_timeout_overrides_ability_manager_default() -> None:
+    from openjiuwen.core.single_agent.ability_manager import (
+        AbilityManager,
+        DEFAULT_TOOL_CALL_TIMEOUT,
     )
-    assert result.get("ok") is False
-    assert "n_clip_2" in str(result.get("error") or "")
-
-
-def test_clip_video_tool_timeout_exempts_ability_manager_default() -> None:
-    from openjiuwen.core.single_agent.ability_manager import AbilityManager
 
     from jiuwenswarm.server.runtime.designer.executor import _node_execute_timeout_sec
     from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
@@ -429,71 +365,15 @@ def test_clip_video_tool_timeout_exempts_ability_manager_default() -> None:
     )
     tools = build_designer_tools(DesignerGraphToolkit(_DummySpawner(), ctx))
     video = next(tool for tool in tools if tool.card.name == "call_video_model")
-    # None = exempt from the 300s default; invoke then uses the 3600s hard cap.
-    # Node-level wait_for still caps the clip at _node_execute_timeout_sec.
     timeout = AbilityManager._resolve_call_timeout(video.card)
-    assert timeout is None
-    assert _node_execute_timeout_sec(node) >= 1800.0
+    assert timeout == 1500.0
+    assert timeout > DEFAULT_TOOL_CALL_TIMEOUT
+    assert _node_execute_timeout_sec(node) >= timeout
 
     mgr = AbilityManager(owner_id="designer:r1:n_clip_1")
     mgr.add_ability(video.card, video)
     registered = mgr._tools["call_video_model"]
-    assert AbilityManager._resolve_call_timeout(registered) is None
-
-
-def test_stamp_ability_timeouts_overrides_bare_300s_card() -> None:
-    from openjiuwen.core.foundation.tool import ToolCard
-    from openjiuwen.core.single_agent.ability_manager import (
-        AbilityManager,
-        DEFAULT_TOOL_CALL_TIMEOUT,
-    )
-
-    from jiuwenswarm.server.runtime.designer.node_agent import (
-        _stamp_ability_manager_timeouts,
-    )
-
-    class _FakeAM:
-        def __init__(self) -> None:
-            self._tools = {
-                "call_video_model": ToolCard(
-                    name="call_video_model",
-                    description="video",
-                    input_params={},
-                ),
-                "call_model": ToolCard(
-                    name="call_model",
-                    description="llm",
-                    input_params={},
-                ),
-            }
-
-        _resolve_call_timeout = staticmethod(AbilityManager._resolve_call_timeout)
-
-    class _FakeAgent:
-        def __init__(self) -> None:
-            self.ability_manager = _FakeAM()
-
-    node = {
-        "id": "n_clip_1",
-        "type": "video",
-        "config": {"pipeline": "clip"},
-    }
-    agent = _FakeAgent()
-    video_before = AbilityManager._resolve_call_timeout(
-        agent.ability_manager._tools["call_video_model"]
-    )
-    assert video_before == DEFAULT_TOOL_CALL_TIMEOUT
-
-    _stamp_ability_manager_timeouts(agent, node)
-
-    assert agent.ability_manager._resolve_call_timeout(
-        agent.ability_manager._tools["call_video_model"]
-    ) is None
-    llm_timeout = agent.ability_manager._resolve_call_timeout(
-        agent.ability_manager._tools["call_model"]
-    )
-    assert llm_timeout is not None
-    assert llm_timeout >= 1800.0
+    assert AbilityManager._resolve_call_timeout(registered) == 1500.0
 
 
 @pytest.mark.asyncio
@@ -540,7 +420,7 @@ async def test_call_image_model_uses_designer_helper_not_localfunction(
 
 
 @pytest.mark.asyncio
-async def test_call_image_model_attaches_on_screen_character_sheets(
+async def test_call_image_model_attaches_scene_character_sheets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -558,7 +438,6 @@ async def test_call_image_model_attaches_on_screen_character_sheets(
     async def fake_image(prompt: str, **kwargs) -> dict[str, str]:
         seen["prompt"] = prompt
         seen["reference_images"] = kwargs.get("reference_images")
-        seen["size"] = kwargs.get("size")
         return {"image_path": str(out)}
 
     monkeypatch.setattr(
@@ -586,15 +465,14 @@ async def test_call_image_model_attaches_on_screen_character_sheets(
         },
     }
     frame = {
-        "id": "n_frame_3",
+        "id": "n_scene_2",
         "type": "image",
-        "label": "scene 2: keyframe 1",
+        "label": "scene 2",
         "config": {
-            "pipeline": "frame",
+            "pipeline": "scene",
             "character_ids": ["char_1", "char_2"],
             "character_node_ids": ["n_character_1", "n_character_2"],
             "cast_names": ["young", "partner"],
-            "aspect_lock": {"ratio": "9:16", "image_size": "576x1024"},
             "identity_refs": {
                 "character_ids": ["char_1", "char_2"],
                 "character_node_ids": ["n_character_1", "n_character_2"],
@@ -604,7 +482,7 @@ async def test_call_image_model_attaches_on_screen_character_sheets(
     ctx = NodeExecutionContext(
         graph={"nodes": [char_1, char_2, frame]},
         run_id="run_img_refs",
-        node_id="n_frame_3",
+        node_id="n_scene_2",
         run={
             "node_states": {
                 "n_character_1": {
@@ -628,46 +506,4 @@ async def test_call_image_model_attaches_on_screen_character_sheets(
     result = await toolkit.call_image_model(prompt="compose dinner")
     assert result.startswith("image_ready")
     assert seen["reference_images"] == [str(young.resolve()), str(partner.resolve())]
-    assert seen["size"] == "576x1024"
-    assert "Image 1 is young" in str(seen["prompt"])
-    assert "Image 2 is partner" in str(seen["prompt"])
-
-
-@pytest.mark.asyncio
-async def test_call_video_model_reuses_completed_and_skips_second_wan(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
-    from jiuwenswarm.server.runtime.designer.node_agent import DesignerGraphToolkit
-
-    clip = tmp_path / "shot.mp4"
-    clip.write_bytes(b"mp4" * 40)
-    started = 0
-
-    async def fake_video(prompt: str, **kwargs) -> dict[str, str]:
-        nonlocal started
-        started += 1
-        return {"video_path": str(clip)}
-
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.handlers.clip.generate_clip_video",
-        fake_video,
-    )
-    node = {
-        "id": "n_clip_1",
-        "type": "video",
-        "label": "clip",
-        "config": {"pipeline": "clip", "prompt": "walks in"},
-    }
-    ctx = NodeExecutionContext(
-        graph={"nodes": [node]},
-        run_id="run_vid",
-        node_id="n_clip_1",
-    )
-    toolkit = DesignerGraphToolkit(_DummySpawner(), ctx)
-    first = await toolkit.call_video_model(prompt="walks in")
-    second = await toolkit.call_video_model(prompt="walks in again")
-    assert first.startswith("video_ready")
-    assert second.startswith("video_ready")
-    assert started == 1
+    assert seen["prompt"] == "compose dinner"

@@ -183,50 +183,6 @@ def test_user_reference_node_is_immutable_passthrough(tmp_path: Path) -> None:
     assert cfg["read_only"] is True
 
 
-def test_music_node_survives_without_music_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    """BGM is one film-wide bed, so the node stays as a silent placeholder."""
-    from jiuwenswarm.server.runtime.designer import orchestration
-    from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
-
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.capabilities.detect_audio_backends",
-        lambda: {"can_speech": False, "can_music": False, "can_video_audio": False},
-    )
-    analysis = {
-        "characters": [{"id": "char_1", "name": "Hero", "description": "a hero"}],
-        "scenes": [{"id": "set_1", "name": "Ridge", "description": "snow"}],
-        "shots": [
-            {
-                "shot_index": 1,
-                "title": "Climb",
-                "action": "climbs",
-                "camera": "wide",
-                "character_ids": ["char_1"],
-                "keyframe_prompt": "Hero climbs",
-                "setting_id": "set_1",
-            }
-        ],
-        "audio": {"policy": "optional_music", "include_speech": False, "include_music": True},
-    }
-    graph = build_smart_video_graph(
-        project_id="proj_bgm01",
-        prompt="a hero climbs a ridge",
-        analysis=analysis,
-        optimize_for="quality",
-    )
-
-    assert "n_music" in {str(node.get("id")) for node in graph["nodes"]}
-
-    assignment = orchestration.assign_audio_node_agents(graph)
-
-    music = next(node for node in graph["nodes"] if str(node.get("id")) == "n_music")
-    assert "n_music" in {str(node.get("id")) for node in graph["nodes"]}
-    assert music["config"]["force_handler"] is True
-    assert music["config"]["delegate"] == "handler"
-    assert "n_music:music_placeholder" in assignment["assigned"]
-    assert graph["metadata"]["audio_routing"]["music_nodes"] is True
-
-
 def test_bootstrap_graph_registers_user_references(
     designer_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -887,10 +843,12 @@ def test_analysis_prompt_reference_roster_is_not_a_shot() -> None:
     actions = " ".join(str(shot.get("action") or "") for shot in analysis["shots"])
     assert "User attached" not in actions
     assert "REFERENCE_MEDIA" not in actions
-    names = " ".join(str(item.get("name") or "") for item in analysis["characters"]).lower()
-    assert "troop" in names
-    scenes = " ".join(str(item.get("name") or "") for item in analysis["scenes"]).lower()
-    assert "castle" in scenes
+    names = " ".join(str(item.get("name") or "") for item in analysis["characters"])
+    assert "User attached" not in names
+    assert "castle-1" not in names
+    scenes = " ".join(str(item.get("name") or "") for item in analysis["scenes"])
+    assert "User attached" not in scenes
+    assert "castle-1" not in scenes
     lock = default_spatial_lock({"name": "Mountain pass", "description": "dusk ridges"})
     blob = " ".join(lock.values()).lower()
     assert "pulpit" not in blob

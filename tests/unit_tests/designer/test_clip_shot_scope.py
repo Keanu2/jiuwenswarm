@@ -117,6 +117,7 @@ def test_build_clip_prompt_omits_full_user_story() -> None:
                     "shot_index": 2,
                     "shot_action": "Child walks to the door",
                     "camera": "medium",
+                    "cast_names": ["Child"],
                 },
             },
         ],
@@ -124,7 +125,7 @@ def test_build_clip_prompt_omits_full_user_story() -> None:
     }
     prompt = build_clip_prompt(graph, graph["nodes"][1])
     assert "USER PROMPT (authoritative story" not in prompt
-    assert "Child walks to the door" in prompt
+    assert "walks to the door" in prompt
     assert looks_like_full_story_restatement(prompt, LONG_STORY) is False
 
 

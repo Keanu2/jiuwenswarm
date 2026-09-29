@@ -60,7 +60,7 @@ async def test_script_analysis_prompt_develops_sparse_requests(
     assert "When the request is sparse" in system
     assert "hook → desire/problem → product demonstration or proof → payoff/CTA" in system
     assert "No filler, duplicate actions" in system
-    assert "use more distinct clips" in system
+    assert "Each clip covers only its own advancing story window" in system
     assert result["target_duration_sec"] == 30
 
 
@@ -99,7 +99,7 @@ async def test_director_brief_prompt_requires_visible_story_and_script_plan(
 
     system = captured["system"]
     assert "Creative concept; Narrative/content arc" in system
-    assert "timed beat plan spanning the full requested duration" in system
+    assert "timed shot plan spanning the full requested duration" in system
     assert "Script/speech plan" in system
     assert "no filler, repeated action" in system
     assert "approved_brief" in graph["metadata"]

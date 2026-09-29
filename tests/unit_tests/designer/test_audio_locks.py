@@ -77,7 +77,7 @@ def test_non_native_audio_model_does_not_swap_for_dialogue(monkeypatch) -> None:
     assert override is None
 
 
-def test_music_node_always_created_when_brief_wants_bgm(monkeypatch) -> None:
+def test_audio_nodes_not_created_when_brief_wants_bgm(monkeypatch) -> None:
     from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
 
     monkeypatch.setattr(
@@ -108,7 +108,7 @@ def test_music_node_always_created_when_brief_wants_bgm(monkeypatch) -> None:
         },
     )
     ids = [str(n.get("id") or "") for n in graph["nodes"]]
-    assert "n_music" in ids
+    assert "n_music" not in ids
     assert "n_speech" not in ids
     clip = next(
         n
@@ -122,7 +122,7 @@ def test_music_node_always_created_when_brief_wants_bgm(monkeypatch) -> None:
     assert "Do NOT generate music" in blob or "NOT in this clip" in blob or "dialogue only" in blob.lower()
 
 
-def test_director_keeps_music_node_without_music_backend(monkeypatch) -> None:
+def test_director_adds_no_audio_nodes_without_music_backend(monkeypatch) -> None:
     from jiuwenswarm.server.runtime.designer.orchestration import assign_audio_node_agents
     from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
 
@@ -149,12 +149,8 @@ def test_director_keeps_music_node_without_music_backend(monkeypatch) -> None:
     )
     assign_audio_node_agents(graph)
     ids = [str(n.get("id") or "") for n in graph["nodes"]]
-    assert "n_music" in ids
+    assert "n_music" not in ids
     assert "n_speech" not in ids
-    music = next(n for n in graph["nodes"] if str(n.get("id")) == "n_music")
-    cfg = music.get("config") or {}
-    assert cfg.get("delegate") == "handler"
-    assert cfg.get("force_handler") is True
 
 
 def test_tts_node_is_never_created_even_when_backend_exists(monkeypatch) -> None:
@@ -195,10 +191,11 @@ def test_tts_node_is_never_created_even_when_backend_exists(monkeypatch) -> None
     assign_audio_node_agents(graph)
     ids = [str(n.get("id") or "") for n in graph["nodes"]]
     assert "n_speech" not in ids
-    assert "n_music" in ids
+    assert "n_music" not in ids
     routing = graph["metadata"]["audio_routing"]
-    assert routing["can_speech"] is False
     assert routing["clip_embedded"] is True
+    assert routing["speech_nodes"] is False
+    assert routing["music_nodes"] is False
 
 
 def test_silent_placeholder_is_not_mixed():
@@ -206,13 +203,8 @@ def test_silent_placeholder_is_not_mixed():
         SILENT_MUSIC_PLACEHOLDER_TOKEN,
         is_silent_music_placeholder,
     )
-    from jiuwenswarm.server.runtime.designer.handlers.compose import (
-        _is_silent_music_placeholder,
-    )
-
     stub = Path(f"designer_music_run_n_music_{SILENT_MUSIC_PLACEHOLDER_TOKEN}.m4a")
     assert is_silent_music_placeholder(stub)
-    assert _is_silent_music_placeholder(stub)
     assert not is_silent_music_placeholder(Path("theme.mp3"))
 
 

@@ -429,7 +429,7 @@ async def test_compose_handler_refuses_while_clip_still_running(
         )
 
 
-def test_compose_also_waits_for_separate_audio_nodes(tmp_path):
+def test_compose_also_waits_for_connected_audio_nodes(tmp_path):
     from jiuwenswarm.common.schema.designer_graph import (
         NODE_STATUS_COMPLETED,
         NODE_STATUS_PENDING,
@@ -452,12 +452,20 @@ def test_compose_also_waits_for_separate_audio_nodes(tmp_path):
             {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
             {"id": "n_speech", "type": "audio", "config": {"role": "speech"}},
             {"id": "n_music", "type": "audio", "config": {"role": "music"}},
-            {"id": "n_compose", "type": "video", "config": {"role": "compose", "inputs": ["n_clip_1"]}},
+            {"id": "n_music_unused", "type": "audio", "config": {"role": "music"}},
+            {
+                "id": "n_compose",
+                "type": "video",
+                "config": {"role": "compose", "inputs": ["n_clip_1", "n_speech"]},
+            },
         ],
-        [{"id": "e", "source": "n_clip_1", "target": "n_compose", "kind": "data"}],
+        [
+            {"id": "e", "source": "n_clip_1", "target": "n_compose", "kind": "data"},
+            {"id": "e_music", "source": "n_music", "target": "n_compose", "kind": "data"},
+        ],
     )
     required = compose_required_predecessor_ids(graph)
-    assert "n_clip_1" in required and "n_speech" in required and "n_music" in required
+    assert required == ["n_clip_1", "n_music", "n_speech"]
     preds = execution_predecessors(graph)
     groups = {k: frozenset({k}) for k in required + ["n_compose"]}
     run = {

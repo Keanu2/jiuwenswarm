@@ -20,24 +20,6 @@ def test_chinese_prose_beats_are_counted():
     assert count_narrative_beats(CN_MULTI_BEAT) >= 4
 
 
-def test_heuristic_splits_chinese_story_without_losing_prose():
-    analysis = heuristic_analysis(CN_MULTI_BEAT)
-    shots = analysis["shots"]
-    assert len(shots) >= 4
-    assert analysis["target_shot_count"] == len(shots)
-    joined = " ".join(str(s.get("action") or "") for s in shots)
-    for beat in ("海啸", "浮现", "脊背", "双翼", "特写"):
-        assert beat in joined
-
-
-def test_explicit_shot_count_still_caps_heuristic():
-    analysis = heuristic_analysis(CN_MULTI_BEAT + " 请拆成3个分镜。")
-    assert len(analysis["shots"]) == 3
-    # Folding, not dropping: the tail beats survive inside the last shot.
-    joined = " ".join(str(s.get("action") or "") for s in analysis["shots"])
-    assert "特写" in joined
-
-
 def test_keyframe_count_is_an_explicit_contract():
     """One shot == one keyframe + one clip, so "N 个关键帧" must be honored as N."""
     from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
@@ -47,8 +29,8 @@ def test_keyframe_count_is_an_explicit_contract():
     assert _explicit_shot_count_from_prompt("请用5个关键帧") == 5
     assert _explicit_shot_count_from_prompt("用三个关键帧收束") == 3
     assert _explicit_shot_count_from_prompt("use 6 keyframes") == 6
-    analysis = heuristic_analysis(CN_MULTI_BEAT + " 请用5个关键帧。")
-    assert len(analysis["shots"]) == 5
+    assert _explicit_shot_count_from_prompt(CN_MULTI_BEAT + " 请用5个关键帧。") == 5
+    assert _explicit_shot_count_from_prompt(CN_MULTI_BEAT + " 请拆成3个分镜。") == 3
 
 
 def test_short_prompt_stays_lean():

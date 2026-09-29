@@ -1336,6 +1336,21 @@ class GraphExecutor:
                         task.cancel()
                     break
 
+                # Nodes a node agent started via node_run finish outside in_flight.
+                states_now = run.get("node_states") or {}
+                remaining.difference_update(
+                    {
+                        nid
+                        for nid in remaining
+                        if (states_now.get(nid) or {}).get("status") in _TERMINAL_NODE_STATUSES
+                    }
+                )
+                agent_started = [
+                    task
+                    for task in (self._node_workers.get(run_id) or {}).values()
+                    if not task.done()
+                ]
+
                 newly_ready = [
                     node_id
                     for node_id in list(remaining)
@@ -1369,7 +1384,7 @@ class GraphExecutor:
                     run["current_node_ids"] = list(in_flight.keys())
                     self._publish(run, on_update)
 
-                if not in_flight:
+                if not in_flight and not agent_started:
                     if remaining:
                         run["status"] = RUN_STATUS_FAILED
                         if not str(run.get("error") or "").strip():
@@ -1389,6 +1404,7 @@ class GraphExecutor:
                 wake.clear()
                 wake_task = asyncio.create_task(wake.wait(), name=f"handoff-wake-{run_id}")
                 wait_set: set[asyncio.Task[Any]] = set(in_flight.values())
+                wait_set.update(agent_started)
                 wait_set.add(wake_task)
                 done, _pending = await asyncio.wait(
                     wait_set,

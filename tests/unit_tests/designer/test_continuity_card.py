@@ -35,7 +35,7 @@ def test_continuity_card_clause_optional_helper_still_works():
     assert "ALREADY_DONE" in clause
 
 
-def test_stamp_handoff_uses_continuity_note_not_full_prior_paste():
+def test_stamp_handoff_saves_own_prompt_and_does_not_stamp_next_clip():
     graph = {
         "nodes": [
             {
@@ -60,9 +60,12 @@ def test_stamp_handoff_uses_continuity_note_not_full_prior_paste():
         shot_action="man starts running",
     )
     assert notes
+    c1 = graph["nodes"][0]["config"]
     c2 = graph["nodes"][1]["config"]
-    assert "man starts running" in str(c2.get("previous_clip_action") or "")
-    assert c2.get("previous_clip_handoff_ready") is True
+    assert c1["last_wan_prompt"].startswith("SHOT1_ONLY_IDENTITY_MARKER")
+    assert c1["handoff_artifact_ready"] is True
+    assert "previous_clip_action" not in c2
+    assert "previous_clip_wan_prompt" not in c2
     # Soft-dep may keep a short readiness marker, but clause must not paste the marker.
     clause = handoff_clause_for_prompt(
         [

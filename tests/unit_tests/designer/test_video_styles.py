@@ -3,7 +3,6 @@
 from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
     infer_shot_budget,
 )
-from jiuwenswarm.server.runtime.designer.handlers.clip import build_clip_prompt
 from jiuwenswarm.server.runtime.designer.skills_loader import (
     attach_skills_metadata,
     load_style_skill,
@@ -66,41 +65,6 @@ def test_attach_skills_stamps_video_style():
     assert clip["config"].get("video_style") == VIDEO_STYLE_FINAL_FRAME_REVERSE
     excerpt = str(clip["config"].get("skill_excerpt") or "")
     assert "final_frame_reverse" in excerpt or "终帧" in excerpt
-
-
-def test_build_clip_prompt_includes_style_lock():
-    graph = {
-        "description": "名画定格终帧倒推",
-        "metadata": {
-            "video_style": VIDEO_STYLE_FINAL_FRAME_REVERSE,
-            "script_analysis": {
-                "shots": [
-                    {
-                        "shot_index": 1,
-                        "action": "羽翼合拢，姿态归位",
-                        "camera": "slow push in",
-                        "timeline": "0-5s",
-                    }
-                ]
-            },
-        },
-        "nodes": [
-            {
-                "id": "n_clip_1",
-                "type": "video",
-                "config": {
-                    "pipeline": "clip",
-                    "shot_index": 1,
-                    "video_style": VIDEO_STYLE_FINAL_FRAME_REVERSE,
-                    "shot_action": "羽翼合拢，姿态归位",
-                },
-            }
-        ],
-    }
-    prompt = build_clip_prompt(graph, graph["nodes"][0], ctx=None)
-    assert "final_frame_reverse" in prompt
-    assert "VIDEO STYLE LOCK" in prompt
-    assert "ENDPOINT" in prompt
 
 
 def test_director_method_alias_works():

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from jiuwenswarm.server.runtime.designer import model_tools
@@ -21,6 +23,26 @@ DINNER = (
     "The mother watches from her chair. A young child sits beside them. "
     "The child leans forward. The father stands."
 )
+
+DINNER_ANALYSIS = {
+    "source": "llm",
+    "characters": [
+        {"id": "char_1", "name": "Father", "description": "navy sweater, grey trousers"},
+        {"id": "char_2", "name": "Mother", "description": "green cardigan, dark skirt"},
+        {"id": "char_3", "name": "Young child", "description": "yellow t-shirt, blue shorts"},
+    ],
+    "scenes": [{"id": "set_1", "name": "living room", "description": "dinner table at dusk"}],
+    "shots": [
+        {
+            "shot_index": 1,
+            "action": "The father reads a letter while the mother and child watch.",
+            "camera": "close-up",
+            "character_ids": ["char_1", "char_2", "char_3"],
+            "setting_id": "set_1",
+            "timeline": "0-5s",
+        }
+    ],
+}
 
 
 def test_article_and_bare_role_do_not_split_cast() -> None:
@@ -53,11 +75,10 @@ def test_solo_prompt_is_one_person_on_a_plain_backdrop() -> None:
     assert "story context" not in wrapped.lower()
     assert "one person" in wrapped.lower()
     assert "studio backdrop" in wrapped.lower()
-    analysis = heuristic_analysis(DINNER)
     graph = build_smart_video_graph(
         project_id="proj_solo",
         prompt=DINNER,
-        analysis=analysis,
+        analysis=copy.deepcopy(DINNER_ANALYSIS),
     )
     sheets = [
         n
@@ -82,7 +103,39 @@ def test_long_film_clips_use_time_windows_not_angles() -> None:
         "Then the child stands and walks to the door. "
         "Then the mother speaks to the father."
     )
-    analysis = heuristic_analysis(prompt)
+    analysis = {
+        "source": "llm",
+        "characters": [
+            {"id": "char_1", "name": "Father", "description": "navy sweater"},
+            {"id": "char_2", "name": "Child", "description": "yellow t-shirt"},
+            {"id": "char_3", "name": "Mother", "description": "green cardigan"},
+        ],
+        "scenes": [{"id": "set_1", "name": "dining room", "description": "table and door"}],
+        "shots": [
+            {
+                "shot_index": 1,
+                "action": "Father reads a letter at the table.",
+                "character_ids": ["char_1"],
+                "setting_id": "set_1",
+                "timeline": "0-10s",
+            },
+            {
+                "shot_index": 2,
+                "action": "The child stands and walks to the door.",
+                "character_ids": ["char_2"],
+                "setting_id": "set_1",
+                "timeline": "10-20s",
+            },
+            {
+                "shot_index": 3,
+                "action": "The mother speaks to the father.",
+                "character_ids": ["char_1", "char_3"],
+                "setting_id": "set_1",
+                "timeline": "20-30s",
+            },
+        ],
+        "target_duration_sec": 30,
+    }
     graph = build_smart_video_graph(
         project_id="proj_windows",
         prompt=prompt,
@@ -98,8 +151,12 @@ def test_long_film_clips_use_time_windows_not_angles() -> None:
         text = str((cfg.get("generate") or {}).get("prompt") or "").lower()
         assert "view left" not in text
         assert "view right" not in text
-        assert "timeline" in text
         assert str(cfg.get("view_key") or "") == ""
+    assert [str((n.get("config") or {}).get("timeline") or "") for n in clips] == [
+        "0-10s",
+        "10-20s",
+        "20-30s",
+    ]
 
 
 def test_402_marks_chat_unavailable_and_fails_closed() -> None:
