@@ -105,16 +105,6 @@ _SETTING_FORBIDS: dict[str, str] = {
     ),
 }
 
-_STYLIZED_RE = re.compile(
-    r"\b(?:cartoon(?:ish)?|pixar|disney|anime|cel[- ]?shaded|2d\s+animat|"
-    r"3d\s+animat|stylized|illustration|toon|comic)\b",
-    re.I,
-)
-_PHOTOREAL_RE = re.compile(
-    r"\b(?:photoreal(?:istic)?|live[- ]?action|4k|shallow\s+depth|"
-    r"documentary|realism)\b",
-    re.I,
-)
 _FACIAL_HAIR_RE = re.compile(
     r"\b(?P<kind>full\s+beard|beard|goatee|mustache|moustache|stubble|"
     r"five[- ]o.?clock\s+shadow)\b",
@@ -125,48 +115,12 @@ _TRAILING_NUM_RE = re.compile(r"^(?P<base>.+?)\s*(?:[_-]|\s+)(?P<num>\d+)$")
 
 
 def infer_style_lock(prompt: str, scene_desc: str = "") -> dict[str, str]:
-    """Build a film-wide style lock from brief language (no scene-domain bias)."""
-    blob = f"{prompt} {scene_desc}".lower()
-    # Stylized always wins when both cartoon and photoreal cues appear
-    # (e.g. "cartoonish" + "cinematic framing" in LLM expansions).
-    if _STYLIZED_RE.search(blob):
-        look = (
-            "stylized animated / cartoon feature look — clean shapes, soft readable silhouettes, "
-            "expressive cartoon faces, gentle cel or soft-3D shading, cohesive warm-cool cartoon palette, "
-            "animated cinematic framing. SAME medium on EVERY sheet/keyframe/clip — "
-            "never switch to live-action photoreal, never flatten 3D<->2D mid-film"
-        )
-        lens = "animated cinematic framing; soft depth of field; no comic-panel grid UI"
-        palette = "match the brief's cartoon palette; keep dyes and line weight locked across shots"
-        medium = "stylized_animation"
-    elif _PHOTOREAL_RE.search(blob):
-        look = (
-            "photoreal cinematic — continuous color grade, matched key direction, "
-            "shallow depth when close. SAME medium on EVERY sheet/keyframe/clip — "
-            "never cartoon/anime restyle mid-film"
-        )
-        lens = "35mm cinematic, soft background when close; no comic/grid UI"
-        palette = "match scene specs color temperature and wardrobe dyes — never restyle mid-film"
-        medium = "photoreal_cinematic"
-    else:
-        look = (
-            "photoreal cinematic — continuous color grade across all sheets/frames/clips. "
-            "SAME medium whole film"
-        )
-        lens = "35mm cinematic, soft background when close; no comic/grid UI"
-        palette = "match scene specs color temperature and wardrobe dyes — never restyle mid-film"
-        medium = "photoreal_cinematic"
-    return {
-        "look": look[:360],
-        "lens": lens[:240],
-        "palette": palette[:240],
-        "medium": medium,
-        "forbid": (
-            "no style drift between shots, no outfit redesign, no new architecture, "
-            "no subtitles/watermarks, no labeled infographic character specs, "
-            "no medium switch (cartoon<->photoreal or 3D<->2D) mid-film"
-        )[:300],
-    }
+    """Build the one film-wide style authority used by brief and media leaves."""
+    from jiuwenswarm.server.runtime.designer.media_model_playbook import (
+        default_style_lock,
+    )
+
+    return default_style_lock(prompt, scene_desc)
 
 
 def _strip_planning_place_mentions(text: str) -> str:
@@ -511,8 +465,12 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     remap_shot_character_ids(shots, alias)
     stamp_identity_attrs(characters)
 
-    style_lock = infer_style_lock(
-        prompt, str((scenes[0] if scenes else {}).get("description") or "")
+    style_lock = (
+        dict(out["style_lock"])
+        if isinstance(out.get("style_lock"), dict) and out.get("style_lock")
+        else infer_style_lock(
+            prompt, str((scenes[0] if scenes else {}).get("description") or "")
+        )
     )
     out["style_lock"] = style_lock
 

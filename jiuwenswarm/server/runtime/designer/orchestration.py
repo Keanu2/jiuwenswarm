@@ -1351,7 +1351,9 @@ class Director:
                 "(face/hair/body/costume), "
                 "scene geography (spatial lock), motion consistency, time-coherent continuity "
                 "(do not undo a completed shot on a later shot), "
-                "shot-view coverage for every named shot, audio policy. "
+                "shot-view coverage for every named beat, audio policy, and one explicit "
+                "Visual Style section. Preserve the user's exact visual medium and rendering "
+                "details; use the provided style_lock when present. "
                 "Preserve all explicit people, places, brand facts, claims, and requested events; "
                 "creative enrichment may fill only details the user left unspecified. "
                 "Respond with markdown brief only (no JSON wrapper)."
@@ -1363,6 +1365,7 @@ class Director:
                         "characters": characters,
                         "scenes": scenes,
                         "shots": analysis.get("shots"),
+                        "style_lock": analysis.get("style_lock"),
                         "audio": audio,
                         "spatial_lock": meta.get("spatial_lock"),
                         "director_brief_notes": meta.get("director_brief_notes")
@@ -1396,6 +1399,15 @@ class Director:
                 "Designer requires LLM to author the creative brief.",
                 code=LLM_API_ERROR,
             )
+        from jiuwenswarm.server.runtime.designer.media_model_playbook import (
+            ensure_visual_style_statement,
+            synchronize_graph_style_from_brief,
+        )
+
+        brief_md = ensure_visual_style_statement(
+            brief_md,
+            analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else {},
+        )
 
         stamped = False
         for node in graph.get("nodes") or []:
@@ -1408,6 +1420,9 @@ class Director:
             stamped = True
             break
         meta["approved_brief"] = brief_md
+        graph["metadata"] = meta
+        synchronize_graph_style_from_brief(graph, brief_md)
+        meta = dict(graph.get("metadata") or {})
         meta["director_brief_ack"] = {
             "ok": True,
             "source": source,
@@ -1449,6 +1464,9 @@ class Director:
                 "storyboard: Scene (setting_id) → Keyframes/shots. FIRST list every "
                 "named human as characters[] (id, name, description) — one solo card "
                 "each. NOT every character appears in every scene. "
+                "Copy the approved Brief's visual style exactly into style_lock and "
+                "the storyboard_markdown Visual Style section; never substitute a "
+                "model or leaf default. "
                 "Different setting_id = DIFFERENT place (distinct architecture). "
                 "Group shots by setting_id. Shots are consecutive TIME windows that "
                 "concatenate to the film — each action is THAT window in FULL DETAIL "
@@ -1486,7 +1504,8 @@ class Director:
                 "language), bgm_lock {mood,style,instruments,continuity,rule}, "
                 "include_speech, include_music. "
                 "Respond JSON only: "
-                '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
+                '{"style_lock":{"look":"...","medium":"..."},'
+                '"characters":[{"id":"char_1","name":"...","description":"..."}],'
                 '"shots":[{"shot_index":1,"timeline":"0-5s","camera":"...",'
                 '"action":"...","on_screen":["char_1"],"offscreen":["char_2"],'
                 '"featured_cast_ids":["char_1"],"cast_actions":{"char_1":"preaching"},'
@@ -1508,6 +1527,7 @@ class Director:
                     {
                         "user_prompt": user_prompt,
                         "approved_brief": approved_brief,
+                        "style_lock": analysis.get("style_lock"),
                         "characters": characters,
                         "shots": shots,
                         "spatial_lock": meta.get("spatial_lock"),
@@ -1649,7 +1669,25 @@ class Director:
                     code=LLM_API_ERROR,
                 )
             # LLM returned shots/cast but omitted markdown — draft hint only.
-            sb_md = _write_storyboard_markdown(shots, characters)
+            sb_md = _write_storyboard_markdown(
+                shots,
+                characters,
+                style_lock=(
+                    analysis.get("style_lock")
+                    if isinstance(analysis.get("style_lock"), dict)
+                    else {}
+                ),
+            )
+
+        from jiuwenswarm.server.runtime.designer.media_model_playbook import (
+            ensure_visual_style_statement,
+            synchronize_graph_style_from_brief,
+        )
+
+        sb_md = ensure_visual_style_statement(
+            sb_md,
+            analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else {},
+        )
 
         stamped = False
         for node in graph.get("nodes") or []:
@@ -1718,6 +1756,9 @@ class Director:
             logger.debug("chain_prior_speech_across_clips failed", exc_info=True)
 
         meta["approved_storyboard"] = sb_md
+        graph["metadata"] = meta
+        synchronize_graph_style_from_brief(graph, sb_md)
+        meta = dict(graph.get("metadata") or {})
         meta["director_storyboard_ack"] = {
             "ok": True,
             "source": source,
@@ -1769,6 +1810,8 @@ class Director:
             system = (
                 "You are the Designer Director. Design the execution graph "
                 "from the approved Brief + Storyboard. Return JSON only. "
+                "Preserve the provided style_lock exactly; it is the approved visual "
+                "medium for every character, scene, keyframe, and clip. "
                 "MUST include characters[] — every named human gets one solo identity "
                 "card (id, name, description). NOT every character in every scene. "
                 "MUST include shots[] grouped by setting_id (distinct places). "
@@ -1796,7 +1839,8 @@ class Director:
                 "keyframe_prompt, exiting_character_ids, keyframe_strategy, "
                 "speech_by_character, speech_line. "
                 "Schema: "
-                '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
+                '{"style_lock":{"look":"...","medium":"..."},'
+                '"characters":[{"id":"char_1","name":"...","description":"..."}],'
                 '"shots":[{"shot_index":1,"timeline":"0-5s","action":"...",'
                 '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
                 '"target_shot_count":N,"include_speech":bool,'
@@ -1813,6 +1857,7 @@ class Director:
                         "user_prompt": user_prompt,
                         "approved_brief": approved_brief,
                         "approved_storyboard": approved_sb,
+                        "style_lock": analysis.get("style_lock"),
                         "characters": characters,
                         "current_shots": shots,
                         "target_shot_count": shot_ceiling or analysis.get("target_shot_count"),
@@ -2567,10 +2612,10 @@ class Director:
                 if not clause:
                     try:
                         from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
-                            ensure_photoreal_style_lock,
+                            ensure_style_lock,
                         )
 
-                        style = ensure_photoreal_style_lock(
+                        style = ensure_style_lock(
                             style,
                             prompt=str(graph.get("description") or meta.get("user_prompt") or ""),
                         )
@@ -2579,37 +2624,16 @@ class Director:
                         clause = f"STYLE LOCK (film-wide): {look}" if look else ""
                     except Exception:  # noqa: BLE001
                         clause = (
-                            "STYLE LOCK (film-wide): photoreal cinematic — "
-                            "SAME medium whole film; never cartoon restyle mid-film."
+                            "STYLE LOCK (film-wide): match the visual medium specified "
+                            "by the brief and storyboard."
                         )
                 if clause:
                     prompt = prompt + "\n" + clause
                     notes.append("inject_style_lock")
                     changed = True
-        elif role in {"clip", "frame", "keyframe", "scene", "character"}:
-            # Unspecified style → hard photoreal lock (domain-agnostic default).
-            try:
-                from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
-                    ensure_photoreal_style_lock,
-                )
-                from jiuwenswarm.server.runtime.designer.media_model_playbook import (
-                    style_lock_clause,
-                )
-
-                style = ensure_photoreal_style_lock(
-                    None,
-                    prompt=str(graph.get("description") or meta.get("user_prompt") or ""),
-                )
-                cfg["style_lock"] = style
-                if "STYLE LOCK" not in prompt:
-                    clause = (style_lock_clause(style) or "").strip() or (
-                        f"STYLE LOCK (film-wide): {style.get('look') or 'photoreal cinematic'}"
-                    )
-                    prompt = prompt + "\n" + clause
-                    notes.append("inject_default_photoreal_style_lock")
-                    changed = True
-            except Exception:  # noqa: BLE001
-                pass
+        # Leaf nodes never invent a visual medium. The brief/storyboard style is
+        # propagated through analysis/metadata above; a missing style stays missing
+        # here instead of silently becoming a model-specific default.
 
         if role == "clip":
             # Scene specs + setting isolation for shots (same locks as keyframes).
@@ -3437,7 +3461,9 @@ class Director:
                 "creative concept, narrative/content arc, timed shot plan, and script/speech "
                 "plan; do not remove an enriched shot merely because it was not stated verbatim "
                 "in the user prompt. Flag missing characters, insufficient shot views, or content "
-                "that contradicts explicit user facts. Patch only to repair those issues; do not "
+                "that contradicts explicit user facts."
+                "Preserve the user's visual style and the existing Visual Style section exactly. "
+                "Patch only to repair those issues; do not "
                 "introduce a conflicting or unrelated plot, cast, claim, or geography. "
                 "Respond JSON only: "
                 '{"ok":true,"patched_brief_markdown":"...","notes":"...","issues":["..."]}'
@@ -3479,8 +3505,19 @@ class Director:
                 code=LLM_API_ERROR,
             ) from exc
 
+        from jiuwenswarm.server.runtime.designer.media_model_playbook import (
+            ensure_visual_style_statement,
+            synchronize_graph_style_from_brief,
+        )
+
+        brief = ensure_visual_style_statement(
+            brief,
+            analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else {},
+        )
         meta["approved_brief"] = brief
         graph["metadata"] = meta
+        synchronize_graph_style_from_brief(graph, brief)
+        meta = dict(graph.get("metadata") or {})
         ack["patched"] = patched[:20]
         meta["director_brief_ack"] = ack
         graph["metadata"] = meta
@@ -3682,6 +3719,11 @@ class Director:
             meta["approved_storyboard"] = _write_storyboard_markdown(
                 shots,
                 list(analysis.get("characters") or []),
+                style_lock=(
+                    analysis.get("style_lock")
+                    if isinstance(analysis.get("style_lock"), dict)
+                    else {}
+                ),
             )
             # Patch storyboard + downstream frame/clip configs once.
             try:
@@ -4513,7 +4555,15 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
 
         planned = list(analysis.get("shots") or [])
         if planned:
-            sb_md = _write_storyboard_markdown(planned, characters)
+            sb_md = _write_storyboard_markdown(
+                planned,
+                characters,
+                style_lock=(
+                    analysis.get("style_lock")
+                    if isinstance(analysis.get("style_lock"), dict)
+                    else {}
+                ),
+            )
             meta["approved_storyboard"] = sb_md
             graph["metadata"] = meta
             for node in graph.get("nodes") or []:

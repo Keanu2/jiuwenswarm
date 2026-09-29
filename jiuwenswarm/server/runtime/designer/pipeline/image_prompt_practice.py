@@ -26,7 +26,24 @@ def _style_look(cfg: dict[str, Any]) -> str:
     style = cfg.get("style_lock") if isinstance(cfg.get("style_lock"), dict) else {}
     look = str(style.get("look") or style.get("medium") or "").strip()
     look = re.split(r"\s+[—–-]\s+|\bnever\b|\bno style\b", look, maxsplit=1, flags=re.I)[0]
-    return look.strip(" .;") or "photoreal cinematic"
+    return look.strip(" .;")
+
+
+def _style_is_covered(text: str, look: str) -> bool:
+    body = str(text or "").lower()
+    style = str(look or "").lower()
+    if not style:
+        return True
+    if style in body:
+        return True
+    cues = {
+        token
+        for token in re.findall(r"[\w-]+", style)
+        if len(token) > 4
+        and token
+        not in {"across", "every", "feature", "coherent", "forms", "shapes", "rendering"}
+    }
+    return bool(cues and any(token in body for token in cues))
 
 
 def _aspect_phrase(cfg: dict[str, Any], graph: dict[str, Any] | None) -> str:
@@ -197,11 +214,16 @@ def ensure_still_tool_prompt(
                     text = (text.rstrip(".") + ". " + tod).strip()
                     notes.append("still_cover_tod")
             look = _style_look(cfg)
-            if look and look.lower() not in pl and "photoreal" not in pl:
+            if look and not _style_is_covered(text, look):
                 text = (text.rstrip(".") + f". {look}.").strip()
                 notes.append("still_cover_style")
     elif role_l in {"character", "character_design"} or "character" in role_l:
         if looks_like_lock_essay(text) or not text:
             text = compose_character_sheet_prompt(cfg=cfg, graph=graph, seed="")
             notes.append("still_rewrote_character_sheet")
+        else:
+            look = _style_look(cfg)
+            if look and not _style_is_covered(text, look):
+                text = (text.rstrip(".") + f". {look}.").strip()
+                notes.append("still_cover_style")
     return text[:2200], notes

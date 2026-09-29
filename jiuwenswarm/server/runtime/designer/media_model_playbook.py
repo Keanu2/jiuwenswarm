@@ -7,6 +7,7 @@ and media tools keep identity / style / positioning consistent.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -68,10 +69,13 @@ ANGLE_PRESETS: list[dict[str, Any]] = [
 ]
 
 STYLE_LOCK_DEFAULT = {
-    "look": "photoreal cinematic, coherent color grade across all sheets/frames/clips",
-    "lens": "35mm cinematic, soft background when close; no comic/grid UI",
-    "palette": "match scene specs color temperature and wardrobe dyes — never restyle mid-film",
-    "medium": "photoreal_cinematic",
+    "look": (
+        "cartoonish animated feature look, flat shapes, soft rendering, rounded forms, "
+        "coherent across all sheets/frames/clips"
+    ),
+    "lens": "animated cinematic framing; soft readable shapes; no comic/grid UI",
+    "palette": "match the brief's palette; keep colors and line weight stable across shots",
+    "medium": "stylized_animation",
     "forbid": "no style drift, no outfit redesign, no new architecture, no subtitles/watermarks",
 }
 
@@ -130,7 +134,7 @@ When correcting leaf agents / drafting node prompts:
 - Character solos = identity only. Every KF composes cast INTO the locked scene specs
   (style_lock + setting text + hierarchical views). Same-setting later KFs: reuse master
   scene prompt handoff — do not edit prior keyframe images as the primary ref.
-- Clip: DETAILED Wan R2V prompt with STYLE LOCK (photoreal default) + CONTACT lock
+- Clip: DETAILED Wan R2V prompt with the brief/storyboard STYLE LOCK + CONTACT lock
   + set/orientation + cast/prop locks (not STYLE HOLD alone).
 - NON-NEGOTIABLE film-wide locks on EVERY keyframe AND clip: aspect_lock (same ratio /
   ~1K stills / 480P video), style_lock, spatial_lock, costume/identity, occupancy, screen axis.
@@ -167,10 +171,56 @@ def playbook_for_role(role: str) -> str:
 
 
 def default_style_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]:
-    """Infer a film-wide style lock from brief language (stylized vs photoreal first)."""
+    """Infer the brief's film-wide style; unspecified briefs default to cartoonish."""
     lock = dict(STYLE_LOCK_DEFAULT)
     blob = f"{prompt} {scene_desc}".lower()
-    # Stylization must win over domain palette hints (prevents cartoon→photoreal drift).
+    # Explicit artistic media must survive instead of being collapsed into either
+    # animation or photography.
+    artistic_media: tuple[tuple[tuple[str, ...], str, str], ...] = (
+        (
+            ("watercolor", "watercolour", "水彩"),
+            "watercolor illustration with soft washes and visible paper texture",
+            "watercolor_illustration",
+        ),
+        (
+            ("oil painting", "oil-painted", "油画"),
+            "oil-painted artwork with visible brush texture and painterly lighting",
+            "oil_painting",
+        ),
+        (
+            ("ink wash", "ink painting", "水墨", "国画"),
+            "ink-wash illustration with expressive lines and controlled tonal washes",
+            "ink_wash",
+        ),
+        (
+            ("pixel art", "像素风", "像素画"),
+            "pixel-art animation with deliberate pixel shapes and a stable limited palette",
+            "pixel_art",
+        ),
+        (
+            ("claymation", "clay animation", "黏土动画", "粘土动画"),
+            "clay-animation look with tactile rounded models and soft handcrafted lighting",
+            "clay_animation",
+        ),
+        (
+            ("paper cut", "papercut", "剪纸"),
+            "paper-cut illustration with layered shapes and handcrafted edges",
+            "paper_cut",
+        ),
+    )
+    for cues, look, medium in artistic_media:
+        if any(cue in blob for cue in cues):
+            lock["look"] = look
+            lock["lens"] = "cinematic framing appropriate to the brief's chosen art medium"
+            lock["palette"] = "preserve the brief's specified palette and material treatment"
+            lock["medium"] = medium
+            lock["forbid"] = (
+                "no style drift between shots, no outfit redesign, no new architecture, "
+                "no subtitles/watermarks, no switch to photography or another art medium"
+            )
+            return {k: str(v)[:280] for k, v in lock.items()}
+
+    # Stylization must win over incidental camera language such as "cinematic".
     if any(
         k in blob
         for k in (
@@ -184,11 +234,19 @@ def default_style_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]
             "2d animated",
             "3d animated",
             "toon",
+            "卡通",
+            "动画",
+            "动漫",
+            "二次元",
+            "赛璐璐",
+            "扁平",
+            "圆润造型",
+            "柔和渲染",
         )
     ):
         lock["look"] = (
-            "stylized animated / cartoon feature look, coherent across EVERY sheet, "
-            "keyframe, and clip — never switch to live-action photoreal mid-film"
+            "cartoonish animated feature look (卡通画风), flat shapes, soft rendering, "
+            "rounded forms, coherent across every sheet, keyframe, and clip"
         )
         lock["lens"] = "animated cinematic framing; soft readable shapes; no comic grid UI"
         lock["palette"] = "match the brief's cartoon palette; keep dyes locked across shots"
@@ -198,16 +256,133 @@ def default_style_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]
             "no subtitles/watermarks, no labeled infographic character specs, "
             "no medium switch (cartoon<->photoreal or 3D<->2D) mid-film"
         )
-    elif any(k in blob for k in ("photoreal", "photorealistic", "live-action", "documentary")):
-        lock["look"] = "photoreal cinematic — continuous color grade; never cartoon restyle"
-        lock["medium"] = "photoreal_cinematic"
-    else:
-        lock["look"] = (
-            "photoreal cinematic — continuous color grade across all sheets/frames/clips. "
-            "SAME medium whole film"
+    elif any(
+        k in blob
+        for k in (
+            "photoreal",
+            "photorealistic",
+            "live-action",
+            "live action",
+            "documentary",
+            "写实",
+            "逼真",
+            "真人",
+            "实拍",
+            "纪录片",
         )
+    ):
+        lock["look"] = "photoreal cinematic — continuous color grade; never cartoon restyle"
+        lock["lens"] = "35mm cinematic, soft background when close; no comic/grid UI"
+        lock["palette"] = "match scene color temperature and wardrobe dyes across shots"
         lock["medium"] = "photoreal_cinematic"
     return {k: str(v)[:280] for k, v in lock.items()}
+
+
+_VISUAL_STYLE_LINE_RE = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?"
+    r"(?:visual\s+style|art\s+style|style|视觉风格|画风)"
+    r"(?:\*\*)?\s*[:：]\s*(.+?)\s*$"
+)
+_VISUAL_STYLE_HEADING_RE = re.compile(
+    r"(?im)^\s*#{1,6}\s*(?:visual\s+style|art\s+style|style|视觉风格|画风)"
+    r"\s*$\s*^\s*(?:[-*]\s*)?(.+?)\s*$"
+)
+
+
+def style_lock_from_brief(
+    text: str,
+    *,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Read the authored Brief/Storyboard style without inventing a leaf default."""
+    body = str(text or "").strip()
+    match = _VISUAL_STYLE_LINE_RE.search(body) or _VISUAL_STYLE_HEADING_RE.search(body)
+    if match:
+        authored = match.group(1).strip().strip("*").strip()
+        inferred = default_style_lock(authored)
+        # Preserve uncommon authored media that are more specific than our small
+        # canonical vocabulary.
+        if inferred.get("look") == STYLE_LOCK_DEFAULT.get("look") and not any(
+            cue in authored.lower()
+            for cue in ("cartoon", "animation", "animated", "卡通", "动画", "扁平", "圆润")
+        ):
+            inferred["look"] = authored[:280]
+            inferred["medium"] = "brief_specified"
+        return inferred
+    if fallback:
+        return {str(k): str(v)[:280] for k, v in fallback.items() if str(v).strip()}
+    return default_style_lock(body)
+
+
+def ensure_visual_style_statement(
+    text: str,
+    style_lock: dict[str, Any] | None,
+) -> str:
+    """Ensure an authored artifact visibly states its style authority."""
+    body = str(text or "").rstrip()
+    if _VISUAL_STYLE_LINE_RE.search(body) or _VISUAL_STYLE_HEADING_RE.search(body):
+        return body
+    style = style_lock if isinstance(style_lock, dict) else {}
+    look = str(style.get("look") or style.get("medium") or "").strip()
+    if not look:
+        return body
+    return (body + f"\n\n## Visual Style\n\n{look}\n").strip()
+
+
+def synchronize_graph_style_from_brief(
+    graph: dict[str, Any],
+    text: str,
+) -> dict[str, str]:
+    """Make authored Brief/Storyboard style the single authority for media leaves."""
+    meta = dict(graph.get("metadata") or {})
+    analysis = (
+        dict(meta.get("script_analysis") or {})
+        if isinstance(meta.get("script_analysis"), dict)
+        else {}
+    )
+    existing = (
+        analysis.get("style_lock")
+        if isinstance(analysis.get("style_lock"), dict)
+        else meta.get("style_lock")
+        if isinstance(meta.get("style_lock"), dict)
+        else {}
+    )
+    user_style = default_style_lock(
+        str(graph.get("description") or meta.get("user_prompt") or "")
+    )
+    # Never let a later authored artifact contradict an explicit user medium.
+    # For prompts without a recognized style cue, Brief/Storyboard remains the
+    # authority and may carry a richer Director inference.
+    if user_style.get("look") != STYLE_LOCK_DEFAULT.get("look"):
+        style = user_style
+    else:
+        style = style_lock_from_brief(text, fallback=existing)
+    analysis["style_lock"] = dict(style)
+    meta["script_analysis"] = analysis
+    meta["style_lock"] = dict(style)
+    try:
+        from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
+            build_production_bible,
+        )
+
+        bible = build_production_bible(
+            analysis,
+            user_prompt=str(graph.get("description") or meta.get("user_prompt") or ""),
+        )
+        analysis["production_bible"] = bible
+        meta["production_bible"] = bible
+    except Exception:  # noqa: BLE001
+        pass
+    graph["metadata"] = meta
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        cfg = dict(node.get("config") or {})
+        role = str(cfg.get("role") or cfg.get("pipeline") or "").lower()
+        if role in {"character", "character_design", "scene", "frame", "keyframe", "clip"}:
+            cfg["style_lock"] = dict(style)
+            node["config"] = cfg
+    return style
 
 
 def camera_rig_for_index(index: int, camera_hint: str = "") -> dict[str, Any]:
@@ -325,7 +500,7 @@ def wan3_clip_prompt_prefix(
         ref_line = f"[References]: {' '.join(refs)}"
     style = style_lock if isinstance(style_lock, dict) else {}
     style_line = "; ".join(f"{k}={v}" for k, v in list(style.items())[:4]) or (
-        "photoreal cinematic, coherent grade"
+        "match the visual style specified by the brief and storyboard"
     )
     positions = left_right or (
         "Maintain fixed screen positions per storyboard; do not swap left/right."

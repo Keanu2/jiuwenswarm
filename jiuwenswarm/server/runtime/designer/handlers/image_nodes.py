@@ -160,7 +160,7 @@ def _shot_frame_prompt(
     names = [str(n).strip() for n in (cast_names or []) if str(n).strip()]
     who = ", ".join(names)
     lead = (
-        f"Cinematic keyframe, one photoreal still for shot {shot['shot_no']}{timeline}. "
+        f"Cinematic keyframe, one style-consistent still for shot {shot['shot_no']}{timeline}. "
         "Clear composition, this instant only, no comic grid."
     )
     if who:

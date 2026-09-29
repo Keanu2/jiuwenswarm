@@ -254,7 +254,12 @@ def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
     return pruned
 
 
-def _write_storyboard_markdown(shots: list[dict[str, Any]], characters: list[dict[str, Any]]) -> str:
+def _write_storyboard_markdown(
+    shots: list[dict[str, Any]],
+    characters: list[dict[str, Any]],
+    *,
+    style_lock: dict[str, Any] | None = None,
+) -> str:
     id_to_name = {str(c.get("id")): str(c.get("name") or c.get("id")) for c in characters}
     # Hierarchical: scenes (setting_id) → keyframes/shots.
     by_set: dict[str, list[dict[str, Any]]] = {}
@@ -269,6 +274,13 @@ def _write_storyboard_markdown(shots: list[dict[str, Any]], characters: list[dic
         by_set[sid].append(shot)
     lines = [
         "# Storyboard Scenario",
+        "",
+        (
+            "Visual style: "
+            + str((style_lock or {}).get("look") or (style_lock or {}).get("medium") or "").strip()
+        )
+        if style_lock
+        else "",
         "",
         "Hierarchy: **Scene (setting_id)** → **Keyframes/shots**.",
         "Different scenes = different places. First keyframe of each scene authors the "
@@ -847,6 +859,17 @@ def build_smart_video_graph(
 
     analysis = ensure_audio_locks_on_analysis(dict(analysis or {}), prompt_text)
     analysis["user_prompt"] = prompt_text
+    from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
+        ensure_style_lock,
+    )
+
+    # Establish one style authority before the production bible / brief are built.
+    # Media leaves receive this same value; they never infer their own medium.
+    film_style = ensure_style_lock(
+        analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else None,
+        prompt=prompt_text,
+    )
+    analysis["style_lock"] = dict(film_style)
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
             apply_shot_scope,
@@ -961,7 +984,9 @@ def build_smart_video_graph(
                 "director_task": (
                     "Author a DETAILED creative brief from the user prompt: every named "
                     "character with wardrobe/face locks, scene geography, language/speech, "
-                    "opening blocking, motion/consistency rules, shot-view coverage, audio. "
+                    "opening blocking, motion/consistency rules, shot-view coverage, audio, "
+                    "and one explicit visual style. Preserve the user's style wording; if "
+                    "none can be inferred, use the cartoonish default. "
                     "Preserve every named shot. Obey and include the PRODUCTION LOCK SPECS."
                 ),
             },
@@ -988,6 +1013,7 @@ def build_smart_video_graph(
             "repeated action, or duplicate coverage. Include per-shot duration, camera/view, "
             "on-screen cast, full blocking/action, "
             "exact speech_line, language lock, consistency forbids "
+            "and the Brief's visual style in every composed-scene description "
             "(do not undo a completed shot). Each row is THAT window in full detail — "
             "not a camera restage of the whole prompt, and not a stripped one-liner."
         ),
@@ -1003,17 +1029,6 @@ def build_smart_video_graph(
         }
     )
     edges.append(_edge("e_brief_storyboard", "n_brief", "n_storyboard"))
-
-    from jiuwenswarm.server.runtime.designer.pipeline.wan_r2v_best_practices import (
-        ensure_photoreal_style_lock,
-    )
-    from jiuwenswarm.server.runtime.designer.media_model_playbook import style_lock_clause
-
-    film_style = ensure_photoreal_style_lock(
-        analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else None,
-        prompt=prompt_text,
-    )
-    film_style_line = (style_lock_clause(film_style) or "").strip()
 
     char_node_ids: list[str] = []
     sheet_by_id: dict[str, dict[str, Any]] = {}
@@ -1045,7 +1060,6 @@ def build_smart_video_graph(
                 "character_name": names[0] if names else display,
                 "character_names": names,
                 "costume_lock": wardrobe or str(sheet.get("costume_lock") or ""),
-                "style_lock": dict(film_style),
                 "image_size": _IMAGE_SIZE,
             }
             prompt = compose_character_sheet_prompt(cfg=seed_cfg, graph=None, seed="")
@@ -1054,7 +1068,6 @@ def build_smart_video_graph(
                 f"One person only: {display}, full or three-quarter body on a plain "
                 "empty studio backdrop. Solid neutral background, identity and costume only. "
                 + (f"Wearing {wardrobe}. " if wardrobe else "")
-                + (film_style_line + " " if film_style_line else "")
                 + "One clear image."
             )
         agent = label
@@ -1274,7 +1287,6 @@ def build_smart_video_graph(
             seed_cfg = {
                 "role": NODE_ROLE_SCENE,
                 "setting_id": sid,
-                "style_lock": dict(film_style),
                 "scene_specs": {
                     **(scene_specs_setting or {}),
                     "scene_name": (scene_specs_setting or {}).get("scene_name") or env_desc,
@@ -1290,8 +1302,6 @@ def build_smart_video_graph(
                 f"Empty environment plate of {env_desc or sid}: furniture, walls, "
                 "windows, light, and props only. One clear image."
             )
-            if film_style_line:
-                scene_prompt = film_style_line + " " + scene_prompt
         _ = (opening_cast, opening_action, ensemble_nids, lock_line_scene)
         scene_inputs = ["n_brief", "n_storyboard"]
         nodes.append(
@@ -1567,8 +1577,7 @@ def build_smart_video_graph(
                 "THIS time window only. "
             )
         shot_prompt_body = (
-            (film_style_line + "\n" if film_style_line else "")
-            + shot_head
+            shot_head
             + layout_bits
             + (f"WHO DOES WHAT: {doing_line}. " if doing_line else "")
             + f"People in frame: {cast_who}. "
@@ -1760,9 +1769,11 @@ def build_smart_video_graph(
             compose_practice_prompt,
         )
 
+        seed_prompt_cfg = dict(shot_cfg)
+        seed_prompt_cfg.pop("style_lock", None)
         shot_cfg["generate"] = {
             "prompt": compose_practice_prompt(
-                cfg=shot_cfg,
+                cfg=seed_prompt_cfg,
                 graph={"metadata": {"script_analysis": analysis}, "nodes": nodes},
                 action=action,
                 camera=camera,

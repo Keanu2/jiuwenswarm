@@ -96,10 +96,10 @@ def _scene_name(cfg: dict[str, Any]) -> str:
 
 def _style_phrase(cfg: dict[str, Any]) -> str:
     style = cfg.get("style_lock") if isinstance(cfg.get("style_lock"), dict) else {}
-    look = str(style.get("look") or style.get("medium") or "photoreal cinematic").strip()
+    look = str(style.get("look") or style.get("medium") or "").strip()
     look = re.split(r"\s+[—–-]\s+|\bnever\b|\bno style\b", look, maxsplit=1, flags=re.I)[0]
     look = look.strip(" .;")
-    return look or "photoreal cinematic"
+    return look
 
 
 def _doing_line(cfg: dict[str, Any], graph: dict[str, Any] | None, action: str) -> str:

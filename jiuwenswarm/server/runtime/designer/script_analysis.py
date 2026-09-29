@@ -809,6 +809,7 @@ def _assign_heuristic_setting_ids(
 
 def heuristic_analysis(prompt: str) -> dict[str, Any]:
     from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
+    from jiuwenswarm.server.runtime.designer.media_model_playbook import default_style_lock
     from jiuwenswarm.server.runtime.designer.node_labels import derive_story_name
     from jiuwenswarm.server.runtime.designer.skills_loader import detect_audio_intent
 
@@ -884,6 +885,7 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         "characters": characters,
         "scenes": scenes,
         "shots": shots,
+        "style_lock": default_style_lock(prompt),
         "audio": audio,
         "scene_continuity_mode": "scene_card_plus_clip_shots",
         "summary": (
@@ -1195,6 +1197,36 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         graph_title=str(parsed.get("story_name") or ""),
     )
     user_prompt = str(base.get("user_prompt") or base.get("summary") or "")
+    from jiuwenswarm.server.runtime.designer.media_model_playbook import (
+        STYLE_LOCK_DEFAULT,
+        default_style_lock,
+    )
+
+    # Explicit user language is authoritative. Otherwise accept the Director's
+    # inferred style, and finally use the product's cartoonish default.
+    user_style = default_style_lock(user_prompt)
+    raw_style = parsed.get("style_lock")
+    visual_style = str(
+        parsed.get("visual_style")
+        or parsed.get("style")
+        or (raw_style if isinstance(raw_style, str) else "")
+        or ""
+    ).strip()
+    if user_style.get("look") != STYLE_LOCK_DEFAULT.get("look"):
+        style_lock = user_style
+    elif isinstance(raw_style, dict) and any(str(v or "").strip() for v in raw_style.values()):
+        style_lock = {
+            str(k): str(v)[:280]
+            for k, v in raw_style.items()
+            if str(v or "").strip()
+        }
+    elif visual_style:
+        style_lock = default_style_lock(visual_style)
+        if style_lock.get("look") == STYLE_LOCK_DEFAULT.get("look"):
+            style_lock["look"] = visual_style[:280]
+            style_lock["medium"] = "brief_specified"
+    else:
+        style_lock = user_style
     decisions = _director_pipeline_decisions(user_prompt, norm_chars, norm_shots)
     heuristic_budget = int(decisions["target_shot_count"])
     explicit = 0
@@ -1261,6 +1293,7 @@ def _normalize_llm_analysis(parsed: dict[str, Any], base: dict[str, Any]) -> dic
         "characters": norm_chars,
         "scenes": norm_scenes,
         "shots": norm_shots,
+        "style_lock": style_lock,
         "audio": audio,
         "scene_continuity_mode": "scene_card_plus_clip_shots",
         "summary": str(parsed.get("summary") or "")[:500]
@@ -1364,6 +1397,9 @@ async def analyze_creative_brief(
             "Per shot also lock staging: cast_actions (posture/doing), blocking positions "
             "(zone/facing), who looks_at whom, who talks_to whom, adjacency (next_to). "
             "Shots grouped by setting_id (different places = different setting_id). "
+            "Infer one film-wide visual style from the user's exact wording. Preserve "
+            "non-English style cues verbatim. If no style can be inferred, use cartoonish "
+            "animation with flat shapes, soft rendering, and rounded forms. "
             "NOT every character in every scene. Per shot: on_screen (visible), offscreen "
             "(in scene, not in frame), cast_actions {id: doing-what}. "
             + shot_count_rule
@@ -1379,6 +1415,7 @@ async def analyze_creative_brief(
             )
             + " Output ONLY one JSON object (no markdown). "
             '{"story_name":"short film title any language",'
+            '"style_lock":{"look":"...","medium":"..."},'
             '"characters":[{"id":"char_1","name":"...","description":"..."}],'
             '"shots":[{"shot_index":1,"title":"2-4 word beat name NEVER Shot N",'
             '"action":"...","camera":"...","on_screen":["char_1"],'
@@ -1408,7 +1445,8 @@ async def analyze_creative_brief(
                     + story_enrichment_rule
                     + "The shots must be distinct, sequential content shots that fill the "
                     "requested duration without repetition. "
-                    '{"characters":[{"id":"char_1","name":"...","description":"..."}],'
+                    '{"style_lock":{"look":"...","medium":"..."},'
+                    '"characters":[{"id":"char_1","name":"...","description":"..."}],'
                     '"shots":[{"shot_index":1,"action":"...","camera":"...",'
                     '"character_ids":["char_1"],"ensemble_cast_ids":["char_1"],'
                     '"featured_cast_ids":["char_1"],"setting_id":"set_1",'

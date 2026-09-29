@@ -51,12 +51,13 @@ Infer posture from action language (sit, lean, kneel, walk, hold, …) — gener
 
 ## Style
 
-- If the user brief does **not** specify cartoon/anime/stylized medium → **STYLE LOCK photoreal cinematic** for the whole film.
-- Soft STYLE HOLD alone is insufficient — keep a hard STYLE LOCK.
+- Copy the visual medium from the brief/storyboard exactly.
+- If the brief cannot infer a medium from the user, it uses the cartoonish default
+  (flat shapes, soft rendering, rounded forms) for the whole film.
 
 ## Authoring checklist for leaf clip agents
 
-1. STYLE LOCK (photoreal unless brief says otherwise)
+1. STYLE LOCK copied from the brief/storyboard
 2. Wan REFERENCE MODE binding (labels match attach order)
 3. CONTACT / ANTI-PENETRATION lock
 4. THIS shot only: action, camera, speech (no prior-line restart)

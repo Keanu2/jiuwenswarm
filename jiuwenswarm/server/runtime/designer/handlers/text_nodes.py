@@ -34,6 +34,9 @@ _BRIEF_INSTRUCTION = """Turn the request below into an executable short-film Bri
 Write English Markdown with these sections:
 - User prompt (verbatim intent)
 - Logline
+- Visual style (REQUIRED: preserve the user's requested medium and rendering details verbatim;
+  if no style can be inferred, write "cartoonish animation — flat shapes, soft rendering,
+  rounded forms")
 - Creative concept (specific interpretation and promise; fill unspecified details creatively)
 - Narrative / content arc (setup or hook → development/turn → payoff or CTA)
 - Timed shot plan spanning the full requested duration; every shot adds new content, no filler or repetition
@@ -62,6 +65,9 @@ Use English Markdown. Include this heading and one table:
 
 ## Storyboard
 
+Before the table, write one line: `Visual style: ...` copied from the Brief. Never replace
+that style with a leaf/model default.
+
 Use a Markdown table whose columns MUST be:
 Shot | Timeline | Camera | Move | Character action | Shot consistency | Comment
 
@@ -80,7 +86,8 @@ Rules:
 - Shot consistency: explicit forbids from prior shots (do not undo a completed shot unless this
   row or the user prompt asks to repeat it; posture/facing/location locks)
 - Comment is the composed-scene prompt: subjects, composition, light, action instant,
-  environment — ready for image gen (composed scene with all opening-cast characters in the scene)
+  environment, and the Brief's visual style — ready for image gen (composed scene with all
+  opening-cast characters in the scene)
 - Language: keep every planned speech_line exact and visibly associate speaker, line, and timing with its row; empty = silent
 - Enhance sparse prompts: crowd, atmosphere, lighting, wardrobe detail — without inventing new lead characters
 - Do not invent a new world that contradicts the brief
@@ -459,12 +466,21 @@ def _stamp_bible_on_text(text: str, ctx: NodeExecutionContext) -> str:
         return text
 
 
+def _sync_style_authority(text: str, ctx: NodeExecutionContext) -> None:
+    from jiuwenswarm.server.runtime.designer.media_model_playbook import (
+        synchronize_graph_style_from_brief,
+    )
+
+    synchronize_graph_style_from_brief(ctx.graph, text)
+
+
 class BriefNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         cfg = node_config(node)
         meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
         approved = str(meta.get("approved_brief") or "").strip()
         if approved:
+            _sync_style_authority(approved, ctx)
             text = _stamp_bible_on_text(approved, ctx)
             path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
             return NodeResult(
@@ -485,6 +501,7 @@ class BriefNodeHandler:
         )
         if not str(text or "").strip():
             raise RuntimeError("Chat model did not return a usable brief.")
+        _sync_style_authority(text, ctx)
         text = _stamp_bible_on_text(text, ctx)
         path = write_workspace_text(f"designer_brief_{ctx.run_id}_{ctx.node_id}", text)
         return NodeResult(
@@ -523,6 +540,7 @@ class StoryboardNodeHandler:
         meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
         approved = str(meta.get("approved_storyboard") or "").strip()
         if approved:
+            _sync_style_authority(approved, ctx)
             sync_shot_nodes_from_storyboard_markdown(ctx.graph, approved)
             text = _stamp_bible_on_text(approved, ctx)
             path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
@@ -554,6 +572,7 @@ class StoryboardNodeHandler:
         )
         if not str(text or "").strip():
             raise RuntimeError("Chat model did not return a usable storyboard.")
+        _sync_style_authority(text, ctx)
         sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
         text = _stamp_bible_on_text(text, ctx)
         path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)

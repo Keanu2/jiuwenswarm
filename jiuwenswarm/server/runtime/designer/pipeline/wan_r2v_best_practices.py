@@ -110,7 +110,7 @@ def wan_leaf_skill_block(*, role: str = "clip") -> str:
                 "(3) same-setting continue only — never across setting_id.",
                 "Omit exited cast from the video call. No negatives, no worked examples.",
                 "Director keep concise faithful story-form; rewrite lock essays.",
-                "STYLE: one look phrase (photoreal cinematic unless the brief names another medium).",
+                "STYLE: one look phrase copied from the brief/storyboard.",
             ]
         )
     return "\n".join(
@@ -119,20 +119,20 @@ def wan_leaf_skill_block(*, role: str = "clip") -> str:
             wan_reference_media_rules(prior_ending_count=0),
             contact_anti_penetration_clause(for_clip=False),
             (
-                "STYLE DEFAULT: if the brief does not specify cartoon/anime/stylized medium, "
-                "lock photoreal cinematic for the whole film (STYLE LOCK — not soft HOLD alone)."
+                "STYLE: copy the brief/storyboard medium. If the brief could not infer one, "
+                "use its cartoonish default for the whole film."
             ),
         ]
     )
 
 
-def ensure_photoreal_style_lock(
+def ensure_style_lock(
     style: dict[str, Any] | None,
     *,
     prompt: str = "",
     scene_desc: str = "",
 ) -> dict[str, str]:
-    """Return a non-empty film-wide style lock; unspecified → photoreal cinematic."""
+    """Return the brief's style lock; unspecified briefs use the cartoonish default."""
     if isinstance(style, dict) and (
         str(style.get("look") or "").strip()
         or str(style.get("medium") or "").strip()
@@ -147,12 +147,12 @@ def ensure_photoreal_style_lock(
     except Exception:  # noqa: BLE001
         return {
             "look": (
-                "photoreal cinematic — continuous color grade across all sheets/frames/clips. "
-                "SAME medium whole film"
+                "cartoonish animated feature look, flat shapes, soft rendering, rounded forms, "
+                "coherent across all sheets/frames/clips"
             ),
-            "lens": "35mm cinematic, soft background when close; no comic/grid UI",
-            "palette": "match scene specs color temperature and wardrobe dyes — never restyle mid-film",
-            "medium": "photoreal_cinematic",
+            "lens": "animated cinematic framing; soft readable shapes; no comic/grid UI",
+            "palette": "match the brief's palette; keep colors and line weight stable across shots",
+            "medium": "stylized_animation",
             "forbid": (
                 "no style drift between shots, no outfit redesign, no new architecture, "
                 "no subtitles/watermarks, no medium switch mid-film"
