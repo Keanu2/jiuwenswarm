@@ -121,8 +121,11 @@ designer.graph.bootstrap
 Loaded from `~/.jiuwenswarm/config/.env` (never commit):
 
 - Chat: DeepSeek / etc. (`API_KEY`, `API_BASE`)
-- Image: Qwen / image-01 / … (`IMAGE_GEN_*`)
-- Video: `VIDEO_GEN_*` (Wan, Seedance, or MiniMax)
+- Image: Settings > Agent image generation (`VISUAL_GEN_*`: Qwen-Image on DashScope,
+  Seedream on ModelArk, MiniMax image-01, or a self-deployed vLLM-Omni)
+- Video: Settings > Agent video generation (`VIDEO_GEN_*`: Wan on DashScope, Seedance on
+  ModelArk, MiniMax-H3, or a self-deployed vLLM-Omni). The OpenRouter path is chat-only:
+  Design needs reference images.
 
 Clips default **480p**. Image path uses `generate_designer_image` (not the harness
 `call_image_model` LocalFunction path). Assets panel unions media + text tiles from

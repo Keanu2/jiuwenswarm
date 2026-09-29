@@ -12,6 +12,7 @@ top-level fields except MiniMax-H3 ``audio_flow_shift``, which rides
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -228,33 +229,34 @@ def _stage(ctx: NodeExecutionContext, text: str) -> None:
         ctx.emit_activity("stage", text, "vllm_omni")
 
 
+def _missing_api_base(kind: str) -> RuntimeError:
+    return RuntimeError(
+        f"ComfyUI {kind} node has no vLLM-Omni API URL: set one on the node, or configure a "
+        f"vLLM-Omni {kind} generation endpoint in Settings > Agent."
+    )
+
+
 class ComfyuiImageNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        from jiuwenswarm.agents.harness.common.tools.image_tools import (
-            _invoke_model_image_generation,
+        from jiuwenswarm.agents.harness.common.tools.vllm_omni_gen import (
+            invoke_vllm_omni_image_generation_sync,
         )
-        from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
-            apply_image_gen_model_config_from_yaml,
-        )
-        from jiuwenswarm.common.config import get_config
-
-        try:
-            apply_image_gen_model_config_from_yaml(get_config())
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to apply image_gen model config from yaml", exc_info=True)
+        from jiuwenswarm.server.runtime.designer.media_generation import vllm_omni_endpoint
 
         request = comfyui_request(node)
+        api_key, api_base, model = vllm_omni_endpoint("image", request.api_base, request.model)
+        if not api_base:
+            raise _missing_api_base("image")
         refs = _collect_references(ctx, node)
         _stage(ctx, "calling vLLM-Omni image model")
         prompt = _prompt(ctx, node)
+        size = request.size or "1024x1024"
         tool_input = {
             "prompt": prompt,
-            "size": request.size or "1024x1024",
+            "size": size,
             "reference_images": refs.images or None,
-            "max_tries": 1,
-            "model_override": request.model or None,
-            "provider_override": "vllm-omni",
-            "api_base_override": request.api_base or None,
+            "model": model or None,
+            "api_base": api_base,
             "negative_prompt": request.negative_prompt,
             **request.extra_fields,
         }
@@ -268,21 +270,21 @@ class ComfyuiImageNodeHandler:
             phase="tool",
             detail={"input": tool_input},
         ):
-            result = await _invoke_model_image_generation(
-                prompt,
-                size=request.size or "1024x1024",
-                reference_images=refs.images or None,
-                max_tries=1,
-                model_override=request.model or None,
-                provider_override="vllm-omni",
-                api_base_override=request.api_base or None,
-                negative_prompt=request.negative_prompt,
-                **request.extra_fields,
-            )
-        if not isinstance(result, dict) or not result.get("image_path"):
-            error = str((result or {}).get("error") or "no image_path")
-            raise RuntimeError(f"vLLM-Omni image generation failed: {error}")
-        path = _into_workspace(ctx, str(result["image_path"]))
+            try:
+                result = await asyncio.to_thread(
+                    invoke_vllm_omni_image_generation_sync,
+                    prompt,
+                    api_key=api_key,
+                    api_base=api_base,
+                    model=model,
+                    size=size,
+                    reference_images=refs.images or None,
+                    negative_prompt=request.negative_prompt,
+                    **request.extra_fields,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"vLLM-Omni image generation failed: {exc}") from exc
+        path = _into_workspace(ctx, str(result.get("image_path") or ""))
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
             message="image generated (vLLM-Omni, ComfyUI)",
@@ -291,20 +293,15 @@ class ComfyuiImageNodeHandler:
 
 class ComfyuiVideoNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
-            apply_video_gen_model_config_from_yaml,
+        from jiuwenswarm.agents.harness.common.tools.vllm_omni_gen import (
+            invoke_vllm_omni_video_generation_sync,
         )
-        from jiuwenswarm.agents.harness.common.tools.video_tools import (
-            _invoke_model_video_generation,
-        )
-        from jiuwenswarm.common.config import get_config
-
-        try:
-            apply_video_gen_model_config_from_yaml(get_config())
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to apply video_gen model config from yaml", exc_info=True)
+        from jiuwenswarm.server.runtime.designer.media_generation import vllm_omni_endpoint
 
         request = comfyui_request(node)
+        api_key, api_base, model = vllm_omni_endpoint("video", request.api_base, request.model)
+        if not api_base:
+            raise _missing_api_base("video")
         refs = _collect_references(ctx, node)
         options: dict[str, Any] = {
             "negative_prompt": request.negative_prompt,
@@ -319,14 +316,15 @@ class ComfyuiVideoNodeHandler:
             options["extra_params"] = request.extra_params
         _stage(ctx, "calling vLLM-Omni video model")
         prompt = _prompt(ctx, node)
+        size = request.size or "1280*720"
+        duration = request.duration or 5
         tool_input = {
             "prompt": prompt,
-            "size": request.size or "1280*720",
-            "duration": request.duration or 5,
+            "size": size,
+            "duration": duration,
             "reference_images": refs.images or None,
-            "model": request.model or None,
-            "provider_override": "vllm-omni",
-            "api_base_override": request.api_base or None,
+            "model": model or None,
+            "api_base": api_base,
             **options,
         }
         from jiuwenswarm.server.runtime.designer.trajectory import (
@@ -339,18 +337,21 @@ class ComfyuiVideoNodeHandler:
             phase="tool",
             detail={"input": tool_input},
         ):
-            result = await _invoke_model_video_generation(
-                prompt,
-                size=request.size or "1280*720",
-                duration=request.duration or 5,
-                reference_images=refs.images or None,
-                model=request.model or None,
-                provider_override="vllm-omni",
-                api_base_override=request.api_base or None,
-                **options,
-            )
-        if "error" in result:
-            raise RuntimeError(str(result["error"]))
+            try:
+                result = await asyncio.to_thread(
+                    invoke_vllm_omni_video_generation_sync,
+                    prompt,
+                    api_key=api_key,
+                    api_base=api_base,
+                    model=model,
+                    size=size,
+                    duration=duration,
+                    resolution=None,
+                    reference_images=refs.images or None,
+                    **options,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"vLLM-Omni video generation failed: {exc}") from exc
         path = _into_workspace(ctx, str(result.get("video_path") or ""))
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_VIDEO, mime_type="video/mp4"),

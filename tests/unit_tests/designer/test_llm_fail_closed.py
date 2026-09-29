@@ -268,60 +268,87 @@ async def test_director_reviews_reject_nonthrowing_model_failures(
         await director.review_storyboard_once(storyboard_graph, node_states=None)
 
 
+_SLOT_FIELDS = ("ENABLED", "API_KEY", "API_BASE", "MODEL_NAME", "PROTOCOL")
+
+
+def _set_slot(monkeypatch: pytest.MonkeyPatch, prefix: str, **values: str) -> None:
+    for field in _SLOT_FIELDS:
+        monkeypatch.delenv(f"{prefix}_{field}", raising=False)
+    for field, value in values.items():
+        monkeypatch.setenv(f"{prefix}_{field.upper()}", value)
+
+
+def _minimax_slot(monkeypatch: pytest.MonkeyPatch, prefix: str) -> None:
+    _set_slot(
+        monkeypatch,
+        prefix,
+        enabled="true",
+        api_key="sk-test",
+        api_base="https://api.minimax.io/v1",
+        model_name="MiniMax-H3",
+        protocol="minimax",
+    )
+
+
 def test_require_media_models_blocks_incomplete_image(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(model_tools, "get_config", lambda: {"models": {}})
+    _set_slot(monkeypatch, "VISUAL_GEN", enabled="true")
     with pytest.raises(DesignerLlmError) as excinfo:
         _require_media_models(image=True)
     assert excinfo.value.code == model_tools.MEDIA_NOT_CONFIGURED
-    assert "image generation" in str(excinfo.value)
+    assert "Image generation is not configured" in str(excinfo.value)
+
+
+def test_require_media_models_blocks_switched_off_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    _minimax_slot(monkeypatch, "VISUAL_GEN")
+    monkeypatch.setenv("VISUAL_GEN_ENABLED", "false")
+    with pytest.raises(DesignerLlmError) as excinfo:
+        _require_media_models(image=True)
+    assert "Image generation is switched off" in str(excinfo.value)
 
 
 def test_require_media_models_noop_when_nothing_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(model_tools, "get_config", lambda: {"models": {}})
+    _set_slot(monkeypatch, "VISUAL_GEN")
+    _set_slot(monkeypatch, "VIDEO_GEN")
     _require_media_models()
 
 
 def test_require_media_models_blocks_incomplete_video_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        model_tools,
-        "get_config",
-        lambda: {
-            "models": {
-                "image_gen": {
-                    "model_client_config": {
-                        "api_base": "http://127.0.0.1:8000/v1",
-                        "client_provider": "OpenAI",
-                    }
-                }
-            }
-        },
-    )
+    _minimax_slot(monkeypatch, "VISUAL_GEN")
+    _set_slot(monkeypatch, "VIDEO_GEN", enabled="true")
     with pytest.raises(DesignerLlmError) as excinfo:
         _require_media_models(image=True, video=True)
     message = str(excinfo.value)
-    assert "video generation" in message
-    assert "image generation" not in message
+    assert "Video generation" in message
+    assert "Image generation" not in message
 
 
-def test_require_media_models_allows_missing_key_and_model(
+def test_require_media_models_blocks_openrouter_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_slot(
+        monkeypatch,
+        "VIDEO_GEN",
+        enabled="true",
+        api_key="sk-or",
+        api_base="https://openrouter.ai/api/v1",
+        model_name="google/veo-3",
+        protocol="openrouter",
+    )
+    with pytest.raises(DesignerLlmError) as excinfo:
+        _require_media_models(video=True)
+    assert "vLLM-Omni" in str(excinfo.value)
+
+
+def test_require_media_models_allows_vllm_omni_without_key_and_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        model_tools,
-        "get_config",
-        lambda: {
-            "models": {
-                "image_gen": {
-                    "model_client_config": {
-                        "api_base": "http://127.0.0.1:8000/v1",
-                        "client_provider": "OpenAI",
-                    }
-                }
-            }
-        },
+    _set_slot(
+        monkeypatch,
+        "VISUAL_GEN",
+        enabled="true",
+        api_base="http://127.0.0.1:8000/v1",
+        protocol="vllm-omni",
     )
     _require_media_models(image=True)

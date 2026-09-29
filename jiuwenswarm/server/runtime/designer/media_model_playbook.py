@@ -82,7 +82,7 @@ STYLE_LOCK_DEFAULT = {
 QWEN_IMAGE_PLAYBOOK = """
 ## Configured image model (call_image_model)
 Use for solo character sheets and scene specs / stills.
-- PROMPT LENGTH: obey the IMAGE PROMPT LIMIT stamped from the configured IMAGE_GEN
+- PROMPT LENGTH: obey the IMAGE PROMPT LIMIT stamped from the configured VISUAL_GEN
   backend (Director / leaf context). Prefer dense shot-ready prose; do not pad.
 - COST: Prefer ~1K resolution (size 1K / 1024x1024 or aspect-matched ~1K). Do not request 2K/4K.
 - EVERY named character gets a solo identity sheet before any keyframe.

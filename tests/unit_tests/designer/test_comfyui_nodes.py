@@ -126,9 +126,15 @@ def test_onboard_keeps_comfyui_nodes_on_the_handler(monkeypatch: pytest.MonkeyPa
     assert cfg["generate"]["prompt"] == "a red boat at dawn"
 
 
+def _clear_video_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("VIDEO_GEN_API_KEY", "VIDEO_GEN_API_BASE", "VIDEO_GEN_MODEL_NAME", "VIDEO_GEN_PROTOCOL"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_video_handler_pins_vllm_omni_with_wired_references(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _clear_video_slot(monkeypatch)
     still = tmp_path / "still.png"
     still.write_bytes(b"png")
     motion = tmp_path / "motion.mp4"
@@ -156,12 +162,12 @@ def test_video_handler_pins_vllm_omni_with_wired_references(
     }
     calls: list[dict[str, Any]] = []
 
-    async def fake_video(prompt: str, **kwargs: Any) -> dict[str, Any]:
+    def fake_video(prompt: str, **kwargs: Any) -> dict[str, Any]:
         calls.append({"prompt": prompt, **kwargs})
         return {"video_path": str(produced)}
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.video_tools._invoke_model_video_generation",
+        "jiuwenswarm.agents.harness.common.tools.vllm_omni_gen.invoke_vllm_omni_video_generation_sync",
         fake_video,
     )
     monkeypatch.setattr(comfyui_nodes, "graph_workspace_dir", lambda _graph: workspace)
@@ -171,8 +177,8 @@ def test_video_handler_pins_vllm_omni_with_wired_references(
 
     call = calls[0]
     assert call["prompt"] == "a red boat at dawn"
-    assert call["provider_override"] == "vllm-omni"
-    assert call["api_base_override"] == "http://omni:8091/v1"
+    assert call["api_base"] == "http://omni:8091/v1"
+    assert call["api_key"] == ""  # no vLLM-Omni slot in Settings, so no key reaches the node's server
     assert call["model"] == "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
     assert call["size"] == "832x480"
     assert call["duration"] == 5.0
@@ -184,6 +190,28 @@ def test_video_handler_pins_vllm_omni_with_wired_references(
     assert call["reference_audios"] == [str(voice.resolve())]
     assert result.output_ref is not None
     assert result.output_ref["uri"] == (workspace / "generated.mp4").resolve().as_uri()
+
+
+@pytest.mark.parametrize(
+    "protocol,expected_key,expected_base",
+    [
+        # a vLLM-Omni Settings slot fills in what the node leaves out
+        ("vllm-omni", "sk-omni", "http://settings-omni:8091/v1"),
+        # another vendor's key and URL never reach a vLLM-Omni node
+        ("minimax", "", ""),
+    ],
+)
+def test_node_endpoint_reuses_only_a_vllm_omni_settings_slot(
+    monkeypatch: pytest.MonkeyPatch, protocol: str, expected_key: str, expected_base: str
+) -> None:
+    from jiuwenswarm.server.runtime.designer.media_generation import vllm_omni_endpoint
+
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-omni")
+    monkeypatch.setenv("VIDEO_GEN_API_BASE", "http://settings-omni:8091/v1")
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "")
+    monkeypatch.setenv("VIDEO_GEN_PROTOCOL", protocol)
+    assert vllm_omni_endpoint("video", None, None) == (expected_key, expected_base, "")
+    assert vllm_omni_endpoint("video", "http://node:8091/v1", "Wan")[1:] == ("http://node:8091/v1", "Wan")
 
 
 def test_wired_reference_without_file_fails_the_node(tmp_path: Path) -> None:
@@ -268,12 +296,12 @@ async def test_scoped_run_calls_vllm_omni_and_runs_nothing_else(
     produced.write_bytes(b"video")
     calls: list[dict[str, Any]] = []
 
-    async def fake_video(prompt: str, **kwargs: Any) -> dict[str, Any]:
+    def fake_video(prompt: str, **kwargs: Any) -> dict[str, Any]:
         calls.append({"prompt": prompt, **kwargs})
         return {"video_path": str(produced)}
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.video_tools._invoke_model_video_generation",
+        "jiuwenswarm.agents.harness.common.tools.vllm_omni_gen.invoke_vllm_omni_video_generation_sync",
         fake_video,
     )
     monkeypatch.setattr(comfyui_nodes, "graph_workspace_dir", lambda _graph: tmp_path / "ws")
@@ -296,7 +324,7 @@ async def test_scoped_run_calls_vllm_omni_and_runs_nothing_else(
     assert finished["status"] == "completed", finished.get("error")
     assert "running" in seen
     assert len(calls) == 1
-    assert calls[0]["provider_override"] == "vllm-omni"
+    assert calls[0]["api_base"] == "http://omni:8091/v1"
     assert calls[0]["reference_images"] == [str(still.resolve())]
     states = finished["node_states"]
     assert states["n_comfy_video"]["status"] == "completed"
@@ -311,11 +339,11 @@ async def test_scoped_run_failure_reaches_the_run_error(
     still = tmp_path / "still.png"
     still.write_bytes(b"png")
 
-    async def unreachable(_prompt: str, **_kwargs: Any) -> dict[str, Any]:
-        return {"error": "vLLM-Omni connection refused"}
+    def unreachable(_prompt: str, **_kwargs: Any) -> dict[str, Any]:
+        raise ValueError("vLLM-Omni connection refused")
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.video_tools._invoke_model_video_generation",
+        "jiuwenswarm.agents.harness.common.tools.vllm_omni_gen.invoke_vllm_omni_video_generation_sync",
         unreachable,
     )
     graph = _imported_graph(designer_store, still)

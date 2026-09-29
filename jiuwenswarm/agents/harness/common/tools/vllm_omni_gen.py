@@ -464,23 +464,32 @@ def _reference_files_payload(
 # ---------------------------------------------------------------------------
 
 
-def _download_generated_video(content_url: str, prompt: str, headers: dict[str, str]) -> dict[str, Any]:
-    output_dir = get_agent_workspace_dir()
+def _generated_output_path(output_dir: Path | None, suffix: str) -> Path:
+    root = output_dir or get_agent_workspace_dir()
+    root.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    output_path = output_dir / f"generated_{timestamp}_{random.randint(1000, 9999)}.mp4"
-    response = _http_request("GET", content_url, headers=headers, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    with open(output_path, "wb") as f:
-        f.write(response.content)
-    return {
-        "video_path": str(output_path.absolute()),
-        "revised_prompt": prompt,
-        "original_url": content_url,
-    }
+    return root / f"generated_{timestamp}_{random.randint(1000, 9999)}.{suffix}"
 
 
-def invoke_vllm_omni_video_generation_sync(
+@dataclass(frozen=True)
+class VllmOmniVideoStatus:
+    """One poll of ``GET {api_base}/videos/{id}``."""
+
+    status: str
+    error: str | None = None
+
+    @property
+    def completed(self) -> bool:
+        return self.status == "completed"
+
+    @property
+    def failed(self) -> bool:
+        return self.status in {"failed", "cancelled", "canceled", "expired"}
+
+
+def submit_vllm_omni_video_sync(
     prompt: str,
+    /,
     *,
     api_key: str,
     api_base: str,
@@ -496,8 +505,8 @@ def invoke_vllm_omni_video_generation_sync(
     negative_prompt: str | None = None,
     extra_params: Mapping[str, Any] | None = None,
     **extra_fields: Any,
-) -> dict[str, Any]:
-    """vLLM-Omni async video generation (``POST /v1/videos`` + poll + download).
+) -> str:
+    """Create a vLLM-Omni video job (``POST /v1/videos``) and return its id.
 
     ``fps`` replaces the pinned provider fps; ``extra_params`` merges over the
     spec-built ``extra_params`` JSON; ``extra_fields`` are top-level request
@@ -592,25 +601,98 @@ def invoke_vllm_omni_video_generation_sync(
     video_id = str(body.get("id") or "").strip()
     if not video_id:
         raise ValueError(f"vLLM-Omni video create response missing id: {body}")
+    return video_id
 
-    query_url = f"{base}/videos/{video_id}"
+
+def query_vllm_omni_video_sync(*, api_key: str, api_base: str, video_id: str) -> VllmOmniVideoStatus:
+    """Poll one vLLM-Omni video job."""
+    base = (api_base or "").strip().rstrip("/")
+    poll = _http_request("GET", f"{base}/videos/{video_id}", headers=_auth_headers(api_key), timeout=60)
+    if not poll.ok:
+        raise ValueError(f"vLLM-Omni poll failed {poll.status_code}: {_error_message(poll)}")
+    payload = poll.json()
+    status = str(payload.get("status") or "").strip().lower()
+    err = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    err_msg = str(err.get("message") or "").strip() or None
+    return VllmOmniVideoStatus(status=status or "unknown", error=err_msg)
+
+
+def download_vllm_omni_video_sync(
+    *, api_key: str, api_base: str, video_id: str, output_path: Path
+) -> Path:
+    """Save a completed vLLM-Omni video job's content to ``output_path``."""
+    base = (api_base or "").strip().rstrip("/")
+    response = _http_request(
+        "GET",
+        f"{base}/videos/{video_id}/content",
+        headers=_auth_headers(api_key),
+        timeout=_DOWNLOAD_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(response.content)
+    return output_path
+
+
+def invoke_vllm_omni_video_generation_sync(
+    prompt: str,
+    /,
+    *,
+    api_key: str,
+    api_base: str,
+    model: str,
+    size: str | None,
+    duration: int | float,
+    resolution: str | None,
+    first_frame: str | None = None,
+    reference_images: list[str] | None = None,
+    reference_videos: list[str] | None = None,
+    reference_audios: list[str] | None = None,
+    fps: int | None = None,
+    negative_prompt: str | None = None,
+    extra_params: Mapping[str, Any] | None = None,
+    **extra_fields: Any,
+) -> dict[str, Any]:
+    """vLLM-Omni async video generation (``POST /v1/videos`` + poll + download).
+
+    Blocks until the job finishes; see ``submit_vllm_omni_video_sync`` for the
+    meaning of ``fps`` / ``extra_params`` / ``extra_fields``.
+    """
+    video_id = submit_vllm_omni_video_sync(
+        prompt,
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        size=size,
+        duration=duration,
+        resolution=resolution,
+        first_frame=first_frame,
+        reference_images=reference_images,
+        reference_videos=reference_videos,
+        reference_audios=reference_audios,
+        fps=fps,
+        negative_prompt=negative_prompt,
+        extra_params=extra_params,
+        **extra_fields,
+    )
     deadline_ts = time.monotonic() + _POLL_TIMEOUT_SECONDS
     last_status = "unknown"
     while time.monotonic() < deadline_ts:
-        poll = _http_request("GET", query_url, headers=headers, timeout=60)
-        if not poll.ok:
-            raise ValueError(
-                f"vLLM-Omni poll failed {poll.status_code}: {_error_message(poll)}"
+        job = query_vllm_omni_video_sync(api_key=api_key, api_base=api_base, video_id=video_id)
+        last_status = job.status
+        if job.completed:
+            output_path = download_vllm_omni_video_sync(
+                api_key=api_key,
+                api_base=api_base,
+                video_id=video_id,
+                output_path=_generated_output_path(None, "mp4"),
             )
-        payload = poll.json()
-        status = str(payload.get("status") or "").strip().lower()
-        last_status = status or last_status
-        if status == "completed":
-            return _download_generated_video(f"{query_url}/content", prompt, headers)
-        if status in {"failed", "cancelled", "canceled", "expired"}:
-            err = payload.get("error") if isinstance(payload.get("error"), dict) else {}
-            err_msg = str(err.get("message") or "").strip()
-            raise ValueError(err_msg or f"vLLM-Omni video generation {status}")
+            return {
+                "video_path": str(output_path.absolute()),
+                "revised_prompt": prompt,
+            }
+        if job.failed:
+            raise ValueError(job.error or f"vLLM-Omni video generation {job.status}")
         time.sleep(_POLL_INTERVAL_SECONDS)
     raise TimeoutError(f"vLLM-Omni video generation timed out (last status={last_status})")
 
@@ -643,7 +725,9 @@ def _load_image_references(
     return references
 
 
-def _save_image_response_body(body: Any, prompt: str, api_key: str) -> dict[str, Any]:
+def _save_image_response_body(
+    body: Any, prompt: str, api_key: str, output_dir: Path | None = None
+) -> dict[str, Any]:
     """Shared response tail for /images/generations and /images/edits."""
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, list) or not data:
@@ -652,9 +736,7 @@ def _save_image_response_body(body: Any, prompt: str, api_key: str) -> dict[str,
     image_b64 = str(first.get("b64_json") or "").strip() or None
     image_url = str(first.get("url") or "").strip() or None
 
-    output_dir = get_agent_workspace_dir()
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    output_path = output_dir / f"generated_{timestamp}_{random.randint(1000, 9999)}.png"
+    output_path = _generated_output_path(output_dir, "png")
     if image_b64:
         with open(output_path, "wb") as f:
             f.write(base64.b64decode(image_b64))
@@ -674,6 +756,7 @@ def _save_image_response_body(body: Any, prompt: str, api_key: str) -> dict[str,
 
 def invoke_vllm_omni_image_generation_sync(
     prompt: str,
+    /,
     *,
     api_key: str,
     api_base: str,
@@ -681,6 +764,7 @@ def invoke_vllm_omni_image_generation_sync(
     size: str | None,
     reference_images: list[str] | None = None,
     negative_prompt: str | None = None,
+    output_dir: Path | None = None,
     **extra_fields: Any,
 ) -> dict[str, Any]:
     """vLLM-Omni image generation.
@@ -754,4 +838,4 @@ def invoke_vllm_omni_image_generation_sync(
         raise ValueError(
             f"vLLM-Omni image create failed {response.status_code}: {_error_message(response)}"
         )
-    return _save_image_response_body(response.json(), prompt, api_key)
+    return _save_image_response_body(response.json(), prompt, api_key, output_dir)

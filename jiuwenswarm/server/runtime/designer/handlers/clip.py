@@ -867,26 +867,15 @@ async def generate_clip_video(
     model: str | None = None,
     force_reference_mode: bool = False,
 ) -> dict[str, Any]:
-    """Call the shared video-generation stack. Tests monkeypatch this function."""
-    from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
-        apply_video_gen_model_config_from_yaml,
-    )
-    from jiuwenswarm.agents.harness.common.tools.video_tools import (
-        _invoke_model_video_generation,
-    )
-    from jiuwenswarm.common.config import get_config
+    """Call the Settings > Agent video model and wait for the clip. Tests monkeypatch this function."""
     from jiuwenswarm.common.utils import get_env_file
     from jiuwenswarm.dotenv_early import load_dotenv_runtime
+    from jiuwenswarm.server.runtime.designer import media_generation
 
     try:
         load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
     except Exception:
-        logger.debug("Failed to reload video_gen env before generation", exc_info=True)
-
-    try:
-        apply_video_gen_model_config_from_yaml(get_config())
-    except Exception:
-        logger.debug("Failed to apply video_gen model config from yaml", exc_info=True)
+        logger.debug("Failed to reload video generation env before generation", exc_info=True)
 
     from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
         resolve_clip_video_format,
@@ -926,17 +915,20 @@ async def generate_clip_video(
         phase="tool",
         detail={"input": tool_input},
     ):
-        result = await _invoke_model_video_generation(
-            prompt,
-            size=video_size,
-            resolution=video_res,
-            first_frame=first_frame,
-            reference_images=reference_images,
-            reference_file=reference_file,
-            duration=clamped_duration,
-            audio=audio,
-            model=resolved_model,
-            force_reference_mode=force_reference_mode,
+        result = await media_generation.generate_video(
+            media_generation.DesignerVideoRequest(
+                prompt=prompt,
+                duration=clamped_duration,
+                size=video_size,
+                resolution=video_res,
+                first_frame=first_frame,
+                reference_images=tuple(reference_images or ()),
+                reference_file=reference_file,
+                audio=bool(audio),
+                reference_mode=force_reference_mode,
+                model=resolved_model,
+            ),
+            save_dir=save_dir,
         )
     if "error" in result:
         raise RuntimeError(str(result["error"]))
@@ -944,15 +936,7 @@ async def generate_clip_video(
     video_path = str(result.get("video_path") or "").strip()
     if not video_path:
         raise RuntimeError("video generation returned no video_path")
-
-    if save_dir:
-        dest_dir = Path(save_dir)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / Path(video_path).name
-        Path(video_path).replace(dest)
-        result = {**result, "video_path": str(dest.resolve())}
-
-    return result
+    return {**result, "video_path": str(Path(video_path).resolve())}
 
 
 class ClipNodeHandler:

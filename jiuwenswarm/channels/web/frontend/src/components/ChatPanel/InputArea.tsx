@@ -2280,7 +2280,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if ((trimmedBase || hasReadyMedia) && onLaunchDesign && useDesignArmedStore.getState().isArmed(launchDesignSid)) {
       useDesignArmedStore.getState().consumeArmed(launchDesignSid);
       useChatStore.getState().setInputValue(launchDesignSid, '');
-      setPendingVoiceText('');
       setAttachments([]);
       setAttachmentAlerts([]);
       if (inputRef.current) {

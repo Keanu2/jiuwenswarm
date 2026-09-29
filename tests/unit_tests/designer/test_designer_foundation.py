@@ -852,7 +852,7 @@ def test_bootstrap_treats_default_project_as_create(designer_store: DesignerGrap
             False,
         )
 
-    monkeypatch.setattr(adapter.project_store, "create_or_restore_project", fake_create)
+    monkeypatch.setattr(adapter.project_store, "create_project_checked", fake_create)
 
     analysis = {
         "source": "llm",

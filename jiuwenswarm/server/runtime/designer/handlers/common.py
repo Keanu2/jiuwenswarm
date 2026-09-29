@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote, urlparse
@@ -820,18 +819,11 @@ async def complete_designer_text(prompt: str, *, max_tokens: int = 8192) -> str:
     return str(content).strip()
 
 
-def _image_gen_switch_enabled() -> bool:
-    raw = (os.environ.get("IMAGE_GEN_ENABLED") or "").strip().lower()
-    if not raw:
-        return True
-    return raw in {"true", "1", "yes", "on", "enabled"}
-
-
 _IMAGE_GEN_SEM = None
 
 
 def _image_gen_semaphore():
-    """Limit concurrent DashScope image calls to avoid RateQuota 429s."""
+    """Limit concurrent image calls to avoid provider RateQuota 429s."""
     import asyncio
 
     global _IMAGE_GEN_SEM
@@ -863,32 +855,24 @@ async def generate_designer_image(
     max_tries: int = 2,
     timeout_sec: float = 1200.0,
 ) -> dict[str, str] | None:
-    """Call image_gen when configured. Tests monkeypatch this function.
+    """Call the Settings > Agent image model when enabled. Tests monkeypatch this function.
 
     Retries transient RateQuota/429 with backoff under a global concurrency cap.
     """
     import asyncio
 
-    from jiuwenswarm.agents.harness.common.tools.image_tools import _invoke_model_image_generation
-    from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
-        apply_image_gen_model_config_from_yaml,
-    )
-    from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.utils import get_env_file
     from jiuwenswarm.dotenv_early import load_dotenv_runtime
+    from jiuwenswarm.server.runtime.designer import media_generation
 
     try:
         load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
     except Exception:
-        logger.debug("Failed to reload image_gen env before generation", exc_info=True)
+        logger.debug("Failed to reload image generation env before generation", exc_info=True)
 
-    if not _image_gen_switch_enabled():
-        logger.info("Designer image generation skipped: IMAGE_GEN_ENABLED is off")
+    if not media_generation.generation_enabled("image"):
+        logger.info("Designer image generation skipped: VISUAL_GEN_ENABLED is off")
         return None
-    try:
-        apply_image_gen_model_config_from_yaml(get_config())
-    except Exception:
-        logger.debug("Failed to apply image_gen model config from yaml", exc_info=True)
     refs = [str(item).strip() for item in (reference_images or []) if str(item).strip()]
     single = (reference_image or "").strip()
     if single and single not in refs:
@@ -909,7 +893,6 @@ async def generate_designer_image(
                     "prompt": prompt,
                     "size": size,
                     "reference_images": refs or None,
-                    "max_tries": 1,
                 }
                 from jiuwenswarm.server.runtime.designer.trajectory import (
                     current_trajectory_span,
@@ -922,16 +905,15 @@ async def generate_designer_image(
                     detail={"attempt": attempt, "input": tool_input},
                 ):
                     result = await asyncio.wait_for(
-                        _invoke_model_image_generation(
+                        media_generation.generate_image(
                             prompt,
                             size=size,
                             reference_images=refs or None,
-                            max_tries=1,
                         ),
                         timeout=max(60.0, float(timeout_sec or 1200.0)),
                     )
             except asyncio.TimeoutError:
-                last_error = f"image_gen timed out after {int(timeout_sec or 1200)}s"
+                last_error = f"image generation timed out after {int(timeout_sec or 1200)}s"
                 logger.info("Designer image generation timed out (attempt %s/%s)", attempt, attempts)
                 result = {"error": last_error}
             except Exception as exc:  # noqa: BLE001
@@ -940,7 +922,7 @@ async def generate_designer_image(
 
         if isinstance(result, dict) and result.get("image_path"):
             return {"image_path": str(result["image_path"])}
-        err = str((result or {}).get("error") or last_error or "image_gen failed")
+        err = str((result or {}).get("error") or last_error or "image generation failed")
         last_error = err
         if attempt < attempts and _is_rate_limit_error(err):
             delay = min(45.0, 4.0 * (2 ** (attempt - 1)))

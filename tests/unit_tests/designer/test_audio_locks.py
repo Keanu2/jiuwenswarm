@@ -47,11 +47,11 @@ def test_video_gen_family_label_follows_configured_model(monkeypatch) -> None:
 def test_image_gen_family_label_follows_configured_model(monkeypatch) -> None:
     from jiuwenswarm.server.runtime.designer.audio_locks import image_gen_family_label
 
-    monkeypatch.setenv("IMAGE_GEN_MODEL_NAME", "doubao-seedream-4-5-251128")
+    monkeypatch.setenv("VISUAL_GEN_MODEL_NAME", "doubao-seedream-4-5-251128")
     assert image_gen_family_label() == "Seedream"
-    monkeypatch.setenv("IMAGE_GEN_MODEL_NAME", "qwen-image-3.0")
+    monkeypatch.setenv("VISUAL_GEN_MODEL_NAME", "qwen-image-3.0")
     assert image_gen_family_label() == "Qwen"
-    monkeypatch.delenv("IMAGE_GEN_MODEL_NAME", raising=False)
+    monkeypatch.delenv("VISUAL_GEN_MODEL_NAME", raising=False)
     assert image_gen_family_label("wan2.7-image") == "Wan"
 
 
@@ -59,7 +59,7 @@ def test_clip_playbook_uses_configured_video_family(monkeypatch) -> None:
     from jiuwenswarm.server.runtime.designer.media_model_playbook import playbook_for_role
 
     monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "doubao-seedance-2-5-260628")
-    monkeypatch.setenv("IMAGE_GEN_MODEL_NAME", "doubao-seedream-4-5-251128")
+    monkeypatch.setenv("VISUAL_GEN_MODEL_NAME", "doubao-seedream-4-5-251128")
     text = playbook_for_role("clip")
     assert "R2V" in text
     assert "Qwen-Image 3.0" not in text

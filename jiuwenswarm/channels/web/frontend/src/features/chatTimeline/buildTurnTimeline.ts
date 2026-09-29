@@ -700,11 +700,7 @@ export type TurnWorkMeta = {
   outcomeTone: WorkOutcomeTone;
 };
 
-const DELIVERABLE_TOOL_NAMES = new Set([
-  'send_file_to_user',
-  'generate_image',
-  'generate_video',
-]);
+const DELIVERABLE_TOOL_NAMES = new Set(['send_file_to_user']);
 
 export function isDeliverableToolName(name: string | undefined): boolean {
   return Boolean(name && DELIVERABLE_TOOL_NAMES.has(name));

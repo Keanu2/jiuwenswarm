@@ -8,7 +8,6 @@ video model is configured with an API key is the one that applies.
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -150,20 +149,9 @@ def capacity_for_model(model_id: str) -> VideoModelCapacity:
 
 def configured_video_model_id() -> str:
     """Model name from Settings / env. Empty when nothing is configured."""
-    model = ""
-    try:
-        from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
-            _get_model_config,
-        )
-        from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.server.runtime.designer.media_generation import configured_model
 
-        mc = _get_model_config(get_config() or {}, "video_gen")
-        model = str(mc.get("model_name") or mc.get("model") or "").strip()
-    except Exception:
-        model = ""
-    if not model:
-        model = str(os.getenv("VIDEO_GEN_MODEL_NAME") or "").strip()
-    return model
+    return configured_model("video")
 
 
 def active_video_capacity() -> VideoModelCapacity:

@@ -20,7 +20,7 @@ The node does not need other characters' images. It does not need the scene imag
 
 1. Builds a character prompt from the name, storyboard text, and locks.
 2. `ensure_still_tool_prompt` keeps the prompt in the image-model form (solo sheet, no scene action).
-3. Calls image generation (`IMAGE_GEN`) with the locked size. User reference files are passed through when present.
+3. Calls image generation (`VISUAL_GEN`) with the locked size. User reference files are passed through when present.
 4. If generation fails, it writes fallback character notes instead of an empty output.
 5. Stores the image path on the node output and a character card ref for later shots.
 

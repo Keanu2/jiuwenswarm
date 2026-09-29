@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.server.runtime.designer.handlers.clip import generate_clip_video
+from jiuwenswarm.server.runtime.designer.media_generation import DesignerVideoRequest
 from jiuwenswarm.server.runtime.designer.trajectory import (
     TRAJECTORY_SCHEMA,
     TrajectoryRecorder,
@@ -78,19 +79,15 @@ async def test_video_backend_records_effective_tool_input(
 ) -> None:
     output = tmp_path / "generated.mp4"
     output.write_bytes(b"video")
-    received: dict[str, object] = {}
+    received: list[DesignerVideoRequest] = []
 
-    async def fake_invoke(prompt: str, **kwargs: object) -> dict[str, str]:
-        received.update({"prompt": prompt, **kwargs})
+    async def fake_generate(request: DesignerVideoRequest, *, save_dir: str | None = None) -> dict[str, str]:
+        received.append(request)
         return {"video_path": str(output)}
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.video_tools._invoke_model_video_generation",
-        fake_invoke,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.multimodal_config.apply_video_gen_model_config_from_yaml",
-        lambda _config: None,
+        "jiuwenswarm.server.runtime.designer.media_generation.generate_video",
+        fake_generate,
     )
 
     recorder = TrajectoryRecorder("graph-video", "run-video")
@@ -114,4 +111,12 @@ async def test_video_backend_records_effective_tool_input(
         for item in recorder.events
         if item["action"] == "tool_call" and item["tool"] == "video_generation"
     )
-    assert event["detail"]["input"] == received
+    [request] = received
+    recorded = event["detail"]["input"]
+    assert recorded["prompt"] == request.prompt == "exact video prompt"
+    assert recorded["reference_images"] == list(request.reference_images) == ["character.png", "scene.png"]
+    assert recorded["duration"] == request.duration == 7
+    assert recorded["audio"] is request.audio is True
+    assert recorded["force_reference_mode"] is request.reference_mode is True
+    assert recorded["size"] == request.size
+    assert recorded["resolution"] == request.resolution

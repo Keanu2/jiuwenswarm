@@ -1,217 +1,206 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from pathlib import Path
+from __future__ import annotations
 
-from jiuwenswarm.agents.harness.common.tools.video_tools import (
-    _align_dashscope_video_api_base,
-    _as_dashscope_file_url,
-    _as_dashscope_media_url,
-    _build_dashscope_video_call,
-    _INTL_DASHSCOPE_API_BASE,
-    video_generation_message_content,
-)
+import asyncio
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from jiuwenswarm.agents.harness.common.tools import gen_toolkits as gt
+from jiuwenswarm.server.runtime.designer import media_generation as mg
+
+
+def _png(path: Path, payload: bytes = b"png") -> str:
+    path.write_bytes(payload)
+    return str(path)
+
+
+def _wan_body(model: str, *, file_url: str | None = None, **fields: Any) -> dict[str, Any]:
+    """The Wan request body for designer inputs (local paths are data URIs by then)."""
+    first_frame = fields.pop("first_frame", None)
+    refs = fields.pop("reference_images", ())
+    request = gt.VideoRequest(
+        prompt="shot",
+        aspect_ratio=fields.pop("aspect_ratio", "16:9"),
+        resolution=fields.pop("resolution", ""),
+        duration_seconds=fields.pop("duration", 5),
+        first_frame_data_uri=mg.image_uri(first_frame),
+        reference_image_uris=tuple(mg.image_uri(item) for item in refs),
+        **fields,
+    )
+    body = gt._dashscope_video_body(model, request, file_url)
+    return {"model": body["model"], **body["input"], **body["parameters"]}
 
 
 def test_local_keyframe_becomes_data_uri(tmp_path: Path) -> None:
-    frame = tmp_path / "shot1.png"
-    frame.write_bytes(b"png")
-    url = _as_dashscope_media_url(str(frame))
-    assert url is not None
-    assert url.startswith("data:image/png;base64,")
+    url = mg.image_uri(_png(tmp_path / "shot1.png"))
+    assert url is not None and url.startswith("data:image/png;base64,")
+    assert mg.image_uri(str(tmp_path / "missing.png")) is None
+    assert mg.image_uri("https://cdn.example/a.png") == "https://cdn.example/a.png"
 
 
-def test_build_call_uses_reference_urls_when_identity_references_exist(tmp_path: Path) -> None:
-    frame = tmp_path / "shot1.png"
-    extra = tmp_path / "character.png"
-    frame.write_bytes(b"png")
-    extra.write_bytes(b"png-extra")
-    params = _build_dashscope_video_call(
-        "wan3.0-video",
-        first_frame=str(frame),
-        reference_images=[str(frame), str(extra)],
-    )
+def test_wan3_references_include_the_first_frame(tmp_path: Path) -> None:
+    frame = _png(tmp_path / "shot1.png")
+    extra = _png(tmp_path / "character.png", b"png-extra")
+    params = _wan_body("wan3.0-video", first_frame=frame, reference_images=[frame, extra])
     assert params["model"] == "wan3.0-video"
-    assert "img_url" not in params
-    assert "shot_type" not in params
+    assert "img_url" not in params and "shot_type" not in params and "resolution" not in params
     assert params["size"] == "1280*720"
-    assert "resolution" not in params
-    media = params.get("media") or []
-    assert len([item for item in media if item.get("type") == "reference_image"]) == 2
+    assert [item["type"] for item in params["media"]] == ["reference_image", "reference_image"]
 
 
-def test_build_call_uses_img_url_for_lone_first_frame(tmp_path: Path) -> None:
-    frame = tmp_path / "shot1.png"
-    frame.write_bytes(b"png")
-    params = _build_dashscope_video_call(
-        "wan3.0-video",
-        first_frame=str(frame),
-    )
-    assert params["model"] == "wan3.0-video"
+def test_wan3_lone_first_frame_is_image_to_video(tmp_path: Path) -> None:
+    params = _wan_body("wan3.0-video", first_frame=_png(tmp_path / "shot1.png"))
     assert str(params["img_url"]).startswith("data:image/png;base64,")
-    assert "shot_type" not in params
+    assert params["resolution"] == "720P" and params["audio"] is False
+    assert "shot_type" not in params and "size" not in params and "ratio" not in params
 
 
-def test_wan3_keeps_unified_model_without_shot_type(tmp_path: Path) -> None:
-    frame = tmp_path / "shot1.png"
-    frame.write_bytes(b"png")
-    params = _build_dashscope_video_call(
-        "wan3.0-video",
-        first_frame=str(frame),
+def test_wan3_img_url_uses_requested_resolution(tmp_path: Path) -> None:
+    params = _wan_body(
+        "wan3.0-video", size="480*854", resolution="1080p", first_frame=_png(tmp_path / "shot1.png")
     )
-    assert params["model"] == "wan3.0-video"
-    assert str(params["img_url"]).startswith("data:image/png;base64,")
-    assert "shot_type" not in params
-    assert params["resolution"] == "720P"
-    assert params["audio"] is False
-    assert "size" not in params
-    assert "ratio" not in params
-
-
-def test_wan3_img_url_uses_requested_portrait_frame(tmp_path: Path) -> None:
-    frame = tmp_path / "shot1.png"
-    frame.write_bytes(b"png")
-    params = _build_dashscope_video_call(
-        "wan3.0-video",
-        size="480*854",
-        resolution="1080P",
-        first_frame=str(frame),
-    )
-    assert "size" not in params
-    assert "ratio" not in params
+    assert "size" not in params and "ratio" not in params
     assert params["resolution"] == "1080P"
 
 
 def test_wan3_uses_media_for_character_scene_and_storyboard(tmp_path: Path) -> None:
-    character = tmp_path / "character.png"
-    scene = tmp_path / "scene.png"
-    frame = tmp_path / "keyframe.png"
-    story = tmp_path / "storyboard.md"
-    character.write_bytes(b"png-c")
-    scene.write_bytes(b"png-s")
-    frame.write_bytes(b"png-f")
-    story.write_text("| Shot | Action |\n| 1 | walk |\n", encoding="utf-8")
-    params = _build_dashscope_video_call(
-        "wan3.0-video",
-        first_frame=None,
-        reference_images=[str(frame), str(character), str(scene)],
-        reference_file=str(story),
-    )
-    assert params["model"] == "wan3.0-video"
-    assert "img_url" not in params
-    assert "reference_urls" not in params
-    assert "shot_type" not in params
+    refs = [_png(tmp_path / f"{name}.png", name.encode()) for name in ("keyframe", "character", "scene")]
+    params = _wan_body("wan3.0-video", reference_images=refs, file_url="oss://bucket/storyboard.md")
+    assert "img_url" not in params and "reference_urls" not in params and "shot_type" not in params
     assert params["audio"] is False
     media = params["media"]
-    assert [item["type"] for item in media] == [
-        "reference_image",
-        "reference_image",
-        "reference_image",
-        "file",
-    ]
+    assert [item["type"] for item in media] == ["reference_image"] * 3 + ["file"]
     assert all(item["url"].startswith("data:image/png;base64,") for item in media[:-1])
-    assert media[-1]["url"] == str(story.resolve())
-    assert _as_dashscope_file_url(str(story)) == str(story.resolve())
+    assert media[-1]["url"] == "oss://bucket/storyboard.md"
 
 
-def test_wan3_storyboard_file_uses_reference_image_not_img_url(tmp_path: Path) -> None:
-    frame = tmp_path / "keyframe.png"
-    story = tmp_path / "storyboard.md"
-    frame.write_bytes(b"png-f")
-    story.write_text("| Shot | Action |\n| 1 | walk |\n", encoding="utf-8")
-    params = _build_dashscope_video_call(
-        "wan3.0-video",
-        first_frame=str(frame),
-        reference_images=[str(frame)],
-        reference_file=str(story),
+def test_wan3_storyboard_with_keyframe_reference_is_not_img_url(tmp_path: Path) -> None:
+    frame = _png(tmp_path / "keyframe.png")
+    params = _wan_body(
+        "wan3.0-video", first_frame=frame, reference_images=[frame], file_url="oss://bucket/storyboard.md"
     )
     assert "img_url" not in params
     assert [item["type"] for item in params["media"]] == ["reference_image", "file"]
-    assert params["audio"] is False
 
 
 def test_wan3_compose_score_can_enable_audio() -> None:
-    params = _build_dashscope_video_call("wan3.0-video", audio=True)
-    assert params["audio"] is True
-    assert "img_url" not in params
+    params = _wan_body("wan3.0-video", generate_audio=True)
+    assert params["audio"] is True and "img_url" not in params
 
 
-def test_legacy_model_keeps_img_url_when_user_video_file_is_attached(tmp_path: Path) -> None:
-    """Non-wan3 models ignore reference_file for mode selection; lone first_frame → img_url."""
-    frame = tmp_path / "shot1.png"
-    video = tmp_path / "motion.mp4"
-    frame.write_bytes(b"png")
-    video.write_bytes(b"mp4")
-    params = _build_dashscope_video_call(
-        "custom-video-model",
-        first_frame=str(frame),
-        reference_file=str(video),
-    )
-    assert params["model"] == "custom-video-model"
-    assert "img_url" in params
-    assert "reference_urls" not in params
-    assert "media" not in params
+def test_non_wan3_model_keeps_img_url_for_a_lone_first_frame(tmp_path: Path) -> None:
+    params = _wan_body("custom-video-model", first_frame=_png(tmp_path / "shot1.png"))
+    assert "img_url" in params and "reference_urls" not in params and "media" not in params
 
 
-def test_build_call_stays_text_only_without_images() -> None:
-    params = _build_dashscope_video_call("wan3.0-video")
-    assert params["model"] == "wan3.0-video"
-    assert params["size"] == "1280*720"
-    assert "img_url" not in params
+def test_text_only_default_size() -> None:
+    params = _wan_body("wan3.0-video")
+    assert params["size"] == "1280*720" and "img_url" not in params
 
 
-def test_force_reference_480p_uses_size_not_resolution(tmp_path: Path) -> None:
-    extra = tmp_path / "character.png"
-    extra.write_bytes(b"png-extra")
-    params = _build_dashscope_video_call(
+def test_reference_mode_480p_uses_size_not_resolution(tmp_path: Path) -> None:
+    params = _wan_body(
         "wan3.0-video",
         size="854*480",
-        resolution="480P",
-        first_frame=None,
-        reference_images=[str(extra)],
-        force_reference_mode=True,
+        resolution="480p",
+        reference_images=[_png(tmp_path / "character.png")],
+        reference_mode=True,
     )
-    assert params["model"] == "wan3.0-video"
-    assert params["size"] == "832*480"
-    assert "resolution" not in params
-    assert "media" in params
+    assert params["size"] == "832*480" and "resolution" not in params and "media" in params
 
 
 def test_text_only_480p_uses_size_not_resolution() -> None:
-    params = _build_dashscope_video_call(
-        "wan3.0-video",
-        size="854*480",
-        resolution="480P",
+    params = _wan_body("wan3.0-video", size="854*480", resolution="480p")
+    assert params["size"] == "832*480" and "resolution" not in params and "img_url" not in params
+
+
+# --------------------------------------------------------------------------- #
+# media_generation: Settings slot, reference loading and waiting for the clip
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture()
+def dashscope_video_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VIDEO_GEN_ENABLED", "true")
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "sk-test")
+    monkeypatch.setenv("VIDEO_GEN_API_BASE", "https://dashscope-intl.aliyuncs.com/api/v1")
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "wan3.0-video")
+    monkeypatch.setenv("VIDEO_GEN_PROTOCOL", "dashscope")
+
+
+def test_generation_problem_explains_each_gap(monkeypatch: pytest.MonkeyPatch, dashscope_video_slot: None) -> None:
+    assert mg.generation_problem("video") is None
+    monkeypatch.setenv("VIDEO_GEN_PROTOCOL", "bytedance")
+    monkeypatch.setenv("VIDEO_GEN_API_BASE", "https://openrouter.ai/api/v1")
+    assert "not one of them" in (mg.generation_problem("video") or "")
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "")
+    assert "not configured" in (mg.generation_problem("video") or "")
+    monkeypatch.setenv("VIDEO_GEN_ENABLED", "false")
+    assert "switched off" in (mg.generation_problem("video") or "")
+
+
+def test_vllm_omni_slot_needs_only_the_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VIDEO_GEN_ENABLED", "true")
+    monkeypatch.setenv("VIDEO_GEN_API_KEY", "")
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", "")
+    monkeypatch.setenv("VIDEO_GEN_API_BASE", "http://127.0.0.1:8091/v1")
+    monkeypatch.setenv("VIDEO_GEN_PROTOCOL", "vllm-omni")
+    assert mg.generation_problem("video") is None
+
+
+def test_generate_video_waits_for_the_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dashscope_video_slot: None
+) -> None:
+    submitted: list[tuple[gt.GenerationTarget, gt.VideoRequest]] = []
+    checks = iter(["Video job ds-1 is still running.", f"Video generated successfully!\nSaved to: {tmp_path}/v.mp4"])
+
+    async def fake_submit(target: gt.GenerationTarget, request: gt.VideoRequest, save_dir: str | None) -> str:
+        submitted.append((target, request))
+        return "Video job ds-1 submitted and still running after 300s - generation can take several minutes."
+
+    async def fake_check(target: gt.GenerationTarget, task_id: str, save_dir: str | None) -> str:
+        assert task_id == "ds-1" and save_dir == str(tmp_path)
+        return next(checks)
+
+    async def instant(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(mg.gen_toolkits, "submit_video", fake_submit)
+    monkeypatch.setattr(mg.gen_toolkits, "check_video", fake_check)
+    monkeypatch.setattr(mg.asyncio, "sleep", instant)
+    character = _png(tmp_path / "character.png")
+    request = mg.DesignerVideoRequest(
+        prompt="shot 1",
+        duration=5,
+        size="720*1280",
+        resolution="720P",
+        reference_images=(character,),
+        reference_file=str(tmp_path / "storyboard.md"),
+        audio=True,
+        reference_mode=True,
+        model="wan3.0-video-prime",
     )
-    assert params["model"] == "wan3.0-video"
-    assert params["size"] == "832*480"
-    assert "resolution" not in params
-    assert "img_url" not in params
+    result = asyncio.run(mg.generate_video(request, save_dir=str(tmp_path)))
+    assert result == {"video_path": f"{tmp_path}/v.mp4"}
+    target, video_request = submitted[0]
+    assert target.backend == "dashscope" and target.model == "wan3.0-video-prime"
+    assert video_request.aspect_ratio == "9:16" and video_request.resolution == "720p"
+    assert video_request.reference_mode and video_request.generate_audio
+    assert video_request.reference_image_uris[0].startswith("data:image/png;base64,")
+    assert video_request.reference_file_path == str(tmp_path / "storyboard.md")
 
 
-def test_align_video_api_base_to_image_gen_intl(monkeypatch) -> None:
-    monkeypatch.setenv("IMAGE_GEN_API_BASE", _INTL_DASHSCOPE_API_BASE)
-    monkeypatch.setenv("IMAGE_GEN_API_KEY", "sk-test")
-    aligned = _align_dashscope_video_api_base(
-        "https://dashscope.aliyuncs.com/api/v1",
-        "sk-test",
-    )
-    assert aligned == _INTL_DASHSCOPE_API_BASE
+def test_generate_video_reports_backend_errors_and_bad_references(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dashscope_video_slot: None
+) -> None:
+    async def failing_submit(*_args: Any) -> str:
+        return "[ERROR]: DashScope video generation submit failed: InvalidParameter: bad size"
 
+    monkeypatch.setattr(mg.gen_toolkits, "submit_video", failing_submit)
+    result = asyncio.run(mg.generate_video(mg.DesignerVideoRequest(prompt="shot")))
+    assert result == {"error": "[ERROR]: DashScope video generation submit failed: InvalidParameter: bad size"}
 
-def test_video_message_content_lists_explicit_images(tmp_path: Path) -> None:
-    character = tmp_path / "character.png"
-    scene = tmp_path / "scene.png"
-    frame = tmp_path / "keyframe.png"
-    character.write_bytes(b"png-c")
-    scene.write_bytes(b"png-s")
-    frame.write_bytes(b"png-f")
-    content = video_generation_message_content(
-        "Create shot 1",
-        first_frame=str(frame),
-        reference_images=[str(character), str(scene), str(frame)],
-    )
-    assert isinstance(content, list)
-    images = [item["image"] for item in content if "image" in item]
-    assert len(images) == 3
-    assert all(item.startswith("data:image/png;base64,") for item in images)
-    assert content[-1]["text"] == "Create shot 1"
+    missing = mg.DesignerVideoRequest(prompt="shot", reference_images=(str(tmp_path / "gone.png"),))
+    assert "none could be read" in asyncio.run(mg.generate_video(missing))["error"]

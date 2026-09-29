@@ -372,13 +372,13 @@ async def _create_design_workspace_once(
     try:
         Path(project_dir).mkdir(parents=True, exist_ok=False)
         try:
-            project, _ = project_store.create_or_restore_project(
+            project, _ = project_store.create_project_checked(
                 title,
                 project_dir,
                 DESIGN_WORK_MODE,
             )
         except project_store.ProjectNameConflict:
-            project, _ = project_store.create_or_restore_project(
+            project, _ = project_store.create_project_checked(
                 f"{title}-{short_id}",
                 project_dir,
                 DESIGN_WORK_MODE,
@@ -845,7 +845,7 @@ def _bootstrap_graph(
             except OSError as exc:
                 return None, f"failed to create project directory: {exc}", "INTERNAL_ERROR"
         try:
-            project, restored = project_store.create_or_restore_project(
+            project, restored = project_store.create_project_checked(
                 name,
                 project_dir,
                 work_mode,

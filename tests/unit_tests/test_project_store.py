@@ -731,13 +731,13 @@ class TestResolveCronProjectBinding:
     @staticmethod
     def test_design_project_is_not_cron_eligible(project_store_dir, tmp_path):
         from jiuwenswarm.server.runtime.session.project_store import (
-            create_or_restore_project,
+            create_project_checked,
             resolve_cron_project_binding,
         )
 
         project_dir = tmp_path / "design-project"
         project_dir.mkdir()
-        project, _ = create_or_restore_project(
+        project, _ = create_project_checked(
             "Design",
             str(project_dir),
             work_mode="design",

@@ -381,16 +381,12 @@ async def test_clip_handler_returns_file_output_ref(
 async def test_generate_clip_video_raises_on_provider_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_invoke(prompt: str, **kwargs):
+    async def fake_generate(request, *, save_dir=None):
         return {"error": "[ERROR]: MiniMax video create failed 402"}
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.video_tools._invoke_model_video_generation",
-        fake_invoke,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.multimodal_config.apply_video_gen_model_config_from_yaml",
-        lambda cfg: None,
+        "jiuwenswarm.server.runtime.designer.media_generation.generate_video",
+        fake_generate,
     )
     with pytest.raises(RuntimeError, match="402"):
         await generate_clip_video("a boy playing basketball")

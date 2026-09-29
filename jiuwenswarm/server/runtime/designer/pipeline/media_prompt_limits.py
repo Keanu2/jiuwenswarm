@@ -1,13 +1,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Prompt-length limits for configured image/video backends (domain-agnostic).
 
-Resolves limits from the user's IMAGE_GEN / VIDEO_GEN model + provider hints.
+Resolves limits from the user's VISUAL_GEN / VIDEO_GEN model + provider hints.
 Never forces a specific model. Unknown backends get a soft advisory only.
 
 Sources are vendor docs / common API contracts (chars unless noted). Token
 limits are converted with a conservative chars≈tokens*4 estimate for LLM
-guidance. Override at runtime with IMAGE_GEN_PROMPT_MAX_CHARS /
-VIDEO_GEN_PROMPT_MAX_CHARS (and the VIDEO_* twins).
+guidance. Override at runtime with VISUAL_GEN_PROMPT_MAX_CHARS /
+VIDEO_GEN_PROMPT_MAX_CHARS (and the IMAGE_* / VIDEO_* twins).
 """
 
 from __future__ import annotations
@@ -110,37 +110,23 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip())
 
 
+def _slot_env(kind: Kind, field: str) -> str:
+    prefix = "VISUAL_GEN" if kind == "image" else "VIDEO_GEN"
+    return os.environ.get(f"{prefix}_{field}") or ""
+
+
 def _provider_blob(*, kind: Kind, model: str = "", provider: str = "", api_base: str = "") -> str:
-    if kind == "image":
-        provider = provider or (os.environ.get("IMAGE_GEN_PROVIDER") or "")
-        api_base = api_base or (os.environ.get("IMAGE_GEN_API_BASE") or "")
-        profile = os.environ.get("IMAGE_GEN_ENDPOINT_PROFILE") or ""
-        model = model or _configured_model("image")
-    else:
-        provider = provider or (os.environ.get("VIDEO_GEN_PROVIDER") or "")
-        api_base = api_base or (
-            os.environ.get("VIDEO_GEN_API_BASE") or os.environ.get("VIDEO_API_BASE") or ""
-        )
-        profile = os.environ.get("VIDEO_GEN_ENDPOINT_PROFILE") or ""
-        model = model or _configured_model("video")
-    return " ".join(_norm(x) for x in (model, provider, api_base, profile) if _norm(x))
+    provider = provider or _slot_env(kind, "PROVIDER")
+    api_base = api_base or _slot_env(kind, "API_BASE")
+    protocol = _slot_env(kind, "PROTOCOL")
+    model = model or _configured_model(kind)
+    return " ".join(_norm(x) for x in (model, provider, api_base, protocol) if _norm(x))
 
 
 def _configured_model(kind: Kind) -> str:
-    try:
-        from jiuwenswarm.server.runtime.designer.audio_locks import (
-            configured_image_gen_model,
-            configured_video_gen_model,
-        )
+    from jiuwenswarm.server.runtime.designer.media_generation import configured_model
 
-        return (
-            configured_image_gen_model()
-            if kind == "image"
-            else configured_video_gen_model()
-        )
-    except Exception:  # noqa: BLE001
-        env_key = "IMAGE_GEN_MODEL_NAME" if kind == "image" else "VIDEO_GEN_MODEL_NAME"
-        return (os.environ.get(env_key) or "").strip()
+    return configured_model(kind)
 
 
 def _match_registry(kind: Kind, blob: str) -> tuple[int, str, str] | None:
@@ -173,20 +159,12 @@ def resolve_prompt_limit(
     )
     override = _env_int(
         *(
-            ("IMAGE_GEN_PROMPT_MAX_CHARS", "IMAGE_PROMPT_MAX_CHARS")
+            ("VISUAL_GEN_PROMPT_MAX_CHARS", "IMAGE_PROMPT_MAX_CHARS")
             if kind_l == "image"
             else ("VIDEO_GEN_PROMPT_MAX_CHARS", "VIDEO_PROMPT_MAX_CHARS")
         )
     )
-    provider_s = _norm(
-        provider
-        or (
-            os.environ.get("IMAGE_GEN_PROVIDER")
-            if kind_l == "image"
-            else os.environ.get("VIDEO_GEN_PROVIDER")
-        )
-        or ""
-    )
+    provider_s = _norm(provider or _slot_env(kind_l, "PROVIDER"))
 
     if override:
         return PromptLimit(

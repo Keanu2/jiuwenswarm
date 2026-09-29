@@ -11,7 +11,7 @@ def test_resolves_minimax_image_1500(monkeypatch) -> None:
         resolve_prompt_limit,
     )
 
-    monkeypatch.delenv("IMAGE_GEN_PROMPT_MAX_CHARS", raising=False)
+    monkeypatch.delenv("VISUAL_GEN_PROMPT_MAX_CHARS", raising=False)
     lim = resolve_prompt_limit("image", model="image-01", provider="minimax")
     assert lim.known
     assert lim.max_chars == 1500
@@ -23,7 +23,7 @@ def test_resolves_qwen_image_3(monkeypatch) -> None:
         resolve_prompt_limit,
     )
 
-    monkeypatch.delenv("IMAGE_GEN_PROMPT_MAX_CHARS", raising=False)
+    monkeypatch.delenv("VISUAL_GEN_PROMPT_MAX_CHARS", raising=False)
     lim = resolve_prompt_limit("image", model="qwen-image-3.0", provider="dashscope")
     assert lim.known
     assert lim.max_chars == 18000
@@ -68,10 +68,10 @@ def test_unknown_backend_soft_default(monkeypatch) -> None:
         resolve_prompt_limit,
     )
 
-    monkeypatch.delenv("IMAGE_GEN_PROMPT_MAX_CHARS", raising=False)
-    monkeypatch.delenv("IMAGE_GEN_MODEL_NAME", raising=False)
-    monkeypatch.delenv("IMAGE_GEN_PROVIDER", raising=False)
-    monkeypatch.delenv("IMAGE_GEN_API_BASE", raising=False)
+    monkeypatch.delenv("VISUAL_GEN_PROMPT_MAX_CHARS", raising=False)
+    monkeypatch.delenv("VISUAL_GEN_MODEL_NAME", raising=False)
+    monkeypatch.delenv("VISUAL_GEN_PROVIDER", raising=False)
+    monkeypatch.delenv("VISUAL_GEN_API_BASE", raising=False)
     lim = resolve_prompt_limit("image", model="my-custom-lab-image-v9", provider="acme")
     assert not lim.known
     assert lim.soft
@@ -132,7 +132,7 @@ def test_audio_locks_delegates_guidance(monkeypatch) -> None:
         video_prompt_limit_guidance,
     )
 
-    monkeypatch.delenv("IMAGE_GEN_PROMPT_MAX_CHARS", raising=False)
+    monkeypatch.delenv("VISUAL_GEN_PROMPT_MAX_CHARS", raising=False)
     monkeypatch.delenv("VIDEO_GEN_PROMPT_MAX_CHARS", raising=False)
     img = image_prompt_limit_guidance()
     vid = video_prompt_limit_guidance()
