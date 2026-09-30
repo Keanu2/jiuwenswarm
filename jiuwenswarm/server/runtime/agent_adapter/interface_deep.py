@@ -280,6 +280,7 @@ from jiuwenswarm.agents.harness.common.tools import (
     is_skill_retrieval_enabled,
     SymphonyToolkit,
 )
+from jiuwenswarm.agents.harness.common.a2a_gateway.tools import A2ASendFileToolkit
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
@@ -6176,6 +6177,11 @@ class JiuWenSwarmDeepAdapter:
             prompt_mode=None,
             rails=rails,
             progressive_tool_enabled=get_progressive_tool_enabled(config_base),
+            # Keep this hot-reload path in sync with create_instance's
+            # create_deep_agent call: a2x_list_agents is always-visible so the
+            # agent can answer "which agents are online" without the
+            # search_tools → load_tools discovery loop.
+            progressive_tool_always_visible_tools=["a2x_list_agents", "a2a_send_message"],
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
@@ -6516,6 +6522,33 @@ class JiuWenSwarmDeepAdapter:
                 exc,
             )
 
+        # A2A gateway toolkit: register the registry-backed agent tools the
+        # conversational agent needs directly — the read-only ``a2x_list_agents``
+        # query and the outbound ``a2a_send_message`` (text to a registry
+        # agent, tunnel-forwarded when the peer is behind NAT). The two
+        # file-sending tools (a2a_send_file / a2a_send_local_file) are
+        # intentionally NOT registered here: they are owned by the swarm
+        # provider path and would collide on the same tool names.
+        try:
+            a2a_toolkit = A2ASendFileToolkit()
+            a2x_tool_names: list[str] = []
+            for tool in a2a_toolkit.get_tools():
+                tool_name = getattr(getattr(tool, "card", tool), "name", "")
+                if tool_name not in ("a2x_list_agents", "a2a_send_message"):
+                    continue
+                self._register_shared_tool(tool)
+                tool_cards.append(tool.card)
+                a2x_tool_names.append(tool.card.name)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] A2ASendFileToolkit registered: tools=%s",
+                a2x_tool_names,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] a2a gateway tools registration failed: %s",
+                exc,
+            )
+
         # acp_chat: forward prompts to external stdio ACP agents (see acp_agents in config.yaml)
         try:
             acp_cfg = get_config().get("acp_agents")
@@ -6707,6 +6740,12 @@ class JiuWenSwarmDeepAdapter:
             # Expose only tool_search initially; ordinary tools are marked
             # deferred and indexed by ProgressiveToolRail at startup.
             progressive_tool_enabled=get_progressive_tool_enabled(config_base),
+            # ``a2x_list_agents`` is a read-only "which agents are online"
+            # query that is foundational environmental awareness — it should
+            # be callable immediately, without first search_tools → load_tools,
+            # so the conversational agent can answer "有哪些 agent 在线" in one
+            # turn instead of getting stuck in the discovery loop.
+            progressive_tool_always_visible_tools=["a2x_list_agents", "a2a_send_message"],
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             add_general_purpose_agent=should_enable_general_agent,
             max_iterations=config.get("max_iterations", 15),

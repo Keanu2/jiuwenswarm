@@ -152,6 +152,7 @@ def build_register_agent_body(
     persistent: bool,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {"agent_card": agent_card, "persistent": persistent}
+    body["tunnel"] = {"online": True}
     if service_id is not None:
         body["service_id"] = service_id
     return body

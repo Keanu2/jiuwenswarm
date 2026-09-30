@@ -33,6 +33,45 @@ def _raise_missing_a2a_sdk(exc: ImportError) -> None:
     ) from exc
 
 
+def _strip_msys2_path_conv(value: str, default: str) -> str:
+    """Repair MSYS2/Git-Bash path conversion for slash-leading URL paths.
+
+    When a value like ``/a2a`` is exported through MSYS2/Git-Bash and then
+    read by a native Windows Python subprocess, MSYS2 rewrites it to an
+    absolute filesystem path rooted at the Git install dir (e.g.
+    ``C:/Program Files/Git/a2a``). That corrupted value then fails the
+    Starlette ``Route`` assertion (paths must start with ``/``).
+
+    This helper strips any leading ``<drive>:/.../Git`` prefix so the path
+    once again starts with ``/``. If the value is empty, the configured
+    default is returned. Values that already start with ``/`` are returned
+    unchanged.
+    """
+    if value is None:
+        return default
+    v = value.strip()
+    if not v:
+        return default
+    if v.startswith("/"):
+        return v
+    # MSYS2 conversion turns /a2a into C:/Program Files/Git/a2a — strip
+    # everything up to and including the Git root segment, then re-slash.
+    lowered = v.lower()
+    marker = "/git/"
+    idx = lowered.find(marker)
+    if idx >= 0:
+        tail = v[idx + len(marker):]
+        return "/" + tail.lstrip("/")
+    # Could not detect a Git-Bash conversion; fall back to default rather
+    # than passing a non-slash path to Starlette (which would assert).
+    logger.warning(
+        "[A2AChannel] path value %r does not start with '/' and no Git-Bash "
+        "conversion prefix was detected; falling back to default %r",
+        v, default,
+    )
+    return default
+
+
 @dataclass
 class A2AChannelConfig:
     enabled: bool = False

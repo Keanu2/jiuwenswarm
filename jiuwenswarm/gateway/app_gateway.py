@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import sys
+import traceback as _tb
 import time
 import uuid as uuid_module
 from dataclasses import dataclass, field
@@ -1521,7 +1522,24 @@ async def _run(
         web_path: str,
         web_dual_protocol: bool = True,
 ) -> None:
-    from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
+    from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import (
+        A2AChannel,
+        A2AChannelConfig,
+        _strip_msys2_path_conv,
+    )
+    from jiuwenswarm.agents.harness.common.a2a_gateway import A2AGatewayConfig
+    from jiuwenswarm.agents.harness.common.a2a_gateway.outbound_client import A2AOutboundClient
+    from jiuwenswarm.agents.harness.common.a2a_gateway.runtime import (
+        set_outbound_client,
+        set_tunnel,
+    )
+    from jiuwenswarm.agents.harness.common.a2a_gateway.tunnel.session import (
+        TunnelSession,
+        TunnelSessionOptions,
+    )
+    from jiuwenswarm.agents.harness.common.a2a_gateway.tunnel.protocol import (
+        TunnelRegisterExtras,
+    )
     from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, \
         DingTalkConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_connect import FeishuChannel, FeishuConfig
@@ -2010,21 +2028,29 @@ async def _run(
         "yes",
         "on",
     }
+    # A2A_SERVER_PATH / A2A_SERVER_CARD_PATH are URL paths that must start
+    # with '/'. Under MSYS2/Git-Bash the value "/a2a" gets rewritten to an
+    # absolute Windows path like "C:/Program Files/Git/a2a" when handed to
+    # a native Python subprocess, which then breaks Starlette's Route
+    # assertion ("Routed paths must start with '/'"). _strip_msys2_path_conv
+    # repairs that so any launch shell (bash/cmd/powershell) works.
     a2a_channel = A2AChannel(
         A2AChannelConfig(
             enabled=a2a_server_enabled,
             host=str(os.getenv("A2A_SERVER_HOST", "127.0.0.1")).strip() or "127.0.0.1",
             port=int(os.getenv("A2A_SERVER_PORT", "19100")),
-            rpc_path=str(os.getenv("A2A_SERVER_PATH", "/a2a")).strip() or "/a2a",
+            rpc_path=_strip_msys2_path_conv(
+                os.getenv("A2A_SERVER_PATH", "/a2a"), "/a2a"
+            ),
             protocol_version=str(os.getenv("A2A_SERVER_PROTOCOL_VERSION", "1.0.0")).strip() or "1.0.0",
-            card_path=str(
-                os.getenv("A2A_SERVER_CARD_PATH", "/.well-known/agent-card.json")
-            ).strip()
-                      or "/.well-known/agent-card.json",
-            extended_card_path=str(
-                os.getenv("A2A_SERVER_EXTENDED_CARD_PATH", "/agent/authenticatedExtendedCard")
-            ).strip()
-                               or "/agent/authenticatedExtendedCard",
+            card_path=_strip_msys2_path_conv(
+                os.getenv("A2A_SERVER_CARD_PATH", "/.well-known/agent-card.json"),
+                "/.well-known/agent-card.json",
+            ),
+            extended_card_path=_strip_msys2_path_conv(
+                os.getenv("A2A_SERVER_EXTENDED_CARD_PATH", "/agent/authenticatedExtendedCard"),
+                "/agent/authenticatedExtendedCard",
+            ),
             app_name=str(
                 os.getenv("A2A_SERVER_APP_NAME", "JiuwenSwarm Gateway A2A Server")
             ).strip()
@@ -2058,8 +2084,68 @@ async def _run(
                     "`uv sync --extra a2a` or `pip install \"jiuwenswarm[a2a]\"`.",
                     exc,
                 )
+                logger.error("[App] A2A server start traceback:\n%s", _tb.format_exc())
 
         a2a_task.add_done_callback(_on_a2a_task_done)
+
+    # ------------------------------------------------------------------
+    # A2A Gateway: outbound client + optional NAT tunnel (relay).
+    # The inbound A2A server above already exists (a2a_connect.py). The
+    # outbound half and the relay tunnel are the pieces ported from the
+    # OpenClaw a2a-gateway plugin. They are long-lived singletons held in
+    # a2a_gateway.runtime and consumed by the swarm a2a_send tools.
+    # ------------------------------------------------------------------
+    a2a_gateway_cfg = A2AGatewayConfig.from_config(
+        full_cfg.get("a2a_gateway") if isinstance(full_cfg, dict) else None,
+    )
+    # Re-read env-driven config (from_config already merges env, but the
+    # explicit A2A_GATEWAY_ENABLED gate is the canonical on/off switch).
+    if a2a_gateway_cfg.enabled:
+        try:
+            outbound_client = A2AOutboundClient(a2a_gateway_cfg)
+            set_outbound_client(outbound_client)
+
+            # Optional relay tunnel for NAT traversal.
+            if a2a_gateway_cfg.tunnel.relay_url and a2a_gateway_cfg.tunnel.device_id:
+                extras = TunnelRegisterExtras(
+                    dataset=a2a_gateway_cfg.tunnel.dataset,
+                    service_id=a2a_gateway_cfg.tunnel.service_id,
+                )
+                tunnel_opts = TunnelSessionOptions(
+                    relay_url=a2a_gateway_cfg.tunnel.relay_url,
+                    device_id=a2a_gateway_cfg.tunnel.device_id,
+                    local_service_port=a2a_gateway_cfg.tunnel.local_service_port,
+                    heartbeat_interval_ms=a2a_gateway_cfg.tunnel.heartbeat_interval_ms,
+                    heartbeat_timeout_ms=a2a_gateway_cfg.tunnel.heartbeat_timeout_ms,
+                    reconnect_interval_ms=a2a_gateway_cfg.tunnel.reconnect_delay_ms,
+                    max_reconnect_interval_ms=a2a_gateway_cfg.tunnel.max_reconnect_delay_ms,
+                    max_reconnect_attempts=a2a_gateway_cfg.tunnel.max_reconnect_attempts,
+                    register_extras=extras,
+                )
+                tunnel = TunnelSession(tunnel_opts)
+
+                def _on_tunnel_task_done(task: asyncio.Task) -> None:
+                    try:
+                        task.result()
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("[App] A2A tunnel failed: %s", exc)
+
+                tunnel_task = asyncio.create_task(tunnel.start(), name="a2a-tunnel")
+                tunnel_task.add_done_callback(_on_tunnel_task_done)
+                set_tunnel(tunnel)
+                logger.info(
+                    "[App] A2A tunnel started: device=%s relay=%s local=:%d",
+                    a2a_gateway_cfg.tunnel.device_id,
+                    a2a_gateway_cfg.tunnel.relay_url,
+                    a2a_gateway_cfg.tunnel.local_service_port,
+                )
+            else:
+                logger.info("[App] A2A gateway outbound enabled (no tunnel relay configured)")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[App] A2A gateway outbound failed to start: %s", exc)
+            set_outbound_client(None)
 
     feishu_channel = None
     feishu_task = None

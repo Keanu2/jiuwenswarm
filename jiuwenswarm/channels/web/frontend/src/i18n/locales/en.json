@@ -27,6 +27,7 @@
     "work": "Tasks",
     "agent": "Agent",
     "teams": "Teams",
+    "projects": "Projects",
     "sessions": "Sessions",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
@@ -243,6 +244,119 @@
       "loadDirectory": "Failed to load team directory",
       "deleteTeam": "Failed to delete team: {{team}}"
     }
+  },
+  "projects": {
+    "title": "Project Management",
+    "agentBadge": "Agent",
+    "subtitle": "Create and manage projects on the group chat service",
+    "listHeading": "Projects",
+    "count": "{{count}} project(s)",
+    "createProject": "Create Project",
+    "createTitle": "Create Project",
+    "createSubtitle": "Create a new project on the group chat service",
+    "creating": "Creating...",
+    "nameLabel": "Project name",
+    "namePlaceholder": "Enter a project name",
+    "maxMembersLabel": "Member limit (optional)",
+    "maxMembersPlaceholder": "Use the server default",
+    "empty": "No projects",
+    "groupId": "Group {{id}}",
+    "errors": {
+      "loadProjects": "Failed to load projects",
+      "createProject": "Failed to create project",
+      "nameTooLong": "Project name must be at most {{max}} characters",
+      "not_configured": "Group chat is not configured. Enable groupchat and set base_url and api_key.",
+      "invalid_request": "Invalid request. Check the project name and member limit.",
+      "unavailable": "Group chat service is unreachable. Make sure the relay is running.",
+      "groupchat_disabled": "Group chat is not enabled on the relay (start it with A2X_GROUPCHAT_ENABLED=true)",
+      "groupchat_name_invalid": "The project name is invalid",
+      "groupchat_group_quota_exceeded": "You have reached the project limit",
+      "groupchat_max_members_invalid": "The member limit exceeds the server maximum",
+      "CREATE_FAILED": "Failed to create project",
+      "LIST_FAILED": "Failed to load projects",
+      "loadMembers": "Failed to load members",
+      "inviteMember": "Failed to add member",
+      "groupchat_invite_not_for_caller": "That invitation was issued to someone else",
+      "groupchat_already_member": "You are already a member of this project",
+      "groupchat_member_banned": "You are banned from that project",
+      "groupchat_owner_immutable": "The project owner cannot be removed",
+      "groupchat_forbidden": "You do not have permission for that",
+      "groupchat_group_muted": "The project is muted; only admins may post",
+      "groupchat_group_not_found": "Project not found, or you are not a member",
+      "groupchat_group_full": "That project has reached its member limit",
+      "groupchat_payload_required": "The message body cannot be empty",
+      "groupchat_mention_invalid": "A mentioned member is not in the project",
+      "groupchat_rate_limited": "Sending too fast — try again shortly",
+      "groupchat_message_too_large": "The message is too long",
+      "groupchat_role_invalid": "Invalid role",
+      "SEND_FAILED": "Failed to send the message",
+      "REMOVE_FAILED": "Failed to remove the member",
+      "ROLE_FAILED": "Failed to change the role",
+      "INVITE_FAILED": "Failed to add the member",
+      "ACCEPT_FAILED": "Failed to accept the invitation",
+      "ACK_FAILED": "Failed to update the read cursor",
+      "SUBSCRIBE_FAILED": "Failed to subscribe to project messages",
+      "UNSUBSCRIBE_FAILED": "Failed to unsubscribe",
+      "groupchat_owner_required": "Only the project owner may delete it",
+      "DELETE_FAILED": "Failed to delete the project",
+      "ARCHIVE_FAILED": "Failed to archive the project",
+      "joinProject": "Failed to join the project",
+      "groupchat_invite_not_found": "The invitation does not exist or has expired",
+      "groupchat_invite_expired": "The invitation has expired",
+      "groupchat_invite_exhausted": "The invitation has already been used",
+      "groupchat_token_required": "Enter the invitation token"
+    },
+    "inviteMember": "Add Member",
+    "inviteTitle": "Add Member",
+    "inviteSubtitle": "A targeted invite joins immediately; a share link produces a token you distribute yourself",
+    "inviting": "Adding...",
+    "inviteModeTargeted": "Targeted",
+    "inviteModeLink": "Share link",
+    "inviteeLabel": "Member id (principal_id)",
+    "inviteePlaceholder": "e.g. u_7c8859bccdc2",
+    "inviteeHint": "Assigned by the group chat service's /api/auth — it is not a username.",
+    "inviteLinkHint": "This token is shown once and only its hash is stored — copy it now.",
+    "maxUsesLabel": "Max uses",
+    "ttlLabel": "Expires in (hours)",
+    "ttlPlaceholder": "Blank = never",
+    "tabMessages": "Messages {{count}}",
+    "tabMembers": "Members {{count}}",
+    "noMessages": "No messages yet",
+    "noMembers": "No members yet",
+    "unknownSender": "Unknown member",
+    "messagePlaceholder": "Type a message. Enter to send, Shift+Enter for a newline",
+    "send": "Send",
+    "sending": "Sending...",
+    "removing": "Removing...",
+    "removeMemberConfirm": "Remove {{member}} from this project?",
+    "selectFirst": "Select a project first",
+    "subStateIdle": "Not subscribed",
+    "subStateConnecting": "Connecting",
+    "subStateLive": "Live",
+    "subStateReconnecting": "Reconnecting",
+    "subStateUnavailable": "Subscription unavailable",
+    "inviteTargetedHint": "A targeted invite must be accepted by the invitee with their own credentials — you cannot accept it on their behalf.",
+    "deleteProject": "Delete Project",
+    "deleting": "Deleting...",
+    "deleteConfirm": "Delete project \"{{project}}\"?\nThis cannot be undone: its members, invitations and all messages are removed. Only the owner may delete.",
+    "archiveProject": "Archive",
+    "archiving": "Archiving...",
+    "archiveConfirm": "Archive project \"{{project}}\"?\nIt disappears from listings but the history is kept, and the owner can still delete it later.",
+    "subStateDeleted": "Deleted",
+    "joinProject": "Join Project",
+    "joinTitle": "Join Project",
+    "joinSubtitle": "Paste an invitation token someone sent you to join that project",
+    "joining": "Joining...",
+    "joinTokenLabel": "Invitation token",
+    "joinTokenPlaceholder": "Paste the invitation token",
+    "joinTokenHint": "Generated by a project member under \"Add Member\" and shown only once.",
+    "joinSuccess": "Joined project \"{{project}}\"",
+    "joinSuccessNoName": "Joined the project",
+    "you": "You",
+    "removeMention": "Click to remove this mention",
+    "mentionHint": "Mentioned members get a targeted notification; mentioning an agent makes it act on your message.",
+    "mentionUnresolved": "No member matches: {{names}}. They will not be notified.",
+    "mentionedBadge": "Mentioned"
   },
   "statusBar": {
     "evolving": "Checking whether skill evolution is needed...",
@@ -1081,28 +1195,94 @@
       "referencedByTeams": "Referenced by {{count}} Team(s)"
     },
     "groups": {
-      "modelDefault": { "label": "Default Model (Main Chat)", "hint": "Primary chat model service and auth" },
-      "modelVideo": { "label": "Video Model", "hint": "Video understanding/generation model (optional)" },
-      "modelAudio": { "label": "Audio Model", "hint": "Speech recognition/synthesis model (optional)" },
-      "modelVision": { "label": "Vision Model", "hint": "Image understanding model (optional)" },
-      "model": { "label": "Model Configuration", "hint": "Model service and authentication settings" },
-      "embed": { "label": "Embed Configuration", "hint": "Embed service and authentication settings" },
-      "thirdParty": { "label": "Third-Party Services", "hint": "API key settings" },
-      "freeSearch": { "label": "Free Search Engines", "hint": "Enable free search engines" },
-      "evolution": { "label": "Evolution Settings", "hint": "Online skill evolution settings" },
-      "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
-      "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
-      "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
-      "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
-      "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
-      "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
-      "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
-      "externalCliAgents": { "label": "Third-Party Agents", "hint": "Configure third-party agents available in Team mode." },
-      "symphony": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
-      "skillRetrieval": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
-      "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
-      "email": { "label": "Email Settings", "hint": "Email account and token settings" },
-      "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
+      "modelDefault": {
+        "label": "Default Model (Main Chat)",
+        "hint": "Primary chat model service and auth"
+      },
+      "modelVideo": {
+        "label": "Video Model",
+        "hint": "Video understanding/generation model (optional)"
+      },
+      "modelAudio": {
+        "label": "Audio Model",
+        "hint": "Speech recognition/synthesis model (optional)"
+      },
+      "modelVision": {
+        "label": "Vision Model",
+        "hint": "Image understanding model (optional)"
+      },
+      "model": {
+        "label": "Model Configuration",
+        "hint": "Model service and authentication settings"
+      },
+      "embed": {
+        "label": "Embed Configuration",
+        "hint": "Embed service and authentication settings"
+      },
+      "thirdParty": {
+        "label": "Third-Party Services",
+        "hint": "API key settings"
+      },
+      "freeSearch": {
+        "label": "Free Search Engines",
+        "hint": "Enable free search engines"
+      },
+      "evolution": {
+        "label": "Evolution Settings",
+        "hint": "Online skill evolution settings"
+      },
+      "agents": {
+        "label": "Multi-Agent Configuration",
+        "hint": "For cluster mode only, Team required"
+      },
+      "team": {
+        "label": "Team Configuration",
+        "hint": "Multi-agent team settings"
+      },
+      "contextEngine": {
+        "label": "Context Compression",
+        "hint": "Enable or disable dialogue context compression"
+      },
+      "kvCacheAffinity": {
+        "label": "Compute Affinity",
+        "hint": "Control Ascend KV Cache affinity"
+      },
+      "permissions": {
+        "label": "Tool Safety Guardrail",
+        "hint": "Enable or disable permission checks for tool calls"
+      },
+      "a2ui": {
+        "label": "A2UI",
+        "hint": "Enable or disable generated UI rendering and A2UI runtime prompts."
+      },
+      "swarmflow": {
+        "label": "SwarmFlow",
+        "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode."
+      },
+      "externalCliAgents": {
+        "label": "Third-Party Agents",
+        "hint": "Configure third-party agents available in Team mode."
+      },
+      "symphony": {
+        "label": "Skill Symphony",
+        "hint": "Control Skill Symphony"
+      },
+      "skillRetrieval": {
+        "label": "Skill Symphony",
+        "hint": "Control Skill Symphony"
+      },
+      "memory": {
+        "label": "Memory Sensitive Info Filter",
+        "hint": "Configure sensitive content types forbidden from memory"
+      },
+      "email": {
+        "label": "Email Settings",
+        "hint": "Email account and token settings"
+      },
+      "other": {
+        "label": "Other Settings",
+        "hint": "Unclassified extended parameters"
+      },
       "proactive": {
         "label": "Proactive Recommendation",
         "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel"
@@ -1116,41 +1296,41 @@
       "dynamicGraph": "Enable dynamic graph",
       "kvCacheRelease": "Legacy path (KV release)",
       "kvCacheAffinity": "New path (Ascend affinity)",
-        "externalCliClaude": "Enable Claude",
-        "externalCliCodex": "Enable Codex",
-        "externalCliUseBuiltin": "Use built-in"
-      },
-      "externalCli": {
-        "claude": "Claude",
-        "codex": "Codex",
-        "claudeHint": "Use Claude from PATH or specify an executable path.",
-        "codexHint": "Use Codex from PATH or specify an executable path.",
-        "useBuiltin": "Use built-in",
-        "detect": "Detect",
-        "selectFile": "Choose file",
-        "selectFileTitle": "Choose {{agent}} command",
-        "selectFileFailed": "Failed to choose file",
-        "cliPathPlaceholder": "Auto-detect {{agent}}, or enter an executable path",
-        "statusUnknown": "Not checked",
-        "statusOk": "Available",
-        "statusWarning": "May be incompatible",
-        "statusMissing": "Not found",
-        "statusUnsupported": "Unsupported path",
-        "statusUnavailable": "Unavailable",
-        "version": "Version {{version}}",
-        "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in\" to use the default startup mode.",
-        "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in\" to use the default startup mode.",
-        "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in\".",
-        "dependencyInstalling": "{{agents}} dependencies are being installed in the background. The agent is not enabled during installation; after installation finishes, enable it again and save the configuration.",
-        "dependencyInstalled": "Enable {{agent}} again and save the configuration.",
-        "dependencyInstallFailed": "{{agent}} dependency installation failed. Check the installation log and try again.",
-        "dependencyInstallPhasePreparing": "Preparing {{agent}} dependency installation",
-        "dependencyInstallPhaseInstalling": "Installing {{agent}} dependencies",
-        "dependencyInstallPhaseVerifying": "Verifying {{agent}} dependencies",
-        "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed",
-        "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed",
-        "dependencyInstallRecentOutput": "Installation log"
-      },
+      "externalCliClaude": "Enable Claude",
+      "externalCliCodex": "Enable Codex",
+      "externalCliUseBuiltin": "Use built-in"
+    },
+    "externalCli": {
+      "claude": "Claude",
+      "codex": "Codex",
+      "claudeHint": "Use Claude from PATH or specify an executable path.",
+      "codexHint": "Use Codex from PATH or specify an executable path.",
+      "useBuiltin": "Use built-in",
+      "detect": "Detect",
+      "selectFile": "Choose file",
+      "selectFileTitle": "Choose {{agent}} command",
+      "selectFileFailed": "Failed to choose file",
+      "cliPathPlaceholder": "Auto-detect {{agent}}, or enter an executable path",
+      "statusUnknown": "Not checked",
+      "statusOk": "Available",
+      "statusWarning": "May be incompatible",
+      "statusMissing": "Not found",
+      "statusUnsupported": "Unsupported path",
+      "statusUnavailable": "Unavailable",
+      "version": "Version {{version}}",
+      "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in\" to use the default startup mode.",
+      "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in\" to use the default startup mode.",
+      "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in\".",
+      "dependencyInstalling": "{{agents}} dependencies are being installed in the background. The agent is not enabled during installation; after installation finishes, enable it again and save the configuration.",
+      "dependencyInstalled": "Enable {{agent}} again and save the configuration.",
+      "dependencyInstallFailed": "{{agent}} dependency installation failed. Check the installation log and try again.",
+      "dependencyInstallPhasePreparing": "Preparing {{agent}} dependency installation",
+      "dependencyInstallPhaseInstalling": "Installing {{agent}} dependencies",
+      "dependencyInstallPhaseVerifying": "Verifying {{agent}} dependencies",
+      "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed",
+      "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed",
+      "dependencyInstallRecentOutput": "Installation log"
+    },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",
       "subtitle": "Set allow / ask / deny per tool name; writes config and hot-reloads. Pattern-based rules are not managed here.",
@@ -1233,7 +1413,11 @@
     "enable": "Enable",
     "disable": "Disable",
     "loading": "Loading scheduled tasks...",
-    "empty": "No scheduled tasks",
+    "empty": {
+      "createButton": "Create scheduled task",
+      "templateSectionTitle": "Templates",
+      "templateMore": "More"
+    },
     "deleteConfirm": "Are you sure you want to delete this task?",
     "autoManaged": "Auto-managed",
     "autoManagedHint": "This task is auto-created/deleted by the proactive recommendation toggle (Settings → Proactive Recommendation). Only the cron expression and timezone can be edited here; other fields (name/status/description/offset/channel) are read-only. To remove it, turn off the toggle in Settings.",
@@ -1287,11 +1471,6 @@
       "history": "Run history",
       "triggeredSessions": "Run history",
       "noTriggeredSessions": "No trigger records"
-    },
-    "empty": {
-      "createButton": "Create scheduled task",
-      "templateSectionTitle": "Templates",
-      "templateMore": "More"
     },
     "history": {
       "comingSoon": "Coming soon"
@@ -2449,10 +2628,22 @@
       "cancel": "Cancel",
       "confirm": "Confirm"
     },
-    "runtime": { "processing": "Processing" },
-    "deleteDialog": { "title": "Delete", "description": "Delete “<name>{{title}}</name>”? This action cannot be undone." },
-    "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
-    "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
+    "runtime": {
+      "processing": "Processing"
+    },
+    "deleteDialog": {
+      "title": "Delete",
+      "description": "Delete “<name>{{title}}</name>”? This action cannot be undone."
+    },
+    "notFound": {
+      "title": "Conversation not found or deleted",
+      "newConversation": "New conversation"
+    },
+    "errors": {
+      "delete": "Failed to delete conversation",
+      "create": "Failed to create conversation",
+      "send": "Failed to send message"
+    }
   },
   "mermaid": {
     "rendering": "Drawing…",

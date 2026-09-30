@@ -62,6 +62,55 @@ async def test_replace_teammate_agent_card_accepts_configured_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_replace_teammate_agent_card_preserves_agent_id_and_tunnel() -> None:
+    client = AsyncMock()
+    ok = await replace_teammate_agent_card_after_bootstrap(
+        client,
+        dataset="openclaw_devices",
+        service_id="jws-dfp",
+        member_name="teammate_1",
+        source="test",
+        agent_id="jws-dfp",
+        tunnel_device_id="jws-dfp",
+    )
+    assert ok is True
+    _dataset, _sid, card = client.replace_agent_card.await_args.args
+    # agent_id overrides the runtime card name so the stable id survives.
+    assert card["name"] == "jws-dfp"
+    assert card["metadata"]["tunnelDeviceId"] == "jws-dfp"
+
+
+@pytest.mark.asyncio
+async def test_register_blank_agent_uses_configured_agent_id() -> None:
+    registered_endpoints = getattr(_runtime, "_REGISTERED" "_BLANK_ENDPOINTS")
+    registered_details = getattr(_runtime, "_REGISTERED" "_BLANK_REGISTRATIONS")
+    registered_endpoints.clear()
+    registered_details.clear()
+    config = {
+        "distributed_mode": True,
+        "role": "teammate",
+        "base_url": "http://127.0.0.1:8000",
+        "dataset": "openclaw_devices",
+        "endpoint": "http://127.0.0.1:19100/a2a",
+        "agent_id": "jws-dfp",
+        "tunnel_device_id": "jws-dfp",
+    }
+    client = SimpleNamespace(register_agent=AsyncMock(return_value=SimpleNamespace(service_id="jws-dfp")))
+    try:
+        assert await register_blank_agent_if_teammate(client, config, source="test") is True
+    finally:
+        registered_endpoints.clear()
+        registered_details.clear()
+
+    client.register_agent.assert_awaited_once()
+    dataset, card = client.register_agent.await_args.args[:2]
+    assert dataset == "openclaw_devices"
+    assert card["name"] == "jws-dfp"
+    assert card["metadata"]["tunnelDeviceId"] == "jws-dfp"
+    assert client.register_agent.await_args.kwargs["service_id"] == "jws-dfp"
+
+
+@pytest.mark.asyncio
 async def test_cached_blank_registration_is_exposed_on_later_client() -> None:
     registered_endpoints = getattr(_runtime, "_REGISTERED" "_BLANK_ENDPOINTS")
     registered_details = getattr(_runtime, "_REGISTERED" "_BLANK_REGISTRATIONS")

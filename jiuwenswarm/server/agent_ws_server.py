@@ -14,7 +14,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Mapping, Optional
 from weakref import WeakValueDictionary
 
 from openjiuwen.core.common.logging import server_logger
@@ -875,6 +875,73 @@ def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
 
 
 
+def _coerce_group_id(value: Any) -> int:
+    """Parse a group id from RPC params, raising the client's own error type.
+
+    Imported lazily so the module keeps loading when the optional group-chat
+    dependencies are absent.
+    """
+    from jiuwenswarm.agents.harness.team.groupchat import GroupChatRequestInvalidError
+
+    if isinstance(value, bool):
+        raise GroupChatRequestInvalidError("group_id 必须是正整数")
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise GroupChatRequestInvalidError("group_id 必须是正整数") from exc
+    if parsed < 1:
+        raise GroupChatRequestInvalidError("group_id 必须大于 0")
+    return parsed
+
+
+def _group_subscriber_id(request: AgentRequest) -> str:
+    """Identity of one subscription binding.
+
+    Keyed on the requesting channel so two channels watching the same project
+    keep independent reference counts, and so a reconnect from the same channel
+    does not double-count.
+    """
+    return f"{request.channel_id or 'unknown'}"
+
+
+def _agent_config_base(config: Any) -> dict[str, Any]:
+    """Build a ``groupchat`` config body that authenticates as the *agent*.
+
+    The runtime helpers all take a ``config_base``, so overriding ``api_key``
+    there is enough to speak as the agent and avoids constructing a parallel
+    config object. The result is the raw section shape ``from_config`` expects,
+    not a ``GroupChatConfig``.
+    """
+    return {
+        "groupchat": {
+            "enabled": config.enabled,
+            "base_url": config.base_url,
+            "api_key": config.agent.api_key,
+            "timeout": config.timeout,
+            "default_max_members": config.default_max_members,
+        }
+    }
+
+
+async def _wrap_group_payload(key: str, awaitable: Any) -> dict[str, Any]:
+    """Await a client call that returns a list and wrap it under ``key``."""
+    return {key: await awaitable}
+
+
+def _ensure_group_hub_callback(hub: Any) -> None:
+    """Point the hub's frame callback at the server-push channel, once.
+
+    The hub is a process-wide singleton while the callback needs the live
+    AgentServer instance, so this re-binds on every subscribe. Re-binding is
+    cheap and keeps the two from getting out of sync across restarts.
+    """
+    from jiuwenswarm.agents.harness.team.groupchat.subscription import (
+        set_group_frame_callback,
+    )
+
+    set_group_frame_callback(hub)
+
+
 class AgentWebSocketServer:
     """Gateway 与 AgentServer 之间的 WebSocket 服务端（单例）.
 
@@ -1529,6 +1596,51 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.TEAM_DELETE:
                 await self._handle_team_delete(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_CREATE:
+                await self._handle_team_create(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_PROJECTS_LIST:
+                await self._handle_team_projects_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_WHOAMI:
+                await self._handle_team_whoami(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_PROJECT_DELETE:
+                await self._handle_team_project_delete(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_PROJECT_ARCHIVE:
+                await self._handle_team_project_archive(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MEMBERS_LIST:
+                await self._handle_team_members_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MEMBER_REMOVE:
+                await self._handle_team_member_remove(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MEMBER_ROLE:
+                await self._handle_team_member_role(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_INVITE_CREATE:
+                await self._handle_team_invite_create(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_INVITE_ACCEPT:
+                await self._handle_team_invite_accept(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MESSAGE_SEND:
+                await self._handle_team_message_send(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MESSAGE_LIST:
+                await self._handle_team_message_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MESSAGE_ACK:
+                await self._handle_team_message_ack(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MESSAGE_SUBSCRIBE:
+                await self._handle_team_message_subscribe(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_MESSAGE_UNSUBSCRIBE:
+                await self._handle_team_message_unsubscribe(ws, request, send_lock)
                 return
             if request.req_method in get_permissions_config_req_methods():
                 await self._handle_permissions_config(ws, request, send_lock)
@@ -3963,6 +4075,686 @@ class AgentWebSocketServer:
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
+
+    async def _handle_team_create(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Create a project (a group on the relay's group chat API).
+
+        Not gated on team/cluster mode: the whole point of the projects page is
+        that it works from any mode, unlike ``team.delete``.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import (
+            GroupChatError,
+            create_group,
+        )
+
+        params = request.params if isinstance(request.params, dict) else {}
+        raw_name = params.get("name")
+        if raw_name is None:
+            # Tolerate the team-shaped spelling so the two pages can share code.
+            raw_name = params.get("team_name") or params.get("project_name")
+
+        try:
+            project = await create_group(
+                name=str(raw_name or ""),
+                owner_dataset=str(params.get("owner_dataset") or "").strip() or None,
+                join_policy=str(params.get("join_policy") or "invite_only"),
+                max_members=params.get("max_members"),
+            )
+            # Best effort and non-fatal: a group without the agent in it is
+            # recoverable (invite it later), whereas failing the create would
+            # discard a group that already exists on the relay.
+            await self._try_join_agent_to_group(project)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"project": project},
+                metadata=request.metadata,
+            )
+        except GroupChatError as exc:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": exc.code},
+                metadata=request.metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the request loop
+            logger.exception("[AgentWebSocketServer] team.create failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "CREATE_FAILED"},
+                metadata=request.metadata,
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_team_projects_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """List projects the configured relay principal belongs to."""
+        from jiuwenswarm.agents.harness.team.groupchat import (
+            GroupChatError,
+            list_groups,
+        )
+
+        params = request.params if isinstance(request.params, dict) else {}
+        try:
+            limit = int(params.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+
+        try:
+            projects = await list_groups(limit=limit)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"projects": projects},
+                metadata=request.metadata,
+            )
+        except GroupChatError as exc:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": exc.code},
+                metadata=request.metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the request loop
+            logger.exception("[AgentWebSocketServer] team.projects.list failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "LIST_FAILED"},
+                metadata=request.metadata,
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_team_whoami(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Resolve the identity behind the configured groupchat credential.
+
+        The projects panel needs this to decide which side of the message list a
+        message belongs on: the relay stamps each entry with its *sender's*
+        principal id, so only the local credentials reveal which ones are
+        "mine". Both are returned — the human's and this instance's agent's —
+        because the agent speaks in the same group and its messages belong on
+        the same side as the person it belongs to.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import whoami
+
+        agent_principal = await self._resolve_agent_groupchat_principal()
+
+        async def action() -> dict[str, Any]:
+            me = dict(await whoami())
+            me["agent_principal_id"] = agent_principal
+            return me
+
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.whoami",
+            failure_code="WHOAMI_FAILED",
+            action=action,
+        )
+
+    async def _resolve_agent_groupchat_principal(self) -> str:
+        """Resolve the principal this instance's agent joins groups as.
+
+        Returns ``""`` — never raises — when the agent has no identity of its
+        own: that is the "shares the human credential" configuration, where the
+        human member already is the agent, and every caller must treat it as
+        "nothing to do" rather than as a failure.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import (
+            GroupChatError,
+            resolve_groupchat_config,
+            whoami,
+        )
+
+        try:
+            config = resolve_groupchat_config()
+            if not config.agent_configured or config.agent.shares_human_identity:
+                return ""
+            me = await whoami(config_base=_agent_config_base(config))
+        except GroupChatError as exc:
+            logger.warning(
+                "[AgentWebSocketServer] cannot resolve the agent principal: code=%s error=%s",
+                exc.code,
+                exc,
+            )
+            return ""
+        except Exception as exc:  # noqa: BLE001 - identity lookup is best effort
+            logger.exception(
+                "[AgentWebSocketServer] agent principal lookup errored: %s", exc
+            )
+            return ""
+        return str(me.get("principal_id") or "")
+
+    async def _try_join_agent_to_group(
+        self, project: Any, *, group_name: str = ""
+    ) -> None:
+        """Add this instance's agent to a group.
+
+        Two-phase by the relay's design: a *targeted* invitation can only be
+        redeemed by the invitee, so the human credential issues it and the
+        agent's own credential accepts. When the agent has no separate key the
+        two collapse into one identity and there is nothing to do — the human
+        member already is the agent.
+
+        Called on both membership paths, not just creation: a project the agent
+        was not a member of when it was created (because it was created
+        elsewhere and joined by invitation) must still end up with the agent in
+        it, or the @-mention bridge can never be addressed there.
+
+        ``project`` is either a group payload (with ``group_id``) or a bare
+        group id — the join path has no group detail to hand, only the id.
+
+        Idempotent. The join path runs against groups the agent may already be
+        in, and redeeming a second invitation for an existing member is at best
+        wasted, so membership is checked first. The check reads the *human's*
+        member list — the agent's own credential can only see groups it is
+        already in, which is exactly the answer when it has no membership.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import (
+            GroupChatError,
+            list_members,
+            resolve_groupchat_config,
+        )
+
+        if isinstance(project, Mapping):
+            group_id = project.get("group_id")
+            name = str(project.get("name") or "") or group_name
+        else:
+            group_id = project
+            name = group_name
+        if group_id is None:
+            return
+
+        try:
+            config = resolve_groupchat_config()
+            if not config.agent_configured or config.agent.shares_human_identity:
+                return
+
+            agent_config_base = _agent_config_base(config)
+            agent_principal = await self._resolve_agent_groupchat_principal()
+            if not agent_principal:
+                logger.warning(
+                    "[AgentWebSocketServer] cannot resolve the agent principal; "
+                    "skipping auto-join for group_id=%s",
+                    group_id,
+                )
+                return
+
+            if await self._group_has_member(
+                group_id=group_id, principal_id=agent_principal, lister=list_members
+            ):
+                logger.info(
+                    "[AgentWebSocketServer] agent already in group, attaching only: "
+                    "group_id=%s",
+                    group_id,
+                )
+                await self._attach_agent_to_group(group_id, name=name)
+                return
+
+            from jiuwenswarm.agents.harness.team.groupchat import (
+                accept_invite,
+                create_invite,
+            )
+
+            # The human credential issues the invite (it owns the group); the
+            # agent's credential redeems it. A targeted invite cannot be
+            # redeemed by anyone but the invitee, which is the whole point.
+            invite = await create_invite(group_id=group_id, invitee_id=agent_principal)
+            token = str(invite.get("token") or "")
+            if not token:
+                return
+            await accept_invite(token=token, config_base=agent_config_base)
+        except GroupChatError as exc:
+            logger.warning(
+                "[AgentWebSocketServer] agent auto-join failed: group_id=%s code=%s error=%s",
+                group_id,
+                exc.code,
+                exc,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - never break project creation
+            logger.exception(
+                "[AgentWebSocketServer] agent auto-join errored: group_id=%s error=%s",
+                group_id,
+                exc,
+            )
+            return
+
+        await self._attach_agent_to_group(group_id, name=name)
+        logger.info(
+            "[AgentWebSocketServer] agent joined project: group_id=%s principal=%s",
+            group_id,
+            agent_principal,
+        )
+
+    @staticmethod
+    async def _group_has_member(
+        *, group_id: Any, principal_id: str, lister: Any
+    ) -> bool:
+        """Whether ``principal_id`` is an active member of the group.
+
+        A member list the caller cannot read is treated as "not a member" — the
+        relay's list endpoint is filtered to the caller's own memberships, so a
+        failed read means we cannot prove membership and the join should proceed
+        rather than silently skip.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import GroupChatError
+
+        try:
+            members = await lister(group_id=group_id)
+        except GroupChatError:
+            return False
+        except Exception:  # noqa: BLE001 - a failed probe must not block the join
+            return False
+        return any(
+            str(member.get("principal_id") or "") == principal_id
+            for member in members
+            if isinstance(member, Mapping)
+        )
+
+    async def _attach_agent_to_group(self, group_id: Any, *, name: str = "") -> None:
+        """Start watching a group the agent is now a real member of.
+
+        Only after membership is real: the relay refuses mentions of non-active
+        members, so subscribing earlier would just reconnect against a group we
+        cannot be addressed in.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team.groupchat import get_bridge
+
+            bridge = get_bridge()
+            if bridge is not None:
+                await bridge.attach_group(int(group_id), name=name)
+        except Exception as exc:  # noqa: BLE001 - watching is best effort
+            logger.debug(
+                "[AgentWebSocketServer] bridge attach skipped: group_id=%s error=%s",
+                group_id,
+                exc,
+            )
+
+    async def _handle_team_project_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Delete a project. Irreversible, and owner-only on the relay side.
+
+        A non-owner gets the relay's ``groupchat_owner_required``; a group the
+        caller cannot even see reports ``groupchat_group_not_found`` (the relay
+        deliberately does not distinguish "missing" from "not a member").
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import delete_group
+
+        params = request.params if isinstance(request.params, dict) else {}
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.project.delete",
+            failure_code="DELETE_FAILED",
+            action=lambda: delete_group(group_id=params.get("group_id")),
+        )
+
+    async def _handle_team_project_archive(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Archive (or unarchive) a project.
+
+        The reversible alternative to deletion: the history stays readable but
+        the group leaves every listing. Owner/admin on the relay side.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import set_archived
+
+        params = request.params if isinstance(request.params, dict) else {}
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.project.archive",
+            failure_code="ARCHIVE_FAILED",
+            action=lambda: set_archived(
+                group_id=params.get("group_id"),
+                archived=bool(params.get("archived", True)),
+            ),
+        )
+
+    # ── 「项目」群聊（relay group chat）：成员、邀请、消息 ──────────────────────
+
+    @staticmethod
+    def _group_chat_response(
+        request: AgentRequest, *, ok: bool, payload: dict[str, Any]
+    ) -> AgentResponse:
+        """Build a response in the shape every group-chat handler returns."""
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=ok,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
+    async def _run_group_chat_handler(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+        *,
+        label: str,
+        failure_code: str,
+        action: Any,
+    ) -> None:
+        """Shared error mapping for the group-chat handlers.
+
+        Every one of them has the same three-outcome shape — a ``GroupChatError``
+        carrying a code the UI branches on, an unexpected exception that must
+        still produce a response, and success — so the mapping lives here rather
+        than being repeated ten times.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import GroupChatError
+
+        try:
+            payload = await action()
+            resp = self._group_chat_response(request, ok=True, payload=payload or {})
+        except GroupChatError as exc:
+            resp = self._group_chat_response(
+                request, ok=False, payload={"error": str(exc), "code": exc.code}
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the request loop
+            logger.exception("[AgentWebSocketServer] %s failed: %s", label, exc)
+            resp = self._group_chat_response(
+                request, ok=False, payload={"error": str(exc), "code": failure_code}
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_team_members_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """List a project's members, naming this instance's own agent.
+
+        The relay already marks every row with ``is_agent`` — it is the only
+        side that knows each principal's kind — so what is added here is the
+        *local* overlay: the configured ``display_name`` for the one row whose
+        credential this process holds. Rows the relay marked stay marked.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import list_members
+
+        params = request.params if isinstance(request.params, dict) else {}
+
+        async def action() -> dict[str, Any]:
+            members = await list_members(group_id=params.get("group_id"))
+            annotated = await self._annotate_agent_members(members)
+            return {"members": annotated}
+
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.members.list",
+            failure_code="LIST_FAILED",
+            action=action,
+        )
+
+    async def _annotate_agent_members(self, members: Any) -> list[dict[str, Any]]:
+        """Mark this instance's own agent row as an agent.
+
+        The relay is authoritative for both the mark and the name: it knows
+        every principal's kind, and it names an Agent after the principal that
+        invited it — so an Agent row carries its owner's name and is told apart
+        from that owner by the agent badge alone. Nothing here overrides that
+        name; a locally configured label would replace the owner's name with
+        something that answers a different question.
+
+        The one thing added is a fallback mark for this instance's own agent,
+        for the case where the relay could not resolve its kind. Rows the relay
+        left unmarked are left alone rather than written to ``False``: a local
+        "not mine" is not evidence of "not an agent", and overwriting it would
+        erase a peer instance's Agent from the roster.
+
+        Best effort: an unresolvable agent identity leaves the rows exactly as
+        the relay sent them, since the members themselves are still worth
+        showing.
+        """
+        rows = [dict(m) for m in members if isinstance(m, Mapping)]
+        agent_principal = await self._resolve_agent_groupchat_principal()
+        if not agent_principal:
+            return rows
+
+        for row in rows:
+            if str(row.get("principal_id") or "") == agent_principal:
+                row["is_agent"] = True
+        return rows
+
+    async def _handle_team_member_remove(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.agents.harness.team.groupchat import remove_member
+
+        params = request.params if isinstance(request.params, dict) else {}
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.member.remove",
+            failure_code="REMOVE_FAILED",
+            action=lambda: remove_member(
+                group_id=params.get("group_id"),
+                principal_id=params.get("principal_id") or params.get("member_id"),
+            ),
+        )
+
+    async def _handle_team_member_role(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.agents.harness.team.groupchat import set_member_role
+
+        params = request.params if isinstance(request.params, dict) else {}
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.member.role",
+            failure_code="ROLE_FAILED",
+            action=lambda: set_member_role(
+                group_id=params.get("group_id"),
+                principal_id=params.get("principal_id") or params.get("member_id"),
+                role=params.get("role"),
+            ),
+        )
+
+    async def _handle_team_invite_create(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Create an invitation and return its token.
+
+        Two shapes, both two-phase by the relay's design:
+
+        * **targeted** (``invitee_id``) — the invitee redeems it themselves via
+          ``team.invite.accept``. It cannot be redeemed by the creator: the relay
+          answers ``groupchat_invite_not_for_caller`` for anyone else, which is
+          the whole point of a targeted invite. So a peer running their own
+          JiuwenSwarm instance accepts it with *their* configured ``groupchat``
+          credentials.
+        * **open** — a share token (with ``max_uses`` / ``ttl_seconds``) the user
+          distributes; any holder can redeem it.
+
+        The plaintext token appears exactly once, in this response.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import create_invite
+
+        params = request.params if isinstance(request.params, dict) else {}
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.invite.create",
+            failure_code="INVITE_FAILED",
+            action=lambda: _wrap_group_payload(
+                "invite",
+                create_invite(
+                    group_id=params.get("group_id"),
+                    invitee_id=params.get("invitee_id") or params.get("principal_id"),
+                    max_uses=params.get("max_uses"),
+                    ttl_seconds=params.get("ttl_seconds"),
+                ),
+            ),
+        )
+
+    async def _handle_team_invite_accept(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Redeem an invitation token as the human credential.
+
+        The human becomes a member here; the *agent* still has to be joined,
+        and that is a second, independent step: a project joined by invitation
+        was created elsewhere, so nothing else would ever put this instance's
+        agent in it and the @-mention bridge could never be addressed there.
+
+        The agent's join is best effort and non-fatal — the human's membership
+        is what the caller asked for and it already succeeded, so a relay
+        hiccup on the second step must not turn the redeem into an error.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import accept_invite
+
+        params = request.params if isinstance(request.params, dict) else {}
+        result: dict[str, Any] = {}
+
+        async def action() -> dict[str, Any]:
+            nonlocal result
+            result = await accept_invite(token=params.get("token")) or {}
+            return result
+
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.invite.accept",
+            failure_code="ACCEPT_FAILED",
+            action=action,
+        )
+
+        # The relay nests the group under ``group`` ({group_id, name, …}), not
+        # as a flat ``group_id``. Pull it out of the redeem response (falling
+        # back to a flat shape for callers/tests that pass one); without it
+        # there is nothing to join, and the human's membership stands alone.
+        group = result.get("group")
+        group_id = (
+            (group.get("group_id") if isinstance(group, Mapping) else None)
+            or result.get("group_id")
+            or params.get("group_id")
+        )
+        group_name = (
+            (group.get("name") if isinstance(group, Mapping) else None)
+            or result.get("name")
+            or params.get("name")
+            or ""
+        )
+        if group_id is None:
+            logger.warning(
+                "[AgentWebSocketServer] team.invite.accept returned no group_id; "
+                "cannot auto-join the agent. response_keys=%s",
+                list(result.keys()),
+            )
+            return
+        await self._try_join_agent_to_group(group_id, group_name=str(group_name))
+
+    async def _handle_team_message_send(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.agents.harness.team.groupchat import send_message
+
+        params = request.params if isinstance(request.params, dict) else {}
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.message.send",
+            failure_code="SEND_FAILED",
+            action=lambda: send_message(
+                group_id=params.get("group_id"),
+                text=params.get("text") or params.get("content"),
+                client_msg_id=params.get("client_msg_id"),
+                mentions=params.get("mentions"),
+                reply_to=params.get("reply_to"),
+            ),
+        )
+
+    async def _handle_team_message_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.agents.harness.team.groupchat import fetch_messages
+
+        params = request.params if isinstance(request.params, dict) else {}
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.message.list",
+            failure_code="LIST_FAILED",
+            action=lambda: fetch_messages(
+                group_id=params.get("group_id"),
+                after_seq=params.get("after_seq"),
+                before_seq=params.get("before_seq"),
+                limit=params.get("limit"),
+            ),
+        )
+
+    async def _handle_team_message_ack(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.agents.harness.team.groupchat import ack_messages
+
+        params = request.params if isinstance(request.params, dict) else {}
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.message.ack",
+            failure_code="ACK_FAILED",
+            action=lambda: ack_messages(
+                group_id=params.get("group_id"), seq=params.get("seq")
+            ),
+        )
+
+    async def _handle_team_message_subscribe(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Start (or join) the live relay subscription for a project.
+
+        The subscription itself is process-wide; what this binds is the
+        AgentServer's interest in it. Frames reach browsers through the normal
+        server-push channel, so no per-connection state is kept here.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import get_subscription_hub
+
+        params = request.params if isinstance(request.params, dict) else {}
+        hub = get_subscription_hub()
+        _ensure_group_hub_callback(hub)
+
+        async def action() -> dict[str, Any]:
+            group_id = _coerce_group_id(params.get("group_id"))
+            await hub.attach(group_id=group_id, subscriber_id=_group_subscriber_id(request))
+            return {"group_id": group_id, "subscribed": True, "watched": hub.watched_groups}
+
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.message.subscribe",
+            failure_code="SUBSCRIBE_FAILED",
+            action=action,
+        )
+
+    async def _handle_team_message_unsubscribe(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.agents.harness.team.groupchat import get_subscription_hub
+
+        params = request.params if isinstance(request.params, dict) else {}
+        hub = get_subscription_hub()
+
+        async def action() -> dict[str, Any]:
+            group_id = _coerce_group_id(params.get("group_id"))
+            await hub.detach(group_id=group_id, subscriber_id=_group_subscriber_id(request))
+            return {"group_id": group_id, "subscribed": False, "watched": hub.watched_groups}
+
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.message.unsubscribe",
+            failure_code="UNSUBSCRIBE_FAILED",
+            action=action,
+        )
 
     async def _handle_session_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Delete a single session and its recoverable runtime state."""

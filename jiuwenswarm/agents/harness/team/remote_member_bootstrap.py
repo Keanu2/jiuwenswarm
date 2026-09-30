@@ -2595,6 +2595,14 @@ async def _replace_teammate_card_after_direct_bootstrap(
         client = getattr(deep_agent, "_jiuwen_a2x_client", None)
         dataset = str(getattr(deep_agent, "_jiuwen_a2x_blank_dataset", "") or "").strip()
         service_id = str(getattr(deep_agent, "_jiuwen_a2x_blank_service_id", "") or "").strip()
+        # Preserve the configured stable identity across the card swap:
+        # ``agent_id`` keeps the peer-addressable name/id, and
+        # ``tunnel_device_id`` keeps the relay routing field. Without these
+        # the runtime planner card would drop both, making the teammate
+        # unaddressable by its configured id.
+        a2x_cfg = getattr(deep_agent, "_jiuwen_a2x_config", None) or {}
+        agent_id = str(a2x_cfg.get("agent_id") or "").strip() or None
+        tunnel_device_id = str(a2x_cfg.get("tunnel_device_id") or "").strip() or None
         if client is None or not dataset or not service_id:
             logger.warning(
                 "[RemoteMemberBootstrap] teammate registry card replace skipped: missing local A2X state "
@@ -2612,6 +2620,8 @@ async def _replace_teammate_card_after_direct_bootstrap(
             service_id=service_id,
             member_name=member,
             source="teammate-direct-bootstrap",
+            agent_id=agent_id,
+            tunnel_device_id=tunnel_device_id,
         )
         if replaced:
             logger.info(
@@ -2908,20 +2918,6 @@ async def run_teammate_bootstrap_daemon(*, stop_event: asyncio.Event, poll_inter
                 direct_bootstrap_addr,
                 local_member,
             )
-            try:
-                from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
-                    register_teammate_blank_agent_at_startup,
-                )
-
-                await register_teammate_blank_agent_at_startup(
-                    config,
-                    source="teammate-bootstrap-daemon",
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[RemoteMemberBootstrap] teammate startup A2X registration failed: %s",
-                    exc,
-                )
         except Exception as exc:
             bootstrap_router = None
             logger.warning(
@@ -2929,6 +2925,25 @@ async def run_teammate_bootstrap_daemon(*, stop_event: asyncio.Event, poll_inter
                 direct_bootstrap_addr,
                 exc,
             )
+
+    # Startup A2X registration is independent of the zmq bootstrap listener:
+    # in NAT-tunnel deployments the teammate is reached via the ws relay → local
+    # A2A ingress (http), not a zmq dial, so registration must still run when
+    # the zmq bind is unavailable (missing zmq, or addr is an http A2A url).
+    try:
+        from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
+            register_teammate_blank_agent_at_startup,
+        )
+
+        await register_teammate_blank_agent_at_startup(
+            config,
+            source="teammate-bootstrap-daemon",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[RemoteMemberBootstrap] teammate startup A2X registration failed: %s",
+            exc,
+        )
 
     logger.info(
         "[RemoteMemberBootstrap] teammate bootstrap daemon started local_member=%s",

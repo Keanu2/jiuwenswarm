@@ -127,7 +127,89 @@ flowchart LR
 
 ## 7. 出站 A2A（Agent 侧）
 
-- 当前仓库未包含独立的 A2A MCP Hub 注册模块；若后续恢复该能力，请以实际接线代码与环境变量定义为准。
+出站 A2A（本机 Agent 调用外部 A2A peer）由 **A2A Gateway** 模块提供，移植自 OpenClaw `a2a-gateway` 插件。入站 A2A 服务器（§1–§6，`a2a_connect.py`）与远场发现（`react.a2x_registry`）已存在并复用；本节仅描述**新增的出站能力**：出站客户端、NAT 隧道、出站文件工具。
+
+### 7.1 组件与实现位置
+
+| 组件 | 实现文件 | 说明 |
+|------|----------|------|
+| 出站客户端 | `jiuwenswarm/agents/harness/common/a2a_gateway/outbound_client.py` | 基于 `a2a-sdk` 的 `ClientFactory`/`create_client`，含熔断、重试、传输回退（JSONRPC>REST>gRPC） |
+| NAT 隧道 | `jiuwenswarm/agents/harness/common/a2a_gateway/tunnel/session.py` | WebSocket 中继客户端（REGISTER/FORWARD/心跳/指数退避重连），跨 NAT 互通 |
+| 出站文件工具 | `jiuwenswarm/agents/harness/common/a2a_gateway/tools.py` | `a2a_send_file` / `a2a_send_local_file` 两个 agent 工具 |
+| 运行时单例 | `jiuwenswarm/agents/harness/common/a2a_gateway/runtime.py` | 进程级 `outbound_client` / `tunnel` 持有器 |
+| Swarm provider | `jiuwenswarm/agents/swarm/providers/a2a_gateway.py` | `swarm.a2a_send` 工具元素（`@harness_element`） |
+| 启动接线 | `jiuwenswarm/gateway/app_gateway.py` | A2A Gateway 段读取配置，拉起 `A2AOutboundClient` + `TunnelSession` |
+
+### 7.2 配置
+
+在 `config.yaml` 顶层加 `a2a_gateway` 段（模板见 `jiuwenswarm/resources/config.team.distributed.{leader,teammate}.yaml`），或用 `A2A_*` 环境变量驱动（与 `A2A_SERVER_*` 一致）。
+
+```yaml
+a2a_gateway:
+  enabled: true                       # 出站总开关；false 时 a2a_send_* 工具不注册
+  default_agent_id: "main"            # 远端路由默认 agentId
+  agent_response_timeout_ms: 300000
+  peers:
+    - name: "remote-coder"
+      agent_card_url: "http://100.64.0.2:19100/.well-known/agent-card.json"
+      auth:
+        type: bearer                  # bearer | api_key
+        token: "<PEER_INBOUND_TOKEN>"
+      tunnel_device_id: ""            # 经中继可达时填 peer 的 deviceId
+  security:
+    max_file_size_bytes: 52428800     # 50 MB 单文件上限
+    allowed_mime_types: []            # 空 = 全部
+    peer_token: ""                    # 出站默认 bearer token（A2X 注册中心解析出的 peer 自动带上；peers[].auth 优先）
+  resilience:
+    retry: { max_retries: 3, initial_delay_ms: 500, max_delay_ms: 10000 }
+    circuit_breaker:
+      enabled: true
+      failure_threshold: 5            # 连续失败触发开路
+  tunnel:
+    relay_url: "ws://relay.example.com:18789"   # 仅跨 NAT 时配置
+    device_id: "<LOCAL_DEVICE_ID>"
+    local_service_port: 19100         # 转发到本地入站 A2A 端口
+```
+
+环境变量（优先级低于 config.yaml 段）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `A2A_GATEWAY_ENABLED` | 未设则关闭 | 出站总开关 |
+| `A2A_TUNNEL_RELAY_URL` | 空 | 中继地址（`ws://` 或 `wss://`） |
+| `A2A_TUNNEL_DEVICE_ID` | 空 | 本机设备身份 |
+| `A2A_TUNNEL_HEARTBEAT_MS` | `15000` | 心跳间隔 |
+| `A2A_TUNNEL_HEARTBEAT_TIMEOUT_MS` | `45000` | 静默超时强制重连 |
+| `A2A_TUNNEL_RECONNECT_DELAY_MS` | `1000` | 指数退避起始 |
+| `A2A_TUNNEL_MAX_RECONNECT_DELAY_MS` | `30000` | 退避封顶 |
+| `A2A_TUNNEL_MAX_RECONNECT_ATTEMPTS` | `0` | `0` = 无限重连 |
+| `A2A_TUNNEL_DATASET` | 空 | enriched REGISTER 用 |
+| `A2A_TUNNEL_SERVICE_ID` | 空 | enriched REGISTER 用 |
+
+### 7.3 Agent 工具
+
+启用后，每个 team 成员（leader / teammate）注册两个工具：
+
+| 工具 | 参数 | 用途 |
+|------|------|------|
+| `a2a_send_file` | `peer_name`、`file_uri` *或* `abs_file_path`、`agent_id?`、`message?` | 向 peer 发文件（URI 或本地路径），返回远端文本响应 |
+| `a2a_send_local_file` | `peer_name`、`abs_file_path`、`agent_id?`、`message?` | 按本机路径发文件，传输名恒为 basename，避免公网 URI 与大段 base64 |
+
+`agent_id` 为非标准路由扩展（对应 OpenClaw `message.agentId`），存入消息 `metadata`，JSON-RPC/REST 最可靠，gRPC 可能丢弃未知字段。单文件上限 50 MB（`security.max_file_size_bytes`）。
+
+### 7.4 端到端验证
+
+1. 启动两端 Gateway（`A2A_SERVER_ENABLED=true`），互为 peer 配置（`peers` 段含对端 `agent_card_url` + token）。
+2. 任一端 Agent 调用 `a2a_send_file` 或 `a2a_send_local_file`，`peer_name` 指向对端。
+3. 对端入站 A2A 收到文件，落盘并触发 Agent 处理（入站落盘逻辑见 `a2a_connect.py`）。
+4. 跨 NAT 场景：两端都配 `tunnel.relay_url` + `tunnel.device_id`，peer 的 `tunnel_device_id` 填对端 deviceId；出站客户端自动对隧道 peer 过滤 gRPC，走 HTTP 经中继转发。
+
+### 7.5 不做的事
+
+- 不重写入站 `a2a_connect.py`（已工作）。
+- 不重写 A2X registry（与 OpenClaw registry-client 重叠，复用 `react.a2x_registry`）。
+- 不移植 OpenClaw Gateway RPC executor（用 JiuwenSwarm 已有 Message 派发替代）。
+- 不移植 mDNS / DNS-SD / Quorum 发现（用 A2X 做远场发现；如需可单独立项）。
 
 ---
 

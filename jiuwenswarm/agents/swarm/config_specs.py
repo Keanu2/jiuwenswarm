@@ -132,6 +132,7 @@ _COMMON_TOOL_NAMES: tuple[str, ...] = (
     registry.XIAOYI_PHONE,
     registry.CRON_TOOLS,
     registry.SEND_FILE,
+    registry.A2A_SEND,
 )
 
 # Parameterless code-profile rails (the code variant of the common rails plus
@@ -186,6 +187,7 @@ _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.CODE_EXTRA_TOOLS,
     registry.CRON_TOOLS,
     registry.SEND_FILE,
+    registry.A2A_SEND,
 )
 
 # code_agent sub-agents are always-on (explore / plan) or config-gated.
@@ -467,6 +469,7 @@ _TOOL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     registry.CODE_EXTRA_TOOLS: lambda c: {"acp_enabled": _acp_enabled(c)},
     registry.VISION: _vision_tool_params,
     registry.AUDIO: _audio_tool_params,
+    registry.A2A_SEND: lambda c: {"a2a_gateway_config": _config_section(c, "a2a_gateway")},
 }
 
 

@@ -228,6 +228,32 @@ async def _run(host: str, port: int) -> None:
     )
     await server.start()
 
+    # ---------- A2A Gateway outbound + relay tunnel ----------
+    # The conversational agent's ``a2a_send_message`` / ``a2a_send_file`` tools
+    # run in THIS process (AgentServer), but the module-level outbound client +
+    # tunnel holders are per-process. The Gateway owns the 19100 inbound A2A
+    # server; this process owns the outbound half so the tools can actually
+    # reach peer agents (directly or via the relay). We register the tunnel
+    # with a process-distinct device id (``<configured>-outbound``) so the
+    # relay doesn't clobber the Gateway's receive registration for the base id.
+    try:
+        from jiuwenswarm.agents.harness.common.a2a_gateway.runtime import init_a2a_gateway
+        full_cfg_a2a = get_config()
+        outbound_device = ""
+        a2a_cfg = full_cfg_a2a.get("a2a_gateway") if isinstance(full_cfg_a2a, dict) else None
+        if isinstance(a2a_cfg, dict):
+            tunnel_cfg = a2a_cfg.get("tunnel") if isinstance(a2a_cfg.get("tunnel"), dict) else {}
+            base_device = str((tunnel_cfg or {}).get("device_id") or "").strip()
+            if base_device:
+                outbound_device = f"{base_device}-outbound"
+        await init_a2a_gateway(
+            full_cfg_a2a,
+            device_id_override=outbound_device or None,
+            tag="AgentServer",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AgentServer] A2A gateway outbound init skipped: %s", exc)
+
     # ---------- ProactiveEngine 初始化 ----------
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
     # app_agentserver 只调 init_proactive_engine。
@@ -247,6 +273,13 @@ async def _run(host: str, port: int) -> None:
         run_teammate_bootstrap_daemon(stop_event=stop_event)
     )
 
+    # Group-chat bridge: answers @-mentions in the relay groups this agent
+    # belongs to. Started here (after server.start(), before the wait) so it
+    # shares this process's lifecycle; start_bridge never raises.
+    from jiuwenswarm.agents.harness.team.groupchat import start_bridge, stop_bridge
+
+    await start_bridge()
+
     def _on_signal() -> None:
         stop_event.set()
 
@@ -265,6 +298,10 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
+        try:
+            await stop_bridge()
+        except Exception as exc:  # noqa: BLE001 - shutdown must continue
+            logger.warning("[AgentServer] group chat bridge stop failed: %s", exc)
         if teammate_bootstrap_task is not None:
             teammate_bootstrap_task.cancel()
             try:

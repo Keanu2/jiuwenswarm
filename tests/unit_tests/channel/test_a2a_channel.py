@@ -7,6 +7,7 @@ from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import (
     A2AChannel,
     A2AChannelConfig,
     _A2AAgentExecutor,
+    _strip_msys2_path_conv,
 )
 from jiuwenswarm.common.schema.message import EventType, Message
 
@@ -498,3 +499,44 @@ async def test_executor_terminal_reasoning_chunk_does_not_leak_into_artifact():
         if not isinstance(e, TaskArtifactUpdateEvent)
     ]
     assert TaskState.TASK_STATE_COMPLETED in final_states
+
+
+class TestStripMsys2PathConv:
+    """Repair MSYS2/Git-Bash rewriting of slash-leading URL paths.
+
+    When /a2a is exported through Git-Bash it becomes an absolute Windows
+    path like 'C:/Program Files/Git/a2a' inside the native Python subprocess,
+    which then breaks Starlette's Route assertion. _strip_msys2_path_conv
+    must restore the leading slash.
+    """
+
+    def test_slash_leading_value_unchanged(self) -> None:
+        assert _strip_msys2_path_conv("/a2a", "/a2a") == "/a2a"
+        assert _strip_msys2_path_conv("/.well-known/agent-card.json", "/a2a") == (
+            "/.well-known/agent-card.json"
+        )
+
+    def test_empty_or_whitespace_returns_default(self) -> None:
+        assert _strip_msys2_path_conv("", "/a2a") == "/a2a"
+        assert _strip_msys2_path_conv("   ", "/a2a") == "/a2a"
+        assert _strip_msys2_path_conv(None, "/a2a") == "/a2a"  # type: ignore[arg-type]
+
+    def test_msys2_conversion_strips_git_prefix(self) -> None:
+        assert _strip_msys2_path_conv(
+            "C:/Program Files/Git/a2a", "/a2a"
+        ) == "/a2a"
+        assert _strip_msys2_path_conv(
+            "D:/tools/Git/.well-known/agent-card.json",
+            "/.well-known/agent-card.json",
+        ) == "/.well-known/agent-card.json"
+
+    def test_msys2_conversion_case_insensitive(self) -> None:
+        # Mixed-case drive / 'GIT' must still be detected.
+        assert _strip_msys2_path_conv(
+            "c:/program files/GIT/a2a", "/a2a"
+        ) == "/a2a"
+
+    def test_non_slash_without_git_prefix_falls_back(self) -> None:
+        # A genuinely malformed value (no slash, no Git prefix) cannot be
+        # repaired — fall back to default rather than crash Starlette.
+        assert _strip_msys2_path_conv("a2a", "/a2a") == "/a2a"

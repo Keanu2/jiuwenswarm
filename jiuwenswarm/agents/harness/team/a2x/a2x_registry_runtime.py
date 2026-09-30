@@ -140,6 +140,24 @@ def resolve_a2x_config(config_base: dict[str, Any]) -> dict[str, Any]:
     if reservation_ttl_seconds < 1:
         reservation_ttl_seconds = 30
 
+    # Optional tunnel device id for NAT-traversed teammates. When set, the
+    # blank agent card registered into the pool carries a ``tunnelDeviceId``
+    # metadata field so leaders routing through the same relay can reach this
+    # teammate's local A2A ingress via forward (gRPC is filtered out for relay
+    # peers). Mirrors OpenClaw's registry-client tunnelDeviceId convention.
+    tunnel_device_id = str(
+        a2x_cfg.get("tunnel_device_id") or a2x_cfg.get("tunnelDeviceId") or ""
+    ).strip() or None
+
+    # Optional explicit registry id. When set, the blank card is registered
+    # under this id (and the card ``name`` is set to it) instead of the
+    # backend-generated ``agent_<hash>`` — so peers can look the teammate up
+    # by a stable, human-meaningful string (typically the same value as
+    # ``tunnel_device_id``).
+    agent_id = str(
+        a2x_cfg.get("agent_id") or a2x_cfg.get("agentId") or ""
+    ).strip() or None
+
     return {
         "base_url": base_url,
         "timeout": timeout,
@@ -150,6 +168,8 @@ def resolve_a2x_config(config_base: dict[str, Any]) -> dict[str, Any]:
         "reservation_ttl_seconds": reservation_ttl_seconds,
         "role": role,
         "distributed_mode": runtime_mode == "distributed",
+        "tunnel_device_id": tunnel_device_id,
+        "agent_id": agent_id,
     }
 
 
@@ -232,7 +252,28 @@ async def register_blank_agent_if_teammate(
         )
         return True
 
-    result = await client.register_blank_agent(dataset=dataset, endpoint=endpoint)
+    tunnel_device_id = config.get("tunnel_device_id")
+    agent_id = config.get("agent_id")
+    if tunnel_device_id or agent_id:
+        # NAT-traversed teammate: register a blank card that also carries a
+        # ``tunnelDeviceId`` metadata field. Leaders routing through the same
+        # relay read this field to forward A2A requests to this teammate's
+        # local ingress via the tunnel (HTTP-only; gRPC is filtered out).
+        #
+        # When ``agent_id`` is configured, both the card ``name`` and the
+        # explicit ``service_id`` are set to it so the registry stores a
+        # stable, peer-addressable id (instead of the endpoint-derived
+        # ``agent_<hash>``). Peers looking the teammate up by name/id then
+        # match ``agent_id`` directly.
+        from jiuwenswarm.agents.harness.team.a2x.client import _internal as _a2x_internal
+        card = _a2x_internal.build_blank_agent_card(endpoint)
+        if agent_id:
+            card["name"] = agent_id
+        if tunnel_device_id:
+            card.setdefault("metadata", {})["tunnelDeviceId"] = tunnel_device_id
+        result = await client.register_agent(dataset, card, service_id=agent_id or None)
+    else:
+        result = await client.register_blank_agent(dataset=dataset, endpoint=endpoint)
     _REGISTERED_BLANK_ENDPOINTS.add(cache_key)
     _remember_blank_registration(
         client,
@@ -242,11 +283,14 @@ async def register_blank_agent_if_teammate(
         endpoint=endpoint,
     )
     logger.info(
-        "[A2XRegistryRuntime] blank agent registered source=%s dataset=%s service_id=%s endpoint=%s",
+        "[A2XRegistryRuntime] blank agent registered source=%s dataset=%s service_id=%s endpoint=%s "
+        "tunnel=%s agent_id=%s",
         source,
         dataset,
         getattr(result, "service_id", ""),
         endpoint,
+        tunnel_device_id or "none",
+        agent_id or "none",
     )
     return True
 
@@ -492,8 +536,17 @@ async def replace_teammate_agent_card_after_bootstrap(
     description: str | None = None,
     status: str | None = None,
     skills: list[dict[str, Any]] | None = None,
+    agent_id: str | None = None,
+    tunnel_device_id: str | None = None,
 ) -> bool:
-    """Replace the teammate's blank card with its runtime planner card."""
+    """Replace the teammate's blank card with its runtime planner card.
+
+    ``agent_id`` (when set) overrides the card ``name`` so the stable,
+    peer-addressable id established at blank-registration time survives the
+    replacement; ``tunnel_device_id`` (when set) re-attaches the
+    ``metadata.tunnelDeviceId`` field, which the runtime card template does
+    not otherwise carry.
+    """
     dataset = str(dataset or "").strip()
     service_id = str(service_id or "").strip()
     member_name = str(member_name or "").strip()
@@ -509,13 +562,16 @@ async def replace_teammate_agent_card_after_bootstrap(
             f"(source={source}, dataset={dataset}, service_id={service_id}, member_name={member_name})"
         )
 
-    agent_card = build_teammate_agent_card(member_name)
+    card_name = str(agent_id or "").strip() or member_name
+    agent_card = build_teammate_agent_card(card_name)
     if description is not None and str(description).strip():
         agent_card["description"] = str(description).strip()
     if status is not None and str(status).strip():
         agent_card["status"] = str(status).strip()
     if skills is not None:
         agent_card["skills"] = [dict(skill) for skill in skills if isinstance(skill, dict)]
+    if str(tunnel_device_id or "").strip():
+        agent_card.setdefault("metadata", {})["tunnelDeviceId"] = str(tunnel_device_id).strip()
 
     try:
         await client.replace_agent_card(dataset, service_id, agent_card)

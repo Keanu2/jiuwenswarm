@@ -10,6 +10,7 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
+import { ProjectsPanel } from './components/ProjectsPanel';
 import { SessionsPanel } from './components/SessionsPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
@@ -132,7 +133,7 @@ function normalizeConfigBoolean(value: unknown): boolean {
   );
 }
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'projects' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -2577,6 +2578,11 @@ function AppContent() {
         {activeNav === 'teams' && (
           <div className="app-section">
             <TeamPanel onSessionsDeleted={handleTeamSessionsDeleted} />
+          </div>
+        )}
+        {activeNav === 'projects' && (
+          <div className="app-section">
+            <ProjectsPanel />
           </div>
         )}
         {activeNav === 'sessions' && (

@@ -187,6 +187,60 @@ telemetry:
     protocol:                       # metrics protocol，默认回退到 telemetry.protocol
     headers: {}                     # metrics headers，默认回退到 telemetry.headers
 
+# ============================================================
+# A2A Gateway — 出站 A2A 客户端 + NAT 隧道（移植自 OpenClaw a2a-gateway 插件）
+# 入站 A2A 服务器由 A2A_SERVER_* 环境变量驱动（见 app_gateway.py）。
+# 此段控制出站（向其它 A2A peer 发消息/文件）与跨 NAT 中继隧道。
+# 远场发现复用 react.a2x_registry（与 OpenClaw registry-client 功能重叠，不重复实现）。
+# ============================================================
+a2a_gateway:
+  enabled: false                    # true = 启用出站 A2A 与 a2a_send_* 工具
+  default_agent_id: "main"          # 远端路由默认 agentId（routing.defaultAgentId）
+  agent_response_timeout_ms: 300000
+  peers: []                        # 出站 peer 列表，见下方示例
+  # peers:
+  #   - name: "remote-coder"
+  #     agent_card_url: "http://100.64.0.2:19100/.well-known/agent-card.json"
+  #     auth:
+  #       type: bearer              # bearer | api_key
+  #       token: "<PEER_INBOUND_TOKEN>"
+  #     tunnel_device_id: ""       # 若 peer 仅经中继可达则填其 deviceId
+  security:
+    inbound_auth: bearer           # 入站鉴权方式（bearer | none）
+    token: ""                      # 入站 token（与 A2A_SERVER_TOKEN 一致）
+    peer_token: ""                 # 出站默认 bearer token（A2X 注册中心解析出的 peer 自动带上；peers[].auth 优先）
+    allowed_mime_types: []         # 空 = 允许全部；如 ["application/pdf","text/plain"]
+    max_file_size_bytes: 52428800  # 50 MB 单文件上限
+    file_uri_allowlist: []         # 空 = 允许全部 URI
+  resilience:
+    retry:
+      max_retries: 3
+      initial_delay_ms: 500
+      max_delay_ms: 10000
+      backoff_factor: 2.0
+      jitter_ms: 250
+    circuit_breaker:
+      enabled: true
+      failure_threshold: 5         # 连续失败次数触发开路
+      soft_threshold: 0.5          # 窗口失败率触发去敏（desensitized）
+      desensitized_capacity: 8     # 去敏态最大并发
+      recovery_rate_constant: 0.1  # 每秒恢复速率
+      open_timeout_ms: 30000
+    health_check_interval_ms: 60000
+    health_check_timeout_ms: 5000
+  # NAT 中继隧道（跨 NAT 互通；仅 relay_url + device_id 都配置时启用）
+  tunnel:
+    relay_url: ""                  # ws:// 或 wss:// 中继地址
+    device_id: ""                  # 本机设备身份（uuid）
+    heartbeat_interval_ms: 15000
+    heartbeat_timeout_ms: 45000
+    reconnect_delay_ms: 1000       # 指数退避起始（ms）
+    max_reconnect_delay_ms: 30000
+    max_reconnect_attempts: 0      # 0 = 无限重连
+    local_service_port: 19100      # 转发目标：本地入站 A2A 端口（A2A_SERVER_PORT）
+    dataset: ""                    # enriched REGISTER 用（与 a2x_registry.dataset 对齐）
+    service_id: ""                  # enriched REGISTER 用
+
 react:
   agent_name: main_agent
   enable_task_loop: false
@@ -251,6 +305,14 @@ react:
     # team.transport.params.bootstrap_direct_addr when available.
     dataset: "team_pool"
     endpoint: ""
+    # Optional stable registry id. When set, the blank card is registered
+    # under this id (card name = service_id = agent_id) instead of the
+    # endpoint-derived ``agent_<hash>``, so peers can look the teammate up
+    # by a fixed string. Typically set equal to ``tunnel_device_id``.
+    agent_id: ""
+    # Optional tunnel device id for NAT-traversed teammates; registered as
+    # ``metadata.tunnelDeviceId`` so leaders can forward via the relay.
+    tunnel_device_id: ""
 
 tools:
   - todo

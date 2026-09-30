@@ -604,6 +604,25 @@ react:
     dataset: "team_pool"
     endpoint: ""
 
+# 「项目」功能：调用 relay 的群聊接口（a2x_registry/groupchat）建群。
+# 与 react.a2x_registry 无关——那个是注册中心（role/dataset/tunnel），
+# 这个只回答"群接口在哪、我是谁"。
+groupchat:
+  enabled: false                    # 置 true 且 base_url 指向已启用 groupchat 的 relay 才会发请求
+  base_url: "http://127.0.0.1:8000" # relay 需以 A2X_GROUPCHAT_ENABLED=true 启动
+  api_key: ""                       # a2x_pat_… ；也可用 env GROUPCHAT_API_KEY 覆盖
+  timeout: 15.0
+  default_max_members: 50           # 前端成员上限的取值天花板
+  # 让本实例的 Agent 也进群：被 @ 即执行，群聊内容作为上下文。
+  # 用独立 key（另一个 principal）才能让 @ 精确区分人和 Agent。
+  agent:
+    enabled: false                  # 置 true 且填好 api_key 后生效
+    api_key: ""                     # Agent 自己的 a2x_pat_… ；留空则回落到上面的 api_key
+    display_name: ""                # 可选，成员列表里的展示名
+  reply:
+    max_context_messages: 50        # 给 Agent 的最近 N 条群聊上下文
+    timeout_seconds: 300            # 单次 turn 上限
+
 tools:
   - todo
   - skill

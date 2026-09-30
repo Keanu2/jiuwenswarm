@@ -66,6 +66,11 @@ def _bump_rebind_gen(session_id: str) -> None:
 _TITLE_MAX_LEN = 50
 # 心跳任务会话目录前缀，不参与 session.list 等列表展示
 _HEARTBEAT_SESSION_PREFIX = "heartbeat_"
+# 群聊 @ 唤醒的 Agent 回合会话：一个群一个，由 bridge 写入，不是用户的会话。
+# 它的 prompt 里嵌着该群最近的完整对话（含其他成员的发言），所以一旦出现在
+# 会话列表里，点开就等于把整个群聊暴露在普通聊天界面。同样不参与列表展示。
+_GROUPCHAT_SESSION_PREFIX = "groupchat_"
+_HIDDEN_SESSION_PREFIXES = (_HEARTBEAT_SESSION_PREFIX, _GROUPCHAT_SESSION_PREFIX)
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
 # user_id 白名单: 仅允许字母数字及 _-, 拒绝路径遍历字符
 _SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -1071,7 +1076,7 @@ def set_session_pinned(session_id: str, pinned: bool) -> tuple[bool, int] | None
                 if not session_dir.is_dir():
                     continue
                 sid = session_dir.name
-                if sid.startswith(_HEARTBEAT_SESSION_PREFIX):
+                if sid.startswith(_HIDDEN_SESSION_PREFIXES):
                     continue
                 m = _read_metadata(sid)
                 if not m:
@@ -1428,7 +1433,7 @@ def get_all_sessions_metadata(
             continue
 
         session_id = session_dir.name
-        if session_id.startswith(_HEARTBEAT_SESSION_PREFIX):
+        if session_id.startswith(_HIDDEN_SESSION_PREFIXES):
             continue
         metadata = _read_metadata(session_id)
 
@@ -1511,7 +1516,7 @@ def collect_all_sessions_metadata(
         if not session_dir.is_dir():
             continue
         sid = session_dir.name
-        if sid.startswith(_HEARTBEAT_SESSION_PREFIX):
+        if sid.startswith(_HIDDEN_SESSION_PREFIXES):
             continue
         if user_id:
             # 按用户家目录读时,绕过走全局单例的 _read_metadata,直接读该目录下文件,

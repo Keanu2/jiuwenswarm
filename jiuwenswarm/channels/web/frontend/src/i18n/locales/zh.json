@@ -27,6 +27,7 @@
     "work": "任务",
     "agent": "智能体",
     "teams": "团队",
+    "projects": "项目",
     "sessions": "会话",
     "cron": "定时任务",
     "skills": "技能",
@@ -243,6 +244,119 @@
       "loadDirectory": "团队目录加载失败",
       "deleteTeam": "删除团队失败：{{team}}"
     }
+  },
+  "projects": {
+    "title": "项目管理",
+    "agentBadge": "Agent",
+    "subtitle": "在群聊服务中创建与管理项目",
+    "listHeading": "项目列表",
+    "count": "当前 {{count}} 个项目",
+    "createProject": "创建项目",
+    "createTitle": "创建项目",
+    "createSubtitle": "在群聊服务中创建一个新项目",
+    "creating": "创建中...",
+    "nameLabel": "项目名称",
+    "namePlaceholder": "请输入项目名称",
+    "maxMembersLabel": "成员上限（可选）",
+    "maxMembersPlaceholder": "默认使用服务端配置",
+    "empty": "暂无项目",
+    "groupId": "群 ID {{id}}",
+    "errors": {
+      "loadProjects": "项目列表加载失败",
+      "createProject": "创建项目失败",
+      "nameTooLong": "项目名称不能超过 {{max}} 个字符",
+      "not_configured": "群聊服务未配置，请在配置中启用 groupchat 并填写 base_url 与 api_key",
+      "invalid_request": "请求参数无效，请检查项目名称与成员上限",
+      "unavailable": "群聊服务不可达，请确认 relay 已启动",
+      "groupchat_disabled": "群聊服务未启用（relay 需以 A2X_GROUPCHAT_ENABLED=true 启动）",
+      "groupchat_name_invalid": "项目名称无效",
+      "groupchat_group_quota_exceeded": "已达到可创建项目的数量上限",
+      "groupchat_max_members_invalid": "成员上限超出服务端允许范围",
+      "CREATE_FAILED": "创建项目失败",
+      "LIST_FAILED": "项目列表加载失败",
+      "loadMembers": "成员列表加载失败",
+      "inviteMember": "添加成员失败",
+      "groupchat_invite_not_for_caller": "该邀请不是发给你的",
+      "groupchat_already_member": "你已经是该项目成员",
+      "groupchat_member_banned": "你已被该项目封禁",
+      "groupchat_owner_immutable": "不能移除项目所有者",
+      "groupchat_forbidden": "没有执行该操作的权限",
+      "groupchat_group_muted": "项目已禁言，只有管理员可以发言",
+      "groupchat_group_not_found": "项目不存在，或你不是其成员",
+      "groupchat_group_full": "该项目成员已达上限",
+      "groupchat_payload_required": "消息内容不能为空",
+      "groupchat_mention_invalid": "被提及的成员不在项目中",
+      "groupchat_rate_limited": "发送过于频繁，请稍后再试",
+      "groupchat_message_too_large": "消息内容过长",
+      "groupchat_role_invalid": "角色不合法",
+      "SEND_FAILED": "发送消息失败",
+      "REMOVE_FAILED": "移除成员失败",
+      "ROLE_FAILED": "修改角色失败",
+      "INVITE_FAILED": "添加成员失败",
+      "ACCEPT_FAILED": "接受邀请失败",
+      "ACK_FAILED": "更新已读位置失败",
+      "SUBSCRIBE_FAILED": "订阅项目消息失败",
+      "UNSUBSCRIBE_FAILED": "取消订阅失败",
+      "groupchat_owner_required": "仅项目所有者可以删除该项目",
+      "DELETE_FAILED": "删除项目失败",
+      "ARCHIVE_FAILED": "归档项目失败",
+      "joinProject": "加入项目失败",
+      "groupchat_invite_not_found": "邀请不存在或已失效",
+      "groupchat_invite_expired": "邀请已过期",
+      "groupchat_invite_exhausted": "邀请已被用完",
+      "groupchat_token_required": "请填写邀请 token"
+    },
+    "inviteMember": "添加成员",
+    "inviteTitle": "添加成员",
+    "inviteSubtitle": "定向邀请会自动加入；分享链接邀请会生成一个 token，由你自行分发",
+    "inviting": "添加中...",
+    "inviteModeTargeted": "定向邀请",
+    "inviteModeLink": "分享链接",
+    "inviteeLabel": "成员标识（principal_id）",
+    "inviteePlaceholder": "例如 u_7c8859bccdc2",
+    "inviteeHint": "该标识由群聊服务的 /api/auth 分配，不是用户名。",
+    "inviteLinkHint": "这个 token 只显示这一次，服务端只存哈希，请立即复制保存。",
+    "maxUsesLabel": "可用次数",
+    "ttlLabel": "有效期（小时）",
+    "ttlPlaceholder": "留空永不过期",
+    "tabMessages": "消息 {{count}}",
+    "tabMembers": "成员 {{count}}",
+    "noMessages": "暂无消息",
+    "noMembers": "暂无成员",
+    "unknownSender": "未知成员",
+    "messagePlaceholder": "输入消息，Enter 发送 / Shift+Enter 换行",
+    "send": "发送",
+    "sending": "发送中...",
+    "removing": "移除中...",
+    "removeMemberConfirm": "确认将 {{member}} 移出该项目？",
+    "selectFirst": "请先选择一个项目",
+    "subStateIdle": "未订阅",
+    "subStateConnecting": "连接中",
+    "subStateLive": "实时",
+    "subStateReconnecting": "重连中",
+    "subStateUnavailable": "订阅不可用",
+    "inviteTargetedHint": "定向邀请需要被邀请者用自己的身份接受（不能由你代接受），接受后才会成为成员。",
+    "deleteProject": "删除项目",
+    "deleting": "删除中...",
+    "deleteConfirm": "确认删除项目「{{project}}」？\n该操作不可恢复：项目的成员、邀请与全部消息都会被一并删除。仅项目所有者可以删除。",
+    "archiveProject": "归档",
+    "archiving": "归档中...",
+    "archiveConfirm": "确认归档项目「{{project}}」？\n归档后项目会从列表中消失，但历史数据保留；之后仍可由所有者删除。",
+    "subStateDeleted": "已删除",
+    "joinProject": "加入项目",
+    "joinTitle": "加入项目",
+    "joinSubtitle": "粘贴他人发来的邀请 token 即可加入该项目",
+    "joining": "加入中...",
+    "joinTokenLabel": "邀请 token",
+    "joinTokenPlaceholder": "粘贴邀请 token",
+    "joinTokenHint": "token 由项目成员在「添加成员」中生成，通常只显示一次。",
+    "joinSuccess": "已加入项目「{{project}}」",
+    "joinSuccessNoName": "已成功加入项目",
+    "you": "我",
+    "removeMention": "点击移除该提及",
+    "mentionHint": "被 @ 的成员会收到定向通知；@ 到 Agent 会让它执行你的指令。",
+    "mentionUnresolved": "未匹配到成员：{{names}}。这条消息不会通知它们。",
+    "mentionedBadge": "已提及"
   },
   "statusBar": {
     "evolving": "正在检测是否需要技能演进...",
@@ -855,11 +969,11 @@
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
-        "swarmflowEnabled": "启用 SwarmFlow",
-        "externalCliAgentClaudeEnabled": "启用 Claude",
-        "externalCliAgentUseBuiltin": "使用内置",
-        "externalCliAgentCliPath": "CLI 路径",
-        "externalCliAgentCodexEnabled": "启用 Codex",
+      "swarmflowEnabled": "启用 SwarmFlow",
+      "externalCliAgentClaudeEnabled": "启用 Claude",
+      "externalCliAgentUseBuiltin": "使用内置",
+      "externalCliAgentCliPath": "CLI 路径",
+      "externalCliAgentCodexEnabled": "启用 Codex",
       "kvCacheReleaseEnabled": "旧链路（KV 释放）",
       "kvCacheAffinityEnabled": "新链路（Ascend 亲和）",
       "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
@@ -1081,29 +1195,98 @@
       "referencedByTeams": "被 {{count}} 个 Team 引用"
     },
     "groups": {
-      "modelDefault": { "label": "默认模型（主对话）", "hint": "主对话模型服务与鉴权参数" },
-      "modelVideo": { "label": "视频模型", "hint": "视频理解（可选）" },
-      "modelAudio": { "label": "音频模型", "hint": "语音识别（可选）" },
-      "modelVision": { "label": "视觉模型", "hint": "图像理解（可选）" },
-      "model": { "label": "模型配置", "hint": "模型服务与鉴权参数" },
-      "embed": { "label": "Embed配置", "hint": "Embed 服务与鉴权参数" },
-      "thirdParty": { "label": "第三方服务配置", "hint": "API Key 配置" },
-      "freeSearch": { "label": "免费搜索引擎配置", "hint": "控制免费搜索引擎启用" },
-      "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
-      "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用，且必须添加Team" },
-      "team": { "label": "Team配置", "hint": "多智能体团队配置" },
-      "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
-      "kvCacheAffinity": { "label": "算力亲和", "hint": "控制 Ascend KV Cache 亲和能力" },
-      "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
-      "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
-      "swarmflow": { "label": "SwarmFlow", "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控" },
-      "externalCliAgents": { "label": "三方 Agent", "hint": "配置 Team 模式可用的三方 Agent" },
-      "symphony": { "label": "技能交响乐", "hint": "控制技能交响乐" },
-      "skillRetrieval": { "label": "技能交响乐", "hint": "控制技能交响乐" },
-      "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
-      "email": { "label": "邮箱配置", "hint": "邮件账号与令牌参数" },
-      "other": { "label": "其他配置", "hint": "未归类的扩展参数" },
-      "proactive": { "label": "主动推荐", "hint": "自动分析用户需求，主动提供建议；调度频率请在定时任务面板调整" }
+      "modelDefault": {
+        "label": "默认模型（主对话）",
+        "hint": "主对话模型服务与鉴权参数"
+      },
+      "modelVideo": {
+        "label": "视频模型",
+        "hint": "视频理解（可选）"
+      },
+      "modelAudio": {
+        "label": "音频模型",
+        "hint": "语音识别（可选）"
+      },
+      "modelVision": {
+        "label": "视觉模型",
+        "hint": "图像理解（可选）"
+      },
+      "model": {
+        "label": "模型配置",
+        "hint": "模型服务与鉴权参数"
+      },
+      "embed": {
+        "label": "Embed配置",
+        "hint": "Embed 服务与鉴权参数"
+      },
+      "thirdParty": {
+        "label": "第三方服务配置",
+        "hint": "API Key 配置"
+      },
+      "freeSearch": {
+        "label": "免费搜索引擎配置",
+        "hint": "控制免费搜索引擎启用"
+      },
+      "evolution": {
+        "label": "自演进配置",
+        "hint": "Skills 在线自演进参数"
+      },
+      "agents": {
+        "label": "多Agent配置",
+        "hint": "仅供集群模式使用，且必须添加Team"
+      },
+      "team": {
+        "label": "Team配置",
+        "hint": "多智能体团队配置"
+      },
+      "contextEngine": {
+        "label": "上下文压缩",
+        "hint": "控制对话上下文是否启用压缩"
+      },
+      "kvCacheAffinity": {
+        "label": "算力亲和",
+        "hint": "控制 Ascend KV Cache 亲和能力"
+      },
+      "permissions": {
+        "label": "工具安全护栏",
+        "hint": "控制工具调用时的权限检查"
+      },
+      "a2ui": {
+        "label": "A2UI",
+        "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词"
+      },
+      "swarmflow": {
+        "label": "SwarmFlow",
+        "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控"
+      },
+      "externalCliAgents": {
+        "label": "三方 Agent",
+        "hint": "配置 Team 模式可用的三方 Agent"
+      },
+      "symphony": {
+        "label": "技能交响乐",
+        "hint": "控制技能交响乐"
+      },
+      "skillRetrieval": {
+        "label": "技能交响乐",
+        "hint": "控制技能交响乐"
+      },
+      "memory": {
+        "label": "记忆系统敏感信息过滤",
+        "hint": "配置禁止写入记忆的敏感信息类型"
+      },
+      "email": {
+        "label": "邮箱配置",
+        "hint": "邮件账号与令牌参数"
+      },
+      "other": {
+        "label": "其他配置",
+        "hint": "未归类的扩展参数"
+      },
+      "proactive": {
+        "label": "主动推荐",
+        "hint": "自动分析用户需求，主动提供建议；调度频率请在定时任务面板调整"
+      }
     },
     "booleanLabels": {
       "skillEvolution": "启用技能自动学习",
@@ -1113,41 +1296,41 @@
       "dynamicGraph": "启用动态图谱",
       "kvCacheRelease": "旧链路（KV 释放）",
       "kvCacheAffinity": "新链路（Ascend 亲和）",
-        "externalCliClaude": "启用 Claude",
-        "externalCliCodex": "启用 Codex",
-        "externalCliUseBuiltin": "使用内置"
-      },
-      "externalCli": {
-        "claude": "Claude",
-        "codex": "Codex",
-        "claudeHint": "可使用系统 PATH 中的 Claude，也可指定可执行文件路径。",
-        "codexHint": "可使用系统 PATH 中的 Codex，也可指定可执行文件路径。",
-        "useBuiltin": "使用内置",
-        "detect": "检测",
-        "selectFile": "选择文件",
-        "selectFileTitle": "选择 {{agent}} 命令",
-        "selectFileFailed": "选择文件失败",
-        "cliPathPlaceholder": "自动检测 {{agent}} 路径，或手动填写可执行文件路径",
-        "statusUnknown": "未检测",
-        "statusOk": "可用",
-        "statusWarning": "可能不兼容",
-        "statusMissing": "未找到",
-        "statusUnsupported": "路径不可用",
-        "statusUnavailable": "不可用",
-        "version": "版本 {{version}}",
-        "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置”，改用默认启动方式。",
-        "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置”，改用默认启动方式。",
-        "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置”。",
-        "dependencyInstalling": "正在后台安装 {{agents}} 依赖。安装期间暂未启用；安装完成后，请再次启用并保存配置。",
-        "dependencyInstalled": "请再次启用 {{agent}} 并保存配置。",
-        "dependencyInstallFailed": "{{agent}} 依赖安装失败。请检查安装日志后重试。",
-        "dependencyInstallPhasePreparing": "准备安装 {{agent}} 依赖",
-        "dependencyInstallPhaseInstalling": "正在安装 {{agent}} 依赖",
-        "dependencyInstallPhaseVerifying": "正在校验 {{agent}} 依赖",
-        "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装",
-        "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败",
-        "dependencyInstallRecentOutput": "安装日志"
-      },
+      "externalCliClaude": "启用 Claude",
+      "externalCliCodex": "启用 Codex",
+      "externalCliUseBuiltin": "使用内置"
+    },
+    "externalCli": {
+      "claude": "Claude",
+      "codex": "Codex",
+      "claudeHint": "可使用系统 PATH 中的 Claude，也可指定可执行文件路径。",
+      "codexHint": "可使用系统 PATH 中的 Codex，也可指定可执行文件路径。",
+      "useBuiltin": "使用内置",
+      "detect": "检测",
+      "selectFile": "选择文件",
+      "selectFileTitle": "选择 {{agent}} 命令",
+      "selectFileFailed": "选择文件失败",
+      "cliPathPlaceholder": "自动检测 {{agent}} 路径，或手动填写可执行文件路径",
+      "statusUnknown": "未检测",
+      "statusOk": "可用",
+      "statusWarning": "可能不兼容",
+      "statusMissing": "未找到",
+      "statusUnsupported": "路径不可用",
+      "statusUnavailable": "不可用",
+      "version": "版本 {{version}}",
+      "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置”，改用默认启动方式。",
+      "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置”，改用默认启动方式。",
+      "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置”。",
+      "dependencyInstalling": "正在后台安装 {{agents}} 依赖。安装期间暂未启用；安装完成后，请再次启用并保存配置。",
+      "dependencyInstalled": "请再次启用 {{agent}} 并保存配置。",
+      "dependencyInstallFailed": "{{agent}} 依赖安装失败。请检查安装日志后重试。",
+      "dependencyInstallPhasePreparing": "准备安装 {{agent}} 依赖",
+      "dependencyInstallPhaseInstalling": "正在安装 {{agent}} 依赖",
+      "dependencyInstallPhaseVerifying": "正在校验 {{agent}} 依赖",
+      "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装",
+      "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败",
+      "dependencyInstallRecentOutput": "安装日志"
+    },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",
       "subtitle": "按工具名设置 allow / ask / deny，立即写入配置并热更新；不含基于 pattern 的规则。",
@@ -1230,7 +1413,11 @@
     "enable": "启动",
     "disable": "停用",
     "loading": "正在加载任务列表...",
-    "empty": "暂无定时任务",
+    "empty": {
+      "createButton": "创建定时任务",
+      "templateSectionTitle": "任务模板",
+      "templateMore": "更多"
+    },
     "deleteConfirm": "确定要删除这个任务吗？",
     "autoManaged": "自动维护",
     "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。仅 Cron 表达式与时区可在此面板编辑，其余字段（名称/状态/描述/偏移/频道）不可改；删除请到设置关闭开关。",
@@ -1285,11 +1472,6 @@
       "history": "运行历史",
       "triggeredSessions": "执行记录",
       "noTriggeredSessions": "暂无触发记录"
-    },
-    "empty": {
-      "createButton": "创建定时任务",
-      "templateSectionTitle": "任务模板",
-      "templateMore": "更多"
     },
     "history": {
       "comingSoon": "该功能即将上线"
@@ -2450,10 +2632,22 @@
       "cancel": "取消",
       "confirm": "确定"
     },
-    "runtime": { "processing": "处理中" },
-    "deleteDialog": { "title": "删除", "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。" },
-    "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
-    "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
+    "runtime": {
+      "processing": "处理中"
+    },
+    "deleteDialog": {
+      "title": "删除",
+      "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。"
+    },
+    "notFound": {
+      "title": "对话不存在或已删除",
+      "newConversation": "新建对话"
+    },
+    "errors": {
+      "delete": "删除对话失败",
+      "create": "创建对话失败",
+      "send": "发送消息失败"
+    }
   },
   "mermaid": {
     "rendering": "绘制中…",

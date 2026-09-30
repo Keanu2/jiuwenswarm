@@ -620,6 +620,27 @@ class TestGetAllSessionsMetadata:
         assert len(sessions) == 2
 
 
+    @staticmethod
+    def test_excludes_groupchat_sessions(sessions_dir):
+        """群聊回合会话不该出现在会话列表。
+
+        它的 prompt 里嵌着整个群的对话记录（含其他成员发言），一旦出现在会话
+        列表，点开就等于把群聊内容暴露在普通聊天界面。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_all_sessions_metadata,
+        )
+
+        init_session_metadata(session_id="sess_a")
+        init_session_metadata(session_id="groupchat_3", channel_id="groupchat")
+        init_session_metadata(session_id="sess_b")
+
+        sessions, total = get_all_sessions_metadata(limit=20)
+        assert total == 2
+        assert {s["session_id"] for s in sessions} == {"sess_a", "sess_b"}
+
+
 # ===========================================================================
 # _read_metadata 容错
 # ===========================================================================

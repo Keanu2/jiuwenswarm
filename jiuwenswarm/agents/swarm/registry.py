@@ -47,6 +47,7 @@ from openjiuwen.agent_teams.schema.build_context import register_build_context_f
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.agents.swarm.providers import (
+    a2a_gateway as _a2a_gateway,
     builtin_rails as _builtin_rails,
     code_rails as _code_rails,
     code_subagents as _code_subagents,
@@ -70,6 +71,8 @@ SYMPHONY_TOOLKIT = _tools.SYMPHONY_TOOLKIT
 CRON_TOOLS = _runtime_tools.CRON_TOOLS
 SEND_FILE = _runtime_tools.SEND_FILE
 MEMBER_SKILL_TOOLKIT = _skills.MEMBER_SKILL_TOOLKIT
+# Outbound A2A file tools (a2a_send_file / a2a_send_local_file).
+A2A_SEND = _a2a_gateway.A2A_SEND
 # Generic tools provided + registered by openjiuwen (referenced by bare name).
 WEB_SEARCH = _OJ_WEB_SEARCH
 WEB_FETCH = _OJ_WEB_FETCH
@@ -196,6 +199,7 @@ __all__ = [
     "AUDIO",
     "CRON_TOOLS",
     "SEND_FILE",
+    "A2A_SEND",
     "MEMBER_SKILL_TOOLKIT",
     "RUNTIME_PROMPT",
     "TEAM_SKILL_STORAGE_POLICY",

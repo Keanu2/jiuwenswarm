@@ -819,6 +819,23 @@ class WebChannel(BaseWsChannel):
             )
             return
 
+        # ── 「项目」群聊下行：项目面板是全局的（不绑定任何会话），群里来了新消息或
+        # 订阅状态变化时，按 group_id 广播给所有 web 连接，由前端过滤出当前打开的项目。
+        # 与上面 heartbeat/cron/proactive 同理：无 session_id 会被下面的旧路径丢弃。
+        if msg.event_type in (EventType.TEAM_GROUP_MESSAGE, EventType.TEAM_GROUP_STATE):
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] %s broadcast to %d client(s) id=%s group_id=%s",
+                msg.event_type.value,
+                len(clients),
+                getattr(msg, "id", ""),
+                (msg.payload or {}).get("group_id") if isinstance(msg.payload, dict) else None,
+            )
+            return
+
         if msg.type == "res":
             if isinstance(msg.payload, dict):
                 res_payload = {**msg.payload}
