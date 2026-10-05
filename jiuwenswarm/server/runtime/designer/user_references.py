@@ -258,28 +258,36 @@ async def classify_reference_images(
         "decompose, or generate a new identity sheet / set plate from the still. "
         "Output ONLY one JSON object: "
         '{"reference_reads":[{"slot":1,"subject":"object","roles":["product_hero"],'
-        '"binding":"verbatim","style_authority":false,"set_lock":false,'
+        '"binding":"verbatim","video_binding":"multi_ref_story",'
+        '"style_authority":false,"set_lock":false,'
         '"motion_source":false,"medium":"","look":"","palette":"",'
         '"character_id":"","setting_id":"","rationale":""}]}. '
         "One read per image; slot numbers follow the roster order. "
         "roles is a list. Use character_identity for a person who will perform, "
         "scene_source for a place, product_hero for an item that must stay as itself, "
-        "still_motion_source when this image is the frame that should move, "
-        "style_source when only the medium and palette should be copied. "
-        "subject remains character, scene, or object for compatibility.\n"
+        "still_motion_source only when this image is the opening keyframe for a "
+        "true animate-this-frame job, style_source when only the medium and palette "
+        "should be copied. subject remains character, scene, or object for compatibility.\n"
         "Decide these fields from the user's intent and wording in ANY language — "
-        "reason about meaning, never match fixed phrases:\n"
+        "reason about meaning, never match fixed phrases or slogan banks:\n"
+        "- video_binding (required, job-level intent; put the same value on each read): "
+        "'multi_ref_story' (DEFAULT) for advertise / act / film / dinner / celebrate / "
+        "product shot / story with identity or set references — clips use R2V and keep "
+        "all uploads + generated cast/set as reference images. "
+        "'animate_keyframe' ONLY when the user wants that still itself animated as the "
+        "video's opening frame (e.g. animate this picture / painting / photo as the clip). "
+        "Story verbs alone must NOT select animate_keyframe.\n"
         "- binding: prefer 'verbatim' (file itself is the reference card; no "
         "image-gen pass). Use 'condition' ONLY for an explicit restyle / redraw / "
-        "new sheet / new plate request. Animate / act / advertise / dinner / "
-        "product shot while keeping the look = character_identity|scene_source|"
-        "product_hero|still_motion_source + verbatim. If the still IS the frame "
-        "to animate as-is, add still_motion_source + verbatim.\n"
+        "new sheet / new plate request. Advertise / act / dinner / product shot while "
+        "keeping the look = character_identity|scene_source|product_hero + verbatim + "
+        "video_binding=multi_ref_story. Add still_motion_source only together with "
+        "video_binding=animate_keyframe when the still IS the frame to animate.\n"
         "- set_lock: true when this still must stay the exact environment geometry of "
         "the film (the user is staging the story or ad inside this place). For a "
         "scene used as-is this is usually true.\n"
         "- style_authority: true when the film's medium/look should follow this "
-        "still's rendering (typical for as-is character/scene/product/motion). "
+        "still's rendering (typical for as-is character/scene/product). "
         "Leave it false only when the user named a competing medium in text "
         "(e.g. a photoreal live-action ad over a cartoon still) so their words win.\n"
         "- character_id / setting_id: copy an id from the analysis cast/set roster "
@@ -287,7 +295,7 @@ async def classify_reference_images(
         "- medium/look/palette: if you can see the picture, name its medium (e.g. "
         "anime, cartoon, photoreal, oil painting), its look, and palette. Leave them "
         "empty if you cannot see pixels — do NOT guess a medium from topic words.\n"
-        "- rationale: one short clause explaining the binding, for debugging."
+        "- rationale: one short clause explaining the binding and video_binding."
     )
     payload = {
         "user_prompt": (prompt or "")[:2000],
