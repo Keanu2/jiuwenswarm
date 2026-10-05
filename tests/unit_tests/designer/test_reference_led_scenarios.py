@@ -50,7 +50,20 @@ _REFERENCE_LED = (
     / "reference_led.py"
 )
 _FORBIDDEN = ("moon cake", "月饼", "climb a wall", "as a painting")
+# 10 scenario kinds × 1000 = 10000 parametric topology cases (plus dedicated Fix tests).
 _CASES_PER_SCENARIO = 1000
+_SCENARIO_KINDS = (
+    "product",
+    "motion",
+    "scene",
+    "character",
+    "text",
+    "character_family",
+    "character_condition_family",
+    "product_cast",
+    "scene_cast",
+    "motion_cast",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +96,7 @@ def _cases(kind: str) -> list[dict]:
                 "lighting": f"light-{index % 11}",
                 "crowd": f"crowd-{index % 7}",
                 "binding": "condition" if index % 2 else "verbatim",
+                "suppress": bool(index % 5 == 0) if kind == "motion_cast" else False,
             }
         )
     return rows
@@ -109,46 +123,104 @@ def _shots(case: dict) -> list[dict]:
     return shots
 
 
+def _family_cast(case: dict) -> list[dict]:
+    return [
+        {"id": "char_1", "name": "Subject", "description": "lead person"},
+        {"id": "char_2", "name": f"Companion-A-{case['index'] % 9}", "description": "family adult"},
+        {"id": "char_3", "name": f"Companion-B-{case['index'] % 5}", "description": "family elder"},
+    ]
+
+
 def _analysis(case: dict) -> dict:
     kind = case["kind"]
     style = {"look": case["look"], "medium": case["medium"]}
+    # Solo fixtures: product/scene/motion do not list incidental cast/set that
+    # would mint companion sheets/plates. Character keeps a solo covered cast.
+    # *_family / *_cast kinds exercise companion generation across modes.
+    if kind == "text":
+        characters = [{"id": "char_1", "name": "Subject", "description": "a person"}]
+        scenes = [{"id": "set_1", "name": "Place", "description": f"place-{case['index']}"}]
+    elif kind in {"character", "character_family", "character_condition_family"}:
+        characters = (
+            _family_cast(case)
+            if kind.endswith("family")
+            else [{"id": "char_1", "name": "Subject", "description": "a person"}]
+        )
+        scenes = [{"id": "set_1", "name": "Place", "description": f"place-{case['index']}"}]
+    elif kind == "scene":
+        characters = []
+        scenes = [{"id": "set_1", "name": "Place", "description": f"place-{case['index']}"}]
+    elif kind == "scene_cast":
+        characters = _family_cast(case)
+        scenes = [
+            {"id": "set_1", "name": "Place", "description": f"place-{case['index']}"},
+            {"id": "set_2", "name": f"Alt-{case['index'] % 3}", "description": "second room"},
+        ]
+    elif kind in {"motion", "motion_cast"}:
+        characters = (
+            _family_cast(case)
+            if kind == "motion_cast"
+            else [{"id": "char_1", "name": "Subject", "description": "a person"}]
+        )
+        scenes = []
+    elif kind == "product_cast":
+        characters = _family_cast(case)
+        scenes = [{"id": "set_1", "name": "Store", "description": f"store-{case['index']}"}]
+    else:
+        # product
+        characters = []
+        scenes = []
     base = {
         "source": "llm",
         "style_lock": style,
-        "characters": [{"id": "char_1", "name": "Subject", "description": "a person"}],
-        "scenes": [{"id": "set_1", "name": "Place", "description": f"place-{case['index']}"}],
+        "characters": characters,
+        "scenes": scenes,
         "shots": _shots(case),
         "audio": {"policy": "silent", "include_speech": False, "include_music": False},
     }
     if kind == "text":
         return base
     path = f"/refs/{kind}-{case['index']}.png"
-    if kind == "product":
+    if kind in {"product", "product_cast"}:
         roles = [ROLE_PRODUCT]
         binding = "verbatim"
-    elif kind == "motion":
+        character_id = ""
+        setting_id = ""
+    elif kind in {"motion", "motion_cast"}:
         roles = [ROLE_MOTION]
         binding = case["binding"]
-    elif kind == "scene":
+        character_id = "char_1"
+        setting_id = ""
+    elif kind in {"scene", "scene_cast"}:
         roles = [ROLE_SCENE]
         binding = "verbatim"
-    else:
+        character_id = ""
+        setting_id = "set_1"
+    elif kind == "character_condition_family":
         roles = [ROLE_CHARACTER]
         binding = "condition"
-    base["creative_intent"] = {
-        "mode": "reference_led",
-        "slots": [
-            {
-                "slot": 1,
-                "path": path,
-                "roles": roles,
-                "bindings": {roles[0]: binding},
-                "character_id": "char_1" if kind == "character" else "",
-                "setting_id": "set_1" if kind == "scene" else "",
-                "node_id": "n_ref_01",
-            }
-        ],
+        character_id = "char_1"
+        setting_id = ""
+    else:
+        # character / character_family — default use-as-is
+        roles = [ROLE_CHARACTER]
+        binding = "verbatim"
+        character_id = "char_1"
+        setting_id = ""
+    slot: dict = {
+        "slot": 1,
+        "path": path,
+        "roles": roles,
+        "bindings": {roles[0]: binding},
+        "character_id": character_id,
+        "setting_id": setting_id,
+        "node_id": "n_ref_01",
     }
+    intent: dict = {"mode": "reference_led", "slots": [slot]}
+    if case.get("suppress"):
+        intent["suppress_companions"] = True
+        slot["suppress_companions"] = True
+    base["creative_intent"] = intent
     return base
 
 
@@ -222,6 +294,15 @@ def _assert_shared_contract(case: dict, graph: dict) -> None:
     assert int(graph["metadata"]["film_duration_sec"]) == total
 
 
+def _companion_sheets(graph: dict) -> list[dict]:
+    found = []
+    for node in graph.get("nodes") or []:
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        if cfg.get("companion_cast") is True:
+            found.append(node)
+    return found
+
+
 def _assert_reference_case(case: dict) -> None:
     graph = _graph(case)
     _assert_shared_contract(case, graph)
@@ -240,6 +321,16 @@ def _assert_reference_case(case: dict) -> None:
             assert cfg["reference_prompt_contract"] == "product"
             assert cfg["reference_image_plan"][0]["role"] == ROLE_PRODUCT
             assert "Image 1" in cfg["generate"]["prompt"]
+    elif kind == "product_cast":
+        # Product still covers no cast ids → all analysis characters are companions.
+        companions = _companion_sheets(graph)
+        assert len(companions) == 3
+        assert all(c["config"]["style_lock"]["medium"] == case["medium"] for c in companions)
+        assert len(_scene_nodes(graph)) == 1  # uncovered store plate
+        for clip in clips:
+            cfg = clip["config"]
+            assert cfg["reference_call_mode"] == "r2v"
+            assert cfg["reference_image_plan"][0]["role"] == ROLE_PRODUCT
     elif kind == "motion":
         assert not _tasks(graph, "identity_sheet")
         assert not _scene_nodes(graph)
@@ -256,6 +347,15 @@ def _assert_reference_case(case: dict) -> None:
             assert clips[0]["config"]["reference_first_frame"].endswith(
                 f"motion-{case['index']}.png"
             )
+    elif kind == "motion_cast":
+        for clip in clips:
+            assert clip["config"]["reference_call_mode"] == "i2v"
+        companions = _companion_sheets(graph)
+        if case.get("suppress"):
+            assert companions == []
+        else:
+            assert len(companions) == 2
+            assert all(c["config"]["style_lock"]["medium"] == case["medium"] for c in companions)
     elif kind == "scene":
         assert not _tasks(graph, "identity_sheet")
         assert not _scene_nodes(graph)
@@ -267,17 +367,53 @@ def _assert_reference_case(case: dict) -> None:
             assert plan[-1]["role"] == ROLE_SCENE
             assert plan[-1]["path"].endswith(f"scene-{case['index']}.png")
             assert "last reference" in cfg["generate"]["prompt"].lower()
-    else:
-        assert len(_tasks(graph, "identity_sheet")) == 1
+    elif kind == "scene_cast":
+        # Scene still covers set_1 only; all three analysis characters are companions.
+        companions = _companion_sheets(graph)
+        assert len(companions) == 3
+        # Locked set_1 stays upload; uncovered set_2 becomes a plate.
         assert len(_scene_nodes(graph)) == 1
-        assert f"place-{case['index']}" in _scene_nodes(graph)[0]["config"]["prompt"]
+        assert _scene_nodes(graph)[0]["config"]["setting_id"] == "set_2"
+        for clip in clips:
+            plan = clip["config"]["reference_image_plan"]
+            assert any(e["node_id"] == "n_ref_01" and e["role"] == ROLE_SCENE for e in plan)
+    elif kind == "character_family":
+        assert ref["config"].get("reference_card_role") == "character_design"
+        companions = _companion_sheets(graph)
+        assert len(companions) == 2
+        assert not _scene_nodes(graph)  # pure character job: no invented set
+        for clip in clips:
+            plan = clip["config"]["reference_image_plan"]
+            assert plan[0]["node_id"] == "n_ref_01"
+            assert plan[0]["path"].endswith(f"character_family-{case['index']}.png")
+            sheet_ids = [e["node_id"] for e in plan if e["node_id"].startswith("n_character_")]
+            assert len(sheet_ids) == 2
+    elif kind == "character_condition_family":
+        assert "reference_card_role" not in ref["config"]
+        sheets = _tasks(graph, "identity_sheet")
+        assert len(sheets) == 3  # self condition sheet + 2 companions
+        companions = _companion_sheets(graph)
+        assert len(companions) == 2
+        for clip in clips:
+            plan = clip["config"]["reference_image_plan"]
+            assert plan[0]["node_id"].startswith("n_character_")
+            assert plan[0]["path"] == ""
+    else:
+        # Default character path: upload card as-is, no sheet, no invented plate.
+        assert not _tasks(graph, "identity_sheet")
+        assert not _scene_nodes(graph)
+        ref = next(node for node in graph["nodes"] if node["id"] == "n_ref_01")
+        assert ref["config"].get("reference_card_role") == "character_design"
         for clip in clips:
             cfg = clip["config"]
-            roles = [item["role"] for item in cfg["reference_image_plan"]]
+            plan = cfg["reference_image_plan"]
+            roles = [item["role"] for item in plan]
             assert cfg["reference_call_mode"] == "r2v"
             assert cfg["reference_prompt_contract"] == "character"
             assert roles[0] == ROLE_CHARACTER
-            assert roles[-1] == ROLE_SCENE
+            assert plan[0]["node_id"] == "n_ref_01"
+            assert plan[0]["path"].endswith(f"character-{case['index']}.png")
+            assert ROLE_SCENE not in roles
             assert "Image 1" in cfg["generate"]["prompt"]
 
 
@@ -326,6 +462,33 @@ def test_character_scenario(case: dict) -> None:
 @pytest.mark.parametrize("case", _cases("text"), ids=lambda case: case["id"])
 def test_text_film_scenario(case: dict) -> None:
     _assert_text_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("character_family"), ids=lambda case: case["id"])
+def test_character_family_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize(
+    "case", _cases("character_condition_family"), ids=lambda case: case["id"]
+)
+def test_character_condition_family_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("product_cast"), ids=lambda case: case["id"])
+def test_product_cast_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("scene_cast"), ids=lambda case: case["id"])
+def test_scene_cast_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("motion_cast"), ids=lambda case: case["id"])
+def test_motion_cast_scenario(case: dict) -> None:
+    _assert_reference_case(case)
 
 
 def test_reference_led_source_has_no_scene_specific_rules() -> None:
@@ -416,7 +579,11 @@ def test_chat_cannot_remove_a_still_a_reference_led_clip_uses() -> None:
 
     from jiuwenswarm.common.schema.designer_graph import DesignerGraphValidationError
 
-    graph = _graph(_cases("character")[0])
+    # Default character is use-as-is (no sheet). Exercise the restyle path that
+    # still builds an identity_sheet the clip depends on.
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="condition", character_id="char_1")]
+    )
     candidate = deepcopy(graph)
     sheet_id = _tasks(candidate, "identity_sheet")[0]["id"]
     _remove_node(candidate, sheet_id)
@@ -436,3 +603,611 @@ async def test_director_does_not_rebuild_a_reference_led_graph() -> None:
     assert ack["source"] == "reference_led"
     assert graph["graph_id"] == graph_id
     assert _clips(graph)
+
+
+# ---------------------------------------------------------------------------
+# Intent-driven topology: inject the classify JSON the LLM would return and
+# assert graph structure. No production code reads user-prompt phrases; the
+# bindings / set_lock / style_authority / medium fields alone drive these.
+# ---------------------------------------------------------------------------
+
+
+def _base_analysis(
+    slots: list[dict],
+    *,
+    style_lock: dict | None = None,
+    characters: list[dict] | None = None,
+    scenes: list[dict] | None = None,
+) -> dict:
+    return {
+        "source": "llm",
+        "style_lock": style_lock if style_lock is not None else {"look": "base-look", "medium": "base-medium"},
+        "characters": (
+            characters
+            if characters is not None
+            else [{"id": "char_1", "name": "Subject", "description": "a person"}]
+        ),
+        "scenes": (
+            scenes
+            if scenes is not None
+            else [{"id": "set_1", "name": "Place", "description": "a-room"}]
+        ),
+        "shots": [
+            {
+                "shot_index": 1,
+                "action": "beat-one",
+                "end_state": "end-one",
+                "camera": "medium",
+                "duration_sec": 4,
+                "setting_id": "set_1",
+            },
+            {
+                "shot_index": 2,
+                "action": "beat-two",
+                "end_state": "end-two",
+                "camera": "medium",
+                "duration_sec": 4,
+                "setting_id": "set_1",
+            },
+        ],
+        "audio": {"policy": "silent", "include_speech": False, "include_music": False},
+        "creative_intent": {"mode": "reference_led", "slots": slots},
+    }
+
+
+def _slot(
+    roles: list[str],
+    *,
+    binding: str | None = None,
+    bindings: dict | None = None,
+    path: str = "/refs/upload.png",
+    node_id: str = "n_ref_01",
+    slot: int = 1,
+    character_id: str = "",
+    setting_id: str = "",
+    **extra,
+) -> dict:
+    entry: dict = {"slot": slot, "path": path, "roles": list(roles), "node_id": node_id}
+    if bindings is not None:
+        entry["bindings"] = bindings
+    elif binding is not None:
+        entry["bindings"] = {role: binding for role in roles}
+    if character_id:
+        entry["character_id"] = character_id
+    if setting_id:
+        entry["setting_id"] = setting_id
+    entry.update(extra)
+    return entry
+
+
+def _intent_graph(
+    slots: list[dict],
+    *,
+    style_lock: dict | None = None,
+    characters: list[dict] | None = None,
+    scenes: list[dict] | None = None,
+) -> dict:
+    return build_smart_video_graph(
+        project_id="proj_intent",
+        prompt="reference intent case",
+        analysis=_base_analysis(
+            slots, style_lock=style_lock, characters=characters, scenes=scenes
+        ),
+        optimize_for="quality",
+    )
+
+
+def _node(graph: dict, node_id: str) -> dict:
+    return next(node for node in graph["nodes"] if node["id"] == node_id)
+
+
+# --- Fix 1: character verbatim skips the identity sheet ---------------------
+
+
+def test_character_verbatim_fills_card_and_skips_sheet() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="char_1")]
+    )
+    assert not _tasks(graph, "identity_sheet")
+    assert not _scene_nodes(graph)
+    ref = _node(graph, "n_ref_01")
+    assert ref["config"]["reference_card_role"] == "character_design"
+    assert ref["output_ref"]["uri"].endswith("upload.png")
+    for clip in _clips(graph):
+        cfg = clip["config"]
+        assert cfg["reference_prompt_contract"] == "character"
+        char_entries = [e for e in cfg["reference_image_plan"] if e["role"] == ROLE_CHARACTER]
+        assert char_entries
+        assert char_entries[0]["node_id"] == "n_ref_01"
+        assert char_entries[0]["path"].endswith("upload.png")
+        assert not any(e["role"] == ROLE_SCENE for e in cfg["reference_image_plan"])
+
+
+def test_character_omitted_binding_defaults_to_verbatim() -> None:
+    """Missing / invalid binding must not invent a sheet or plate."""
+    from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
+        BINDING_VERBATIM,
+        ROLE_CHARACTER,
+        _bindings_for,
+    )
+
+    bindings = _bindings_for({"roles": [ROLE_CHARACTER]}, [ROLE_CHARACTER])
+    assert bindings[ROLE_CHARACTER] == BINDING_VERBATIM
+
+    graph = _intent_graph(
+        [
+            {
+                "slot": 1,
+                "path": "/refs/upload.png",
+                "roles": [ROLE_CHARACTER],
+                "bindings": {},
+                "character_id": "char_1",
+                "setting_id": "",
+                "node_id": "n_ref_01",
+            }
+        ]
+    )
+    assert not _tasks(graph, "identity_sheet")
+    assert not _scene_nodes(graph)
+    ref = _node(graph, "n_ref_01")
+    assert ref["config"]["reference_card_role"] == "character_design"
+
+
+def test_character_condition_still_builds_identity_sheet() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="condition", character_id="char_1")]
+    )
+    assert len(_tasks(graph, "identity_sheet")) == 1
+    # Restyle character alone must not invent a text set plate.
+    assert not _scene_nodes(graph)
+    ref = _node(graph, "n_ref_01")
+    assert "reference_card_role" not in ref["config"]
+    for clip in _clips(graph):
+        char_entries = [
+            e for e in clip["config"]["reference_image_plan"] if e["role"] == ROLE_CHARACTER
+        ]
+        assert char_entries and char_entries[0]["node_id"].startswith("n_character_")
+        assert char_entries[0]["path"] == ""
+        assert not any(e["role"] == ROLE_SCENE for e in clip["config"]["reference_image_plan"])
+
+
+def test_scene_condition_without_lock_may_invent_plate() -> None:
+    """Only an explicit scene restyle invents a T2I plate."""
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_CHARACTER],
+                binding="verbatim",
+                character_id="char_1",
+                slot=1,
+                node_id="n_ref_01",
+                path="/refs/person.png",
+            ),
+            _slot(
+                [ROLE_SCENE],
+                binding="condition",
+                setting_id="set_1",
+                slot=2,
+                node_id="n_ref_02",
+                path="/refs/room.png",
+            ),
+        ]
+    )
+    assert not _tasks(graph, "identity_sheet")
+    assert len(_scene_nodes(graph)) == 1
+    for clip in _clips(graph):
+        scene_entries = [
+            e for e in clip["config"]["reference_image_plan"] if e["role"] == ROLE_SCENE
+        ]
+        assert scene_entries and scene_entries[-1]["node_id"].startswith("n_scene_")
+        assert scene_entries[-1]["path"] == ""
+
+
+# --- Fix 3: set_lock / scene verbatim locks the set, no invented plate ------
+
+
+def test_scene_set_lock_locks_set_and_skips_plate() -> None:
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_CHARACTER],
+                binding="condition",
+                character_id="char_1",
+                slot=1,
+                node_id="n_ref_01",
+                path="/refs/person.png",
+            ),
+            _slot(
+                [ROLE_SCENE],
+                binding="condition",
+                setting_id="set_1",
+                slot=2,
+                node_id="n_ref_02",
+                path="/refs/room.png",
+                set_lock=True,
+            ),
+        ]
+    )
+    # Character still needs its sheet, but the locked scene is never invented.
+    assert len(_tasks(graph, "identity_sheet")) == 1
+    assert not _scene_nodes(graph)
+    scene_ref = _node(graph, "n_ref_02")
+    assert scene_ref["config"]["reference_card_role"] == "scene"
+    assert scene_ref["output_ref"]["uri"].endswith("room.png")
+    for clip in _clips(graph):
+        plan = clip["config"]["reference_image_plan"]
+        scene_entries = [e for e in plan if e["role"] == ROLE_SCENE]
+        assert scene_entries and scene_entries[-1]["node_id"] == "n_ref_02"
+        assert scene_entries[-1]["path"].endswith("room.png")
+
+
+# --- Fix 4/5: medium inheritance from an authority still --------------------
+
+
+def test_style_authority_without_vision_locks_to_reference() -> None:
+    from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
+        MATCH_REFERENCE_MEDIUM,
+    )
+
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_SCENE],
+                binding="verbatim",
+                setting_id="set_1",
+                set_lock=True,
+                style_authority=True,
+            )
+        ],
+        style_lock={"look": "photoreal commercial", "medium": "photoreal"},
+    )
+    lock = graph["metadata"]["style_lock"]
+    assert lock["medium"] == MATCH_REFERENCE_MEDIUM
+    for clip in _clips(graph):
+        prompt = clip["config"]["generate"]["prompt"]
+        assert "match the rendering" in prompt.lower()
+        assert clip["config"]["style_lock"]["medium"] == MATCH_REFERENCE_MEDIUM
+
+
+def test_style_authority_with_vision_inherits_named_medium() -> None:
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_SCENE],
+                binding="verbatim",
+                setting_id="set_1",
+                set_lock=True,
+                style_authority=True,
+                style_read={"medium": "anime", "look": "cel-shaded", "palette": "pastel"},
+            )
+        ],
+        style_lock={"look": "photoreal commercial", "medium": "photoreal"},
+    )
+    lock = graph["metadata"]["style_lock"]
+    assert lock["medium"] == "anime"
+    assert lock["look"] == "cel-shaded"
+    for clip in _clips(graph):
+        prompt = clip["config"]["generate"]["prompt"]
+        assert "Medium: anime." in prompt
+        assert "cel-shaded" in prompt
+
+
+def test_user_medium_wins_when_no_style_authority() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_SCENE], binding="verbatim", setting_id="set_1")],
+        style_lock={"look": "live-action", "medium": "photoreal"},
+    )
+    lock = graph["metadata"]["style_lock"]
+    assert lock["medium"] == "photoreal"
+    assert lock["look"] == "live-action"
+
+
+# --- Fix 6: product / motion verbatim --------------------------------------
+
+
+def test_product_verbatim_keeps_plan_path_and_card() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_PRODUCT], binding="verbatim", path="/refs/sku.png")],
+        characters=[],
+        scenes=[],
+    )
+    assert not _tasks(graph, "identity_sheet")
+    assert not _tasks(graph, "medium_change")
+    assert not _scene_nodes(graph)
+    ref = _node(graph, "n_ref_01")
+    assert ref["config"]["reference_card_role"] == "product"
+    for clip in _clips(graph):
+        plan = clip["config"]["reference_image_plan"]
+        assert plan[0]["role"] == ROLE_PRODUCT
+        assert plan[0]["path"].endswith("sku.png")
+
+
+def test_motion_verbatim_i2v_without_restyle() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_MOTION], binding="verbatim", path="/refs/frame.png")]
+    )
+    assert not _tasks(graph, "medium_change")
+    ref = _node(graph, "n_ref_01")
+    assert ref["config"]["reference_card_role"] == "motion"
+    for clip in _clips(graph):
+        cfg = clip["config"]
+        assert cfg["reference_call_mode"] == "i2v"
+        assert cfg["reference_first_frame"].endswith("frame.png")
+
+
+def test_motion_condition_builds_restyle_node() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_MOTION], binding="condition", path="/refs/frame.png")]
+    )
+    assert len(_tasks(graph, "medium_change")) == 1
+    ref = _node(graph, "n_ref_01")
+    assert "reference_card_role" not in ref["config"]
+    for clip in _clips(graph):
+        assert clip["config"]["reference_first_frame_node"] == "n_restyle_01"
+
+
+# --- Fix 2: classifier fields persist through stamp_creative_intent ---------
+
+
+def test_enriched_classify_fields_persist_into_slots() -> None:
+    from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
+        absorb_reference_read,
+        stamp_creative_intent,
+    )
+
+    item = {
+        "slot": 1,
+        "subject": "scene",
+        "roles": [ROLE_SCENE],
+        "binding": "verbatim",
+        "set_lock": True,
+        "style_authority": True,
+        "medium": "anime",
+        "look": "cel-shaded",
+        "palette": "pastel",
+        "rationale": "locked cartoon set",
+        "keyframe_complete": True,
+    }
+    read = absorb_reference_read(item, 1, "scene")
+    assert read["set_lock"] is True
+    assert read["style_authority"] is True
+    assert read["keyframe_complete"] is True
+    assert read["style_read"] == {"medium": "anime", "look": "cel-shaded", "palette": "pastel"}
+
+    analysis = stamp_creative_intent(
+        {"style_lock": {}}, [read], [{"path": "/refs/room.png"}]
+    )
+    slot = analysis["creative_intent"]["slots"][0]
+    assert slot["set_lock"] is True
+    assert slot["style_authority"] is True
+    assert slot["style_read"]["medium"] == "anime"
+    assert slot["bindings"][ROLE_SCENE] == "verbatim"
+    assert analysis["creative_intent"]["keyframe_complete"] is True
+
+
+# --- Companion cast / set: uncovered analysis ids get sheets/plates ---------
+
+
+_FAMILY = [
+    {"id": "xiaoyue", "name": "Xiaoyue", "description": "young woman"},
+    {"id": "father", "name": "Father", "description": "middle-aged man"},
+    {"id": "mother", "name": "Mother", "description": "middle-aged woman"},
+]
+
+_PLACES = [
+    {"id": "set_1", "name": "Dining room", "description": "family dining room"},
+    {"id": "set_2", "name": "Kitchen", "description": "warm kitchen"},
+]
+
+
+def test_verbatim_character_multi_cast_builds_companion_sheets() -> None:
+    """Verbatim still covers that id; other analysis characters get sheets."""
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="xiaoyue")],
+        characters=_FAMILY,
+        scenes=[_PLACES[0]],
+        style_lock={"look": "ink wash", "medium": "anime"},
+    )
+    sheets = _tasks(graph, "identity_sheet")
+    assert len(sheets) == 2
+    sheet_ids = {str(n["config"].get("character_id") or "") for n in sheets}
+    assert sheet_ids == {"father", "mother"}
+    assert not any(n["config"].get("character_id") == "xiaoyue" for n in sheets)
+    for sheet in sheets:
+        assert sheet["config"]["style_lock"]["medium"] == "anime"
+        assert sheet["config"].get("companion_cast") is True
+        assert "n_ref_01" not in (sheet["config"].get("inputs") or [])
+    ref = _node(graph, "n_ref_01")
+    assert ref["config"]["force_handler"] is True
+    assert ref["config"]["reference_card_role"] == "character_design"
+    for clip in _clips(graph):
+        plan = clip["config"]["reference_image_plan"]
+        char_entries = [e for e in plan if e["role"] == ROLE_CHARACTER]
+        assert char_entries[0]["node_id"] == "n_ref_01"
+        assert char_entries[0]["path"].endswith("upload.png")
+        assert {e["node_id"] for e in char_entries[1:]} == {
+            sheets[0]["id"],
+            sheets[1]["id"],
+        }
+        # Character-only job: no invented plate from the solo analysis scene.
+        assert not any(e["role"] == ROLE_SCENE for e in plan)
+    assert not _scene_nodes(graph)
+
+
+def test_verbatim_character_solo_cast_skips_companion_sheets() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="xiaoyue")],
+        characters=[{"id": "xiaoyue", "name": "Xiaoyue", "description": "young woman"}],
+    )
+    assert not _tasks(graph, "identity_sheet")
+    assert not _scene_nodes(graph)
+
+
+def test_condition_character_sheets_self_plus_companions() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="condition", character_id="xiaoyue")],
+        characters=_FAMILY,
+    )
+    sheets = _tasks(graph, "identity_sheet")
+    assert len(sheets) == 3
+    by_id = {str(n["config"].get("character_id") or ""): n for n in sheets}
+    assert set(by_id) == {"xiaoyue", "father", "mother"}
+    # Condition still feeds its own sheet; companions do not.
+    assert "n_ref_01" in (by_id["xiaoyue"]["config"].get("inputs") or [])
+    assert by_id["xiaoyue"].get("config", {}).get("companion_cast") is not True
+    assert by_id["father"]["config"].get("companion_cast") is True
+    assert "n_ref_01" not in (by_id["father"]["config"].get("inputs") or [])
+
+
+def test_scene_verbatim_builds_plates_for_uncovered_settings() -> None:
+    from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
+        MATCH_REFERENCE_MEDIUM,
+    )
+
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_SCENE],
+                binding="verbatim",
+                setting_id="set_1",
+                set_lock=True,
+                style_authority=True,
+            )
+        ],
+        characters=[],
+        scenes=_PLACES,
+        style_lock={"look": "photoreal", "medium": "photoreal"},
+    )
+    plates = _scene_nodes(graph)
+    assert len(plates) == 1
+    assert plates[0]["config"]["setting_id"] == "set_2"
+    # Authority still without vision inherits match-reference medium.
+    assert plates[0]["config"]["style_lock"]["medium"] == MATCH_REFERENCE_MEDIUM
+    ref = _node(graph, "n_ref_01")
+    assert ref["config"]["reference_card_role"] == "scene"
+    for clip in _clips(graph):
+        scene_entries = [
+            e for e in clip["config"]["reference_image_plan"] if e["role"] == ROLE_SCENE
+        ]
+        assert scene_entries[0]["node_id"] == "n_ref_01"
+        assert scene_entries[0]["path"].endswith("upload.png")
+        assert scene_entries[-1]["node_id"] == plates[0]["id"]
+        assert scene_entries[-1]["path"] == ""
+
+
+def test_scene_verbatim_with_cast_builds_companion_sheets() -> None:
+    """Locked set + multi-cast analysis → companion sheets, no plate for locked set."""
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_SCENE],
+                binding="verbatim",
+                setting_id="set_1",
+                set_lock=True,
+                style_authority=True,
+                style_read={"medium": "anime", "look": "cel-shaded"},
+            )
+        ],
+        characters=_FAMILY,
+        scenes=[_PLACES[0]],
+    )
+    assert not _scene_nodes(graph)
+    sheets = _tasks(graph, "identity_sheet")
+    assert len(sheets) == 3
+    for sheet in sheets:
+        assert sheet["config"]["style_lock"]["medium"] == "anime"
+
+
+def test_product_with_cast_builds_companion_sheets() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_PRODUCT], binding="verbatim", path="/refs/sku.png")],
+        characters=_FAMILY[:2],
+        scenes=[],
+    )
+    sheets = _tasks(graph, "identity_sheet")
+    assert len(sheets) == 2
+    ref = _node(graph, "n_ref_01")
+    assert ref["config"]["reference_card_role"] == "product"
+    for clip in _clips(graph):
+        plan = clip["config"]["reference_image_plan"]
+        assert plan[0]["role"] == ROLE_PRODUCT
+        assert any(e["node_id"].startswith("n_character_") for e in plan)
+
+
+def test_motion_multi_cast_allows_companions_unless_suppressed() -> None:
+    graph = _intent_graph(
+        [_slot([ROLE_MOTION], binding="verbatim", path="/refs/frame.png", character_id="xiaoyue")],
+        characters=_FAMILY,
+        scenes=[],
+    )
+    sheets = _tasks(graph, "identity_sheet")
+    assert len(sheets) == 2
+    assert {n["config"]["character_id"] for n in sheets} == {"father", "mother"}
+    for clip in _clips(graph):
+        assert clip["config"]["reference_call_mode"] == "i2v"
+        assert clip["config"]["reference_first_frame"].endswith("frame.png")
+
+    suppressed = _intent_graph(
+        [
+            _slot(
+                [ROLE_MOTION],
+                binding="verbatim",
+                path="/refs/frame.png",
+                character_id="xiaoyue",
+                keyframe_complete=True,
+            )
+        ],
+        characters=_FAMILY,
+        scenes=[],
+    )
+    assert not _tasks(suppressed, "identity_sheet")
+
+
+def test_multi_still_covers_each_id_only_uncovered_get_companions() -> None:
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_CHARACTER],
+                binding="verbatim",
+                character_id="xiaoyue",
+                slot=1,
+                node_id="n_ref_01",
+                path="/refs/xiaoyue.png",
+            ),
+            _slot(
+                [ROLE_CHARACTER],
+                binding="verbatim",
+                character_id="father",
+                slot=2,
+                node_id="n_ref_02",
+                path="/refs/father.png",
+            ),
+        ],
+        characters=_FAMILY,
+    )
+    sheets = _tasks(graph, "identity_sheet")
+    assert len(sheets) == 1
+    assert sheets[0]["config"]["character_id"] == "mother"
+    for clip in _clips(graph):
+        char_entries = [
+            e for e in clip["config"]["reference_image_plan"] if e["role"] == ROLE_CHARACTER
+        ]
+        assert {e["node_id"] for e in char_entries} == {
+            "n_ref_01",
+            "n_ref_02",
+            sheets[0]["id"],
+        }
+
+
+def test_slot_character_id_matches_analysis_name() -> None:
+    """Normalize so slot character_id can match analysis name/id."""
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="Xiaoyue")],
+        characters=[
+            {"id": "char_xy", "name": "Xiaoyue", "description": "young woman"},
+            {"id": "father", "name": "Father", "description": "dad"},
+        ],
+    )
+    sheets = _tasks(graph, "identity_sheet")
+    assert len(sheets) == 1
+    assert sheets[0]["config"]["character_id"] == "father"

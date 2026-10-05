@@ -8,6 +8,7 @@ roles on attached stills. No branch reads a scene, product, or example prompt.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.schema.designer_graph import (
@@ -35,6 +36,13 @@ BINDINGS = frozenset({BINDING_VERBATIM, BINDING_CONDITION})
 MODE_TEXT = "text_film"
 MODE_REFERENCE = "reference_led"
 
+# When an authority still owns the look but no vision labelled its medium, the
+# lock points back at the attached pixels instead of a guessed art-style name.
+MATCH_REFERENCE_MEDIUM = "match_reference_still"
+MATCH_REFERENCE_LOOK = (
+    "same rendering, line, shading, and palette as the attached reference image(s)"
+)
+
 _SUBJECT_ROLE = {
     "character": ROLE_CHARACTER,
     "scene": ROLE_SCENE,
@@ -45,12 +53,15 @@ _ROLE_SUBJECT = {
     ROLE_SCENE: "scene",
     ROLE_PRODUCT: "object",
 }
+# Use-as-is is the default for every reference role. An image-gen sheet /
+# restyle / invented plate is created only when the LLM returns
+# ``binding=condition`` (user asked to restyle / redraw / decompose).
 _DEFAULT_BINDING = {
-    ROLE_CHARACTER: BINDING_CONDITION,
+    ROLE_CHARACTER: BINDING_VERBATIM,
     ROLE_SCENE: BINDING_VERBATIM,
     ROLE_PRODUCT: BINDING_VERBATIM,
     ROLE_MOTION: BINDING_VERBATIM,
-    ROLE_STYLE: BINDING_CONDITION,
+    ROLE_STYLE: BINDING_VERBATIM,
 }
 
 
@@ -102,7 +113,7 @@ def absorb_reference_read(
     if slot < 1:
         slot = index
     bindings = _bindings_for(item, roles)
-    return {
+    read = {
         "slot": slot,
         "subject": subject,
         "character_id": str(item.get("character_id") or "").strip(),
@@ -110,6 +121,8 @@ def absorb_reference_read(
         "roles": roles,
         "bindings": bindings,
     }
+    _carry_intent_fields(read, item)
+    return read
 
 
 def stamp_creative_intent(
@@ -143,20 +156,28 @@ def stamp_creative_intent(
                 "Attached stills need a reference role before a graph can be built."
             )
         path = str(image.get("path") or image.get("uri") or "").strip()
-        slots.append(
-            {
-                "slot": index,
-                "path": path,
-                "roles": roles,
-                "bindings": _bindings_for(read, roles),
-                "character_id": str(read.get("character_id") or "").strip(),
-                "setting_id": str(read.get("setting_id") or "").strip(),
-                "node_id": f"n_ref_{index:02d}",
-            }
-        )
+        slot_entry = {
+            "slot": index,
+            "path": path,
+            "roles": roles,
+            "bindings": _bindings_for(read, roles),
+            "character_id": str(read.get("character_id") or "").strip(),
+            "setting_id": str(read.get("setting_id") or "").strip(),
+            "node_id": f"n_ref_{index:02d}",
+        }
+        _carry_intent_fields(slot_entry, read)
+        slots.append(slot_entry)
     out = dict(analysis)
     out["reference_reads"] = [dict(read) for read in (reads or []) if isinstance(read, dict)]
-    out["creative_intent"] = {"mode": MODE_REFERENCE, "slots": slots}
+    intent: dict[str, Any] = {"mode": MODE_REFERENCE, "slots": slots}
+    # Intent-level companion flags (classify may set these on any read row).
+    for read in reads or []:
+        if not isinstance(read, dict):
+            continue
+        for flag in ("suppress_companions", "solo_subject", "keyframe_complete"):
+            if _as_bool(read.get(flag)):
+                intent[flag] = True
+    out["creative_intent"] = intent
     return out
 
 
@@ -270,7 +291,12 @@ def compose_reference_clip_prompt(cfg: dict[str, Any] | None) -> str:
         f"Shot {index}, timeline {timeline}, duration {duration} seconds.",
         f"Visual style: {look}.",
     ]
-    if medium:
+    if medium == MATCH_REFERENCE_MEDIUM:
+        lines.append(
+            "Medium: match the rendering, line, shading, and palette of the "
+            "attached reference image(s); do not switch to another medium."
+        )
+    elif medium:
         lines.append(f"Medium: {medium}.")
     if lighting:
         lines.append(f"Lighting stays {lighting}.")
@@ -388,11 +414,13 @@ def build_reference_led_video_graph(
         analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else None,
         prompt=prompt_text,
     )
+    # Let an authority still own the film medium when the LLM flagged it.
+    style = _style_lock_from_references(style, slots)
     analysis["style_lock"] = dict(style)
     shots = _prepare_shots(analysis, prompt_text)
     analysis["shots"] = shots
     analysis["user_prompt"] = prompt_text
-    job = _job_plan(slots)
+    job = _job_plan(slots, analysis)
     mode = "cost" if str(optimize_for).strip().lower() == "cost" else "quality"
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
@@ -456,65 +484,115 @@ def build_reference_led_video_graph(
 
     for slot in slots:
         node_id = str(slot["node_id"])
-        add_node(
-            {
-                "id": node_id,
-                "type": NODE_TYPE_IMAGE,
+        path_value = str(slot.get("path") or "")
+        card_role = _verbatim_card_role(slot)
+        ref_config: dict[str, Any] = {
+            "role": NODE_TYPE_IMAGE,
+            "delegate": "handler",
+            "force_handler": True,
+            "skip_llm": True,
+            "read_only": True,
+            "immutable_source": True,
+            "interaction_mode": "upload",
+            "user_reference_id": f"ref_{int(slot['slot']):02d}",
+            "user_reference_path": path_value,
+            "reference_roles": list(slot.get("roles") or []),
+            "reference_bindings": dict(slot.get("bindings") or {}),
+            "inputs": [],
+        }
+        # Immediate card fill: a verbatim still is the card the user sees, so it
+        # already reads as its cast/scene/product role — never Play-regenerated.
+        if card_role:
+            ref_config["reference_card_role"] = card_role
+        if slot.get("style_authority"):
+            ref_config["style_authority"] = True
+        if slot.get("set_lock"):
+            ref_config["set_lock"] = True
+        ref_node: dict[str, Any] = {
+            "id": node_id,
+            "type": NODE_TYPE_IMAGE,
+            "label": f"Reference {slot['slot']}",
+            "config": ref_config,
+            "layout": {"x": 40, "y": 220 + (int(slot["slot"]) - 1) * 160, "width": 220, "height": 140},
+        }
+        # Pre-seed output_ref from the upload so the card shows at bootstrap.
+        if path_value:
+            ref_node["output_ref"] = {
+                "kind": NODE_TYPE_IMAGE,
+                "uri": _as_file_uri(path_value),
                 "label": f"Reference {slot['slot']}",
-                "config": {
-                    "role": NODE_TYPE_IMAGE,
-                    "delegate": "handler",
-                    "force_handler": True,
-                    "skip_llm": True,
-                    "read_only": True,
-                    "immutable_source": True,
-                    "interaction_mode": "upload",
-                    "user_reference_id": f"ref_{int(slot['slot']):02d}",
-                    "user_reference_path": slot.get("path") or "",
-                    "reference_roles": list(slot.get("roles") or []),
-                    "reference_bindings": dict(slot.get("bindings") or {}),
-                    "inputs": [],
-                },
-                "layout": {"x": 40, "y": 220 + (int(slot["slot"]) - 1) * 160, "width": 220, "height": 140},
             }
-        )
+        add_node(ref_node)
         add_edge(node_id, "n_brief")
 
     sheet_ids: list[str] = []
-    if job["sheets"]:
-        for index, slot in enumerate(job["character_slots"], start=1):
-            cid = str(slot.get("character_id") or f"char_{index}")
-            character = _character(analysis, cid)
-            sheet_id = f"n_character_{index}"
-            sheet_ids.append(sheet_id)
-            add_node(
-                {
-                    "id": sheet_id,
-                    "type": NODE_TYPE_IMAGE,
-                    "label": character.get("name") or f"Character {index}",
-                    "config": {
-                        "role": NODE_ROLE_CHARACTER_DESIGN,
-                        "character_id": character.get("id") or cid,
-                        "character_name": character.get("name") or f"Character {index}",
-                        "reference_still_task": "identity_sheet",
-                        "require_reference_images": True,
-                        "style_lock": dict(style),
-                        "inputs": ["n_storyboard", slot["node_id"]],
-                        "delegate": "handler",
-                        "optimize_for": mode,
-                        "prompt": still_task_prompt(
-                            {
-                                "reference_still_task": "identity_sheet",
-                                "character_name": character.get("name") or f"Character {index}",
-                                "style_lock": style,
-                            }
-                        ),
-                    },
-                    "layout": {"x": 320, "y": 220 + (index - 1) * 160, "width": 240, "height": 140},
-                }
-            )
-            add_edge("n_storyboard", sheet_id)
-            add_edge(str(slot["node_id"]), sheet_id)
+    sheet_index = 0
+    # Condition-bound stills: identity sheet redrawn from the upload.
+    for slot in job.get("character_sheet_slots") or []:
+        sheet_index += 1
+        cid = str(slot.get("character_id") or f"char_{sheet_index}")
+        character = _character(analysis, cid)
+        sheet_id = f"n_character_{sheet_index}"
+        sheet_ids.append(sheet_id)
+        add_node(
+            {
+                "id": sheet_id,
+                "type": NODE_TYPE_IMAGE,
+                "label": character.get("name") or f"Character {sheet_index}",
+                "config": {
+                    "role": NODE_ROLE_CHARACTER_DESIGN,
+                    "character_id": character.get("id") or cid,
+                    "character_name": character.get("name") or f"Character {sheet_index}",
+                    "reference_still_task": "identity_sheet",
+                    "require_reference_images": True,
+                    "style_lock": dict(style),
+                    "inputs": ["n_storyboard", slot["node_id"]],
+                    "delegate": "handler",
+                    "optimize_for": mode,
+                    "prompt": still_task_prompt(
+                        {
+                            "reference_still_task": "identity_sheet",
+                            "character_name": character.get("name") or f"Character {sheet_index}",
+                            "style_lock": style,
+                        }
+                    ),
+                },
+                "layout": {"x": 320, "y": 220 + (sheet_index - 1) * 160, "width": 240, "height": 140},
+            }
+        )
+        add_edge("n_storyboard", sheet_id)
+        add_edge(str(slot["node_id"]), sheet_id)
+
+    # Uncovered analysis cast: companion identity sheets under the same style_lock.
+    # No upload input — never regenerate a verbatim still for these ids.
+    for character in job.get("companion_characters") or []:
+        sheet_index += 1
+        cid = str(character.get("id") or f"char_{sheet_index}")
+        sheet_id = f"n_character_{sheet_index}"
+        sheet_ids.append(sheet_id)
+        name = str(character.get("name") or f"Character {sheet_index}")
+        add_node(
+            {
+                "id": sheet_id,
+                "type": NODE_TYPE_IMAGE,
+                "label": name,
+                "config": {
+                    "role": NODE_ROLE_CHARACTER_DESIGN,
+                    "character_id": cid,
+                    "character_name": name,
+                    "reference_still_task": "identity_sheet",
+                    "require_reference_images": False,
+                    "companion_cast": True,
+                    "style_lock": dict(style),
+                    "inputs": ["n_storyboard"],
+                    "delegate": "handler",
+                    "optimize_for": mode,
+                    "prompt": _companion_sheet_prompt(character, style),
+                },
+                "layout": {"x": 320, "y": 220 + (sheet_index - 1) * 160, "width": 240, "height": 140},
+            }
+        )
+        add_edge("n_storyboard", sheet_id)
 
     restyle_id = ""
     if job["restyle"]:
@@ -548,9 +626,11 @@ def build_reference_led_video_graph(
 
     plate_ids: list[str] = []
     if job["plates"]:
-        scenes = [s for s in (analysis.get("scenes") or []) if isinstance(s, dict)] or [
-            {"id": "set_1", "name": "Setting", "description": "Environment for this story."}
-        ]
+        scenes = list(job.get("companion_scenes") or [])
+        if not scenes:
+            scenes = [s for s in (analysis.get("scenes") or []) if isinstance(s, dict)] or [
+                {"id": "set_1", "name": "Setting", "description": "Environment for this story."}
+            ]
         for index, scene in enumerate(scenes, start=1):
             plate_id = f"n_scene_{index}"
             plate_ids.append(plate_id)
@@ -615,6 +695,10 @@ def build_reference_led_video_graph(
             else:
                 cfg["reference_first_frame"] = str(job["motion_slots"][0].get("path") or "")
                 cfg["inputs"].append(str(job["motion_slots"][0]["node_id"]))
+            # Companion cast sheets must reach compose or prune drops them.
+            for sheet_id in sheet_ids:
+                if sheet_id not in cfg["inputs"]:
+                    cfg["inputs"].append(sheet_id)
         else:
             for entry in plan:
                 node_id = str(entry.get("node_id") or "")
@@ -704,6 +788,48 @@ def _role_list(value: Any) -> list[str]:
     return out
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
+
+
+def _style_read(item: dict[str, Any]) -> dict[str, str]:
+    """Pull a vision medium/look/palette read off a classifier row, if present."""
+    out: dict[str, str] = {}
+    nested = item.get("style_read") if isinstance(item.get("style_read"), dict) else {}
+    for source in (item, nested):
+        for key in ("medium", "look", "palette"):
+            value = str(source.get(key) or "").strip()
+            if value and key not in out:
+                out[key] = value[:280]
+    return out
+
+
+def _carry_intent_fields(target: dict[str, Any], item: dict[str, Any]) -> None:
+    """Persist the LLM's enriched intent flags; only keep the ones it set.
+
+    The classifier returns these; code never parses the user prompt to infer
+    them. Absent / false flags leave the dict untouched so defaults still apply.
+    """
+    if _as_bool(item.get("style_authority")):
+        target["style_authority"] = True
+    if _as_bool(item.get("set_lock")):
+        target["set_lock"] = True
+    if _as_bool(item.get("motion_source")):
+        target["motion_source"] = True
+    # Companion-suppression flags: keyframe-complete / solo / explicit skip.
+    for flag in ("suppress_companions", "solo_subject", "keyframe_complete"):
+        if _as_bool(item.get(flag)):
+            target[flag] = True
+    style_read = _style_read(item)
+    if style_read:
+        target["style_read"] = style_read
+    rationale = str(item.get("rationale") or "").strip()
+    if rationale:
+        target["rationale"] = rationale[:280]
+
+
 def _bindings_for(item: dict[str, Any], roles: list[str]) -> dict[str, str]:
     raw = item.get("bindings") if isinstance(item.get("bindings"), dict) else {}
     single = str(item.get("binding") or "").strip().lower()
@@ -716,55 +842,361 @@ def _bindings_for(item: dict[str, Any], roles: list[str]) -> dict[str, str]:
     return out
 
 
+def _norm_id(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return "_".join(text.replace("-", "_").split())
+
+
 def _character(analysis: dict[str, Any], character_id: str) -> dict[str, Any]:
+    needle = _norm_id(character_id)
     for item in analysis.get("characters") or []:
-        if isinstance(item, dict) and str(item.get("id") or "") == character_id:
+        if not isinstance(item, dict):
+            continue
+        if needle and (
+            _norm_id(item.get("id")) == needle or _norm_id(item.get("name")) == needle
+        ):
             return item
     characters = [item for item in (analysis.get("characters") or []) if isinstance(item, dict)]
     if len(characters) == 1:
         return characters[0]
-    return {"id": character_id, "name": "Reference subject", "description": "The person in the reference image."}
+    return {
+        "id": character_id or "char_1",
+        "name": "Reference subject",
+        "description": "The person in the reference image.",
+    }
 
 
-def _job_plan(slots: list[dict[str, Any]]) -> dict[str, Any]:
+def _analysis_characters(analysis: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return [item for item in ((analysis or {}).get("characters") or []) if isinstance(item, dict)]
+
+
+def _analysis_scenes(analysis: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return [item for item in ((analysis or {}).get("scenes") or []) if isinstance(item, dict)]
+
+
+def _suppress_companions(intent: dict[str, Any], slots: list[dict[str, Any]]) -> bool:
+    """True when the LLM marked the job as solo / keyframe-complete / no companions."""
+    for flag in ("suppress_companions", "solo_subject", "keyframe_complete"):
+        if _as_bool(intent.get(flag)):
+            return True
+    for slot in slots:
+        for flag in ("suppress_companions", "solo_subject", "keyframe_complete"):
+            if _as_bool(slot.get(flag)):
+                return True
+    return False
+
+
+def _cover_character_keys(
+    covered: set[str], slot_key: str, characters: list[dict[str, Any]]
+) -> None:
+    key = _norm_id(slot_key)
+    if not key:
+        return
+    covered.add(key)
+    for item in characters:
+        cid = _norm_id(item.get("id"))
+        cname = _norm_id(item.get("name"))
+        if key == cid or key == cname:
+            if cid:
+                covered.add(cid)
+            if cname:
+                covered.add(cname)
+
+
+def _covered_character_ids(
+    slots: list[dict[str, Any]], analysis: dict[str, Any] | None
+) -> set[str]:
+    """Ids/names already supplied by a character (or tagged motion) still."""
+    characters = _analysis_characters(analysis)
+    covered: set[str] = set()
+    for slot in slots:
+        roles = slot.get("roles") or []
+        cid = str(slot.get("character_id") or "").strip()
+        if ROLE_CHARACTER in roles or (ROLE_MOTION in roles and cid):
+            if cid:
+                _cover_character_keys(covered, cid, characters)
+            elif ROLE_CHARACTER in roles and len(characters) == 1:
+                _cover_character_keys(covered, str(characters[0].get("id") or ""), characters)
+                _cover_character_keys(covered, str(characters[0].get("name") or ""), characters)
+    return covered
+
+
+def _companion_characters(
+    analysis: dict[str, Any] | None, covered: set[str]
+) -> list[dict[str, Any]]:
+    """Analysis cast members not already covered by a still — never invent beyond analysis."""
+    out: list[dict[str, Any]] = []
+    for item in _analysis_characters(analysis):
+        cid = _norm_id(item.get("id"))
+        cname = _norm_id(item.get("name"))
+        if (cid and cid in covered) or (cname and cname in covered):
+            continue
+        if not cid and not cname:
+            continue
+        out.append(item)
+    return out
+
+
+def _covered_setting_ids(
+    slots: list[dict[str, Any]], analysis: dict[str, Any] | None
+) -> set[str]:
+    """Settings already provided by a scene still (verbatim, locked, or condition)."""
+    scenes = _analysis_scenes(analysis)
+    covered: set[str] = set()
+    for slot in slots:
+        if ROLE_SCENE not in (slot.get("roles") or []):
+            continue
+        sid = str(slot.get("setting_id") or "").strip()
+        if sid:
+            key = _norm_id(sid)
+            covered.add(key)
+            for scene in scenes:
+                scid = _norm_id(scene.get("id"))
+                sname = _norm_id(scene.get("name"))
+                if key == scid or key == sname:
+                    if scid:
+                        covered.add(scid)
+                    if sname:
+                        covered.add(sname)
+        elif len(scenes) == 1:
+            covered.add(_norm_id(scenes[0].get("id")))
+            name = _norm_id(scenes[0].get("name"))
+            if name:
+                covered.add(name)
+    return covered
+
+
+def _companion_scenes(
+    analysis: dict[str, Any] | None, covered: set[str]
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in _analysis_scenes(analysis):
+        sid = _norm_id(item.get("id"))
+        sname = _norm_id(item.get("name"))
+        if (sid and sid in covered) or (sname and sname in covered):
+            continue
+        if not sid and not sname:
+            continue
+        out.append(item)
+    return out
+
+
+def _companion_sheet_prompt(character: dict[str, Any], style: dict[str, Any]) -> str:
+    name = str(character.get("name") or "the person").strip()
+    desc = str(character.get("description") or "").strip()
+    medium = str(style.get("medium") or style.get("look") or "the approved style").strip()
+    bits = [f"Create an identity sheet for {name}."]
+    if desc:
+        bits.append(desc if desc.endswith(".") else f"{desc}.")
+    bits.append("Plain studio backdrop. Do not invent a different person.")
+    bits.append(f"Visual style: {medium}.")
+    return " ".join(bits)
+
+
+def _slot_binding(slot: dict[str, Any], role: str) -> str:
+    value = str((slot.get("bindings") or {}).get(role) or "").strip().lower()
+    return value if value in BINDINGS else _DEFAULT_BINDING[role]
+
+
+def _verbatim_card_role(slot: dict[str, Any]) -> str:
+    """Design-card label for an upload the LLM bound verbatim (no regen node).
+
+    The label lets the canvas show the upload as its cast / scene / product /
+    motion card right away; an empty string means the still still feeds a
+    generated sheet / plate / restyle node instead.
+    """
+    roles = slot.get("roles") or []
+    if ROLE_MOTION in roles:
+        return "motion" if _slot_binding(slot, ROLE_MOTION) == BINDING_VERBATIM else ""
+    if ROLE_CHARACTER in roles and _slot_binding(slot, ROLE_CHARACTER) == BINDING_VERBATIM:
+        return "character_design"
+    if ROLE_SCENE in roles and (
+        _slot_binding(slot, ROLE_SCENE) == BINDING_VERBATIM or bool(slot.get("set_lock"))
+    ):
+        return "scene"
+    if ROLE_PRODUCT in roles:
+        return "product"
+    return ""
+
+
+def _as_file_uri(path: str) -> str:
+    text = str(path or "").strip()
+    if not text or "://" in text or text.startswith("file:"):
+        return text
+    try:
+        return Path(text).as_uri()
+    except (ValueError, OSError):
+        return text
+
+
+def _style_lock_from_references(
+    style: dict[str, str], slots: list[dict[str, Any]]
+) -> dict[str, str]:
+    """Inherit the film medium from an authority still when the LLM flagged it.
+
+    The classifier sets ``style_authority`` / ``set_lock`` only when the still
+    should own the look; if the user named a competing medium it leaves them
+    unset and the text lock is kept as-is. A vision read (medium/look/palette)
+    wins; without vision the lock points back at the attached pixels rather than
+    guessing an art-style name from topic words such as "advertise".
+    """
+    authority = [
+        slot for slot in slots if slot.get("style_authority") or slot.get("set_lock")
+    ]
+    if not authority:
+        return style
+    merged = dict(style)
+    for slot in authority:
+        read = slot.get("style_read") if isinstance(slot.get("style_read"), dict) else {}
+        medium = str(read.get("medium") or "").strip()
+        if not medium:
+            continue
+        merged["medium"] = medium[:280]
+        look = str(read.get("look") or "").strip()
+        if look:
+            merged["look"] = look[:280]
+        palette = str(read.get("palette") or "").strip()
+        if palette:
+            merged["palette"] = palette[:280]
+        return merged
+    merged["medium"] = MATCH_REFERENCE_MEDIUM
+    merged["look"] = MATCH_REFERENCE_LOOK
+    return merged
+
+
+def _job_plan(
+    slots: list[dict[str, Any]],
+    analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     def has(role: str) -> list[dict[str, Any]]:
         return [slot for slot in slots if role in (slot.get("roles") or [])]
+
+    binding_of = _slot_binding
+    intent = (
+        analysis.get("creative_intent")
+        if isinstance((analysis or {}).get("creative_intent"), dict)
+        else {}
+    )
+    suppress = _suppress_companions(intent if isinstance(intent, dict) else {}, slots)
+    cast = _analysis_characters(analysis)
+    settings = _analysis_scenes(analysis)
 
     motion = has(ROLE_MOTION)
     product = has(ROLE_PRODUCT)
     scene = has(ROLE_SCENE)
     character = has(ROLE_CHARACTER)
     style = has(ROLE_STYLE)
-    # A still that is itself the frame wins over sheet/plate generation.
+
+    # Covered = any still that already supplies that cast/set id (verbatim or
+    # condition). Companions are analysis entries minus that covered set.
+    covered_chars = _covered_character_ids(slots, analysis)
+    # Motion-solo: a single analysis character with no character still is the
+    # keyframe subject — do not mint a redundant identity sheet for them.
+    if motion and not character and len(cast) == 1:
+        _cover_character_keys(covered_chars, str(cast[0].get("id") or ""), cast)
+        _cover_character_keys(covered_chars, str(cast[0].get("name") or ""), cast)
+    companions = [] if suppress else _companion_characters(analysis, covered_chars)
+
+    # A character the LLM bound verbatim (the default) is shown from its own
+    # file: no sheet for that id. Only an explicit `condition` character
+    # regenerates a redrawn identity sheet for its still.
+    sheet_characters = [
+        slot for slot in character if binding_of(slot, ROLE_CHARACTER) == BINDING_CONDITION
+    ]
+    verbatim_characters = [
+        slot for slot in character if binding_of(slot, ROLE_CHARACTER) == BINDING_VERBATIM
+    ]
+    # Locked / verbatim scene uploads are the set itself. Condition scene
+    # stills cover their setting_id but still mint a generated plate.
+    locked_scene = [
+        slot
+        for slot in scene
+        if binding_of(slot, ROLE_SCENE) == BINDING_VERBATIM or bool(slot.get("set_lock"))
+    ]
+    restyle_scene = [
+        slot
+        for slot in scene
+        if binding_of(slot, ROLE_SCENE) == BINDING_CONDITION and not bool(slot.get("set_lock"))
+    ]
+    covered_settings = _covered_setting_ids(slots, analysis)
+
+    # Sets: scene-led jobs invent plates for uncovered settings. Pure character
+    # / motion jobs do not invent a place merely from analysis.scenes. Product
+    # jobs that list environments get companion plates for uncovered settings.
+    needs_set = bool(scene) or (bool(product) and bool(settings) and not motion)
+    plate_scenes: list[dict[str, Any]] = []
+    if not suppress and needs_set:
+        plate_scenes = list(_companion_scenes(analysis, covered_settings))
+        # Condition (restyle) settings need a generated plate even though the
+        # still "covers" them — the upload is a seed, not the plan path.
+        if restyle_scene and not locked_scene:
+            for slot in restyle_scene:
+                sid = _norm_id(slot.get("setting_id"))
+                match = next(
+                    (
+                        s
+                        for s in settings
+                        if _norm_id(s.get("id")) == sid or _norm_id(s.get("name")) == sid
+                    ),
+                    None,
+                )
+                if match is None and not sid and settings:
+                    match = settings[0]
+                if match is None:
+                    match = {
+                        "id": str(slot.get("setting_id") or "set_1"),
+                        "name": "Setting",
+                        "description": "Environment for this story.",
+                    }
+                if match not in plate_scenes:
+                    plate_scenes.insert(0, match)
+            if not plate_scenes:
+                plate_scenes = list(settings) or [
+                    {
+                        "id": "set_1",
+                        "name": "Setting",
+                        "description": "Environment for this story.",
+                    }
+                ]
+
+    # Motion keeps I2V for the keyframe; companions (if any) are still minted
+    # under style_lock — never regenerate the motion upload itself.
     if motion:
-        binding = str((motion[0].get("bindings") or {}).get(ROLE_MOTION) or BINDING_VERBATIM)
+        binding = binding_of(motion[0], ROLE_MOTION)
         return {
             "call_mode": "i2v",
             "contract": "motion",
-            "sheets": False,
+            "sheets": bool(sheet_characters) or bool(companions),
             "plates": False,
             "restyle": binding == BINDING_CONDITION,
             "motion_slots": motion,
-            "product_slots": [],
-            "scene_slots": [],
-            "character_slots": [],
+            "product_slots": product,
+            "scene_slots": locked_scene,
+            "character_slots": character,
+            "character_sheet_slots": sheet_characters,
+            "character_verbatim_slots": verbatim_characters,
+            "companion_characters": companions,
+            "companion_scenes": [],
             "style_slots": style,
         }
-    verbatim_scene = [
-        slot
-        for slot in scene
-        if str((slot.get("bindings") or {}).get(ROLE_SCENE) or "") == BINDING_VERBATIM
-    ]
+
     return {
         "call_mode": "r2v",
         "contract": "product" if product and not character else ("character" if character else "scene"),
-        "sheets": bool(character),
-        "plates": bool(character) and not verbatim_scene,
+        "sheets": bool(sheet_characters) or bool(companions),
+        "plates": bool(plate_scenes),
         "restyle": False,
         "motion_slots": [],
         "product_slots": product,
-        "scene_slots": verbatim_scene or scene,
+        # Only locked/verbatim uploads belong on the plan as scene paths.
+        "scene_slots": locked_scene,
         "character_slots": character,
+        "character_sheet_slots": sheet_characters,
+        "character_verbatim_slots": verbatim_characters,
+        "companion_characters": companions,
+        "companion_scenes": plate_scenes,
         "style_slots": style,
     }
 
@@ -778,14 +1210,17 @@ def _reference_plan(
     plan: list[dict[str, str]] = []
     for slot in job.get("product_slots") or []:
         plan.append({"role": ROLE_PRODUCT, "path": str(slot.get("path") or ""), "node_id": str(slot["node_id"])})
+    # Verbatim characters ride on their own upload path (Image 1) — no sheet.
+    for slot in job.get("character_verbatim_slots") or []:
+        plan.append({"role": ROLE_CHARACTER, "path": str(slot.get("path") or ""), "node_id": str(slot["node_id"])})
     for sheet_id in sheet_ids:
         plan.append({"role": ROLE_CHARACTER, "path": "", "node_id": sheet_id})
-    if job.get("plates"):
-        for plate_id in plate_ids:
-            plan.append({"role": ROLE_SCENE, "path": "", "node_id": plate_id})
-    else:
-        for slot in job.get("scene_slots") or []:
-            plan.append({"role": ROLE_SCENE, "path": str(slot.get("path") or ""), "node_id": str(slot["node_id"])})
+    # Locked / verbatim scene uploads stay on the plan even when companion
+    # plates cover other settings.
+    for slot in job.get("scene_slots") or []:
+        plan.append({"role": ROLE_SCENE, "path": str(slot.get("path") or ""), "node_id": str(slot["node_id"])})
+    for plate_id in plate_ids:
+        plan.append({"role": ROLE_SCENE, "path": "", "node_id": plate_id})
     return _cap_plan(plan)
 
 

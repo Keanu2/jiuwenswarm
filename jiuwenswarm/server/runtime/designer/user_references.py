@@ -14,6 +14,7 @@ import binascii
 import json
 import logging
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -203,8 +204,8 @@ async def classify_reference_images(
 ) -> list[dict[str, Any]]:
     """Ask the model what each uploaded still is, before any edge is chosen.
 
-    A person who still needs a character sheet, a place, and a product are
-    different destinations. This call only returns that judgment.
+    A person, a place, a product, and a motion frame are different destinations.
+    Default binding is use-as-is (verbatim); this call only returns that judgment.
     """
     slots: list[dict[str, Any]] = []
     images: list[str] = []
@@ -223,18 +224,47 @@ async def classify_reference_images(
         for index, item in enumerate(slots, start=1)
     ]
     system = (
-        "You inspect each attached reference image. "
+        "You inspect each attached reference image together with the user's full "
+        "request, and judge what the user wants done with that exact still. "
+        "DEFAULT for every role is use-as-is: binding='verbatim'. Only choose "
+        "binding='condition' when the user clearly asks to restyle, redraw, "
+        "decompose, or generate a new identity sheet / set plate from the still. "
         "Output ONLY one JSON object: "
         '{"reference_reads":[{"slot":1,"subject":"object","roles":["product_hero"],'
-        '"binding":"verbatim","character_id":"","setting_id":""}]}. '
+        '"binding":"verbatim","style_authority":false,"set_lock":false,'
+        '"motion_source":false,"keyframe_complete":false,"solo_subject":false,'
+        '"suppress_companions":false,"medium":"","look":"","palette":"",'
+        '"character_id":"","setting_id":"","rationale":""}]}. '
+        "One read per image; slot numbers follow the roster order. "
         "roles is a list. Use character_identity for a person who will perform, "
         "scene_source for a place, product_hero for an item that must stay as itself, "
         "still_motion_source when this image is the frame that should move, "
         "style_source when only the medium and palette should be copied. "
-        "binding is verbatim when the file itself is shown, or condition when a new "
-        "still must be generated from the file. One read per image. "
-        "subject remains character, scene, or object for compatibility. "
-        "Slot numbers follow the roster order."
+        "subject remains character, scene, or object for compatibility.\n"
+        "Decide these fields from the user's intent and wording in ANY language — "
+        "reason about meaning, never match fixed phrases:\n"
+        "- binding: prefer 'verbatim' (file itself is the reference card; no "
+        "image-gen pass). Use 'condition' ONLY for an explicit restyle / redraw / "
+        "new sheet / new plate request. Animate / act / advertise / dinner / "
+        "product shot while keeping the look = character_identity|scene_source|"
+        "product_hero|still_motion_source + verbatim. If the still IS the frame "
+        "to animate as-is, add still_motion_source + verbatim.\n"
+        "- set_lock: true when this still must stay the exact environment geometry of "
+        "the film (the user is staging the story or ad inside this place). For a "
+        "scene used as-is this is usually true.\n"
+        "- style_authority: true when the film's medium/look should follow this "
+        "still's rendering (typical for as-is character/scene/product/motion). "
+        "Leave it false only when the user named a competing medium in text "
+        "(e.g. a photoreal live-action ad over a cartoon still) so their words win.\n"
+        "- keyframe_complete / solo_subject / suppress_companions: true when this "
+        "still already contains everyone needed (solo subject, finished painting, "
+        "or keyframe-only animate) so the graph must NOT invent companion cast "
+        "sheets or set plates. Leave false when the brief lists other people or "
+        "places that still need identity sheets / plates under the same style.\n"
+        "- medium/look/palette: if you can see the picture, name its medium (e.g. "
+        "anime, cartoon, photoreal, oil painting), its look, and palette. Leave them "
+        "empty if you cannot see pixels — do NOT guess a medium from topic words.\n"
+        "- rationale: one short clause explaining the binding, for debugging."
     )
     payload = {"user_prompt": (prompt or "")[:2000], "images": roster}
     try:
@@ -520,6 +550,9 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
                 item["character_id"] = str(route.get("character_id")).strip()
             if str(route.get("setting_id") or "").strip():
                 item["setting_id"] = str(route.get("setting_id")).strip()
+        resolved = path.resolve()
+        filename = str(item.get("filename") or resolved.name)
+        mime = str(item.get("mime_type") or _guess_mime(kind, resolved.suffix))
         if node_id in existing:
             for node in nodes:
                 if str(node.get("id") or "") != node_id:
@@ -532,14 +565,36 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
                 cfg["skip_llm"] = True
                 cfg["read_only"] = True
                 cfg["immutable_source"] = True
+                # Rebase onto the project-materialized file when Enter copied
+                # base64/temp analysis paths into ``.designer/refs``.
+                cfg["user_reference_id"] = ref_id
+                cfg["user_reference_kind"] = kind
+                cfg["user_reference_path"] = str(resolved)
+                cfg["interaction_mode"] = "upload"
+                upload = dict(cfg.get("upload") or {})
+                upload.update(
+                    {"filename": filename, "asset_id": ref_id, "mime_type": mime}
+                )
+                cfg["upload"] = upload
+                cfg["materials"] = [
+                    {
+                        "id": ref_id,
+                        "filename": filename,
+                        "mime_type": mime,
+                        "uri": resolved.as_uri(),
+                    }
+                ]
                 if subject:
                     cfg["user_reference_subject"] = subject
                 node["config"] = cfg
+                node["output_ref"] = {
+                    "kind": node_type,
+                    "uri": resolved.as_uri(),
+                    "mime_type": mime,
+                    "label": filename,
+                }
                 break
         if node_id not in existing:
-            resolved = path.resolve()
-            filename = str(item.get("filename") or resolved.name)
-            mime = str(item.get("mime_type") or _guess_mime(kind, resolved.suffix))
             ref_config: dict[str, Any] = {
                 "role": node_type,
                 "user_reference_id": ref_id,
@@ -796,6 +851,62 @@ def normalize_user_references(
         counts[kind] += 1
         out.append(record)
     return out
+
+
+def materialize_user_references_for_analysis(raw: Any) -> list[dict[str, Any]]:
+    """Decode / copy attachments to a temp dir so classify always gets a path.
+
+    Enter historically used ``dest_dir=None`` preview records. Base64-only
+    uploads then had an empty ``path``, so classify/stamp were skipped and the
+    classic quality graph regenerated the still. Analysis must materialize.
+    """
+    if raw in (None, "", []):
+        return []
+    dest = Path(tempfile.mkdtemp(prefix="jiuwenswarm-designer-refs-"))
+    return normalize_user_references(raw, dest_dir=dest)
+
+
+def image_reference_records(refs: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Image slots that have a non-empty path (ready for classify / stamp)."""
+    out: list[dict[str, Any]] = []
+    for item in refs or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "").strip().lower() != KIND_IMAGE:
+            continue
+        if str(item.get("path") or "").strip():
+            out.append(item)
+    return out
+
+
+def rebase_creative_intent_paths(
+    analysis: dict[str, Any] | None,
+    refs: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Point ``creative_intent.slots`` at project-materialized image paths.
+
+    Classify may have stamped temp paths from
+    ``materialize_user_references_for_analysis``; after Enter copies uploads
+    into the project ``.designer/refs`` folder, slot paths must follow.
+    """
+    if not isinstance(analysis, dict):
+        return analysis
+    intent = analysis.get("creative_intent")
+    if not isinstance(intent, dict):
+        return analysis
+    slots = intent.get("slots")
+    if not isinstance(slots, list) or not slots:
+        return analysis
+    images = image_reference_records(refs)
+    if not images:
+        return analysis
+    for index, slot in enumerate(slots):
+        if not isinstance(slot, dict) or index >= len(images):
+            continue
+        path = str(images[index].get("path") or "").strip()
+        if path:
+            slot["path"] = path
+    return analysis
 
 
 def _preview_reference(item: dict[str, Any], *, kind: str, index: int) -> dict[str, Any]:
