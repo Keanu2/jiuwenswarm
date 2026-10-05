@@ -3,26 +3,36 @@
 **Suite file:** `jiuwenswarm/tests/unit_tests/test_reference_led_scenarios.py`  
 **Upload / Enter helpers:** `jiuwenswarm/tests/unit_tests/designer/test_user_references.py`  
 **Branch:** `0.2.8.beta1-referenceModeFix`  
-**Last full run (this change set):** **10053+ passed** after fail-closed safety-net tighten (see below). Parametric matrix = **10 × 1000 = 10 000** scenario cases.
+**Last full run (this change set):** **20059 passed** (`20 × 1000` parametric + dedicated Fix tests + user_references).
 
 ---
 
-## 1. How the 10 000 matrix is built
+## 1. How the 20 000 matrix is built
 
 `_CASES_PER_SCENARIO = 1000` for each of `_SCENARIO_KINDS`:
 
-| # | Kind | Mode under test |
+| # | Kind | Pipeline slice |
 |---|---|---|
 | 1 | `product` | Solo product still, verbatim |
-| 2 | `motion` | Solo motion still, alternating verbatim/condition |
+| 2 | `motion` | Solo motion still, verbatim/condition I2V |
 | 3 | `scene` | Solo scene still, verbatim |
-| 4 | `character` | Solo character still, verbatim |
-| 5 | `text` | No references — classic quality.v5 text film |
-| 6 | `character_family` | Verbatim character + 3-person analysis cast → 2 companions |
-| 7 | `character_condition_family` | Condition character + 2 companions |
-| 8 | `product_cast` | Product + 3 cast companions + store plate |
-| 9 | `scene_cast` | Scene verbatim + 3 cast companions + uncovered set plate |
-| 10 | `motion_cast` | Motion + multi-cast companions (suppressed every 5th case) |
+| 4 | `character` | Solo character still + uncovered set plate |
+| 5 | `text` | No refs — classic quality.v5 |
+| 6 | `character_family` | Verbatim lead + 2 companions + uncovered plates |
+| 7 | `character_condition_family` | Condition lead sheet + 2 companions + plates |
+| 8 | `product_cast` | Product + 3 companions + store plate |
+| 9 | `scene_cast` | Scene verbatim + 3 companions + uncovered plate |
+| 10 | `motion_cast` | Motion + 2 companions; no plates |
+| 11 | `id_reconcile` | `xiaoyue` → `char_1`; parents companions |
+| 12 | `five_stills` | 5 character uploads; 1 companion; Wan keeps uploads |
+| 13 | `stale_solo_flags` | Leftover solo/suppress JSON ignored; family still generated |
+| 14 | `mixed_roles` | Character + scene + product mix; uncovered cast/set |
+| 15 | `two_character_stills` | Two covered leads; one companion |
+| 16 | `all_cast_covered` | Three stills cover all three cast; 0 companions |
+| 17 | `scene_condition_extra` | Condition scene + extra uncovered setting |
+| 18 | `product_and_scene` | Product + locked scene + 3 companions + extra plate |
+| 19 | `style_and_character` | Style still does not cover a person; companions still mint |
+| 20 | `motion_stale_flags` | Motion + leftover suppress JSON; companions still mint |
 
 ### Dimensions averaged inside each kind (index `0..999`)
 
@@ -35,7 +45,6 @@
 | Lighting | `light-{index % 11}` | 11 |
 | Crowd | `crowd-{index % 7}` | 7 |
 | Binding (motion / motion_cast) | even→verbatim, odd→condition | 2 |
-| Suppress (motion_cast) | `index % 5 == 0` | on/off |
 
 Shared assertions (`_assert_shared_contract`): clip count, action uniqueness, timeline continuity, previous_end_state chaining, style_lock look/medium, lighting/crowd in prompts, film_duration_sec sum.
 
@@ -68,13 +77,14 @@ Shared assertions (`_assert_shared_contract`): clip count, action uniqueness, ti
 
 ### `test_character_family_scenario` × 1000
 - Verbatim lead card kept  
-- Exactly **2** `companion_cast` sheets; style_lock medium matches case  
-- No invented scene plates (pure character job)  
+- Exactly **2** `companion_cast` sheets  
+- Uncovered analysis rooms plated (`n_scene_*`)  
 - Plan: upload first, then two `n_character_*`  
 
 ### `test_character_condition_family_scenario` × 1000
 - No verbatim card role on upload  
 - **3** identity sheets (1 condition self + 2 companions)  
+- Uncovered rooms plated  
 - Plan leads with `n_character_*` empty path  
 
 ### `test_product_cast_scenario` × 1000
@@ -89,7 +99,40 @@ Shared assertions (`_assert_shared_contract`): clip count, action uniqueness, ti
 
 ### `test_motion_cast_scenario` × 1000
 - I2V preserved  
-- If suppress → 0 companions; else **2** companions with matching medium  
+- **2** companions; **no** scene plates (motion policy)
+
+### `test_id_reconcile_scenario` × 1000
+- Slot `xiaoyue` persists as `char_1`; companions are parents only  
+
+### `test_five_stills_scenario` × 1000
+- 5 verbatim character uploads; one uncovered companion + plate cards  
+- Wan plan keeps all five uploads (`len(plan) ≤ 5`)  
+
+### `test_stale_solo_flags_scenario` × 1000
+- Intent still has `solo_subject` / `suppress_companions` / `keyframe_complete`  
+- Topology ignores them: 2 companions + plates  
+
+### `test_mixed_roles_scenario` × 1000
+- Character + scene + product stills  
+- 2 uncovered people companions; uncovered `set_2` plate; product first on plan  
+
+### `test_two_character_stills_scenario` × 1000
+- Two verbatim character cards; only `char_3` companion  
+
+### `test_all_cast_covered_scenario` × 1000
+- Three stills cover the whole family → **0** companions; rooms still plated  
+
+### `test_scene_condition_extra_scenario` × 1000
+- Condition scene + extra setting → generated plate(s)  
+
+### `test_product_and_scene_scenario` × 1000
+- Product + locked scene; 3 companions; plate for `set_2`  
+
+### `test_style_and_character_scenario` × 1000
+- Style still does not consume a character id; 2 companions + plates  
+
+### `test_motion_stale_flags_scenario` × 1000
+- Motion + leftover suppress JSON → 2 companions; I2V; no plates  
 
 ---
 
@@ -119,8 +162,13 @@ Shared assertions (`_assert_shared_contract`): clip count, action uniqueness, ti
 | `test_condition_character_sheets_self_plus_companions` | Condition self + companions |
 | `test_scene_verbatim_with_cast_builds_companion_sheets` | Scene lock + cast companions |
 | `test_product_with_cast_builds_companion_sheets` | Product + cast |
-| `test_motion_multi_cast_allows_companions_unless_suppressed` | Motion companions / suppress |
+| `test_motion_multi_cast_mints_companions_ignoring_stale_flags` | Motion companions even with leftover suppress JSON |
 | `test_multi_still_covers_each_id_only_uncovered_get_companions` | Multi-still coverage |
+| `test_stale_solo_subject_does_not_wipe_uncovered_companions` | T1: 4-cast + solo_subject still → 3 companions |
+| `test_xiaoyue_alias_covers_char_1_and_parents_are_companions` | T3: id reconcile |
+| `test_character_still_plates_uncovered_analysis_scenes` | T6: character job plates storyboard rooms |
+| `test_scene_still_plates_only_uncovered_setting` | T7: plate uncovered set only |
+| `test_plan_cap_keeps_uploads_over_generated_companions` | T8: `_cap_plan` prefers uploads |
 
 ---
 
@@ -129,7 +177,7 @@ Shared assertions (`_assert_shared_contract`): clip count, action uniqueness, ti
 | Test | What it verifies |
 |---|---|
 | `test_normalize_copies_path_and_assigns_ordered_slots` | Path copy + roster labels |
-| `test_normalize_decodes_base64_and_rejects_over_limit` | Base64 decode + max 3 images |
+| `test_normalize_decodes_base64_and_rejects_over_limit` | Base64 decode + max 5 images |
 | `test_materialize_for_analysis_gives_path_to_base64_only_upload` | **Enter fix:** preview path empty; analysis materialize has file |
 | `test_rebase_creative_intent_paths_onto_project_refs` | Temp → project path rebase |
 | `test_attach_rebases_existing_n_ref_path` | Existing `n_ref_*` path refresh |
@@ -151,7 +199,7 @@ cd jiuwenswarm
   -q --tb=line --no-cov
 ```
 
-Expect ≈ **10 000** parametric scenario tests + dedicated Fix tests + user_references tests (**10 050+** total items in the combined collection).
+Expect ≈ **20 000** parametric scenario tests + dedicated Fix tests + user_references tests (**20059** in the last combined run).
 
 ---
 

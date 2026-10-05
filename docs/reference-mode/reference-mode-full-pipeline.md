@@ -28,9 +28,9 @@ This document is the reproduce guide for the **complete** reference-led pipeline
 | Still bound **verbatim** (default) | That subject is a **handler** card (`n_ref_*`). Pixels are never image-gen’d. |
 | Still bound **condition** | That subject may be regenerated (`identity_sheet` / `medium_change` / scene plate). |
 | Other people in `analysis.characters` **not covered** by a still | Generated as **companion** `n_character_*` sheets under the film `style_lock`. |
-| Other places in `analysis.scenes` **not covered** | Companion `n_scene_*` plates **only when** `needs_set` (a scene role is present, or product + analysis scenes). Pure character / motion jobs do **not** invent sets. |
-| Solo / keyframe-complete / suppress | LLM flags `suppress_companions` / `solo_subject` / `keyframe_complete` → no companions. |
-| Multi-still | Each still covers its `character_id` / `setting_id`; only uncovered analysis entries become companions. |
+| Other places in `analysis.scenes` **not covered** | Companion `n_scene_*` plates for every **non-motion** job. Motion stays I2V (cast companions yes, set plates no). Never invent a room beyond analysis. |
+| Solo / suppress flags | **Not topology.** Companions/plates exist only when analysis − covered stills is non-empty. Leftover `solo_subject` / `suppress_companions` / `keyframe_complete` JSON is ignored. |
+| Multi-still | Up to **5** image stills. Each still covers a reconciled `character_id` / `setting_id`; only uncovered analysis entries become companions. |
 | No phrase regex | Bindings come from LLM JSON only — never slogan keyword banks. |
 
 ---
@@ -68,11 +68,11 @@ flowchart TD
 3. If `image_refs` non-empty and classify returns **no reads** → Enter hard-fails (`Attached stills could not be assigned a reference role`).  
 4. After project materialize, `rebase_creative_intent_paths` so slots point at `.designer/refs`.  
 5. Fail closed in `_bootstrap_graph` only when `reference_reads` exist but `creative_intent.mode != reference_led` (stamp lost). Classic attach without classify still allowed.  
-6. Attachment limits: max 3 images, 1 video, 1 audio (`MAX_REFS_BY_KIND`).  
+6. Attachment limits: max 5 images, 1 video, 1 audio (`MAX_REFS_BY_KIND`).  
 
 ### Scenario kinds under test (`_SCENARIO_KINDS`)
 
-`product`, `motion`, `scene`, `character`, `text`, `character_family`, `character_condition_family`, `product_cast`, `scene_cast`, `motion_cast` — **1000 cases each** (10 000 parametric) plus dedicated Fix tests. See `reference-mode-test-catalog.md`.
+`product`, `motion`, `scene`, `character`, `text`, `character_family`, `character_condition_family`, `product_cast`, `scene_cast`, `motion_cast`, `id_reconcile`, `five_stills` — **1000 cases each** (12 000 parametric) plus dedicated Fix tests. See `reference-mode-test-catalog.md`.
 
 ---
 
@@ -101,7 +101,6 @@ flowchart TD
 |---|---|
 | `set_lock` | Scene geometry locked; never invent a plate that replaces it |
 | `style_authority` | Film `style_lock` inherits still medium/look (or `match_reference_still`) |
-| `suppress_companions` / `solo_subject` / `keyframe_complete` | No companion cast/set |
 
 ---
 
@@ -109,23 +108,20 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  S[slots + analysis] --> SUP{_suppress_companions?}
-  SUP -->|yes| NC[companions=[] plates from needs_set only if not suppress]
-  SUP -->|no| COV[covered_chars / covered_settings from stills]
-  COV --> COMP[companions = analysis.characters − covered]
+  S[slots + analysis] --> R[reconcile slot ids to analysis roster]
+  R --> COV[covered_chars / covered_settings from stills]
+  COV --> COMP[ALWAYS companions = analysis.characters − covered]
   COV --> MOT{motion role?}
   MOT -->|yes| I2V[call_mode=i2v<br/>plates=false<br/>sheets = condition chars OR companions<br/>restyle if motion condition]
   MOT -->|no| R2V[call_mode=r2v]
   R2V --> SHEET[character_sheet_slots = character condition stills]
   R2V --> VERB[character_verbatim_slots = character verbatim stills]
-  R2V --> NEED{needs_set =<br/>scene role OR product+scenes?}
-  NEED -->|yes| PL[_companion_scenes + condition scene plates]
-  NEED -->|no| NP[companion_scenes=[] — no invented set for pure character]
+  R2V --> PL[plate_scenes = analysis.scenes − covered<br/>plus condition scene plates; never invent beyond analysis]
 ```
 
 ### Coverage rules
 
-- A character still (verbatim **or** condition) covers its `character_id` (normalized; matches analysis `id` or `name`).  
+- A character still (verbatim **or** condition) covers its reconciled `character_id` (analysis `id`, `name`, then `match_terms`; single-candidate fallback).  
 - A scene still covers its `setting_id` the same way.  
 - Motion with `character_id` covers that id; motion + single analysis character covers that solo subject.  
 - Companions are **never invented** beyond `analysis.characters` / `analysis.scenes`.
@@ -140,7 +136,7 @@ flowchart TD
 | `n_character_*` (condition) | Character `binding=condition` | built as handler; `apply_runtime_delegate` / `ensure_agents_and_prune` promotes to agent | `identity_sheet`, inputs include upload |
 | `n_character_*` (companion) | Uncovered analysis cast | same promotion path | `companion_cast=True`, `require_reference_images=False`, style_lock |
 | `n_restyle_01` | Motion `condition` | same promotion path | `medium_change` → I2V first frame |
-| `n_scene_*` | `companion_scenes` when `needs_set` | same promotion path | T2I under style_lock; never replaces locked upload |
+| `n_scene_*` | Uncovered `analysis.scenes` on non-motion jobs | same promotion path | T2I under style_lock; never replaces locked upload |
 | `n_brief` / `n_storyboard` | Always | agent | |
 | `n_clip_*` | Always | agent at build | `compose_reference_clip_prompt` + `call_video_model` only |
 | `n_compose` | Always | agent | Concat clips |
@@ -213,7 +209,7 @@ flowchart LR
   CLIP --> V[Wan I2V first_frame=keyframe]
 ```
 
-If `keyframe_complete` / `suppress_companions` → no companion sheets.
+Cast companions mint for uncovered analysis characters. Motion jobs do **not** mint set plates.
 
 ---
 
@@ -225,7 +221,7 @@ If `keyframe_complete` / `suppress_companions` → no companion sheets.
 4. Locked/verbatim scene paths  
 5. Companion / restyle plate node ids  
 
-Capped at 5 (`_cap_plan`): product first, scene last, middle filled.
+Capped at 5 (`_cap_plan`): product and user upload paths first; generated companions/plates fill remaining slots; keep one generated scene last when it does not drop an upload. Truncated companions remain as canvas cards (clip inputs) even when they are not Wan refs.
 
 ---
 
@@ -262,9 +258,9 @@ git checkout 0.2.8.beta1-referenceModeFix
 | Symptom | Likely cause |
 |---|---|
 | `smart_video.quality.v5` | Classify/stamp skipped (path empty) |
-| No family sheets | Companions suppressed or analysis cast solo |
+| No family sheets | Analysis cast fully covered, or ids not reconciled (`xiaoyue` vs `char_1`) |
 | Xiaoyue T2I sheet | Binding `condition` or covered id mismatch |
-| Invented room on character-only | Should **not** happen — plates need scene/product set need |
+| Missing dining/kitchen plates | Analysis `scenes` empty — plates are never invented beyond analysis |
 
 ---
 

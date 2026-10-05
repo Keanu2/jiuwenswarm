@@ -47,7 +47,7 @@ KIND_IMAGE = "image"
 KIND_VIDEO = "video"
 KIND_AUDIO = "audio"
 SUPPORTED_KINDS = frozenset({KIND_IMAGE, KIND_VIDEO, KIND_AUDIO})
-MAX_REFS_BY_KIND = {KIND_IMAGE: 3, KIND_VIDEO: 1, KIND_AUDIO: 1}
+MAX_REFS_BY_KIND = {KIND_IMAGE: 5, KIND_VIDEO: 1, KIND_AUDIO: 1}
 MAX_INLINE_BYTES = 6 * 1024 * 1024
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".jfif"}
@@ -201,6 +201,7 @@ def user_reference_audio_path(graph: dict[str, Any] | None) -> Path | None:
 async def classify_reference_images(
     prompt: str,
     refs: list[dict[str, Any]] | None,
+    analysis: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Ask the model what each uploaded still is, before any edge is chosen.
 
@@ -223,6 +224,32 @@ async def classify_reference_images(
         f"image {index} = {str(item.get('filename') or f'image-{index}')}"
         for index, item in enumerate(slots, start=1)
     ]
+    cast_roster: list[dict[str, Any]] = []
+    set_roster: list[dict[str, Any]] = []
+    if isinstance(analysis, dict):
+        for item in analysis.get("characters") or []:
+            if not isinstance(item, dict):
+                continue
+            cast_roster.append(
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "name": str(item.get("name") or "").strip(),
+                    "match_terms": [
+                        str(t).strip()
+                        for t in (item.get("match_terms") or [])
+                        if str(t).strip()
+                    ],
+                }
+            )
+        for item in analysis.get("scenes") or []:
+            if not isinstance(item, dict):
+                continue
+            set_roster.append(
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "name": str(item.get("name") or "").strip(),
+                }
+            )
     system = (
         "You inspect each attached reference image together with the user's full "
         "request, and judge what the user wants done with that exact still. "
@@ -232,8 +259,7 @@ async def classify_reference_images(
         "Output ONLY one JSON object: "
         '{"reference_reads":[{"slot":1,"subject":"object","roles":["product_hero"],'
         '"binding":"verbatim","style_authority":false,"set_lock":false,'
-        '"motion_source":false,"keyframe_complete":false,"solo_subject":false,'
-        '"suppress_companions":false,"medium":"","look":"","palette":"",'
+        '"motion_source":false,"medium":"","look":"","palette":"",'
         '"character_id":"","setting_id":"","rationale":""}]}. '
         "One read per image; slot numbers follow the roster order. "
         "roles is a list. Use character_identity for a person who will perform, "
@@ -256,17 +282,19 @@ async def classify_reference_images(
         "still's rendering (typical for as-is character/scene/product/motion). "
         "Leave it false only when the user named a competing medium in text "
         "(e.g. a photoreal live-action ad over a cartoon still) so their words win.\n"
-        "- keyframe_complete / solo_subject / suppress_companions: true when this "
-        "still already contains everyone needed (solo subject, finished painting, "
-        "or keyframe-only animate) so the graph must NOT invent companion cast "
-        "sheets or set plates. Leave false when the brief lists other people or "
-        "places that still need identity sheets / plates under the same style.\n"
+        "- character_id / setting_id: copy an id from the analysis cast/set roster "
+        "when the still depicts that person or place. Prefer roster ids over new names.\n"
         "- medium/look/palette: if you can see the picture, name its medium (e.g. "
         "anime, cartoon, photoreal, oil painting), its look, and palette. Leave them "
         "empty if you cannot see pixels — do NOT guess a medium from topic words.\n"
         "- rationale: one short clause explaining the binding, for debugging."
     )
-    payload = {"user_prompt": (prompt or "")[:2000], "images": roster}
+    payload = {
+        "user_prompt": (prompt or "")[:2000],
+        "images": roster,
+        "analysis_characters": cast_roster,
+        "analysis_scenes": set_roster,
+    }
     try:
         from jiuwenswarm.server.runtime.designer.model_tools import (
             call_model_tool,
@@ -801,7 +829,7 @@ async def ensure_user_reference_routes(graph: dict[str, Any] | None) -> list[str
         prompt = str(
             meta.get("user_prompt") or meta.get("prompt") or meta.get("approved_brief") or ""
         )
-        reads = await classify_reference_images(prompt, refs)
+        reads = await classify_reference_images(prompt, refs, analysis)
         if reads:
             analysis["reference_reads"] = reads
             meta["script_analysis"] = analysis

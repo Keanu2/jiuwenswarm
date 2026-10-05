@@ -64,11 +64,19 @@ def test_normalize_decodes_base64_and_rejects_over_limit(tmp_path: Path) -> None
         dest_dir=dest,
     )
     assert Path(refs[0]["path"]).read_bytes() == _png_bytes()
-    with pytest.raises(UserReferenceError, match="at most 3 image"):
+    five = normalize_user_references(
+        [
+            {"kind": "image", "filename": f"{index}.png", "base64_data": payload}
+            for index in range(5)
+        ],
+        dest_dir=dest,
+    )
+    assert len(five) == 5
+    with pytest.raises(UserReferenceError, match="at most 5 image"):
         normalize_user_references(
             [
                 {"kind": "image", "filename": f"{index}.png", "base64_data": payload}
-                for index in range(4)
+                for index in range(6)
             ],
             dest_dir=dest,
         )
@@ -569,6 +577,8 @@ async def test_classify_reference_images_marks_a_product_as_an_object(
 
     async def fake_call_model_tool(**kwargs):
         seen["images"] = kwargs.get("images")
+        seen["system"] = kwargs.get("system")
+        seen["prompt"] = kwargs.get("prompt")
         return {
             "ok": True,
             "fallback": False,
@@ -582,9 +592,18 @@ async def test_classify_reference_images_marks_a_product_as_an_object(
     reads = await classify_reference_images(
         "给我的产品做30秒中文koc视频",
         [{"kind": "image", "path": str(image), "filename": "01_reference.jpg"}],
+        {"characters": [{"id": "char_1", "name": "Lead", "match_terms": ["xiaoyue"]}],
+         "scenes": [{"id": "set_1", "name": "Dining"}]},
     )
     assert reads[0]["subject"] == "object"
     assert seen["images"] == [str(image)]
+    system = str(seen.get("system") or "")
+    assert "suppress_companions" not in system
+    assert "solo_subject" not in system
+    assert "keyframe_complete" not in system
+    body = str(seen.get("prompt") or "")
+    assert "char_1" in body
+    assert "set_1" in body
 
 
 @pytest.mark.asyncio

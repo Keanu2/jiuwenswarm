@@ -35,6 +35,7 @@ from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
     ROLE_MOTION,
     ROLE_PRODUCT,
     ROLE_SCENE,
+    ROLE_STYLE,
     video_generation_overrides,
 )
 from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
@@ -50,7 +51,7 @@ _REFERENCE_LED = (
     / "reference_led.py"
 )
 _FORBIDDEN = ("moon cake", "月饼", "climb a wall", "as a painting")
-# 10 scenario kinds × 1000 = 10000 parametric topology cases (plus dedicated Fix tests).
+# 20 scenario kinds × 1000 = 20000 parametric topology cases (plus dedicated Fix tests).
 _CASES_PER_SCENARIO = 1000
 _SCENARIO_KINDS = (
     "product",
@@ -63,6 +64,16 @@ _SCENARIO_KINDS = (
     "product_cast",
     "scene_cast",
     "motion_cast",
+    "id_reconcile",
+    "five_stills",
+    "stale_solo_flags",
+    "mixed_roles",
+    "two_character_stills",
+    "all_cast_covered",
+    "scene_condition_extra",
+    "product_and_scene",
+    "style_and_character",
+    "motion_stale_flags",
 )
 
 
@@ -96,7 +107,6 @@ def _cases(kind: str) -> list[dict]:
                 "lighting": f"light-{index % 11}",
                 "crowd": f"crowd-{index % 7}",
                 "binding": "condition" if index % 2 else "verbatim",
-                "suppress": bool(index % 5 == 0) if kind == "motion_cast" else False,
             }
         )
     return rows
@@ -136,17 +146,85 @@ def _analysis(case: dict) -> dict:
     style = {"look": case["look"], "medium": case["medium"]}
     # Solo fixtures: product/scene/motion do not list incidental cast/set that
     # would mint companion sheets/plates. Character keeps a solo covered cast.
-    # *_family / *_cast kinds exercise companion generation across modes.
+    # *_family / *_cast / id_reconcile / five_stills exercise companions + plates.
     if kind == "text":
         characters = [{"id": "char_1", "name": "Subject", "description": "a person"}]
         scenes = [{"id": "set_1", "name": "Place", "description": f"place-{case['index']}"}]
-    elif kind in {"character", "character_family", "character_condition_family"}:
-        characters = (
-            _family_cast(case)
-            if kind.endswith("family")
-            else [{"id": "char_1", "name": "Subject", "description": "a person"}]
-        )
+    elif kind in {
+        "character",
+        "character_family",
+        "character_condition_family",
+        "id_reconcile",
+    }:
+        if kind == "id_reconcile":
+            characters = [
+                {
+                    "id": "char_1",
+                    "name": "小月",
+                    "description": "young woman",
+                    "match_terms": ["xiaoyue", "小月"],
+                },
+                {
+                    "id": "char_2",
+                    "name": f"Companion-A-{case['index'] % 9}",
+                    "description": "family adult",
+                },
+                {
+                    "id": "char_3",
+                    "name": f"Companion-B-{case['index'] % 5}",
+                    "description": "family elder",
+                },
+            ]
+        else:
+            characters = (
+                _family_cast(case)
+                if kind.endswith("family")
+                else [{"id": "char_1", "name": "Subject", "description": "a person"}]
+            )
+        if kind.endswith("family") or kind == "id_reconcile":
+            scenes = [
+                {"id": "set_1", "name": "Dining", "description": f"dining-{case['index']}"},
+                {
+                    "id": "set_2",
+                    "name": f"Kitchen-{case['index'] % 3}",
+                    "description": "kitchen",
+                },
+            ]
+        else:
+            scenes = [{"id": "set_1", "name": "Place", "description": f"place-{case['index']}"}]
+    elif kind == "five_stills":
+        characters = [
+            {"id": f"char_{i}", "name": f"Person-{i}", "description": f"cast {i}"}
+            for i in range(1, 7)
+        ]
         scenes = [{"id": "set_1", "name": "Place", "description": f"place-{case['index']}"}]
+    elif kind in {
+        "stale_solo_flags",
+        "two_character_stills",
+        "all_cast_covered",
+        "style_and_character",
+        "motion_stale_flags",
+        "mixed_roles",
+    }:
+        characters = _family_cast(case)
+        scenes = [
+            {"id": "set_1", "name": "Dining", "description": f"dining-{case['index']}"},
+            {"id": "set_2", "name": "Kitchen", "description": "kitchen"},
+        ]
+        if kind == "motion_stale_flags":
+            scenes = []
+    elif kind == "scene_condition_extra":
+        characters = []
+        scenes = [
+            {"id": "set_1", "name": "Place", "description": f"place-{case['index']}"},
+            {"id": "set_2", "name": "Alt", "description": "second"},
+        ]
+    elif kind == "product_and_scene":
+        characters = _family_cast(case)
+        scenes = [
+            {"id": "set_1", "name": "Store", "description": f"store-{case['index']}"},
+            {"id": "set_2", "name": "Street", "description": "street"},
+        ]
     elif kind == "scene":
         characters = []
         scenes = [{"id": "set_1", "name": "Place", "description": f"place-{case['index']}"}]
@@ -180,6 +258,129 @@ def _analysis(case: dict) -> dict:
     }
     if kind == "text":
         return base
+    if kind == "five_stills":
+        slots = [
+            {
+                "slot": i,
+                "path": f"/refs/five_stills-{case['index']}-{i}.png",
+                "roles": [ROLE_CHARACTER],
+                "bindings": {ROLE_CHARACTER: "verbatim"},
+                "character_id": f"char_{i}",
+                "setting_id": "",
+                "node_id": f"n_ref_{i:02d}",
+            }
+            for i in range(1, 6)
+        ]
+        base["creative_intent"] = {"mode": "reference_led", "slots": slots}
+        return base
+    if kind == "two_character_stills":
+        slots = [
+            {
+                "slot": i,
+                "path": f"/refs/two_character_stills-{case['index']}-{i}.png",
+                "roles": [ROLE_CHARACTER],
+                "bindings": {ROLE_CHARACTER: "verbatim"},
+                "character_id": f"char_{i}",
+                "setting_id": "",
+                "node_id": f"n_ref_{i:02d}",
+            }
+            for i in range(1, 3)
+        ]
+        base["creative_intent"] = {"mode": "reference_led", "slots": slots}
+        return base
+    if kind == "all_cast_covered":
+        slots = [
+            {
+                "slot": i,
+                "path": f"/refs/all_cast_covered-{case['index']}-{i}.png",
+                "roles": [ROLE_CHARACTER],
+                "bindings": {ROLE_CHARACTER: "verbatim"},
+                "character_id": f"char_{i}",
+                "setting_id": "",
+                "node_id": f"n_ref_{i:02d}",
+            }
+            for i in range(1, 4)
+        ]
+        base["creative_intent"] = {"mode": "reference_led", "slots": slots}
+        return base
+    if kind == "mixed_roles":
+        slots = [
+            {
+                "slot": 1,
+                "path": f"/refs/mixed-{case['index']}-char.png",
+                "roles": [ROLE_CHARACTER],
+                "bindings": {ROLE_CHARACTER: "verbatim"},
+                "character_id": "char_1",
+                "setting_id": "",
+                "node_id": "n_ref_01",
+            },
+            {
+                "slot": 2,
+                "path": f"/refs/mixed-{case['index']}-scene.png",
+                "roles": [ROLE_SCENE],
+                "bindings": {ROLE_SCENE: "verbatim"},
+                "character_id": "",
+                "setting_id": "set_1",
+                "node_id": "n_ref_02",
+            },
+            {
+                "slot": 3,
+                "path": f"/refs/mixed-{case['index']}-product.png",
+                "roles": [ROLE_PRODUCT],
+                "bindings": {ROLE_PRODUCT: "verbatim"},
+                "character_id": "",
+                "setting_id": "",
+                "node_id": "n_ref_03",
+            },
+        ]
+        base["creative_intent"] = {"mode": "reference_led", "slots": slots}
+        return base
+    if kind == "product_and_scene":
+        slots = [
+            {
+                "slot": 1,
+                "path": f"/refs/product_and_scene-{case['index']}-sku.png",
+                "roles": [ROLE_PRODUCT],
+                "bindings": {ROLE_PRODUCT: "verbatim"},
+                "character_id": "",
+                "setting_id": "",
+                "node_id": "n_ref_01",
+            },
+            {
+                "slot": 2,
+                "path": f"/refs/product_and_scene-{case['index']}-room.png",
+                "roles": [ROLE_SCENE],
+                "bindings": {ROLE_SCENE: "verbatim"},
+                "character_id": "",
+                "setting_id": "set_1",
+                "node_id": "n_ref_02",
+            },
+        ]
+        base["creative_intent"] = {"mode": "reference_led", "slots": slots}
+        return base
+    if kind == "style_and_character":
+        slots = [
+            {
+                "slot": 1,
+                "path": f"/refs/style_and_character-{case['index']}-char.png",
+                "roles": [ROLE_CHARACTER],
+                "bindings": {ROLE_CHARACTER: "verbatim"},
+                "character_id": "char_1",
+                "setting_id": "",
+                "node_id": "n_ref_01",
+            },
+            {
+                "slot": 2,
+                "path": f"/refs/style_and_character-{case['index']}-style.png",
+                "roles": [ROLE_STYLE],
+                "bindings": {ROLE_STYLE: "verbatim"},
+                "character_id": "",
+                "setting_id": "",
+                "node_id": "n_ref_02",
+            },
+        ]
+        base["creative_intent"] = {"mode": "reference_led", "slots": slots}
+        return base
     path = f"/refs/{kind}-{case['index']}.png"
     if kind in {"product", "product_cast"}:
         roles = [ROLE_PRODUCT]
@@ -201,6 +402,21 @@ def _analysis(case: dict) -> dict:
         binding = "condition"
         character_id = "char_1"
         setting_id = ""
+    elif kind == "id_reconcile":
+        roles = [ROLE_CHARACTER]
+        binding = "verbatim"
+        character_id = "xiaoyue"
+        setting_id = ""
+    elif kind == "scene_condition_extra":
+        roles = [ROLE_SCENE]
+        binding = "condition"
+        character_id = ""
+        setting_id = "set_1"
+    elif kind in {"stale_solo_flags", "motion_stale_flags"}:
+        roles = [ROLE_MOTION] if kind == "motion_stale_flags" else [ROLE_CHARACTER]
+        binding = "verbatim"
+        character_id = "char_1"
+        setting_id = ""
     else:
         # character / character_family — default use-as-is
         roles = [ROLE_CHARACTER]
@@ -216,11 +432,13 @@ def _analysis(case: dict) -> dict:
         "setting_id": setting_id,
         "node_id": "n_ref_01",
     }
-    intent: dict = {"mode": "reference_led", "slots": [slot]}
-    if case.get("suppress"):
-        intent["suppress_companions"] = True
-        slot["suppress_companions"] = True
-    base["creative_intent"] = intent
+    base["creative_intent"] = {"mode": "reference_led", "slots": [slot]}
+    if kind in {"stale_solo_flags", "motion_stale_flags"}:
+        # Leftover classify flags must NOT wipe companions (WI-1: flags unused).
+        base["creative_intent"]["solo_subject"] = True
+        base["creative_intent"]["suppress_companions"] = True
+        base["creative_intent"]["keyframe_complete"] = True
+        slot["solo_subject"] = True
     return base
 
 
@@ -351,11 +569,9 @@ def _assert_reference_case(case: dict) -> None:
         for clip in clips:
             assert clip["config"]["reference_call_mode"] == "i2v"
         companions = _companion_sheets(graph)
-        if case.get("suppress"):
-            assert companions == []
-        else:
-            assert len(companions) == 2
-            assert all(c["config"]["style_lock"]["medium"] == case["medium"] for c in companions)
+        assert len(companions) == 2
+        assert all(c["config"]["style_lock"]["medium"] == case["medium"] for c in companions)
+        assert not _scene_nodes(graph)
     elif kind == "scene":
         assert not _tasks(graph, "identity_sheet")
         assert not _scene_nodes(graph)
@@ -381,7 +597,7 @@ def _assert_reference_case(case: dict) -> None:
         assert ref["config"].get("reference_card_role") == "character_design"
         companions = _companion_sheets(graph)
         assert len(companions) == 2
-        assert not _scene_nodes(graph)  # pure character job: no invented set
+        assert len(_scene_nodes(graph)) >= 1
         for clip in clips:
             plan = clip["config"]["reference_image_plan"]
             assert plan[0]["node_id"] == "n_ref_01"
@@ -394,14 +610,86 @@ def _assert_reference_case(case: dict) -> None:
         assert len(sheets) == 3  # self condition sheet + 2 companions
         companions = _companion_sheets(graph)
         assert len(companions) == 2
+        assert len(_scene_nodes(graph)) >= 1
         for clip in clips:
             plan = clip["config"]["reference_image_plan"]
             assert plan[0]["node_id"].startswith("n_character_")
             assert plan[0]["path"] == ""
-    else:
-        # Default character path: upload card as-is, no sheet, no invented plate.
-        assert not _tasks(graph, "identity_sheet")
+    elif kind == "id_reconcile":
+        companions = _companion_sheets(graph)
+        assert len(companions) == 2
+        ids = {str(n["config"].get("character_id") or "") for n in companions}
+        assert ids == {"char_2", "char_3"}
+        assert not any(n["config"].get("character_id") in {"xiaoyue", "char_1"} for n in companions)
+        assert len(_scene_nodes(graph)) >= 1
+        slot = graph["metadata"]["script_analysis"]["creative_intent"]["slots"][0]
+        assert slot["character_id"] == "char_1"
+    elif kind == "five_stills":
+        companions = _companion_sheets(graph)
+        assert len(companions) == 1
+        assert companions[0]["config"]["character_id"] == "char_6"
+        assert len(_scene_nodes(graph)) >= 1
+        for clip in clips:
+            plan = clip["config"]["reference_image_plan"]
+            upload_ids = {e["node_id"] for e in plan if e["path"]}
+            assert upload_ids == {f"n_ref_{i:02d}" for i in range(1, 6)}
+            assert len(plan) <= 5
+    elif kind == "stale_solo_flags":
+        companions = _companion_sheets(graph)
+        assert len(companions) == 2
+        assert len(_scene_nodes(graph)) >= 1
+        assert ref["config"].get("reference_card_role") == "character_design"
+    elif kind == "motion_stale_flags":
+        companions = _companion_sheets(graph)
+        assert len(companions) == 2
         assert not _scene_nodes(graph)
+        for clip in clips:
+            assert clip["config"]["reference_call_mode"] == "i2v"
+    elif kind == "two_character_stills":
+        companions = _companion_sheets(graph)
+        assert len(companions) == 1
+        assert companions[0]["config"]["character_id"] == "char_3"
+        assert len(_scene_nodes(graph)) >= 1
+        ids = {n["id"] for n in graph["nodes"] if n["id"].startswith("n_ref_")}
+        assert {"n_ref_01", "n_ref_02"} <= ids
+    elif kind == "all_cast_covered":
+        assert _companion_sheets(graph) == []
+        assert len(_scene_nodes(graph)) >= 1
+        ids = {n["id"] for n in graph["nodes"] if n["id"].startswith("n_ref_")}
+        assert ids == {"n_ref_01", "n_ref_02", "n_ref_03"}
+    elif kind == "mixed_roles":
+        companions = _companion_sheets(graph)
+        assert len(companions) == 2
+        assert len(_scene_nodes(graph)) == 1
+        assert _scene_nodes(graph)[0]["config"]["setting_id"] == "set_2"
+        for clip in clips:
+            plan = clip["config"]["reference_image_plan"]
+            assert plan[0]["role"] == ROLE_PRODUCT
+            assert any(e["node_id"] == "n_ref_01" and e["role"] == ROLE_CHARACTER for e in plan)
+    elif kind == "product_and_scene":
+        companions = _companion_sheets(graph)
+        assert len(companions) == 3
+        assert len(_scene_nodes(graph)) == 1
+        assert _scene_nodes(graph)[0]["config"]["setting_id"] == "set_2"
+        for clip in clips:
+            plan = clip["config"]["reference_image_plan"]
+            assert plan[0]["role"] == ROLE_PRODUCT
+    elif kind == "style_and_character":
+        companions = _companion_sheets(graph)
+        assert len(companions) == 2
+        assert len(_scene_nodes(graph)) >= 1
+        assert ref["config"].get("reference_card_role") == "character_design"
+        assert any(n["id"] == "n_ref_02" for n in graph["nodes"])
+    elif kind == "scene_condition_extra":
+        assert len(_scene_nodes(graph)) >= 1
+        setting_ids = {n["config"].get("setting_id") for n in _scene_nodes(graph)}
+        assert "set_1" in setting_ids or "set_2" in setting_ids
+        for clip in clips:
+            assert clip["config"]["reference_call_mode"] == "r2v"
+    else:
+        # Default character path: upload card as-is, no sheet; uncovered set is plated.
+        assert not _tasks(graph, "identity_sheet")
+        assert len(_scene_nodes(graph)) >= 1
         ref = next(node for node in graph["nodes"] if node["id"] == "n_ref_01")
         assert ref["config"].get("reference_card_role") == "character_design"
         for clip in clips:
@@ -413,7 +701,7 @@ def _assert_reference_case(case: dict) -> None:
             assert roles[0] == ROLE_CHARACTER
             assert plan[0]["node_id"] == "n_ref_01"
             assert plan[0]["path"].endswith(f"character-{case['index']}.png")
-            assert ROLE_SCENE not in roles
+            assert ROLE_SCENE in roles
             assert "Image 1" in cfg["generate"]["prompt"]
 
 
@@ -488,6 +776,56 @@ def test_scene_cast_scenario(case: dict) -> None:
 
 @pytest.mark.parametrize("case", _cases("motion_cast"), ids=lambda case: case["id"])
 def test_motion_cast_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("id_reconcile"), ids=lambda case: case["id"])
+def test_id_reconcile_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("five_stills"), ids=lambda case: case["id"])
+def test_five_stills_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("stale_solo_flags"), ids=lambda case: case["id"])
+def test_stale_solo_flags_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("mixed_roles"), ids=lambda case: case["id"])
+def test_mixed_roles_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("two_character_stills"), ids=lambda case: case["id"])
+def test_two_character_stills_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("all_cast_covered"), ids=lambda case: case["id"])
+def test_all_cast_covered_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("scene_condition_extra"), ids=lambda case: case["id"])
+def test_scene_condition_extra_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("product_and_scene"), ids=lambda case: case["id"])
+def test_product_and_scene_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("style_and_character"), ids=lambda case: case["id"])
+def test_style_and_character_scenario(case: dict) -> None:
+    _assert_reference_case(case)
+
+
+@pytest.mark.parametrize("case", _cases("motion_stale_flags"), ids=lambda case: case["id"])
+def test_motion_stale_flags_scenario(case: dict) -> None:
     _assert_reference_case(case)
 
 
@@ -706,7 +1044,8 @@ def _node(graph: dict, node_id: str) -> dict:
 
 def test_character_verbatim_fills_card_and_skips_sheet() -> None:
     graph = _intent_graph(
-        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="char_1")]
+        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="char_1")],
+        scenes=[],
     )
     assert not _tasks(graph, "identity_sheet")
     assert not _scene_nodes(graph)
@@ -745,7 +1084,8 @@ def test_character_omitted_binding_defaults_to_verbatim() -> None:
                 "setting_id": "",
                 "node_id": "n_ref_01",
             }
-        ]
+        ],
+        scenes=[],
     )
     assert not _tasks(graph, "identity_sheet")
     assert not _scene_nodes(graph)
@@ -755,7 +1095,8 @@ def test_character_omitted_binding_defaults_to_verbatim() -> None:
 
 def test_character_condition_still_builds_identity_sheet() -> None:
     graph = _intent_graph(
-        [_slot([ROLE_CHARACTER], binding="condition", character_id="char_1")]
+        [_slot([ROLE_CHARACTER], binding="condition", character_id="char_1")],
+        scenes=[],
     )
     assert len(_tasks(graph, "identity_sheet")) == 1
     # Restyle character alone must not invent a text set plate.
@@ -966,12 +1307,13 @@ def test_enriched_classify_fields_persist_into_slots() -> None:
         "look": "cel-shaded",
         "palette": "pastel",
         "rationale": "locked cartoon set",
-        "keyframe_complete": True,
     }
     read = absorb_reference_read(item, 1, "scene")
     assert read["set_lock"] is True
     assert read["style_authority"] is True
-    assert read["keyframe_complete"] is True
+    assert "keyframe_complete" not in read
+    assert "solo_subject" not in read
+    assert "suppress_companions" not in read
     assert read["style_read"] == {"medium": "anime", "look": "cel-shaded", "palette": "pastel"}
 
     analysis = stamp_creative_intent(
@@ -982,7 +1324,7 @@ def test_enriched_classify_fields_persist_into_slots() -> None:
     assert slot["style_authority"] is True
     assert slot["style_read"]["medium"] == "anime"
     assert slot["bindings"][ROLE_SCENE] == "verbatim"
-    assert analysis["creative_intent"]["keyframe_complete"] is True
+    assert "keyframe_complete" not in analysis["creative_intent"]
 
 
 # --- Companion cast / set: uncovered analysis ids get sheets/plates ---------
@@ -1029,15 +1371,15 @@ def test_verbatim_character_multi_cast_builds_companion_sheets() -> None:
             sheets[0]["id"],
             sheets[1]["id"],
         }
-        # Character-only job: no invented plate from the solo analysis scene.
-        assert not any(e["role"] == ROLE_SCENE for e in plan)
-    assert not _scene_nodes(graph)
+        assert any(e["role"] == ROLE_SCENE for e in plan)
+    assert len(_scene_nodes(graph)) == 1
 
 
 def test_verbatim_character_solo_cast_skips_companion_sheets() -> None:
     graph = _intent_graph(
         [_slot([ROLE_CHARACTER], binding="verbatim", character_id="xiaoyue")],
         characters=[{"id": "xiaoyue", "name": "Xiaoyue", "description": "young woman"}],
+        scenes=[],
     )
     assert not _tasks(graph, "identity_sheet")
     assert not _scene_nodes(graph)
@@ -1134,7 +1476,7 @@ def test_product_with_cast_builds_companion_sheets() -> None:
         assert any(e["node_id"].startswith("n_character_") for e in plan)
 
 
-def test_motion_multi_cast_allows_companions_unless_suppressed() -> None:
+def test_motion_multi_cast_mints_companions_ignoring_stale_flags() -> None:
     graph = _intent_graph(
         [_slot([ROLE_MOTION], binding="verbatim", path="/refs/frame.png", character_id="xiaoyue")],
         characters=_FAMILY,
@@ -1147,7 +1489,7 @@ def test_motion_multi_cast_allows_companions_unless_suppressed() -> None:
         assert clip["config"]["reference_call_mode"] == "i2v"
         assert clip["config"]["reference_first_frame"].endswith("frame.png")
 
-    suppressed = _intent_graph(
+    stale = _intent_graph(
         [
             _slot(
                 [ROLE_MOTION],
@@ -1155,12 +1497,14 @@ def test_motion_multi_cast_allows_companions_unless_suppressed() -> None:
                 path="/refs/frame.png",
                 character_id="xiaoyue",
                 keyframe_complete=True,
+                solo_subject=True,
+                suppress_companions=True,
             )
         ],
         characters=_FAMILY,
         scenes=[],
     )
-    assert not _tasks(suppressed, "identity_sheet")
+    assert len(_tasks(stale, "identity_sheet")) == 2
 
 
 def test_multi_still_covers_each_id_only_uncovered_get_companions() -> None:
@@ -1211,3 +1555,123 @@ def test_slot_character_id_matches_analysis_name() -> None:
     sheets = _tasks(graph, "identity_sheet")
     assert len(sheets) == 1
     assert sheets[0]["config"]["character_id"] == "father"
+
+
+def test_stale_solo_subject_does_not_wipe_uncovered_companions() -> None:
+    """T1: leftover solo_subject=true is ignored; uncovered cast still gets sheets."""
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_CHARACTER],
+                binding="verbatim",
+                character_id="char_1",
+                solo_subject=True,
+                suppress_companions=True,
+                keyframe_complete=True,
+            )
+        ],
+        characters=[
+            {"id": "char_1", "name": "Lead", "description": "lead"},
+            {"id": "char_2", "name": "Two", "description": "two"},
+            {"id": "char_3", "name": "Three", "description": "three"},
+            {"id": "char_4", "name": "Four", "description": "four"},
+        ],
+        scenes=[],
+    )
+    sheets = _companion_sheets(graph)
+    assert len(sheets) == 3
+    assert {n["config"]["character_id"] for n in sheets} == {"char_2", "char_3", "char_4"}
+    assert not any(n["config"].get("character_id") == "char_1" for n in _tasks(graph, "identity_sheet"))
+
+
+def test_xiaoyue_alias_covers_char_1_and_parents_are_companions() -> None:
+    """T3: classify id xiaoyue reconciles to char_1 / 小月; parents only are companions."""
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="xiaoyue")],
+        characters=[
+            {
+                "id": "char_1",
+                "name": "小月",
+                "description": "young woman",
+                "match_terms": ["xiaoyue", "小月"],
+            },
+            {"id": "father", "name": "Father", "description": "dad"},
+            {"id": "mother", "name": "Mother", "description": "mom"},
+        ],
+        scenes=[],
+    )
+    sheets = _companion_sheets(graph)
+    assert {n["config"]["character_id"] for n in sheets} == {"father", "mother"}
+    assert not any(n["config"].get("character_id") in {"xiaoyue", "char_1"} for n in sheets)
+    slot = graph["metadata"]["script_analysis"]["creative_intent"]["slots"][0]
+    assert slot["character_id"] == "char_1"
+
+
+def test_character_still_plates_uncovered_analysis_scenes() -> None:
+    """T6: character still + two storyboard rooms → companion plates."""
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="char_1")],
+        characters=[{"id": "char_1", "name": "Lead", "description": "lead"}],
+        scenes=_PLACES,
+    )
+    plates = _scene_nodes(graph)
+    assert len(plates) >= 1
+    assert {p["config"]["setting_id"] for p in plates} == {"set_1", "set_2"}
+
+
+def test_scene_still_plates_only_uncovered_setting() -> None:
+    """T7: locked set_1 of two analysis sets → plate set_2 only."""
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_SCENE],
+                binding="verbatim",
+                setting_id="set_1",
+                set_lock=True,
+            )
+        ],
+        characters=[],
+        scenes=_PLACES,
+    )
+    plates = _scene_nodes(graph)
+    assert len(plates) == 1
+    assert plates[0]["config"]["setting_id"] == "set_2"
+
+
+def test_plan_cap_keeps_uploads_over_generated_companions() -> None:
+    """T8: 2 uploads + 3 companions + plate → ≤5 and both uploads stay."""
+    graph = _intent_graph(
+        [
+            _slot(
+                [ROLE_CHARACTER],
+                binding="verbatim",
+                character_id="char_1",
+                slot=1,
+                node_id="n_ref_01",
+                path="/refs/a.png",
+            ),
+            _slot(
+                [ROLE_CHARACTER],
+                binding="verbatim",
+                character_id="char_2",
+                slot=2,
+                node_id="n_ref_02",
+                path="/refs/b.png",
+            ),
+        ],
+        characters=[
+            {"id": "char_1", "name": "One", "description": "one"},
+            {"id": "char_2", "name": "Two", "description": "two"},
+            {"id": "char_3", "name": "Three", "description": "three"},
+            {"id": "char_4", "name": "Four", "description": "four"},
+            {"id": "char_5", "name": "Five", "description": "five"},
+        ],
+        scenes=_PLACES[:1],
+    )
+    assert len(_companion_sheets(graph)) == 3
+    assert _scene_nodes(graph)
+    for clip in _clips(graph):
+        plan = clip["config"]["reference_image_plan"]
+        assert len(plan) <= 5
+        upload_ids = {e["node_id"] for e in plan if e.get("path")}
+        assert {"n_ref_01", "n_ref_02"} <= upload_ids

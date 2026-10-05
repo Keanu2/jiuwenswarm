@@ -168,15 +168,9 @@ def stamp_creative_intent(
         _carry_intent_fields(slot_entry, read)
         slots.append(slot_entry)
     out = dict(analysis)
+    _reconcile_slot_ids(slots, out)
     out["reference_reads"] = [dict(read) for read in (reads or []) if isinstance(read, dict)]
     intent: dict[str, Any] = {"mode": MODE_REFERENCE, "slots": slots}
-    # Intent-level companion flags (classify may set these on any read row).
-    for read in reads or []:
-        if not isinstance(read, dict):
-            continue
-        for flag in ("suppress_companions", "solo_subject", "keyframe_complete"):
-            if _as_bool(read.get(flag)):
-                intent[flag] = True
     out["creative_intent"] = intent
     return out
 
@@ -410,6 +404,10 @@ def build_reference_led_video_graph(
     slots = _slots(intent)
     if not slots:
         raise ReferenceIntentError("Reference-led graph requires at least one still role.")
+    _reconcile_slot_ids(slots, analysis)
+    if isinstance(intent, dict):
+        intent["slots"] = slots
+        analysis["creative_intent"] = intent
     style = ensure_style_lock(
         analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else None,
         prompt=prompt_text,
@@ -565,7 +563,17 @@ def build_reference_led_video_graph(
 
     # Uncovered analysis cast: companion identity sheets under the same style_lock.
     # No upload input — never regenerate a verbatim still for these ids.
-    for character in job.get("companion_characters") or []:
+    # On-screen companions fill the Wan cap before off-screen extras.
+    on_screen = _on_screen_character_keys(analysis)
+    companions = list(job.get("companion_characters") or [])
+    companions.sort(
+        key=lambda ch: 0
+        if (
+            _norm_id(ch.get("id")) in on_screen or _norm_id(ch.get("name")) in on_screen
+        )
+        else 1
+    )
+    for character in companions:
         sheet_index += 1
         cid = str(character.get("id") or f"char_{sheet_index}")
         sheet_id = f"n_character_{sheet_index}"
@@ -626,11 +634,11 @@ def build_reference_led_video_graph(
 
     plate_ids: list[str] = []
     if job["plates"]:
-        scenes = list(job.get("companion_scenes") or [])
-        if not scenes:
-            scenes = [s for s in (analysis.get("scenes") or []) if isinstance(s, dict)] or [
-                {"id": "set_1", "name": "Setting", "description": "Environment for this story."}
-            ]
+        scenes = [
+            item
+            for item in (job.get("companion_scenes") or [])
+            if isinstance(item, dict)
+        ]
         for index, scene in enumerate(scenes, start=1):
             plate_id = f"n_scene_{index}"
             plate_ids.append(plate_id)
@@ -695,15 +703,19 @@ def build_reference_led_video_graph(
             else:
                 cfg["reference_first_frame"] = str(job["motion_slots"][0].get("path") or "")
                 cfg["inputs"].append(str(job["motion_slots"][0]["node_id"]))
-            # Companion cast sheets must reach compose or prune drops them.
-            for sheet_id in sheet_ids:
-                if sheet_id not in cfg["inputs"]:
-                    cfg["inputs"].append(sheet_id)
+            # Companion sheets/plates must reach compose or prune drops them.
+            # Wan still sees only the capped reference_image_plan.
+            for extra_id in list(sheet_ids) + list(plate_ids):
+                if extra_id not in cfg["inputs"]:
+                    cfg["inputs"].append(extra_id)
         else:
             for entry in plan:
                 node_id = str(entry.get("node_id") or "")
                 if node_id and node_id not in cfg["inputs"]:
                     cfg["inputs"].append(node_id)
+            for extra_id in list(sheet_ids) + list(plate_ids):
+                if extra_id not in cfg["inputs"]:
+                    cfg["inputs"].append(extra_id)
         cfg["generate"] = {"prompt": compose_reference_clip_prompt(cfg)}
         cfg["director_task"] = (
             "Write the reference-led shot prompt from this clip config, then call_video_model."
@@ -807,21 +819,13 @@ def _style_read(item: dict[str, Any]) -> dict[str, str]:
 
 
 def _carry_intent_fields(target: dict[str, Any], item: dict[str, Any]) -> None:
-    """Persist the LLM's enriched intent flags; only keep the ones it set.
-
-    The classifier returns these; code never parses the user prompt to infer
-    them. Absent / false flags leave the dict untouched so defaults still apply.
-    """
+    """Persist classifier style/lock flags. Topology never reads leftover suppress JSON."""
     if _as_bool(item.get("style_authority")):
         target["style_authority"] = True
     if _as_bool(item.get("set_lock")):
         target["set_lock"] = True
     if _as_bool(item.get("motion_source")):
         target["motion_source"] = True
-    # Companion-suppression flags: keyframe-complete / solo / explicit skip.
-    for flag in ("suppress_companions", "solo_subject", "keyframe_complete"):
-        if _as_bool(item.get(flag)):
-            target[flag] = True
     style_read = _style_read(item)
     if style_read:
         target["style_read"] = style_read
@@ -876,16 +880,70 @@ def _analysis_scenes(analysis: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [item for item in ((analysis or {}).get("scenes") or []) if isinstance(item, dict)]
 
 
-def _suppress_companions(intent: dict[str, Any], slots: list[dict[str, Any]]) -> bool:
-    """True when the LLM marked the job as solo / keyframe-complete / no companions."""
-    for flag in ("suppress_companions", "solo_subject", "keyframe_complete"):
-        if _as_bool(intent.get(flag)):
-            return True
+def _entity_keys(item: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for field in ("id", "name"):
+        n = _norm_id(item.get(field))
+        if n:
+            keys.add(n)
+    extra: list[Any] = []
+    for field in ("match_terms", "aliases"):
+        raw = item.get(field) or []
+        if isinstance(raw, list):
+            extra.extend(raw)
+        elif raw:
+            extra.append(raw)
+    for term in extra:
+        n = _norm_id(term)
+        if n:
+            keys.add(n)
+    return keys
+
+
+def _resolve_roster_id(
+    raw: Any, roster: list[dict[str, Any]], *, single_ok: bool
+) -> str:
+    """Map a slot id onto analysis id, name, match_terms, or a sole roster row."""
+    needle = _norm_id(raw)
+    if needle:
+        for item in roster:
+            if needle == _norm_id(item.get("id")):
+                return str(item.get("id") or "").strip()
+        for item in roster:
+            if needle == _norm_id(item.get("name")):
+                return str(item.get("id") or "").strip()
+        for item in roster:
+            if needle in _entity_keys(item):
+                return str(item.get("id") or "").strip()
+    if single_ok and len(roster) == 1:
+        return str(roster[0].get("id") or "").strip()
+    return str(raw or "").strip()
+
+
+def _reconcile_slot_ids(
+    slots: list[dict[str, Any]], analysis: dict[str, Any] | None
+) -> None:
+    """Write canonical analysis ids onto slots so coverage and sheets share one key."""
+    characters = _analysis_characters(analysis)
+    scenes = _analysis_scenes(analysis)
     for slot in slots:
-        for flag in ("suppress_companions", "solo_subject", "keyframe_complete"):
-            if _as_bool(slot.get(flag)):
-                return True
-    return False
+        roles = slot.get("roles") or []
+        if ROLE_CHARACTER in roles or ROLE_MOTION in roles:
+            has_cid = bool(str(slot.get("character_id") or "").strip())
+            if ROLE_CHARACTER in roles or has_cid:
+                resolved = _resolve_roster_id(
+                    slot.get("character_id"),
+                    characters,
+                    single_ok=ROLE_CHARACTER in roles,
+                )
+                if resolved:
+                    slot["character_id"] = resolved
+        if ROLE_SCENE in roles:
+            resolved = _resolve_roster_id(
+                slot.get("setting_id"), scenes, single_ok=True
+            )
+            if resolved:
+                slot["setting_id"] = resolved
 
 
 def _cover_character_keys(
@@ -896,13 +954,9 @@ def _cover_character_keys(
         return
     covered.add(key)
     for item in characters:
-        cid = _norm_id(item.get("id"))
-        cname = _norm_id(item.get("name"))
-        if key == cid or key == cname:
-            if cid:
-                covered.add(cid)
-            if cname:
-                covered.add(cname)
+        keys = _entity_keys(item)
+        if key in keys:
+            covered.update(keys)
 
 
 def _covered_character_ids(
@@ -929,11 +983,10 @@ def _companion_characters(
     """Analysis cast members not already covered by a still — never invent beyond analysis."""
     out: list[dict[str, Any]] = []
     for item in _analysis_characters(analysis):
-        cid = _norm_id(item.get("id"))
-        cname = _norm_id(item.get("name"))
-        if (cid and cid in covered) or (cname and cname in covered):
+        keys = _entity_keys(item)
+        if keys & covered:
             continue
-        if not cid and not cname:
+        if not keys:
             continue
         out.append(item)
     return out
@@ -950,22 +1003,24 @@ def _covered_setting_ids(
             continue
         sid = str(slot.get("setting_id") or "").strip()
         if sid:
-            key = _norm_id(sid)
-            covered.add(key)
-            for scene in scenes:
-                scid = _norm_id(scene.get("id"))
-                sname = _norm_id(scene.get("name"))
-                if key == scid or key == sname:
-                    if scid:
-                        covered.add(scid)
-                    if sname:
-                        covered.add(sname)
+            _cover_setting_keys(covered, sid, scenes)
         elif len(scenes) == 1:
-            covered.add(_norm_id(scenes[0].get("id")))
-            name = _norm_id(scenes[0].get("name"))
-            if name:
-                covered.add(name)
+            _cover_setting_keys(covered, str(scenes[0].get("id") or ""), scenes)
+            _cover_setting_keys(covered, str(scenes[0].get("name") or ""), scenes)
     return covered
+
+
+def _cover_setting_keys(
+    covered: set[str], slot_key: str, scenes: list[dict[str, Any]]
+) -> None:
+    key = _norm_id(slot_key)
+    if not key:
+        return
+    covered.add(key)
+    for item in scenes:
+        keys = _entity_keys(item)
+        if key in keys:
+            covered.update(keys)
 
 
 def _companion_scenes(
@@ -973,11 +1028,10 @@ def _companion_scenes(
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in _analysis_scenes(analysis):
-        sid = _norm_id(item.get("id"))
-        sname = _norm_id(item.get("name"))
-        if (sid and sid in covered) or (sname and sname in covered):
+        keys = _entity_keys(item)
+        if keys & covered:
             continue
-        if not sid and not sname:
+        if not keys:
             continue
         out.append(item)
     return out
@@ -1074,12 +1128,7 @@ def _job_plan(
         return [slot for slot in slots if role in (slot.get("roles") or [])]
 
     binding_of = _slot_binding
-    intent = (
-        analysis.get("creative_intent")
-        if isinstance((analysis or {}).get("creative_intent"), dict)
-        else {}
-    )
-    suppress = _suppress_companions(intent if isinstance(intent, dict) else {}, slots)
+    _reconcile_slot_ids(slots, analysis)
     cast = _analysis_characters(analysis)
     settings = _analysis_scenes(analysis)
 
@@ -1090,14 +1139,14 @@ def _job_plan(
     style = has(ROLE_STYLE)
 
     # Covered = any still that already supplies that cast/set id (verbatim or
-    # condition). Companions are analysis entries minus that covered set.
+    # condition). Companions are always analysis entries minus that covered set.
     covered_chars = _covered_character_ids(slots, analysis)
     # Motion-solo: a single analysis character with no character still is the
     # keyframe subject — do not mint a redundant identity sheet for them.
     if motion and not character and len(cast) == 1:
         _cover_character_keys(covered_chars, str(cast[0].get("id") or ""), cast)
         _cover_character_keys(covered_chars, str(cast[0].get("name") or ""), cast)
-    companions = [] if suppress else _companion_characters(analysis, covered_chars)
+    companions = _companion_characters(analysis, covered_chars)
 
     # A character the LLM bound verbatim (the default) is shown from its own
     # file: no sheet for that id. Only an explicit `condition` character
@@ -1122,12 +1171,11 @@ def _job_plan(
     ]
     covered_settings = _covered_setting_ids(slots, analysis)
 
-    # Sets: scene-led jobs invent plates for uncovered settings. Pure character
-    # / motion jobs do not invent a place merely from analysis.scenes. Product
-    # jobs that list environments get companion plates for uncovered settings.
-    needs_set = bool(scene) or (bool(product) and bool(settings) and not motion)
+    # Uncovered analysis.scenes become plates for every non-motion job.
+    # Motion keeps I2V frame-only (no invented set plates). Never mint a room
+    # that is not already in analysis.
     plate_scenes: list[dict[str, Any]] = []
-    if not suppress and needs_set:
+    if not motion:
         plate_scenes = list(_companion_scenes(analysis, covered_settings))
         # Condition (restyle) settings need a generated plate even though the
         # still "covers" them — the upload is a seed, not the plan path.
@@ -1138,28 +1186,14 @@ def _job_plan(
                     (
                         s
                         for s in settings
-                        if _norm_id(s.get("id")) == sid or _norm_id(s.get("name")) == sid
+                        if sid in _entity_keys(s)
                     ),
                     None,
                 )
                 if match is None and not sid and settings:
                     match = settings[0]
-                if match is None:
-                    match = {
-                        "id": str(slot.get("setting_id") or "set_1"),
-                        "name": "Setting",
-                        "description": "Environment for this story.",
-                    }
-                if match not in plate_scenes:
+                if match is not None and match not in plate_scenes:
                     plate_scenes.insert(0, match)
-            if not plate_scenes:
-                plate_scenes = list(settings) or [
-                    {
-                        "id": "set_1",
-                        "name": "Setting",
-                        "description": "Environment for this story.",
-                    }
-                ]
 
     # Motion keeps I2V for the keyframe; companions (if any) are still minted
     # under style_lock — never regenerate the motion upload itself.
@@ -1224,16 +1258,54 @@ def _reference_plan(
     return _cap_plan(plan)
 
 
+def _on_screen_character_keys(analysis: dict[str, Any] | None) -> set[str]:
+    keys: set[str] = set()
+    for shot in ((analysis or {}).get("shots") or []):
+        if not isinstance(shot, dict):
+            continue
+        for field in ("on_screen", "character_ids", "visible_cast_ids"):
+            raw = shot.get(field) or []
+            if not isinstance(raw, list):
+                continue
+            for cid in raw:
+                n = _norm_id(cid)
+                if n:
+                    keys.add(n)
+    return keys
+
+
 def _cap_plan(plan: list[dict[str, str]], cap: int = 5) -> list[dict[str, str]]:
+    """Prefer product and user uploads over generated companions/plates under the Wan cap."""
     if len(plan) <= cap:
         return plan
-    locked_first = [item for item in plan if item.get("role") == ROLE_PRODUCT][:1]
-    locked_last = [item for item in plan if item.get("role") == ROLE_SCENE][-1:]
-    middle = [item for item in plan if item not in locked_first and item not in locked_last]
-    room = cap - len(locked_first) - len(locked_last)
-    if room < 0:
-        return (locked_first + locked_last)[:cap]
-    return locked_first + middle[:room] + locked_last
+
+    def is_upload(item: dict[str, str]) -> bool:
+        return bool(str(item.get("path") or "").strip())
+
+    products = [i for i, item in enumerate(plan) if item.get("role") == ROLE_PRODUCT]
+    uploads = [
+        i
+        for i, item in enumerate(plan)
+        if i not in products and is_upload(item)
+    ]
+    generated = [
+        i for i in range(len(plan)) if i not in products and i not in set(uploads)
+    ]
+    gen_chars = [i for i in generated if plan[i].get("role") == ROLE_CHARACTER]
+    gen_scenes = [i for i in generated if plan[i].get("role") == ROLE_SCENE]
+    other = [i for i in generated if i not in gen_chars and i not in gen_scenes]
+
+    head = products + uploads
+    if len(head) >= cap:
+        return [plan[i] for i in head[:cap]]
+
+    room = cap - len(head)
+    fill = gen_chars + other
+    if gen_scenes and room >= 1:
+        last = gen_scenes[-1:]
+        fill = fill + gen_scenes[:-1]
+        return [plan[i] for i in head + fill[: room - 1] + last]
+    return [plan[i] for i in head + (fill + gen_scenes)[:room]]
 
 
 def _prepare_shots(analysis: dict[str, Any], prompt: str) -> list[dict[str, Any]]:

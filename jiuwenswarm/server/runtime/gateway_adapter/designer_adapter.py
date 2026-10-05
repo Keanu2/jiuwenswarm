@@ -1392,7 +1392,7 @@ async def _bootstrap_graph_with_director_impl(
     if image_refs:
         if callable(on_progress):
             on_progress("thinking", "Supervisor · Reading reference images")
-        reads = await classify_reference_images(prompt, image_refs)
+        reads = await classify_reference_images(prompt, image_refs, analysis)
         if not reads:
             return (
                 None,
