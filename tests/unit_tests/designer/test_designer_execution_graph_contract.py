@@ -49,7 +49,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     normalize_node,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _TS = (
     _REPO_ROOT
     / "jiuwenswarm"

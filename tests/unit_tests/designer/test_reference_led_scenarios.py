@@ -39,7 +39,7 @@ from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
 )
 from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
 
-_ROOT = Path(__file__).resolve().parents[2]
+_ROOT = Path(__file__).resolve().parents[3]
 _REFERENCE_LED = (
     _ROOT
     / "jiuwenswarm"

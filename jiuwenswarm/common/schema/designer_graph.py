@@ -6,7 +6,7 @@ Shared between the React Flow frontend, gateway RPC handlers, and the graph
 executor.  Frontend mirrors live in
 ``channels/web/frontend/src/features/designer/executionGraphTypes.ts``;
 cross-layer literals are pinned by
-``tests/unit_tests/test_designer_execution_graph_contract.py``.
+``tests/unit_tests/designer/test_designer_execution_graph_contract.py``.
 """
 
 from __future__ import annotations
