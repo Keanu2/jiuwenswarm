@@ -37,6 +37,10 @@ from jiuwenswarm.server.runtime.designer.chat_document_sync import (
 )
 
 from jiuwenswarm.server.runtime.designer.chat_document_plan import plan_document_edits
+from jiuwenswarm.server.runtime.designer.edit_scope import (
+    restore_document_attribute_scope,
+    restore_graph_attribute_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +481,7 @@ async def run_leader_chat(
     ):
         raise ChatDocumentConflict("大纲或分镜有待选择版本，请先保留原版或采用新版，再重试编辑。")
     next_graph, run_ids, summary = apply_leader_plan(deepcopy(graph), plan)
+    next_graph = restore_graph_attribute_scope(graph, next_graph, text)
     text_edits = []
     if plan["edit_documents"] or graph_content_changed(graph, next_graph):
         validate_shot_topology(next_graph)
@@ -488,6 +493,13 @@ async def run_leader_chat(
             _emit(progress, ACTIVITY_KIND_STAGE, "synchronizing the complete brief and storyboard")
             next_graph, text_edits = await plan_document_edits(graph, next_graph, remaining_documents, text)
     next_graph, texts, changed = prepare_document_update(graph, next_graph, documents, text_edits)
+    next_graph = restore_graph_attribute_scope(graph, next_graph, text)
+    texts = restore_document_attribute_scope(
+        graph,
+        {key: doc.text for key, doc in documents.items()},
+        texts,
+        text,
+    )
     if changed:
         _emit(progress, ACTIVITY_KIND_TOOL_CALL, "validated workflow edits; preparing to save", tool="designer_graph_patch")
     return {
