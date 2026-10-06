@@ -62,6 +62,8 @@ def _isolated_service_env(temp_home: Path) -> dict[str, str]:
     env["JIUWENSWARM_HOME"] = str(temp_home)
     # Preserve the per-test ports when service startup loads runtime dotenv.
     env["JIUWENSWARM_CLI_PORTS"] = "1"
+    # Readiness is detected from INFO lines on the subprocess console.
+    env["LOG_LEVEL"] = "INFO"
     return env
 
 
