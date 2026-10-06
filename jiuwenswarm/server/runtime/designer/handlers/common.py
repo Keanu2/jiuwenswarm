@@ -11,6 +11,8 @@ from urllib.parse import unquote, urlparse
 
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
+    NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_SCENE,
     AssetRef,
     DesignerExecutionGraph,
     DesignerGraphNode,
@@ -59,16 +61,6 @@ def node_generate_prompt(node: DesignerGraphNode | None) -> str:
         if text:
             return text
     return str((config or {}).get("prompt") or "").strip()
-
-
-def node_generate_prompt_origin(node: DesignerGraphNode | None) -> str:
-    if node is None:
-        return ""
-    config = node.get("config") if isinstance(node.get("config"), dict) else {}
-    generate = config.get("generate") if isinstance(config, dict) else None
-    if isinstance(generate, dict):
-        return str(generate.get("prompt_origin") or "").strip()
-    return ""
 
 
 def path_from_uri(uri: str) -> Path | None:
@@ -144,15 +136,101 @@ def node_output_image_paths(ctx: NodeExecutionContext, node_id: str) -> list[Pat
 
 
 def role_output_refs(ctx: NodeExecutionContext, role: str) -> list[dict]:
+    """Collect output refs from every node with the given role (multi-character/scene)."""
     if ctx.run is None:
         return []
+    collected: list[dict] = []
+    seen_uri: set[str] = set()
     for node in ctx.graph.get("nodes") or []:
         if node_role(node) != role:
             continue
-        collected = node_output_refs(ctx, str(node.get("id") or ""))
-        if collected:
-            return collected
-    return []
+        for ref in node_output_refs(ctx, str(node.get("id") or "")):
+            uri = str(ref.get("uri") or "").strip()
+            if not uri or uri in seen_uri:
+                continue
+            seen_uri.add(uri)
+            collected.append(ref)
+    return collected
+
+
+def node_ids_output_image_paths(ctx: NodeExecutionContext, node_ids: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for nid in node_ids:
+        for path in node_output_image_paths(ctx, nid):
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path)
+    return paths
+
+
+def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
+    """Identity-first refs: optional prior keyframe, solo cast sheets, then scene.
+
+    Order matters for I2I models: prior KF (edit strategy) → character solos → scene.
+    """
+    cfg = node.get("config") or {}
+    identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+    preferred = [
+        str(x)
+        for x in (
+            identity.get("character_node_ids")
+            or cfg.get("character_node_ids")
+            or []
+        )
+        if str(x).strip()
+    ]
+    paths = node_ids_output_image_paths(ctx, preferred) if preferred else []
+    if not paths:
+        # Prefer identity_source solos over combined compose aids.
+        solo_ids: list[str] = []
+        for other in ctx.graph.get("nodes") or []:
+            if not isinstance(other, dict):
+                continue
+            oc = other.get("config") if isinstance(other.get("config"), dict) else {}
+            if str(oc.get("role") or "") != NODE_ROLE_CHARACTER_DESIGN:
+                continue
+            if oc.get("combined_cast"):
+                continue
+            solo_ids.append(str(other.get("id") or ""))
+        paths = node_ids_output_image_paths(ctx, [x for x in solo_ids if x])
+    if not paths:
+        paths = list(role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN))
+
+    scene_paths = list(role_output_image_paths(ctx, NODE_ROLE_SCENE))
+    input_ids = [str(x) for x in (cfg.get("inputs") or []) if str(x).startswith("n_scene")]
+    if input_ids:
+        scene_paths = node_ids_output_image_paths(ctx, input_ids) or scene_paths
+
+    prior_id = str(
+        identity.get("prior_keyframe_node_id")
+        or cfg.get("prior_keyframe_node_id")
+        or ""
+    ).strip()
+    prior_paths: list[Path] = []
+    if prior_id:
+        prior_paths = node_ids_output_image_paths(ctx, [prior_id])
+
+    merged: list[Path] = []
+    seen: set[str] = set()
+    # Prior keyframe first when editing sequentially; else cast then scene.
+    strategy = str(
+        identity.get("keyframe_strategy") or cfg.get("keyframe_strategy") or ""
+    )
+    ordered = (
+        [*prior_paths, *paths, *scene_paths]
+        if strategy == "edit_prior_keyframe" and prior_paths
+        else [*paths, *scene_paths, *prior_paths]
+    )
+    for path in ordered:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(path)
+    return merged
 
 
 def role_output_image_paths(ctx: NodeExecutionContext, role: str) -> list[Path]:
@@ -180,31 +258,6 @@ def role_output_image_path(ctx: NodeExecutionContext, role: str) -> Path | None:
     return paths[0] if paths else None
 
 
-_TEXT_SUFFIXES = {".md", ".txt", ".markdown", ".csv"}
-
-
-def role_output_text_path(ctx: NodeExecutionContext, role: str) -> Path | None:
-    """Return the markdown/text artifact for a role, if the node wrote a file."""
-    if ctx.run is None:
-        return None
-    states = ctx.run.get("node_states") or {}
-    for node in ctx.graph.get("nodes") or []:
-        if node_role(node) != role:
-            continue
-        ref = (states.get(node["id"]) or {}).get("output_ref") or {}
-        path = path_from_uri(str(ref.get("uri") or ""))
-        if path is None or not path.is_file():
-            continue
-        candidates = [path] if path.suffix.lower() in _TEXT_SUFFIXES else []
-        sidecar = path.with_suffix(".md")
-        if sidecar not in candidates:
-            candidates.append(sidecar)
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate.resolve()
-    return None
-
-
 def role_output_text(ctx: NodeExecutionContext, role: str) -> str:
     if ctx.run is None:
         return ""
@@ -216,7 +269,8 @@ def role_output_text(ctx: NodeExecutionContext, role: str) -> str:
         path = path_from_uri(str(ref.get("uri") or ""))
         if path is None or not path.is_file():
             continue
-        candidates = [path] if path.suffix.lower() in _TEXT_SUFFIXES else []
+        text_suffixes = {".md", ".txt", ".markdown", ".csv"}
+        candidates = [path] if path.suffix.lower() in text_suffixes else []
         sidecar = path.with_suffix(".md")
         if sidecar not in candidates:
             candidates.append(sidecar)
@@ -230,104 +284,67 @@ def role_output_text(ctx: NodeExecutionContext, role: str) -> str:
     return ""
 
 
-def _blocks_to_text(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, list):
-        parts: list[str] = []
-        for block in value:
-            if isinstance(block, dict):
-                text = block.get("text") or block.get("content") or ""
-                if text:
-                    parts.append(str(text))
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(parts).strip()
-    if isinstance(value, dict):
-        return _blocks_to_text(value.get("text") or value.get("content"))
-    return ""
-
-
-def model_response_text(response: object) -> str:
-    """Read visible text from a chat-model response, including reasoning-only payloads."""
-    if response is None:
-        return ""
-    if isinstance(response, str):
-        return response.strip()
-    for attr in ("content", "text", "reasoning_content", "output_text"):
-        text = _blocks_to_text(getattr(response, attr, None))
-        if text:
-            return text
-    extra = getattr(response, "model_extra", None) or getattr(response, "extra", None)
-    if isinstance(extra, dict):
-        text = _blocks_to_text(extra.get("content") or extra.get("reasoning_content"))
-        if text:
-            return text
-    return ""
-
-
 async def complete_designer_text(prompt: str, *, max_tokens: int = 1200) -> str:
     """Call the default chat model. Tests monkeypatch this function."""
     from jiuwenswarm.common.config import get_config, get_default_models
-    from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-    from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+    from openjiuwen.core.foundation.llm import Model
+    from openjiuwen.core.foundation.llm.schema.config import (
+        ModelClientConfig,
+        ModelRequestConfig,
+    )
 
     entries = get_default_models(get_config())
     entry = next((item for item in entries if item.get("is_default") is True), None)
     if entry is None and entries:
         entry = entries[0]
     client = (entry or {}).get("model_client_config") if isinstance(entry, dict) else {}
+    mco = (entry or {}).get("model_config_obj") if isinstance(entry, dict) else {}
     if not isinstance(client, dict):
         return ""
+    if not isinstance(mco, dict):
+        mco = {}
     api_key = str(client.get("api_key") or "").strip()
     api_base = str(client.get("api_base") or "").strip()
     model_name = str(client.get("model_name") or "").strip()
+    provider = str(client.get("client_provider") or "").strip()
     if not api_key or not model_name:
-        logger.warning(
-            "Designer text model missing api_key or model_name; skipping LLM"
-        )
         return ""
-    mcc_fields = {key: value for key, value in client.items() if key != "model_name"}
-    if not mcc_fields.get("client_provider"):
-        mcc_fields["client_provider"] = "OpenAI"
-    # Designer nodes need a markdown table, not a thinking dump. DeepSeek V4
-    # otherwise spends the output budget on reasoning and Storyboard looks empty.
-    mco = dict((entry or {}).get("model_config_obj") or {}) if isinstance(entry, dict) else {}
-    mco["reasoning_level"] = "off"
-    mco["max_tokens"] = max_tokens
-    request_kwargs = build_reasoning_model_request_kwargs(
-        model_client_config=mcc_fields,
-        model_config_obj=mco,
+    kwargs: dict[str, object] = {
+        "api_key": api_key,
+        "api_base": api_base,
+        "client_provider": provider,
+    }
+    profile = str(client.get("endpoint_profile") or "").strip()
+    if profile:
+        kwargs["endpoint_profile"] = profile
+    request = ModelRequestConfig(
         model_name=model_name,
+        temperature=float(mco.get("temperature", 0.4) or 0.4),
+        top_p=float(mco.get("top_p", 0.95) or 0.95),
+        max_tokens=max_tokens,
     )
-    request_kwargs["max_tokens"] = max_tokens
     model = Model(
-        model_client_config=ModelClientConfig(**mcc_fields),
-        model_config=ModelRequestConfig(**request_kwargs),
+        model_client_config=ModelClientConfig(**kwargs),
+        model_config=request,
     )
-
-    async def _invoke() -> str:
-        response = await model.invoke(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=max_tokens,
-            model=model_name,
-        )
-        text = model_response_text(response)
-        if not text:
-            logger.warning(
-                "Designer text LLM empty model=%s response_type=%s",
-                model_name,
-                type(response).__name__,
-            )
-        return text
-
-    text = await _invoke()
-    if not text:
-        text = await _invoke()
-    return text
+    response = await model.invoke(
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+        max_tokens=max_tokens,
+        model=model_name,
+    )
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("text"):
+                parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts).strip()
+    return str(content).strip()
 
 
 def _image_gen_switch_enabled() -> bool:
@@ -337,13 +354,48 @@ def _image_gen_switch_enabled() -> bool:
     return raw in {"true", "1", "yes", "on", "enabled"}
 
 
+_IMAGE_GEN_SEM = None
+
+
+def _image_gen_semaphore():
+    """Limit concurrent DashScope image calls to avoid RateQuota 429s."""
+    import asyncio
+
+    global _IMAGE_GEN_SEM
+    if _IMAGE_GEN_SEM is None:
+        # Keep low: quality path fans out cast+scene+frames; API quotas are tight.
+        _IMAGE_GEN_SEM = asyncio.Semaphore(2)
+    return _IMAGE_GEN_SEM
+
+
+def _is_rate_limit_error(text: str) -> bool:
+    low = (text or "").lower()
+    return any(
+        token in low
+        for token in (
+            "ratequota",
+            "rate limit",
+            "throttling",
+            "too many requests",
+            "429",
+        )
+    )
+
+
 async def generate_designer_image(
     prompt: str,
-    size: str = "1328x1328",
+    size: str = "1024x1024",
     reference_image: str | None = None,
     reference_images: list[str] | None = None,
+    max_tries: int = 4,
+    timeout_sec: float = 120.0,
 ) -> dict[str, str] | None:
-    """Call image_gen when configured. Tests monkeypatch this function."""
+    """Call image_gen when configured. Tests monkeypatch this function.
+
+    Retries transient RateQuota/429 with backoff under a global concurrency cap.
+    """
+    import asyncio
+
     from jiuwenswarm.agents.harness.common.tools.image_tools import _invoke_model_image_generation
     from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
         apply_image_gen_model_config_from_yaml,
@@ -373,11 +425,48 @@ async def generate_designer_image(
             "Designer image generation using reference_images=%s",
             ",".join(Path(item).name for item in refs),
         )
-    result = await _invoke_model_image_generation(prompt, size=size, reference_images=refs or None)
-    if "error" in result:
-        logger.info("Designer image generation unavailable: %s", result["error"])
-        return {"error": str(result["error"])}
-    image_path = str(result.get("image_path") or "").strip()
-    if not image_path:
-        return None
-    return {"image_path": image_path}
+
+    attempts = max(1, min(6, int(max_tries or 1)))
+    last_error = ""
+    sem = _image_gen_semaphore()
+    for attempt in range(1, attempts + 1):
+        async with sem:
+            try:
+                result = await asyncio.wait_for(
+                    _invoke_model_image_generation(
+                        prompt,
+                        size=size,
+                        reference_images=refs or None,
+                        max_tries=1,
+                    ),
+                    timeout=max(30.0, float(timeout_sec or 120.0)),
+                )
+            except asyncio.TimeoutError:
+                last_error = f"image_gen timed out after {int(timeout_sec)}s"
+                logger.info("Designer image generation timed out (attempt %s/%s)", attempt, attempts)
+                result = {"error": last_error}
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                result = {"error": last_error}
+
+        if isinstance(result, dict) and result.get("image_path"):
+            return {"image_path": str(result["image_path"])}
+        err = str((result or {}).get("error") or last_error or "image_gen failed")
+        last_error = err
+        if attempt < attempts and _is_rate_limit_error(err):
+            delay = min(45.0, 4.0 * (2 ** (attempt - 1)))
+            logger.info(
+                "Designer image rate-limited; retry in %.1fs (attempt %s/%s)",
+                delay,
+                attempt,
+                attempts,
+            )
+            await asyncio.sleep(delay)
+            continue
+        if attempt < attempts and "timed out" in err.lower():
+            await asyncio.sleep(2.0)
+            continue
+        break
+
+    logger.info("Designer image generation unavailable: %s", last_error)
+    return {"error": last_error}

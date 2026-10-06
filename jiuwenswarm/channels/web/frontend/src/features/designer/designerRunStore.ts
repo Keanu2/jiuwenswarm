@@ -124,6 +124,7 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
           .catch(() => undefined);
       }, 400);
     }
+    // Do NOT auto-press Continue / Regenerate — user chooses explicitly.
   },
 
   resetForGraph: (graph) => {
@@ -171,9 +172,9 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
     set({ runError: null });
     try {
       let result;
-      if (primary === 'continue' && run?.run_id) {
-        result = await designerGraphClient.startRun({ runId: run.run_id });
-      } else if (primary === 'retry_failed') {
+      // Always drive the full remaining pipeline in one start — never require
+      // repeated Continue clicks between layers / asset approvals.
+      if (primary === 'retry_failed') {
         const failedId =
           currentLayerNodeIds.find(
             (nodeId) => nodeStates[nodeId]?.status === DESIGNER_NODE_STATUS_FAILED,
@@ -188,6 +189,8 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
               nodeId: failedId,
             })
           : await designerGraphClient.startRun({ graphId: graph.graph_id });
+      } else if (run?.run_id && primary === 'continue') {
+        result = await designerGraphClient.startRun({ runId: run.run_id });
       } else {
         result = await designerGraphClient.startRun({ graphId: graph.graph_id });
       }

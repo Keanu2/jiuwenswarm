@@ -1,14 +1,17 @@
 import { useDesignerStore } from './designerStore';
 import { useDesignerChatStore } from './designerChatStore';
 import { designerGraphClient } from './designerGraphClient';
+import { useDesignerOptimizeStore } from './designerOptimizeStore';
 
-export const DESIGNER_BOOTSTRAP_THINKING_MS = 2000;
+export const DESIGNER_BOOTSTRAP_THINKING_MS = 1200;
 
 export type LaunchDesignerFromTaskParams = {
   prompt: string;
   projectId?: string;
   projectDir?: string;
   workMode?: 'work' | 'code';
+  optimizeFor?: 'cost' | 'quality';
+  scenario?: string;
   /** Navigate to Design nav before/while bootstrap runs. */
   onNavigateToDesign: () => void;
   thinkingMs?: number;
@@ -24,14 +27,16 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * 设计画布 Assistant 发送：已在 Design 页，不跳转导航，直接 bootstrap 上屏。
- * 与 Tasks 入口共用同一条 ``designer.graph.bootstrap`` 链路。
+ * Design canvas Assistant send: already on Design page, no nav jump; bootstrap onto canvas.
+ * Shares the same ``designer.graph.bootstrap`` path as the Tasks entry.
  */
 export async function bootstrapDesignerFromChat(params: {
   prompt: string;
   projectId?: string;
   projectDir?: string;
   workMode?: 'work' | 'code';
+  optimizeFor?: 'cost' | 'quality';
+  scenario?: string;
   thinkingText?: string;
   doneText?: string;
   errorText?: string;
@@ -44,17 +49,22 @@ export async function bootstrapDesignerFromChat(params: {
 }
 
 /**
- * Tasks 页选「设计」后发送：跳转设计栏 → 聊天区展示用户消息 → 模拟思考 → bootstrap 上屏。
- * 不写入主 chatStore，也不走主 agent 链路。
+ * Tasks page Design arm → Design tab: compose agentic graph via bootstrap RPC.
  */
 export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParams): Promise<void> {
   const prompt = params.prompt.trim();
   if (!prompt) return;
 
+  const optimizeFor =
+    params.optimizeFor ?? useDesignerOptimizeStore.getState().optimizeFor ?? 'quality';
   const thinkingMs = params.thinkingMs ?? DESIGNER_BOOTSTRAP_THINKING_MS;
-  const thinkingText = params.thinkingText ?? '正在思考如何搭建设计工作流…';
-  const doneText = params.doneText ?? '已为你搭建初始设计工作流。';
-  const errorText = params.errorText ?? '搭建工作流失败，请稍后重试。';
+  const thinkingText =
+    params.thinkingText ??
+    `Decomposing your request into an agentic ${optimizeFor}-optimized design graph…`;
+  const doneText =
+    params.doneText ??
+    'Workflow composed. Tweak parameters and rerun nodes as needed.';
+  const errorText = params.errorText ?? 'Failed to compose the design workflow. Please retry.';
 
   const designerStore = useDesignerStore.getState();
   const chatStore = useDesignerChatStore.getState();
@@ -77,7 +87,6 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
 
   await sleep(thinkingMs);
 
-  // 用户可能已离开设计页；仍继续完成 bootstrap，图会写入 store。
   chatStore.removeMessage(thinkingId);
   chatStore.setBootstrapPhase('bootstrapping');
 
@@ -87,6 +96,8 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
       projectId: params.projectId,
       projectDir: params.projectDir,
       workMode: params.workMode,
+      optimizeFor,
+      scenario: params.scenario,
     });
     const graph = result?.graph;
     if (!graph?.graph_id || !Array.isArray(graph.nodes)) {
@@ -94,9 +105,11 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
     }
     useDesignerStore.getState().applyGraph(graph);
     useDesignerChatStore.getState().bindGraph(graph.graph_id);
+    const scenario = String(graph.metadata?.scenario || 'auto');
+    const nodeCount = graph.nodes.length;
     useDesignerChatStore.getState().appendMessage({
       role: 'assistant',
-      content: doneText,
+      content: `${doneText}\n\nScenario: ${scenario} · Nodes: ${nodeCount} · Optimize: ${optimizeFor}`,
       kind: 'bootstrap_done',
     });
     useDesignerChatStore.getState().setBootstrapPhase('done');
@@ -105,7 +118,7 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
     useDesignerStore.getState().failBootstrapEntry(message);
     useDesignerChatStore.getState().appendMessage({
       role: 'assistant',
-      content: `${errorText}${message ? `（${message}）` : ''}`,
+      content: `${errorText}${message ? ` (${message})` : ''}`,
       kind: 'bootstrap_error',
     });
     useDesignerChatStore.getState().setBootstrapPhase('error');

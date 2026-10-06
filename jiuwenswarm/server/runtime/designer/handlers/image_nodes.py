@@ -8,7 +8,6 @@ from pathlib import Path
 from shutil import copy2
 
 from jiuwenswarm.common.schema.designer_graph import (
-    GENERATE_PROMPT_ORIGIN_STORYBOARD,
     NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER_DESIGN,
     NODE_ROLE_SCENE,
@@ -17,14 +16,15 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_TEXT,
     AssetRef,
     DesignerGraphNode,
-    node_role,
     node_shot_index,
 )
 from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
 from jiuwenswarm.server.runtime.designer.handlers.common import (
+    collect_frame_reference_images,
     file_output_ref,
     graph_prompt,
     role_output_image_path,
+    role_output_image_paths,
     role_output_text,
     write_workspace_text,
 )
@@ -36,12 +36,18 @@ from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
 
-def _character_prompt(source: str) -> str:
+def _character_prompt(source: str, *, combined_cast: bool = False) -> str:
+    if combined_cast:
+        return (
+            "Combined cast postcard: all listed characters side-by-side on one sheet, "
+            "full or three-quarter body each, consistent scale, clean background, "
+            "cinematic lighting. Clear identity for each person. Be fast — one clear image. "
+            "No subtitles, no storyboard grid, no dense text labels.\n"
+            f"{source}"
+        )
     return (
-        "Character design sheet only. Single subject, relaxed standing three-quarter pose, "
-        "plain seamless studio backdrop, no location, no train, no station, no street, "
-        "not walking, not a cinematic scene. Lighting is studio, not the story setting. "
-        "Use the brief only for face, body, hair, and costume. Ignore action and place. "
+        "Character design sheet, single subject, full or three-quarter body, clean background, "
+        "cinematic lighting. Be fast — one clear image. Follow the brief. "
         "No subtitles, no storyboard grid.\n"
         f"{source}"
     )
@@ -51,7 +57,7 @@ def _scene_prompt(source: str) -> str:
     return (
         "Cinematic establishing shot of the environment only, no people. "
         "Show space, weather, lighting, signage, and ground so a character can be placed later. "
-        "No people, no subtitles, no storyboard grid.\n"
+        "Be fast — one clear image. No people, no subtitles, no storyboard grid.\n"
         f"{source}"
     )
 
@@ -75,61 +81,88 @@ def _shot_frame_prompt(
     *,
     has_character: bool,
     has_scene: bool,
-    has_previous_frame: bool = False,
+    cast_names: list[str] | None = None,
+    character_ref_count: int = 1,
+    combined_cast_ref: bool = False,
+    keyframe_strategy: str = "",
+    costume_lock: str = "",
 ) -> str:
     timeline = f" ({shot['timeline']})" if shot["timeline"] else ""
     comment = str(shot.get("comment") or "").strip()
-    camera = str(shot.get("camera") or "").strip() or "unspecified"
-    move = str(shot.get("move") or "").strip() or "static"
-    action = str(shot.get("character_action") or "").strip() or "unspecified"
-    place = str(shot.get("scene_change") or "").strip() or "unspecified"
-    _ = brief
-    lead = ""
-    if comment:
-        lead = f"Generate the keyframe from this shot description: {comment}. "
-    lead += (
-        f"ONE photoreal still for shot {shot['shot_no']}{timeline} only. "
-        f"Camera must be {camera}. Camera move: {move}. "
-        f"This instant: {action}. Place: {place}. "
-        "This shot must use a different camera size, angle, distance, and moment "
-        "than the character sheet and than every other keyframe."
+    names = [str(n).strip() for n in (cast_names or []) if str(n).strip()]
+    who = ", ".join(names)
+    lead = (
+        f"Cinematic keyframe, one photoreal still for shot {shot['shot_no']}{timeline}. "
+        "Clear composition, this instant only, no comic grid."
     )
+    if who:
+        if len(names) > 1:
+            lead += (
+                f" The frame MUST clearly show all of these characters: {who}. "
+                "Do not drop anyone listed."
+            )
+        else:
+            lead += f" Feature this character: {who}."
+    if comment:
+        lead += f" Generate the keyframe from this shot description: {comment}."
     lead += (
         " Shot notes: "
         f"shot {shot['shot_no']}; "
         f"timeline {shot['timeline'] or 'unspecified'}; "
-        f"camera {camera}; "
-        f"camera move {move}; "
-        f"character action {action}; "
-        f"scene change {place}."
+        f"camera {shot['camera'] or 'unspecified'}; "
+        f"camera move {shot['move'] or 'unspecified'}; "
+        f"character action {shot['character_action'] or 'unspecified'}; "
+        f"scene change {shot['scene_change'] or 'unspecified'}."
     )
-    if has_previous_frame:
-        lead += (
-            " This is a later shot generated from text only. "
-            "Change camera size, angle, distance, blocking, and the action instant. "
-            "Do not restyle or copy another keyframe's composition."
-        )
-        if has_scene:
-            lead += " If a later image is the scene, match location and lighting only."
-    elif has_character and has_scene:
-        lead += (
-            " This is image-to-image. The first reference is the character sheet "
-            "(identity and costume only); the second is the scene. "
-            "Place that person in that place with THIS shot's camera. "
-            "Do not copy the character sheet's pose or framing."
-        )
+    n_refs = max(1, int(character_ref_count or 1))
+    prior_edit = keyframe_strategy == "edit_prior_keyframe"
+    if has_character and has_scene:
+        if prior_edit:
+            lead += (
+                " This is image-to-image EDIT of the prior keyframe (first reference). "
+                f"Keep the same faces and costumes"
+                f"{f' for {who}' if who else ''}; only change pose/action/blocking for this beat. "
+                "Additional references are canonical solo cast sheets and the scene — "
+                "do not invent a new wardrobe (e.g. suit vs robe)."
+            )
+        elif combined_cast_ref or (len(names) > 1 and n_refs == 1):
+            lead += (
+                " This is image-to-image. The first reference is a combined cast postcard "
+                f"(all of {who or 'the cast'} on one sheet); the second is the scene. "
+                "Place ALL of those people into that scene together, matching each identity "
+                "and costume from the postcard, plus location, lighting, and weather."
+            )
+        elif n_refs > 1:
+            lead += (
+                f" This is image-to-image. The first {n_refs} references are CANONICAL solo "
+                f"cast sheets{f' for {who}' if who else ''}; the next is the scene. "
+                "Compose every listed character into that scene. "
+                "IDENTITY LOCK: same face, hair, body, and costume as each sheet — "
+                "never redesign wardrobe between shots."
+            )
+        else:
+            lead += (
+                " This is image-to-image. The first reference is the canonical character sheet; "
+                "the second is the scene. Place that character in that scene and keep "
+                "identity, costume, materials, location, lighting, and weather."
+            )
     elif has_character:
         lead += (
-            " The character reference is identity and costume only. "
-            "Invent THIS shot's camera. Do not copy a studio full-body standing or walking pose."
+            " Character look, costume, and materials must match the character reference exactly. "
+            "Do not invent a new design or alternate wardrobe."
         )
     elif has_scene:
         lead += " Location, lighting, and weather must match the scene reference."
+    if costume_lock:
+        lead += f" Costume lock: {costume_lock}."
     lead += (
         " The image must be the cinematic scene itself. "
         "No subtitles, no storyboard grid, no table, no spreadsheet, no cell borders. "
         "Do not paint words like Shot, Timeline, Camera, Move, Character action, Scene change, or Comment."
     )
+    visual = _strip_markdown_tables(brief)
+    if visual:
+        return f"{lead}\nOverall visual style:\n{visual}"
     return lead
 
 
@@ -173,44 +206,6 @@ def fallback_keyframe_script(source: str, shot_index: int = 1) -> str:
     return "".join(lines)
 
 
-_MAX_FRAME_REFERENCE_IMAGES = 3
-
-
-def collect_frame_reference_images(
-    ctx: NodeExecutionContext,
-    node: DesignerGraphNode,
-    *,
-    character: Path | None,
-    scene: Path | None,
-    previous: Path | None,
-    later_shot: bool = False,
-) -> list[str]:
-    """Shot 1 may use character/scene. Later shots are text-to-image.
-
-    qwen-image treats a previous still as a style/edit source, so chaining
-    keyframes only changes look, not camera or action.
-    """
-    del ctx, node, previous
-    if later_shot:
-        return []
-    paths: list[Path] = []
-    seen: set[str] = set()
-
-    def add(path: Path | None) -> None:
-        if path is None:
-            return
-        resolved = path.resolve()
-        key = str(resolved)
-        if key in seen:
-            return
-        seen.add(key)
-        paths.append(resolved)
-
-    add(character)
-    add(scene)
-    return [str(path) for path in paths[:_MAX_FRAME_REFERENCE_IMAGES]]
-
-
 def _publish_shot_image(src: Path, *, stem: str) -> Path:
     dest = handler_io.get_agent_workspace_dir() / f"{stem}{src.suffix or '.png'}"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -226,10 +221,15 @@ async def _image_or_notes(
     stem: str,
     kind_if_text: str,
     reference_images: list[str] | None = None,
+    size: str = "1024x1024",
+    max_tries: int = 4,
+    require_image: bool = True,
 ) -> NodeResult:
     generated = await handler_io.generate_designer_image(
         prompt,
+        size=size,
         reference_images=reference_images,
+        max_tries=max_tries,
     )
     if generated and generated.get("image_path"):
         path = Path(generated["image_path"])
@@ -237,8 +237,12 @@ async def _image_or_notes(
             output_ref=file_output_ref(path, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
             message="image generated",
         )
-    path = write_workspace_text(stem, notes)
     error = str((generated or {}).get("error") or "").strip()
+    if require_image:
+        raise RuntimeError(
+            f"image_gen required but failed for {stem}: {error or 'no image_path'}"
+        )
+    path = write_workspace_text(stem, notes)
     message = (
         f"image_gen failed: {error}; wrote notes"
         if error
@@ -279,24 +283,38 @@ def _with_card_ref(result: NodeResult, ctx: NodeExecutionContext, role: str) -> 
 
 class CharacterDesignNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        source = _aligned_source(ctx, NODE_ROLE_CHARACTER_DESIGN, node)
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        focused = str(cfg.get("prompt") or "").strip()
+        source = focused or _aligned_source(ctx, NODE_ROLE_CHARACTER_DESIGN, node)
+        name = str(cfg.get("character_name") or node.get("label") or "Character")
+        size = str(cfg.get("image_size") or "1024x1024")
+        combined = bool(cfg.get("combined_cast"))
+        max_tries = int(cfg.get("max_image_calls") or 1)
         result = await _image_or_notes(
-            prompt=_character_prompt(source),
+            prompt=_character_prompt(f"{name}\n{source}", combined_cast=combined),
             notes=fallback_character_sheet(source),
             stem=f"designer_character_{ctx.run_id}_{ctx.node_id}",
             kind_if_text=NODE_TYPE_TEXT,
+            size=size,
+            max_tries=max_tries,
         )
         return _with_card_ref(result, ctx, NODE_ROLE_CHARACTER_DESIGN)
 
 
 class SceneNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        source = _aligned_source(ctx, NODE_ROLE_SCENE, node)
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        focused = str(cfg.get("prompt") or "").strip()
+        source = focused or _aligned_source(ctx, NODE_ROLE_SCENE, node)
+        size = str(cfg.get("image_size") or "1024x1024")
+        max_tries = int(cfg.get("max_image_calls") or 1)
         result = await _image_or_notes(
             prompt=_scene_prompt(source),
             notes=fallback_scene_notes(source),
             stem=f"designer_scene_{ctx.run_id}_{ctx.node_id}",
             kind_if_text=NODE_TYPE_TEXT,
+            size=size,
+            max_tries=max_tries,
         )
         return _with_card_ref(result, ctx, NODE_ROLE_SCENE)
 
@@ -306,53 +324,101 @@ class FrameNodeHandler:
         shot_index = node_shot_index(node)
         storyboard = role_output_text(ctx, NODE_ROLE_STORYBOARD)
         brief = role_output_text(ctx, NODE_ROLE_BRIEF)
-        character = role_output_image_path(ctx, NODE_ROLE_CHARACTER_DESIGN)
-        scene = role_output_image_path(ctx, NODE_ROLE_SCENE)
-        visual = brief or graph_prompt(ctx.graph)
-        has_scene_node = any(
-            node_role(item) == NODE_ROLE_SCENE for item in (ctx.graph.get("nodes") or [])
-        )
-        missing: list[str] = []
-        if character is None:
-            missing.append("Character")
-        if has_scene_node and scene is None:
-            missing.append("Scene")
-        if missing:
+        all_chars = role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN)
+        all_scenes = role_output_image_paths(ctx, NODE_ROLE_SCENE)
+        visual = brief or graph_prompt(ctx.graph, node)
+        if not all_chars or not all_scenes:
+            missing = []
+            if not all_chars:
+                missing.append("Character")
+            if not all_scenes:
+                missing.append("Scene")
             raise RuntimeError(
                 "Keyframe generation must send "
                 + " and ".join(missing)
-                + " with this shot. Finish those nodes first."
+                + " with this shot. Finish the Character and Scene nodes first."
             )
-        later_shot = shot_index > 1
-        refs = collect_frame_reference_images(
-            ctx,
-            node,
-            character=character,
-            scene=scene,
-            previous=None,
-            later_shot=later_shot,
-        )
+        refs_paths = collect_frame_reference_images(ctx, node)
+        refs = [str(p) for p in (refs_paths or [*all_chars[:3], *all_scenes[:1]])]
         shots = storyboard_shots_or_default(storyboard, visual)
-        if shot_index > len(shots):
+        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
+        generate = cfg.get("generate") if isinstance(cfg.get("generate"), dict) else {}
+        planned_action = str(cfg.get("shot_action") or generate.get("prompt") or "").strip()
+        cast_names = [
+            str(x).strip()
+            for x in (cfg.get("cast_names") or [])
+            if str(x).strip()
+        ]
+        preferred_char_nodes = [
+            str(x)
+            for x in (
+                (cfg.get("identity_refs") or {}).get("character_node_ids")
+                if isinstance(cfg.get("identity_refs"), dict)
+                else None
+            )
+            or (cfg.get("character_node_ids") or [])
+            if str(x).strip()
+        ]
+        identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+        keyframe_strategy = str(
+            identity.get("keyframe_strategy") or cfg.get("keyframe_strategy") or ""
+        )
+        costume_lock = str(identity.get("costume_lock") or cfg.get("costume_lock") or "")
+        # Detect combined cast from attached character nodes when available.
+        combined_cast_ref = False
+        for other in ctx.graph.get("nodes") or []:
+            if not isinstance(other, dict):
+                continue
+            if str(other.get("id") or "") not in preferred_char_nodes:
+                continue
+            oc = other.get("config") if isinstance(other.get("config"), dict) else {}
+            if oc.get("combined_cast"):
+                combined_cast_ref = True
+                if not cast_names:
+                    cast_names = [
+                        str(x).strip()
+                        for x in (oc.get("character_names") or [])
+                        if str(x).strip()
+                    ] or ([str(oc.get("character_name") or "").strip()] if oc.get("character_name") else [])
+        char_ref_count = max(1, len(preferred_char_nodes) or 1)
+        if shot_index > len(shots) and planned_action:
+            shot = {
+                "shot_no": str(shot_index),
+                "timeline": "",
+                "camera": str(cfg.get("camera") or "medium / eye-level"),
+                "move": "",
+                "character_action": planned_action,
+                "scene_change": "",
+                "comment": planned_action,
+            }
+        elif shot_index > len(shots):
             raise RuntimeError(
                 f"Shot {shot_index} is not in the storyboard ({len(shots)} shots)."
             )
-        shot = dict(shots[shot_index - 1])
+        else:
+            shot = dict(shots[shot_index - 1])
         override = handler_io.node_generate_prompt(node)
-        origin = handler_io.node_generate_prompt_origin(node)
-        if override and origin != GENERATE_PROMPT_ORIGIN_STORYBOARD:
+        if override:
             shot["comment"] = override
-        character_key = str(character.resolve()) if character is not None else ""
-        scene_key = str(scene.resolve()) if scene is not None else ""
+        elif planned_action and not str(shot.get("comment") or "").strip():
+            shot["comment"] = planned_action
+        size = str(cfg.get("image_size") or "1024x1024")
+        max_tries = int(cfg.get("max_image_calls") or 1)
         generated = await handler_io.generate_designer_image(
             _shot_frame_prompt(
                 shot,
                 visual,
-                has_character=bool(character_key and character_key in refs),
-                has_scene=bool(scene_key and scene_key in refs),
-                has_previous_frame=later_shot,
+                has_character=True,
+                has_scene=True,
+                cast_names=cast_names,
+                character_ref_count=char_ref_count,
+                combined_cast_ref=combined_cast_ref,
+                keyframe_strategy=keyframe_strategy,
+                costume_lock=costume_lock,
             ),
+            size=size,
             reference_images=refs,
+            max_tries=max_tries,
         )
         if generated and generated.get("image_path"):
             path = _publish_shot_image(
@@ -366,16 +432,6 @@ class FrameNodeHandler:
                 message=f"keyframe {shot_index} generated",
             )
         last_error = str((generated or {}).get("error") or "").strip()
-        notes = fallback_keyframe_script(storyboard or visual, shot_index)
-        path = write_workspace_text(f"designer_frame_{ctx.run_id}_{ctx.node_id}", notes)
-        ref = file_output_ref(path, kind=NODE_TYPE_TEXT, mime_type="text/markdown")
-        message = (
-            f"image_gen failed: {last_error}; wrote notes"
-            if last_error
-            else "image_gen unavailable, wrote notes"
-        )
-        return NodeResult(
-            output_ref=ref,
-            output_refs=[ref],
-            message=message,
+        raise RuntimeError(
+            f"keyframe {shot_index} image_gen failed: {last_error or 'no image_path'}"
         )

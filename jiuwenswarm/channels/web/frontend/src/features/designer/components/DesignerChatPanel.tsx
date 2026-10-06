@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { useWorkspaceStore } from '../../../stores';
 import { bootstrapDesignerFromChat } from '../designerEntry';
 import { useDesignerChatStore } from '../designerChatStore';
+import { useDesignerOptimizeStore } from '../designerOptimizeStore';
 import { DesignerAssetsPanel } from './DesignerAssetsPanel';
 
 type SidebarTab = 'assistant' | 'assets';
@@ -46,6 +47,8 @@ export function DesignerChatPanel() {
   const selectedProject = useWorkspaceStore((state) => state.selectedProject);
   const workMode = useWorkspaceStore((state) => state.workMode);
   const loadProjects = useWorkspaceStore((state) => state.loadProjects);
+  const optimizeFor = useDesignerOptimizeStore((state) => state.optimizeFor);
+  const setOptimizeFor = useDesignerOptimizeStore((state) => state.setOptimizeFor);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState('');
   const [tab, setTab] = useState<SidebarTab>('assistant');
@@ -72,6 +75,7 @@ export function DesignerChatPanel() {
       ...(useExistingProject
         ? { projectId, projectDir: selectedProject?.project_dir }
         : { workMode }),
+      optimizeFor,
       thinkingText: t('designer.chat.thinking'),
       doneText: t('designer.chat.bootstrapDone'),
       errorText: t('designer.chat.bootstrapError'),
@@ -82,6 +86,7 @@ export function DesignerChatPanel() {
     chatBusy,
     draft,
     loadProjects,
+    optimizeFor,
     selectedProject?.project_dir,
     selectedProject?.project_id,
     t,
@@ -130,6 +135,25 @@ export function DesignerChatPanel() {
 
       {tab === 'assistant' ? (
         <>
+          <div className="designer-chat-panel__optimize" data-testid="designer-optimize-toggle">
+            <span className="designer-chat-panel__optimize-label">Optimize</span>
+            <div className="designer-chat-panel__optimize-group" role="group" aria-label="Optimize for">
+              <button
+                type="button"
+                className={`designer-chat-panel__optimize-btn${optimizeFor === 'cost' ? ' is-active' : ''}`}
+                onClick={() => setOptimizeFor('cost')}
+              >
+                Cost
+              </button>
+              <button
+                type="button"
+                className={`designer-chat-panel__optimize-btn${optimizeFor === 'quality' ? ' is-active' : ''}`}
+                onClick={() => setOptimizeFor('quality')}
+              >
+                Quality
+              </button>
+            </div>
+          </div>
           <div className="designer-chat-panel__body" ref={bodyRef} data-testid="designer-chat-panel-body">
             {messages.length === 0 ? (
               <p className="designer-chat-panel__empty">{t('designer.chat.emptyHint')}</p>

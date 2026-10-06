@@ -29,10 +29,251 @@ from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionCont
 
 logger = logging.getLogger(__name__)
 
+# Roles that must emit real media (handlers are the generation backends).
+_MEDIA_MATERIALIZE_ROLES = {
+    "character",
+    "character_design",
+    "scene",
+    "frame",
+    "keyframe",
+    "clip",
+    "compose",
+    "speech",
+    "music",
+}
+_IMAGE_URI_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".jfif")
+_VIDEO_URI_SUFFIXES = (".mp4", ".webm", ".mov", ".mkv")
+_AUDIO_URI_SUFFIXES = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
+_MEDIA_URI_SUFFIXES = _IMAGE_URI_SUFFIXES + _VIDEO_URI_SUFFIXES + _AUDIO_URI_SUFFIXES
+
+# Role → required media family for handler materialization.
+# Clip/compose must not treat a keyframe PNG as "done" (agents often attach stills).
+_ROLE_REQUIRED_MEDIA: dict[str, str] = {
+    "character": "image",
+    "character_design": "image",
+    "scene": "image",
+    "frame": "image",
+    "keyframe": "image",
+    "clip": "video",
+    "compose": "video",
+    "speech": "audio",
+    "music": "audio",
+}
+
 NodeAgentRunner = Callable[
     [DesignerGraphNode, NodeExecutionContext, "DesignerGraphToolkit"],
     Awaitable[NodeResult],
 ]
+
+
+def _ref_media_family(ref: Any) -> str | None:
+    """Return 'image' | 'video' | 'audio' if ref is real media on disk/URI, else None.
+
+    Agents often complete with ``kind=video`` / ``mime_type=video/mp4`` while the
+    URI is still a ``.md`` stub. Extension (and existing file type) must win over
+    kind/mime so handler materialization actually runs.
+    """
+    if not isinstance(ref, dict):
+        return None
+    uri = str(ref.get("uri") or "").strip()
+    uri_l = uri.lower()
+    # Markdown / text / json never count as raster or film.
+    if any(uri_l.endswith(suf) for suf in (".md", ".markdown", ".txt", ".json", ".html")):
+        return None
+    if any(uri_l.endswith(suf) for suf in _IMAGE_URI_SUFFIXES):
+        return "image"
+    if any(uri_l.endswith(suf) for suf in _VIDEO_URI_SUFFIXES):
+        return "video"
+    if any(uri_l.endswith(suf) for suf in _AUDIO_URI_SUFFIXES):
+        return "audio"
+    # workspace:// or extension-less: fall back to kind only if not a known text kind
+    kind = str(ref.get("kind") or "").lower()
+    mime = str(ref.get("mime_type") or ref.get("mimeType") or "").lower()
+    if mime.startswith("text/") or kind in {"text", "file", "markdown", "document"}:
+        return None
+    # If URI points at an on-disk file, sniff by suffix after resolving
+    path = _path_from_file_uri(uri) if uri.startswith("file:") else None
+    if path is not None and path.is_file():
+        suf = path.suffix.lower()
+        if suf in _IMAGE_URI_SUFFIXES:
+            return "image"
+        if suf in _VIDEO_URI_SUFFIXES:
+            return "video"
+        if suf in _AUDIO_URI_SUFFIXES:
+            return "audio"
+        if suf in {".md", ".markdown", ".txt", ".json"}:
+            return None
+    if mime.startswith("image/") or kind == "image":
+        return "image"
+    if mime.startswith("video/") or kind == "video":
+        # Refuse mime-only video claims without a video URI/path.
+        return None
+    if mime.startswith("audio/") or kind == "audio":
+        return None
+    return None
+
+
+def _ref_looks_like_media(ref: Any) -> bool:
+    return _ref_media_family(ref) is not None
+
+
+def _result_has_media(result: NodeResult | None, *, required: str | None = None) -> bool:
+    """If required is set ('image'|'video'|'audio'), only that family counts."""
+    if result is None:
+        return False
+    refs: list[Any] = []
+    if result.output_ref is not None:
+        refs.append(result.output_ref)
+    refs.extend(list(result.output_refs or []))
+    for ref in refs:
+        family = _ref_media_family(ref)
+        if family is None:
+            continue
+        if required is None or family == required:
+            return True
+    return False
+
+
+def _upstream_image_uri_keys(ctx: NodeExecutionContext | None) -> set[str]:
+    """Character/scene sheet URIs — must not satisfy a frame/keyframe node."""
+    if ctx is None:
+        return set()
+    keys: set[str] = set()
+    try:
+        from jiuwenswarm.server.runtime.designer.handlers.common import (
+            role_output_image_paths,
+        )
+    except Exception:  # noqa: BLE001
+        return set()
+    for role in ("character_design", "character", "scene"):
+        try:
+            paths = role_output_image_paths(ctx, role)
+        except Exception:  # noqa: BLE001
+            continue
+        for path in paths or []:
+            try:
+                resolved = Path(path).resolve()
+            except OSError:
+                continue
+            keys.add(resolved.as_uri().lower())
+            keys.add(str(resolved).replace("\\", "/").lower())
+            keys.add(resolved.name.lower())
+    return keys
+
+
+def _result_satisfies_required_media(
+    result: NodeResult | None,
+    node: DesignerGraphNode,
+    ctx: NodeExecutionContext | None = None,
+) -> bool:
+    """Role-aware media check: frames need their own keyframe, not cast/scene refs."""
+    required = _required_media_family(node)
+    if not _result_has_media(result, required=required):
+        return False
+    role = str(node_role(node) or "").strip().lower()
+    if required != "image" or role not in {"frame", "keyframe"}:
+        return True
+    refs: list[Any] = []
+    if result is not None and result.output_ref is not None:
+        refs.append(result.output_ref)
+    if result is not None:
+        refs.extend(list(result.output_refs or []))
+    upstream = _upstream_image_uri_keys(ctx)
+    for ref in refs:
+        if _ref_media_family(ref) != "image" or not isinstance(ref, dict):
+            continue
+        uri = str(ref.get("uri") or "").strip()
+        if not uri:
+            continue
+        uri_l = uri.lower()
+        label = str(ref.get("label") or "").lower()
+        if "designer_frame_" in uri_l or "designer_frame_" in label:
+            return True
+        name = Path(uri_l.replace("\\", "/").split("/")[-1]).name
+        keys = {uri_l, uri_l.replace("\\", "/"), name}
+        if upstream and keys & upstream:
+            continue
+        # Non-upstream image counts as this node's keyframe.
+        return True
+    return False
+
+
+def _node_expects_media(node: DesignerGraphNode) -> bool:
+    role = str(node_role(node) or "").strip().lower()
+    if role in _MEDIA_MATERIALIZE_ROLES:
+        return True
+    ntype = str(node.get("type") or "").strip().lower()
+    return ntype in {"image", "video", "audio"}
+
+
+def _required_media_family(node: DesignerGraphNode) -> str | None:
+    role = str(node_role(node) or "").strip().lower()
+    if role in _ROLE_REQUIRED_MEDIA:
+        return _ROLE_REQUIRED_MEDIA[role]
+    ntype = str(node.get("type") or "").strip().lower()
+    if ntype in {"image", "video", "audio"}:
+        return ntype
+    return None
+
+def _path_from_file_uri(uri: str) -> Path | None:
+    raw = str(uri or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("file:"):
+        from urllib.parse import unquote, urlparse
+        from urllib.request import url2pathname
+
+        parsed = urlparse(raw)
+        try:
+            path = Path(url2pathname(unquote(parsed.path)))
+        except Exception:  # noqa: BLE001
+            path = Path(unquote(parsed.path.lstrip("/")))
+        return path if str(path) else None
+    path = Path(raw)
+    return path
+
+
+def _agent_text_from_result(result: NodeResult | None) -> str:
+    if result is None:
+        return ""
+    refs: list[Any] = []
+    if result.output_ref:
+        refs.append(result.output_ref)
+    refs.extend(result.output_refs or [])
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        uri = str(ref.get("uri") or "").strip()
+        if not uri:
+            continue
+        low = uri.lower()
+        mime = str(ref.get("mime_type") or "").lower()
+        if not (low.endswith((".md", ".txt")) or "text" in mime or "markdown" in mime):
+            continue
+        path = _path_from_file_uri(uri)
+        if path is None:
+            continue
+        try:
+            if path.is_file():
+                return path.read_text(encoding="utf-8", errors="replace")[:8000]
+        except OSError:
+            continue
+    return str(getattr(result, "message", "") or "")[:2000]
+
+
+def _seed_handler_prompt(node: DesignerGraphNode, agent_result: NodeResult | None) -> None:
+    """Push agent-authored creative text into node.config.prompt for handlers."""
+    text = _agent_text_from_result(agent_result).strip()
+    if not text:
+        return
+    cfg = node.get("config")
+    if not isinstance(cfg, dict):
+        cfg = {}
+        node["config"] = cfg
+    # Prefer agent brief/spec when handler prompt is empty or generic.
+    existing = str(cfg.get("prompt") or "").strip()
+    if not existing or len(text) > len(existing):
+        cfg["prompt"] = text[:6000]
 
 
 class DesignerNodeSpawner(Protocol):
@@ -181,7 +422,11 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
     }
     return (
         "执行当前设计节点。先看 JSON 上下文，再用工具读图/改图/拉起同伴，最后 "
-        "designer_node_complete。\n\n"
+        "designer_node_complete。\n"
+        "CRITICAL: Call designer_node_complete before finishing. "
+        "For character/scene/frame nodes submit text specs that describe the image; "
+        "for clip/compose the pipeline will materialize real video — do not claim done "
+        "with only markdown if you can attach a video uri.\n\n"
         f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n```"
     )
 
@@ -234,7 +479,7 @@ class DesignerGraphToolkit:
         self.spawned.append(target)
         return result
 
-    def node_complete(
+    async def node_complete(
         self,
         *,
         uri: str = "",
@@ -246,18 +491,22 @@ class DesignerGraphToolkit:
     ) -> str:
         refs: list[AssetRef] = []
         node = _node_from_ctx(self.ctx)
-        if text.strip() and not uri.strip():
+        # Prefer materializing `text` when present — agents often pass both a
+        # workspace:// uri hint and the actual markdown body; the uri alone may
+        # not exist on disk.
+        if text.strip():
             path = write_workspace_text(
                 f"designer_agent_{self.ctx.run_id}_{self.ctx.node_id}",
                 text,
             )
-            refs.append(
-                file_output_ref(
-                    path,
-                    kind=kind.strip() or str(node.get("type") or "text"),
-                    mime_type=mime_type.strip() or "text/markdown",
-                )
+            ref = file_output_ref(
+                path,
+                kind=kind.strip() or str(node.get("type") or "text"),
+                mime_type=mime_type.strip() or "text/markdown",
             )
+            if label.strip():
+                ref["label"] = label.strip()
+            refs.append(ref)
         elif uri.strip():
             refs.append(
                 {
@@ -279,11 +528,63 @@ class DesignerGraphToolkit:
                 )
         if not refs:
             return "complete requires uri or text"
-        self.completed = NodeResult(
+        agent_result = NodeResult(
             output_ref=refs[0],
             output_refs=refs,
             message="node completed",
         )
+        self.completed = agent_result
+
+        # Eager media materialization: agents often spawn compose right after
+        # submitting a clip/image text spec. Generate the real asset here so
+        # downstream nodes (and run state) see a media URI before that spawn.
+        required_family = _required_media_family(node)
+        if _node_expects_media(node) and not _result_satisfies_required_media(
+            agent_result, node, self.ctx
+        ):
+            from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
+
+            _seed_handler_prompt(node, agent_result)
+            logger.info(
+                "Eager media materialization on node_complete. node=%s role=%s required=%s",
+                self.ctx.node_id,
+                node_role(node),
+                required_family,
+            )
+            try:
+                media = await get_node_handler(node).execute(node, self.ctx)
+            except Exception as exc:
+                logger.exception(
+                    "Eager media materialization failed on node_complete. node=%s",
+                    self.ctx.node_id,
+                )
+                return f"completed {refs[0].get('uri')} (media pending: {exc})"
+            if _result_satisfies_required_media(media, node, self.ctx):
+                merged_refs: list[AssetRef] = []
+                if isinstance(media.output_ref, dict):
+                    merged_refs.append(media.output_ref)
+                for ref in media.output_refs or []:
+                    if isinstance(ref, dict) and ref not in merged_refs:
+                        merged_refs.append(ref)
+                merged_refs.extend(refs)
+                self.completed = NodeResult(
+                    output_ref=media.output_ref or merged_refs[0],
+                    output_refs=merged_refs,
+                    message=f"agent+handler: {media.message or 'media materialized'}",
+                )
+                # Publish into live run state so concurrent spawns see the media.
+                if isinstance(self.ctx.run, dict):
+                    states = self.ctx.run.setdefault("node_states", {})
+                    states[self.ctx.node_id] = {
+                        **dict(states.get(self.ctx.node_id) or {}),
+                        "output_ref": self.completed.output_ref,
+                        "output_refs": list(self.completed.output_refs or []),
+                        "message": self.completed.message,
+                    }
+                out_uri = ""
+                if isinstance(self.completed.output_ref, dict):
+                    out_uri = str(self.completed.output_ref.get("uri") or "")
+                return f"completed {out_uri}"
         return f"completed {refs[0].get('uri')}"
 
 
@@ -301,28 +602,41 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
         card = ToolCard(name=name, description=description, input_params=input_params)
         return LocalFunction(card=card, func=func)
 
-    async def graph_get(_inputs: dict[str, Any] | None = None) -> str:
+    def _payload(**kwargs: Any) -> dict[str, Any]:
+        """LocalFunction invokes tools as func(**schema_fields)."""
+        payload = dict(kwargs)
+        nested = payload.pop("inputs", None)
+        if isinstance(nested, dict):
+            merged = dict(nested)
+            merged.update(payload)
+            return merged
+        return payload
+
+    async def graph_get(**_kwargs: Any) -> str:
         return json.dumps(toolkit.graph_get(), ensure_ascii=False)
 
-    async def graph_patch(inputs: dict[str, Any] | None = None) -> str:
-        payload = inputs or {}
+    async def graph_patch(**kwargs: Any) -> str:
+        payload = _payload(**kwargs)
         patch = payload.get("patch")
         if isinstance(patch, str):
-            patch = json.loads(patch)
+            try:
+                patch = json.loads(patch)
+            except json.JSONDecodeError:
+                return "patch must be a JSON object"
         if not isinstance(patch, dict):
             return "patch must be an object"
         return json.dumps(toolkit.graph_patch(patch), ensure_ascii=False)
 
-    async def node_run(inputs: dict[str, Any] | None = None) -> str:
-        payload = inputs or {}
+    async def node_run(**kwargs: Any) -> str:
+        payload = _payload(**kwargs)
         return await toolkit.node_run(str(payload.get("node_id") or ""))
 
-    async def node_complete(inputs: dict[str, Any] | None = None) -> str:
-        payload = inputs or {}
+    async def node_complete(**kwargs: Any) -> str:
+        payload = _payload(**kwargs)
         extra = payload.get("extra_uris") or payload.get("extraUris") or []
         if isinstance(extra, str):
             extra = [item.strip() for item in extra.split(",") if item.strip()]
-        return toolkit.node_complete(
+        return await toolkit.node_complete(
             uri=str(payload.get("uri") or ""),
             kind=str(payload.get("kind") or ""),
             mime_type=str(payload.get("mime_type") or payload.get("mimeType") or ""),
@@ -340,10 +654,17 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
         ),
         make_tool(
             "designer_graph_patch",
-            "按 Designer graph patch 增删节点或边。",
+            "按 Designer graph patch 增删节点或边。patch 可为对象或 JSON 字符串。",
             {
                 "type": "object",
-                "properties": {"patch": {"type": "object"}},
+                "properties": {
+                    "patch": {
+                        "anyOf": [
+                            {"type": "object"},
+                            {"type": "string"},
+                        ]
+                    }
+                },
                 "required": ["patch"],
             },
             graph_patch,
@@ -407,7 +728,7 @@ class NodeAgentHost:
         if self._runner is not None:
             return await self._runner(node, ctx, toolkit)
         try:
-            return await self._run_deep_agent(node, ctx, toolkit)
+            agent_result = await self._run_deep_agent(node, ctx, toolkit)
         except Exception:
             logger.exception(
                 "Designer node agent failed; falling back to handler. node=%s",
@@ -416,6 +737,55 @@ class NodeAgentHost:
             from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
 
             return await get_node_handler(node).execute(node, ctx)
+
+        # Agents author creative direction via designer_* tools, but media
+        # generation backends live on handlers. If the agent only submitted
+        # text/markdown (or the wrong media family, e.g. PNG on a clip node),
+        # materialize the expected media while keeping the AI creative path.
+        required_family = _required_media_family(node)
+        if _node_expects_media(node) and not _result_satisfies_required_media(
+            agent_result, node, ctx
+        ):
+            from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
+
+            _seed_handler_prompt(node, agent_result)
+            logger.info(
+                "Materializing media via handler after agent text output. "
+                "node=%s role=%s required=%s",
+                ctx.node_id,
+                node_role(node),
+                required_family,
+            )
+            try:
+                media = await get_node_handler(node).execute(node, ctx)
+            except Exception:
+                logger.exception(
+                    "Media materialization failed; not keeping markdown stub. node=%s",
+                    ctx.node_id,
+                )
+                raise
+            if not _result_satisfies_required_media(media, node, ctx):
+                raise RuntimeError(
+                    f"node {ctx.node_id} handler did not produce required "
+                    f"{required_family or 'media'}"
+                )
+            refs: list[AssetRef] = []
+            if isinstance(media.output_ref, dict):
+                refs.append(media.output_ref)
+            for ref in media.output_refs or []:
+                if isinstance(ref, dict) and ref not in refs:
+                    refs.append(ref)
+            if isinstance(agent_result.output_ref, dict) and agent_result.output_ref not in refs:
+                refs.append(agent_result.output_ref)
+            for ref in agent_result.output_refs or []:
+                if isinstance(ref, dict) and ref not in refs:
+                    refs.append(ref)
+            return NodeResult(
+                output_ref=media.output_ref or (refs[0] if refs else None),
+                output_refs=refs,
+                message=f"agent+handler: {media.message or 'media materialized'}",
+            )
+        return agent_result
 
     async def _run_deep_agent(
         self,
@@ -444,8 +814,11 @@ class NodeAgentHost:
             if entry is None and entries:
                 entry = entries[0]
             client = (entry or {}).get("model_client_config") if isinstance(entry, dict) else {}
+            mco = (entry or {}).get("model_config_obj") if isinstance(entry, dict) else {}
             if not isinstance(client, dict):
                 raise RuntimeError("no model configured for designer node agent")
+            if not isinstance(mco, dict):
+                mco = {}
             api_key = str(client.get("api_key") or "").strip()
             model_name = str(client.get("model_name") or "").strip()
             if not api_key or not model_name:
@@ -458,7 +831,17 @@ class NodeAgentHost:
             profile = str(client.get("endpoint_profile") or "").strip()
             if profile:
                 kwargs["endpoint_profile"] = profile
-            model = Model(model_client_config=ModelClientConfig(**kwargs))
+            from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
+
+            request = ModelRequestConfig(
+                model_name=model_name,
+                temperature=float(mco.get("temperature", 0.95) or 0.95),
+                top_p=float(mco.get("top_p", 0.95) or 0.95),
+            )
+            model = Model(
+                model_client_config=ModelClientConfig(**kwargs),
+                model_config=request,
+            )
             workspace_dir = get_agent_workspace_dir()
             workspace_dir.mkdir(parents=True, exist_ok=True)
             card_name = str(
@@ -472,8 +855,9 @@ class NodeAgentHost:
                 system_prompt=system_prompt,
                 tools=tools,
                 workspace=Workspace(root_path=str(workspace_dir)),
+                # Task loop needs a Session; we pass one on invoke below.
                 enable_task_loop=True,
-                max_iterations=12,
+                max_iterations=14,
                 add_general_purpose_agent=False,
             )
             ensure = getattr(agent, "ensure_initialized", None)
@@ -486,11 +870,51 @@ class NodeAgentHost:
         invoke = getattr(agent, "invoke", None)
         if not callable(invoke):
             raise RuntimeError("DeepAgent has no invoke")
-        result = invoke({"query": query, "conversation_id": key})
+        # openjiuwen DeepAgent requires an explicit Session for task-loop mode.
+        from openjiuwen.core.session.agent import Session
+
+        session = Session(session_id=key, card=getattr(agent, "card", None))
+        result = invoke({"query": query, "conversation_id": key}, session=session)
         if hasattr(result, "__await__"):
             result = await result
         if toolkit.completed is not None:
-            return toolkit.completed
+            completed = toolkit.completed
+            # Guarantee required media family even when agent completed with text/PNG only.
+            required_family = _required_media_family(node)
+            if _node_expects_media(node) and not _result_satisfies_required_media(
+                completed, node, ctx
+            ):
+                from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
+
+                _seed_handler_prompt(node, completed)
+                try:
+                    media = await get_node_handler(node).execute(node, ctx)
+                except Exception:
+                    logger.exception(
+                        "Post-complete media materialization failed. node=%s", ctx.node_id
+                    )
+                    media = None
+                if media is not None and _result_satisfies_required_media(media, node, ctx):
+                    refs: list[AssetRef] = []
+                    if isinstance(media.output_ref, dict):
+                        refs.append(media.output_ref)
+                    for ref in media.output_refs or []:
+                        if isinstance(ref, dict) and ref not in refs:
+                            refs.append(ref)
+                    if isinstance(completed.output_ref, dict):
+                        refs.append(completed.output_ref)
+                    completed = NodeResult(
+                        output_ref=media.output_ref or (refs[0] if refs else None),
+                        output_refs=refs,
+                        message=f"agent+handler: {media.message or 'media materialized'}",
+                    )
+            if _node_expects_media(node):
+                required_family = _required_media_family(node)
+                if not _result_satisfies_required_media(completed, node, ctx):
+                    raise RuntimeError(
+                        f"node {ctx.node_id} finished without required {required_family} media"
+                    )
+            return completed
         text = ""
         if isinstance(result, dict):
             text = str(result.get("output") or result.get("content") or "")
@@ -499,9 +923,14 @@ class NodeAgentHost:
         else:
             text = str(getattr(result, "content", "") or result)
         if not text.strip():
+            # Empty agent reply on media nodes → handler path (no silent hang).
+            if _node_expects_media(node):
+                from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
+
+                return await get_node_handler(node).execute(node, ctx)
             raise RuntimeError("node agent returned empty output")
         path = write_workspace_text(f"designer_agent_{ctx.run_id}_{ctx.node_id}", text)
-        return NodeResult(
+        agent_result = NodeResult(
             output_ref=file_output_ref(
                 path,
                 kind=str(node.get("type") or "text"),
@@ -509,3 +938,26 @@ class NodeAgentHost:
             ),
             message="node agent text fallback",
         )
+        required_family = _required_media_family(node)
+        if _node_expects_media(node):
+            from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
+
+            _seed_handler_prompt(node, agent_result)
+            media = await get_node_handler(node).execute(node, ctx)
+            if not _result_satisfies_required_media(media, node, ctx):
+                raise RuntimeError(
+                    f"node {ctx.node_id} handler did not produce required {required_family}"
+                )
+            refs = []
+            if isinstance(media.output_ref, dict):
+                refs.append(media.output_ref)
+            for ref in media.output_refs or []:
+                if isinstance(ref, dict) and ref not in refs:
+                    refs.append(ref)
+            refs.append(agent_result.output_ref)  # type: ignore[arg-type]
+            return NodeResult(
+                output_ref=media.output_ref or refs[0],
+                output_refs=refs,
+                message=f"agent-text+handler: {media.message or 'media materialized'}",
+            )
+        return agent_result

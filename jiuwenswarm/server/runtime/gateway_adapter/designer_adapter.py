@@ -39,17 +39,16 @@ _store = DesignerGraphStore()
 _executor = GraphExecutor(_store)
 
 
+def _prefer_runtime_pipeline(graph: dict[str, Any]) -> dict[str, Any]:
+    """Prefer node agents + tools when an LLM is configured; else role handlers."""
+    from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
+
+    return apply_runtime_delegate(graph)
+
+
+# Back-compat alias
 def _prefer_handler_pipeline(graph: dict[str, Any]) -> dict[str, Any]:
-    """UI bootstrap uses role handlers so Play runs the media pipeline without a node Agent host."""
-    for node in graph.get("nodes") or []:
-        if not isinstance(node, dict):
-            continue
-        config = node.setdefault("config", {})
-        if not isinstance(config, dict):
-            continue
-        if not str(config.get("delegate") or "").strip():
-            config["delegate"] = CONFIG_DELEGATE_HANDLER
-    return normalize_execution_graph(graph)
+    return _prefer_runtime_pipeline(graph)
 
 
 def _ok_response(request: AgentRequest, payload: Any) -> AgentResponse:
@@ -286,6 +285,7 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
 def _bootstrap_graph(
     params: dict[str, Any],
     channel_id: str,
+    analysis: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     prompt = str(params.get("prompt") or "").strip()
     if not prompt:
@@ -345,13 +345,75 @@ def _bootstrap_graph(
         }
 
     title = params.get("title")
-    graph = _prefer_handler_pipeline(
-        build_bootstrap_graph(
-            project_id=project_id,
-            prompt=prompt,
-            title=str(title).strip() if isinstance(title, str) else None,
-        )
+    optimize_raw = str(params.get("optimize_for") or params.get("optimizeFor") or "quality")
+    optimize_for = "cost" if optimize_raw.strip().lower() == "cost" else "quality"
+    scenario_raw = params.get("scenario")
+    scenario = (
+        str(scenario_raw).strip().lower()
+        if isinstance(scenario_raw, str) and scenario_raw.strip()
+        else None
     )
+    from jiuwenswarm.server.runtime.designer.composer import (
+        compose_execution_graph,
+        detect_scenario,
+    )
+    from jiuwenswarm.server.runtime.designer.script_analysis import (
+        analyze_creative_brief_sync,
+        heuristic_analysis,
+        _llm_configured,
+    )
+    from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
+    from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
+
+    detected = scenario or detect_scenario(prompt)
+    # Prefer supervisor-style LLM cast/shot analysis when models exist; heuristics only as fallback.
+    if detected == "video":
+        if analysis is None:
+            if _llm_configured():
+                try:
+                    analysis = analyze_creative_brief_sync(
+                        prompt, use_llm=True, timeout_sec=20.0
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.info("Bootstrap LLM analysis failed; using heuristics", exc_info=True)
+                    analysis = heuristic_analysis(prompt)
+            else:
+                analysis = heuristic_analysis(prompt)
+        if not isinstance(analysis, dict):
+            analysis = heuristic_analysis(prompt)
+        graph = _prefer_runtime_pipeline(
+            build_smart_video_graph(
+                project_id=project_id,
+                prompt=prompt,
+                analysis=analysis,
+                title=str(title).strip() if isinstance(title, str) else None,
+                optimize_for=optimize_for,
+                ai_mode=_llm_configured(),
+            )
+        )
+        meta = dict(graph.get("metadata") or {})
+        meta["optimize_for"] = optimize_for
+        meta["scenario"] = "video"
+        meta["script_analysis"] = analysis
+        meta["script_analysis_mode"] = str(analysis.get("source") or "heuristic")
+        # Play may still refine analysis/plan with supervisor+manager agents once.
+        meta["pending_llm_analysis"] = bool(
+            _llm_configured() and str(analysis.get("source") or "") != "llm"
+        )
+        meta["one_pass"] = True
+        meta["auto_accept_outputs"] = True
+        graph["metadata"] = meta
+        graph = attach_skills_metadata(graph, prompt)
+    else:
+        graph = _prefer_runtime_pipeline(
+            compose_execution_graph(
+                project_id=project_id,
+                prompt=prompt,
+                title=str(title).strip() if isinstance(title, str) else None,
+                optimize_for=optimize_for,  # type: ignore[arg-type]
+                scenario=detected,
+            )
+        )
     saved = _store.save_graph(graph)
     payload: dict[str, Any] = {"graph": dict(saved), "project_id": project_id}
     if project_payload is not None:
@@ -502,10 +564,14 @@ class DesignerAdapter(GatewayAdapter):
             elif method == ReqMethod.DESIGNER_GRAPH_SAVE:
                 payload, error, code = await asyncio.to_thread(_save_graph, params)
             elif method == ReqMethod.DESIGNER_GRAPH_BOOTSTRAP:
+                # Never block the UI RPC on LLM casting — that caused Request timed out.
+                # Build immediately with heuristics (or a precomputed analysis); LLM may
+                # refine later when the user hits Run via supervisor metadata only.
                 payload, error, code = await asyncio.to_thread(
                     _bootstrap_graph,
                     params,
                     request.channel_id,
+                    None,
                 )
             elif method == ReqMethod.DESIGNER_GRAPH_PATCH:
                 payload, error, code = await asyncio.to_thread(_patch_graph, params)

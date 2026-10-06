@@ -17,7 +17,9 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_CLIP,
     NODE_ROLE_COMPOSE,
     NODE_ROLE_FRAME,
+    NODE_ROLE_MUSIC,
     NODE_ROLE_SCENE,
+    NODE_ROLE_SPEECH,
     NODE_ROLE_STORYBOARD,
     NODE_TYPE_AUDIO,
     NODE_TYPE_IMAGE,
@@ -27,6 +29,10 @@ from jiuwenswarm.common.schema.designer_graph import (
     AssetRef,
     DesignerGraphNode,
     node_role,
+)
+from jiuwenswarm.server.runtime.designer.handlers.audio_nodes import (
+    MusicNodeHandler,
+    SpeechNodeHandler,
 )
 from jiuwenswarm.server.runtime.designer.handlers.clip import ClipNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
@@ -85,11 +91,13 @@ NODE_HANDLERS: dict[str, NodeHandler] = {
     NODE_ROLE_FRAME: FrameNodeHandler(),
     NODE_ROLE_CLIP: ClipNodeHandler(),
     NODE_ROLE_COMPOSE: ComposeNodeHandler(),
+    NODE_ROLE_MUSIC: MusicNodeHandler(),
+    NODE_ROLE_SPEECH: SpeechNodeHandler(),
     NODE_TYPE_TEXT: MockNodeHandler(),
     NODE_TYPE_TABLE: MockNodeHandler(),
     NODE_TYPE_IMAGE: MockNodeHandler(),
     NODE_TYPE_VIDEO: MockNodeHandler(),
-    NODE_TYPE_AUDIO: MockNodeHandler(),
+    NODE_TYPE_AUDIO: MusicNodeHandler(),
 }
 
 

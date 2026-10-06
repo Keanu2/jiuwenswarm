@@ -51,6 +51,8 @@ NODE_ROLE_STORYBOARD = "storyboard"
 NODE_ROLE_FRAME = "frame"
 NODE_ROLE_CLIP = "clip"
 NODE_ROLE_COMPOSE = "compose"
+NODE_ROLE_MUSIC = "music"
+NODE_ROLE_SPEECH = "speech"
 
 NODE_ROLES: frozenset[str] = frozenset(
     {
@@ -61,6 +63,8 @@ NODE_ROLES: frozenset[str] = frozenset(
         NODE_ROLE_FRAME,
         NODE_ROLE_CLIP,
         NODE_ROLE_COMPOSE,
+        NODE_ROLE_MUSIC,
+        NODE_ROLE_SPEECH,
     }
 )
 
@@ -364,6 +368,7 @@ class DesignerExecutionRun(TypedDict, total=False):
     current_node_ids: list[str]
     created_at: int
     updated_at: int
+    metadata: dict[str, Any]
 
 
 # ── Validation / normalization ────────────────────────────────────────────────
@@ -629,16 +634,26 @@ def _append_node_input(graph: DesignerExecutionGraph, node_id: str, input_id: st
 
 
 def ensure_bootstrap_pipeline(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
-    """Keep old bootstrap graphs on the current clip / keyframe pipeline.
-
-    Scene is optional: existing Scene nodes stay wired, but new graphs do not
-    grow a Brief → Scene edge.
-    """
+    """Keep old bootstrap graphs on the current clip / scene / keyframe pipeline."""
     metadata = graph.get("metadata") or {}
     if metadata.get("bootstrap") != "designer.graph.bootstrap.v1":
         return graph
     node_ids = {node["id"] for node in graph.get("nodes") or []}
     edges = graph.setdefault("edges", [])
+    has_frame = "n_frame" in node_ids or any(
+        str(item).startswith("n_frame_") for item in node_ids
+    )
+    if "n_brief" in node_ids and has_frame and "n_scene" not in node_ids:
+        graph.setdefault("nodes", []).append(
+            {
+                "id": "n_scene",
+                "type": NODE_TYPE_IMAGE,
+                "label": "Scene",
+                "config": {"role": NODE_ROLE_SCENE, "inputs": ["n_brief"]},
+                "layout": {"x": 400, "y": 240, "width": 280, "height": 160},
+            }
+        )
+        node_ids.add("n_scene")
     frame_ids = [
         str(node.get("id") or "")
         for node in graph.get("nodes") or []
@@ -909,32 +924,6 @@ def shot_pipeline_count(graph: DesignerExecutionGraph) -> int:
     return max(frames, clips, 0)
 
 
-def preserve_expanded_shot_nodes(
-    incoming: DesignerExecutionGraph,
-    existing: DesignerExecutionGraph | None,
-) -> DesignerExecutionGraph:
-    """Keep already-expanded keyframe/clip nodes when a stale save sends the bootstrap shape."""
-    if existing is None:
-        return incoming
-    existing_count = shot_pipeline_count(existing)
-    incoming_count = shot_pipeline_count(incoming)
-    if existing_count <= incoming_count or existing_count <= 1:
-        return incoming
-    incoming_ids = {str(node.get("id") or "") for node in incoming.get("nodes") or []}
-    grafted = dict(incoming)
-    extra_nodes = [
-        dict(node)
-        for node in existing.get("nodes") or []
-        if str(node.get("id") or "") not in incoming_ids
-        and (
-            node_role(node) in {NODE_ROLE_FRAME, NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}
-            or _is_shot_pipeline_id(str(node.get("id") or ""))
-        )
-    ]
-    grafted["nodes"] = [dict(node) for node in incoming.get("nodes") or []] + extra_nodes
-    return expand_shot_nodes(grafted, existing_count)
-
-
 def _asset_ref_uri(ref: object) -> str:
     if not isinstance(ref, dict):
         return ""
@@ -970,6 +959,32 @@ def preserve_node_output_refs(
     return next_graph
 
 
+def preserve_expanded_shot_nodes(
+    incoming: DesignerExecutionGraph,
+    existing: DesignerExecutionGraph | None,
+) -> DesignerExecutionGraph:
+    """Keep already-expanded keyframe/clip nodes when a stale save sends the bootstrap shape."""
+    if existing is None:
+        return incoming
+    existing_count = shot_pipeline_count(existing)
+    incoming_count = shot_pipeline_count(incoming)
+    if existing_count <= incoming_count or existing_count <= 1:
+        return incoming
+    incoming_ids = {str(node.get("id") or "") for node in incoming.get("nodes") or []}
+    grafted = dict(incoming)
+    extra_nodes = [
+        dict(node)
+        for node in existing.get("nodes") or []
+        if str(node.get("id") or "") not in incoming_ids
+        and (
+            node_role(node) in {NODE_ROLE_FRAME, NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}
+            or _is_shot_pipeline_id(str(node.get("id") or ""))
+        )
+    ]
+    grafted["nodes"] = [dict(node) for node in incoming.get("nodes") or []] + extra_nodes
+    return expand_shot_nodes(grafted, existing_count)
+
+
 def expand_shot_nodes(
     graph: DesignerExecutionGraph,
     shot_count: int,
@@ -1001,24 +1016,29 @@ def expand_shot_nodes(
     ]
     kept_ids = {str(node.get("id") or "") for node in kept_nodes}
 
-    def _role_node_id(role: str) -> str | None:
+    def _role_node_ids(role: str) -> list[str]:
+        ids: list[str] = []
         for node in kept_nodes:
             if node_role(node) == role and str(node.get("id") or ""):
-                return str(node["id"])
-        return None
+                ids.append(str(node["id"]))
+        return ids
 
-    character_id = _role_node_id(NODE_ROLE_CHARACTER_DESIGN)
-    scene_id = _role_node_id(NODE_ROLE_SCENE)
-    storyboard_id = _role_node_id(NODE_ROLE_STORYBOARD)
+    character_ids = _role_node_ids(NODE_ROLE_CHARACTER_DESIGN)
+    scene_ids = _role_node_ids(NODE_ROLE_SCENE)
+    storyboard_id = (_role_node_ids(NODE_ROLE_STORYBOARD) or [None])[0]
     delegate = _copied_delegate(graph)
     frame_nodes: list[DesignerGraphNode] = []
     clip_nodes: list[DesignerGraphNode] = []
     for index in range(1, count + 1):
         frame_id = frame_node_id(index)
         clip_id = clip_node_id(index)
-        prev_frame_id = frame_node_id(index - 1) if index > 1 else None
-        frame_inputs = [item for item in (character_id, scene_id, storyboard_id, prev_frame_id) if item]
-        clip_inputs = [item for item in (character_id, scene_id, storyboard_id, frame_id) if item]
+        frame_inputs = [*character_ids, *scene_ids]
+        if storyboard_id:
+            frame_inputs.append(storyboard_id)
+        clip_inputs = [*character_ids, *scene_ids]
+        if storyboard_id:
+            clip_inputs.append(storyboard_id)
+        clip_inputs.append(frame_id)
         frame_config: dict[str, Any] = {
             "role": NODE_ROLE_FRAME,
             "shot_index": index,
@@ -1072,42 +1092,64 @@ def expand_shot_nodes(
                 "layout": clip_layout,
             }
         )
-        for source_id, prefix in (
-            (character_id, "character"),
-            (scene_id, "scene"),
-            (storyboard_id, "storyboard"),
-        ):
-            if not source_id or source_id not in kept_ids:
+        for source_id in character_ids:
+            if source_id not in kept_ids:
                 continue
             kept_edges.append(
                 {
-                    "id": f"e_{prefix}_{frame_id}",
+                    "id": f"e_{source_id}_{frame_id}",
                     "source": source_id,
                     "target": frame_id,
                     "kind": EDGE_KIND_DATA,
                 }
             )
-        if index > 1:
-            prev_frame_id = frame_node_id(index - 1)
+        for source_id in scene_ids:
+            if source_id not in kept_ids:
+                continue
             kept_edges.append(
                 {
-                    "id": f"e_{prev_frame_id}_{frame_id}",
-                    "source": prev_frame_id,
+                    "id": f"e_{source_id}_{frame_id}",
+                    "source": source_id,
                     "target": frame_id,
                     "kind": EDGE_KIND_DATA,
                 }
             )
-        for source_id, prefix in (
-            (character_id, "character"),
-            (scene_id, "scene"),
-            (storyboard_id, "storyboard"),
-        ):
-            if not source_id or source_id not in kept_ids:
+        if storyboard_id and storyboard_id in kept_ids:
+            kept_edges.append(
+                {
+                    "id": f"e_storyboard_{frame_id}",
+                    "source": storyboard_id,
+                    "target": frame_id,
+                    "kind": EDGE_KIND_DATA,
+                }
+            )
+        for source_id in character_ids:
+            if source_id not in kept_ids:
                 continue
             kept_edges.append(
                 {
-                    "id": f"e_{prefix}_{clip_id}",
+                    "id": f"e_{source_id}_{clip_id}",
                     "source": source_id,
+                    "target": clip_id,
+                    "kind": EDGE_KIND_DATA,
+                }
+            )
+        for source_id in scene_ids:
+            if source_id not in kept_ids:
+                continue
+            kept_edges.append(
+                {
+                    "id": f"e_{source_id}_{clip_id}",
+                    "source": source_id,
+                    "target": clip_id,
+                    "kind": EDGE_KIND_DATA,
+                }
+            )
+        if storyboard_id and storyboard_id in kept_ids:
+            kept_edges.append(
+                {
+                    "id": f"e_storyboard_{clip_id}",
+                    "source": storyboard_id,
                     "target": clip_id,
                     "kind": EDGE_KIND_DATA,
                 }
@@ -1472,14 +1514,21 @@ def build_bootstrap_graph(
             "type": NODE_TYPE_IMAGE,
             "label": "Character",
             "config": {"role": NODE_ROLE_CHARACTER_DESIGN, "inputs": ["n_brief"]},
-            "layout": {"x": 400, "y": 140, "width": 280, "height": 160},
+            "layout": {"x": 400, "y": 40, "width": 280, "height": 160},
+        },
+        {
+            "id": "n_scene",
+            "type": NODE_TYPE_IMAGE,
+            "label": "Scene",
+            "config": {"role": NODE_ROLE_SCENE, "inputs": ["n_brief"]},
+            "layout": {"x": 400, "y": 240, "width": 280, "height": 160},
         },
         {
             "id": "n_storyboard",
             "type": NODE_TYPE_TABLE,
             "label": "Storyboard",
             "config": {"role": NODE_ROLE_STORYBOARD, "inputs": ["n_brief"]},
-            "layout": {"x": 400, "y": 340, "width": 280, "height": 240},
+            "layout": {"x": 400, "y": 440, "width": 280, "height": 160},
         },
         {
             "id": "n_frame_1",
@@ -1488,7 +1537,7 @@ def build_bootstrap_graph(
             "config": {
                 "role": NODE_ROLE_FRAME,
                 "shot_index": 1,
-                "inputs": ["n_character", "n_storyboard"],
+                "inputs": ["n_character", "n_scene", "n_storyboard"],
             },
             "layout": {"x": 760, "y": 240, "width": 280, "height": 160},
         },
@@ -1499,7 +1548,7 @@ def build_bootstrap_graph(
             "config": {
                 "role": NODE_ROLE_CLIP,
                 "shot_index": 1,
-                "inputs": ["n_character", "n_storyboard", "n_frame_1"],
+                "inputs": ["n_character", "n_scene", "n_storyboard", "n_frame_1"],
             },
             "layout": {"x": 1120, "y": 240, "width": 280, "height": 160},
         },
@@ -1513,6 +1562,7 @@ def build_bootstrap_graph(
     ]
     edges: list[DesignerGraphEdge] = [
         {"id": "e_brief_character", "source": "n_brief", "target": "n_character", "kind": EDGE_KIND_DATA},
+        {"id": "e_brief_scene", "source": "n_brief", "target": "n_scene", "kind": EDGE_KIND_DATA},
         {"id": "e_brief_storyboard", "source": "n_brief", "target": "n_storyboard", "kind": EDGE_KIND_DATA},
         {
             "id": "e_character_storyboard",
@@ -1521,9 +1571,18 @@ def build_bootstrap_graph(
             "kind": EDGE_KIND_SYNC,
             "label": "Align",
         },
+        {
+            "id": "e_scene_storyboard",
+            "source": "n_scene",
+            "target": "n_storyboard",
+            "kind": EDGE_KIND_SYNC,
+            "label": "Align",
+        },
         {"id": "e_character_n_frame_1", "source": "n_character", "target": "n_frame_1", "kind": EDGE_KIND_DATA},
+        {"id": "e_scene_n_frame_1", "source": "n_scene", "target": "n_frame_1", "kind": EDGE_KIND_DATA},
         {"id": "e_storyboard_n_frame_1", "source": "n_storyboard", "target": "n_frame_1", "kind": EDGE_KIND_DATA},
         {"id": "e_character_n_clip_1", "source": "n_character", "target": "n_clip_1", "kind": EDGE_KIND_DATA},
+        {"id": "e_scene_n_clip_1", "source": "n_scene", "target": "n_clip_1", "kind": EDGE_KIND_DATA},
         {"id": "e_storyboard_n_clip_1", "source": "n_storyboard", "target": "n_clip_1", "kind": EDGE_KIND_DATA},
         {"id": "e_n_frame_1_n_clip_1", "source": "n_frame_1", "target": "n_clip_1", "kind": EDGE_KIND_DATA},
         {"id": "e_n_clip_1_compose", "source": "n_clip_1", "target": "n_compose", "kind": EDGE_KIND_DATA},

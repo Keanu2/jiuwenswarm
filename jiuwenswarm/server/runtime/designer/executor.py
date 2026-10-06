@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Protocol
@@ -69,7 +70,7 @@ class RunUpdateCallback(Protocol):
     ) -> None: ...
 
 _MOCK_NODE_DELAY_SECONDS = 0.35
-_MAX_CONCURRENT_NODE_AGENTS = 6
+_MAX_CONCURRENT_NODE_AGENTS = 3
 _TERMINAL_NODE_STATUSES = {
     NODE_STATUS_COMPLETED,
     NODE_STATUS_FAILED,
@@ -176,7 +177,13 @@ class GraphExecutor:
             "current_node_ids": [],
             "created_at": now,
             "updated_at": now,
+            "metadata": {"use_prior_feedback": True},
         }
+        # Opt-in: Run again may apply prior report constraints (still one-pass, no loop).
+        meta = dict(graph.get("metadata") or {})
+        meta["use_prior_feedback"] = True
+        graph["metadata"] = meta
+        self._store.save_graph(graph)
         return self._store.save_run(run)
 
     async def start_run(
@@ -187,9 +194,34 @@ class GraphExecutor:
         on_graph_update: GraphUpdateCallback | None = None,
     ) -> DesignerExecutionRun:
         run = self._require_run(run_id)
-        if run["status"] in {RUN_STATUS_RUNNING, RUN_STATUS_COMPLETED}:
+        if run["status"] == RUN_STATUS_RUNNING:
             return run
+        # Resume one-pass execution when a prior wave ended early with pending nodes.
+        if run["status"] == RUN_STATUS_COMPLETED:
+            pending = any(
+                (state or {}).get("status") == NODE_STATUS_PENDING
+                for state in (run.get("node_states") or {}).values()
+            )
+            if not pending:
+                return run
         graph = self._require_graph(run["graph_id"])
+        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+
+        # AI-first: keep agent delegate when models exist; handlers only as no-LLM fallback.
+        # force_handler nodes (music/speech beds) stay on the fast handler path.
+        use_agents = llm_available()
+        for node in graph.get("nodes") or []:
+            cfg = node.setdefault("config", {})
+            if isinstance(cfg, dict):
+                if cfg.get("force_handler"):
+                    cfg["delegate"] = "handler"
+                else:
+                    cfg["delegate"] = "agent" if use_agents else "handler"
+                    if use_agents and cfg.get("skip_llm"):
+                        cfg["skip_llm"] = False
+        meta = dict(graph.get("metadata") or {})
+        meta["ai_agent_pipeline"] = use_agents
+        graph["metadata"] = meta
         run["status"] = RUN_STATUS_RUNNING
         run["updated_at"] = utc_now_ms()
         run = self._store.save_run(run)
@@ -417,46 +449,53 @@ class GraphExecutor:
         *,
         on_update: RunUpdateCallback | None,
     ) -> None:
+        """Run all ready waves to completion (same one-pass contract as wave executor)."""
         run_id = run["run_id"]
         try:
-            incoming = data_predecessors(graph)
-            groups = sync_groups(graph)
-            ready_ids = [
-                node["id"]
-                for node in graph.get("nodes") or []
-                if _is_ready(node["id"], run, incoming, groups)
-            ]
-            if not ready_ids:
-                pending = any(
-                    (run.get("node_states") or {}).get(node["id"], {}).get("status")
-                    == NODE_STATUS_PENDING
+            while True:
+                await self._await_pause(run_id)
+                if self._is_cancelled(run_id):
+                    return
+                run = self._require_run(run_id)
+                graph = self._require_graph(str(run.get("graph_id") or graph.get("graph_id") or ""))
+                incoming = data_predecessors(graph)
+                groups = sync_groups(graph)
+                ready_ids = [
+                    node["id"]
                     for node in graph.get("nodes") or []
-                )
-                run["status"] = RUN_STATUS_FAILED if pending else RUN_STATUS_COMPLETED
-                run["current_node_ids"] = []
+                    if _is_ready(node["id"], run, incoming, groups)
+                ]
+                if not ready_ids:
+                    pending = any(
+                        (run.get("node_states") or {}).get(node["id"], {}).get("status")
+                        == NODE_STATUS_PENDING
+                        for node in graph.get("nodes") or []
+                    )
+                    run["status"] = RUN_STATUS_FAILED if pending else RUN_STATUS_COMPLETED
+                    run["current_node_ids"] = []
+                    run["updated_at"] = utc_now_ms()
+                    self._publish(run, on_update)
+                    self._store.save_run(run)
+                    return
+                run["current_node_ids"] = list(ready_ids)
                 run["updated_at"] = utc_now_ms()
                 self._publish(run, on_update)
                 self._store.save_run(run)
-                return
-            run["current_node_ids"] = list(ready_ids)
-            run["updated_at"] = utc_now_ms()
-            self._publish(run, on_update)
-            self._store.save_run(run)
-            for node_id in ready_ids:
-                await self.spawn_node_agent(run_id, node_id)
-            await self._wait_agent_workers(run_id)
-            if self._is_cancelled(run_id):
-                return
-            run = self._require_run(run_id)
-            statuses = {state.get("status") for state in (run.get("node_states") or {}).values()}
-            if NODE_STATUS_FAILED in statuses:
-                run["status"] = RUN_STATUS_FAILED
-            else:
-                run["status"] = RUN_STATUS_COMPLETED
-            run["current_node_ids"] = []
-            run["updated_at"] = utc_now_ms()
-            self._publish(run, on_update)
-            self._store.save_run(run)
+                for node_id in ready_ids:
+                    await self.spawn_node_agent(run_id, node_id)
+                await self._wait_agent_workers(run_id)
+                if self._is_cancelled(run_id):
+                    return
+                run = self._require_run(run_id)
+                if NODE_STATUS_FAILED in {
+                    state.get("status") for state in (run.get("node_states") or {}).values()
+                }:
+                    run["status"] = RUN_STATUS_FAILED
+                    run["current_node_ids"] = []
+                    run["updated_at"] = utc_now_ms()
+                    self._publish(run, on_update)
+                    self._store.save_run(run)
+                    return
         except asyncio.CancelledError:
             run = self.cancel_run(run_id)
             self._publish(run, on_update)
@@ -478,57 +517,438 @@ class GraphExecutor:
         on_update: RunUpdateCallback | None,
     ) -> None:
         run_id = run["run_id"]
-        remaining = {
-            node["id"]
-            for node in graph.get("nodes", [])
-            if (run.get("node_states") or {}).get(node["id"], {}).get("status")
-            not in _TERMINAL_NODE_STATUSES
-        }
-        incoming = data_predecessors(graph)
-        groups = sync_groups(graph)
-        graph, remaining, incoming, groups = self._expand_clips_if_needed(
-            graph, run, remaining, on_update=on_update
+        graph_id = str(graph.get("graph_id") or "")
+        from jiuwenswarm.server.runtime.designer.orchestration import (
+            ManagerAgent,
+            SupervisorAgent,
+            SupervisorReviewer,
+            write_run_feedback,
         )
+        from jiuwenswarm.server.runtime.designer.trajectory import (
+            begin_trajectory,
+            end_trajectory,
+            get_trajectory,
+            load_prior_feedback,
+        )
+
+        optimize_for = str((graph.get("metadata") or {}).get("optimize_for") or "quality")
+        # One-pass: never consume prior ratings/feedback unless this is an explicit Run again.
+        use_prior = bool(
+            (graph.get("metadata") or {}).get("use_prior_feedback")
+            or (run.get("metadata") or {}).get("use_prior_feedback")
+        )
+        # Supervisor LLM analysis when pending / heuristic bootstrap — rebuild once, no loop.
+        meta0 = dict(graph.get("metadata") or {})
+        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+
+        use_llm_orch = llm_available()
+        # Stamp how agents run for this Play (docs + trajectory).
+        meta0 = dict(graph.get("metadata") or {})
+        meta0["ai_agent_pipeline"] = bool(use_llm_orch)
+        meta0["agent_runtime"] = {
+            "mode": "ai" if use_llm_orch else "heuristic",
+            "orch": (
+                "SupervisorAgent/ManagerAgent via jiuwenswarm model_tools.call_model_tool "
+                "(Settings chat models + orchestration skills)"
+                if use_llm_orch
+                else "SupervisorAgent/ManagerAgent plan_fast / validate_plan_fast heuristics"
+            ),
+            "leaves": (
+                "NodeAgentHost → openjiuwen create_deep_agent (jiuwenswarm Settings model) "
+                "when config.delegate=agent; handler fallback on agent failure"
+                if use_llm_orch
+                else "role handlers / direct image-video APIs only"
+            ),
+            "force_handler": (
+                "music/speech stay on MusicNodeHandler/SpeechNodeHandler until TTS/music "
+                "backends exist; if audio not requested, nodes are omitted"
+            ),
+            "heuristic_when": "llm_available() is False (no Settings chat models)",
+        }
+        graph["metadata"] = meta0
+        if (
+            str(meta0.get("scenario") or "") == "video"
+            and use_llm_orch
+            and (
+                meta0.get("pending_llm_analysis")
+                or str(meta0.get("script_analysis_mode") or "") != "llm"
+            )
+        ):
+            try:
+                from jiuwenswarm.server.runtime.designer.script_analysis import (
+                    analyze_creative_brief,
+                )
+                from jiuwenswarm.server.runtime.designer.smart_graph import (
+                    apply_runtime_delegate,
+                    build_smart_video_graph,
+                )
+                from jiuwenswarm.server.runtime.designer.skills_loader import (
+                    attach_skills_metadata,
+                )
+
+                prompt_text = str(graph.get("description") or "")
+                if prompt_text:
+                    analysis = await analyze_creative_brief(
+                        prompt_text, use_llm=True, timeout_sec=45.0
+                    )
+                    if str(analysis.get("source") or "") == "llm":
+                        old_id = str(graph.get("graph_id") or "")
+                        project_id = str(graph.get("project_id") or "")
+                        rebuilt = build_smart_video_graph(
+                            project_id=project_id,
+                            prompt=prompt_text,
+                            analysis=analysis,
+                            title=str(graph.get("title") or "") or None,
+                            optimize_for=optimize_for,
+                            ai_mode=True,
+                        )
+                        rebuilt["graph_id"] = old_id
+                        rebuilt["project_id"] = project_id
+                        rebuilt["created_at"] = graph.get("created_at") or rebuilt.get(
+                            "created_at"
+                        )
+                        rebuilt = apply_runtime_delegate(rebuilt)
+                        rebuilt = attach_skills_metadata(rebuilt, prompt_text)
+                        meta_r = dict(rebuilt.get("metadata") or {})
+                        meta_r["script_analysis"] = analysis
+                        meta_r["script_analysis_mode"] = "llm"
+                        meta_r["pending_llm_analysis"] = False
+                        meta_r["ai_agent_pipeline"] = True
+                        meta_r["supervisor_analyzed"] = True
+                        rebuilt["metadata"] = meta_r
+                        graph = self._store.save_graph(rebuilt)
+                    else:
+                        meta0["script_analysis"] = analysis
+                        meta0["script_analysis_mode"] = str(
+                            analysis.get("source") or "heuristic"
+                        )
+                        meta0["pending_llm_analysis"] = False
+                        graph["metadata"] = meta0
+                        graph = self._store.save_graph(graph)
+            except Exception:  # noqa: BLE001
+                logger.info("Play-time supervisor LLM analysis skipped", exc_info=True)
+                meta0 = dict(graph.get("metadata") or {})
+                meta0["pending_llm_analysis"] = False
+                graph["metadata"] = meta0
+                try:
+                    graph = self._store.save_graph(graph)
+                except Exception:  # noqa: BLE001
+                    pass
+        elif meta0.get("pending_llm_analysis"):
+            meta0["pending_llm_analysis"] = False
+            graph["metadata"] = meta0
+            try:
+                graph = self._store.save_graph(graph)
+            except Exception:  # noqa: BLE001
+                pass
+        prior: dict[str, Any] | None = None
+        if use_prior:
+            prior = load_prior_feedback(graph_id)
+            if prior:
+                meta = dict(graph.get("metadata") or {})
+                meta["prior_feedback"] = prior
+                meta["last_improvement_plan"] = str(
+                    ((prior.get("final") or {}).get("improvement_plan"))
+                    or meta.get("last_improvement_plan")
+                    or ""
+                )
+                graph["metadata"] = meta
+        else:
+            # Strip stale prior so node agents do not re-apply old constraints mid-pass.
+            meta = dict(graph.get("metadata") or {})
+            meta.pop("prior_feedback", None)
+            graph["metadata"] = meta
+        traj = begin_trajectory(
+            graph_id,
+            run_id,
+            meta={
+                "scenario": (graph.get("metadata") or {}).get("scenario"),
+                "optimize_for": optimize_for,
+                "skill_guided": bool((graph.get("metadata") or {}).get("skill_guided")),
+                "audio_intent": (graph.get("metadata") or {}).get("audio_intent"),
+                "one_pass": True,
+                "use_prior_feedback": use_prior,
+            },
+        )
+        agent_feedback: dict[str, dict[str, Any]] = {}
         try:
-            while remaining:
+            with traj.span(
+                agent_id="manager",
+                action="decide_capabilities",
+                phase="orchestration",
+                role="manager",
+                tool="heuristic",
+            ):
+                cap_plan = ManagerAgent().decide_capabilities(graph)
+                traj.record(
+                    agent_id="manager",
+                    action="decide_capabilities_result",
+                    phase="orchestration",
+                    role="manager",
+                    detail={
+                        "rating_modality": cap_plan.get("global_rating_modality"),
+                        "can_vision": cap_plan.get("can_vision"),
+                        "can_video": cap_plan.get("can_video"),
+                        "reason": str(cap_plan.get("reason") or "")[:400],
+                    },
+                )
+                graph = self._store.save_graph(graph)
+
+            with traj.span(
+                agent_id="supervisor",
+                action="plan",
+                phase="orchestration",
+                role="supervisor",
+                tool=("llm" if use_llm_orch else "deterministic"),
+                detail={"optimize_for": optimize_for, "has_prior_feedback": bool(prior)},
+            ):
+                supervisor_skill = str(
+                    (graph.get("metadata") or {}).get("supervisor_skill_excerpt") or ""
+                )
+                if supervisor_skill:
+                    meta = dict(graph.get("metadata") or {})
+                    meta["active_supervisor_skill"] = supervisor_skill[:3000]
+                    graph["metadata"] = meta
+                plan = await SupervisorAgent().plan(
+                    graph,
+                    optimize_for=optimize_for,
+                    prior_feedback=prior,
+                    use_llm=use_llm_orch,
+                )
+                traj.record(
+                    agent_id="supervisor",
+                    action="plan_result",
+                    phase="orchestration",
+                    role="supervisor",
+                    detail={
+                        "notes": str((plan or {}).get("notes") or "")[:500],
+                        "rating_modality": (plan or {}).get("rating_modality"),
+                        "use_llm": use_llm_orch,
+                    },
+                )
+                self._store.save_graph(graph)
+
+            with traj.span(
+                agent_id="manager",
+                action="validate_plan",
+                phase="orchestration",
+                role="manager",
+                tool=("llm" if use_llm_orch else "heuristic"),
+            ):
+                manager_ack = await ManagerAgent().validate_plan(
+                    graph, use_llm=use_llm_orch
+                )
+                traj.record(
+                    agent_id="manager",
+                    action="validate_plan_result",
+                    phase="orchestration",
+                    role="manager",
+                    detail={
+                        "patched": list(manager_ack.get("patched") or [])[:20],
+                        "rating_modality": manager_ack.get("rating_modality"),
+                        "can_vision": manager_ack.get("can_vision"),
+                        "use_llm": use_llm_orch,
+                    },
+                )
+                graph = self._store.save_graph(graph)
+
+            remaining = {
+                node["id"]
+                for node in graph.get("nodes", [])
+                if (run.get("node_states") or {}).get(node["id"], {}).get("status")
+                not in _TERMINAL_NODE_STATUSES
+            }
+            incoming = data_predecessors(graph)
+            groups = sync_groups(graph)
+            graph, remaining, incoming, groups = self._expand_clips_if_needed(
+                graph, run, remaining, on_update=on_update
+            )
+            # Continuous scheduling: start each node as soon as graph deps are met
+            # (no wave barrier). Cap concurrency like the agent-scheduler path.
+            in_flight: dict[str, asyncio.Task[None]] = {}
+            sem = asyncio.Semaphore(_MAX_CONCURRENT_NODE_AGENTS)
+
+            async def _run_guarded(node_id: str) -> None:
+                async with sem:
+                    await self._run_single_node(
+                        graph,
+                        run,
+                        _node_by_id(graph, node_id),
+                        on_update=on_update,
+                        agent_feedback=agent_feedback,
+                    )
+
+            def _maybe_adjust_clips() -> None:
+                nonlocal graph
+                meta_live = dict(graph.get("metadata") or {})
+                if meta_live.get("clips_adjusted_after_keyframes"):
+                    return
+                frame_nodes = [
+                    n
+                    for n in (graph.get("nodes") or [])
+                    if node_role(n) == NODE_ROLE_FRAME
+                ]
+                clip_pending = [
+                    n
+                    for n in (graph.get("nodes") or [])
+                    if node_role(n) == NODE_ROLE_CLIP
+                    and (run.get("node_states") or {}).get(str(n.get("id") or ""), {}).get(
+                        "status"
+                    )
+                    not in _TERMINAL_NODE_STATUSES
+                ]
+                frames_done = bool(frame_nodes) and all(
+                    (run.get("node_states") or {}).get(str(n.get("id") or ""), {}).get("status")
+                    in _TERMINAL_NODE_STATUSES
+                    for n in frame_nodes
+                )
+                if not (frames_done and clip_pending):
+                    return
+                with traj.span(
+                    agent_id="supervisor",
+                    action="adjust_after_keyframes",
+                    phase="orchestration",
+                    role="supervisor",
+                    tool="heuristic",
+                ):
+                    adj_notes = SupervisorAgent().adjust_clips_after_keyframes(
+                        graph,
+                        node_states=run.get("node_states"),
+                        agent_feedback=agent_feedback,
+                    )
+                    traj.record(
+                        agent_id="supervisor",
+                        action="adjust_after_keyframes_result",
+                        phase="orchestration",
+                        role="supervisor",
+                        detail={"notes": adj_notes[:20], "rating_modality": "text_only"},
+                    )
+                with traj.span(
+                    agent_id="manager",
+                    action="ack_keyframe_adjustment",
+                    phase="orchestration",
+                    role="manager",
+                    tool="heuristic",
+                ):
+                    ManagerAgent().ack_keyframe_adjustment(graph, adj_notes)
+                graph = self._store.save_graph(graph)
+
+            async def _maybe_review_storyboard() -> None:
+                nonlocal graph
+                meta_live = dict(graph.get("metadata") or {})
+                if meta_live.get("storyboard_reviewed"):
+                    return
+                sb_state = (run.get("node_states") or {}).get("n_storyboard") or {}
+                if sb_state.get("status") not in _TERMINAL_NODE_STATUSES:
+                    return
+                with traj.span(
+                    agent_id="manager",
+                    action="review_storyboard",
+                    phase="orchestration",
+                    role="manager",
+                    tool=("llm" if use_llm_orch else "heuristic"),
+                ):
+                    sb_ack = await ManagerAgent().review_storyboard_once(
+                        graph,
+                        node_states=run.get("node_states"),
+                        use_llm=use_llm_orch,
+                    )
+                    traj.record(
+                        agent_id="manager",
+                        action="review_storyboard_result",
+                        phase="orchestration",
+                        role="manager",
+                        detail={
+                            "patched": list(sb_ack.get("patched") or [])[:20],
+                            "source": sb_ack.get("source"),
+                        },
+                    )
+                graph = self._store.save_graph(graph)
+
+            while remaining or in_flight:
                 await self._await_pause(run_id)
                 if self._is_cancelled(run_id):
+                    for task in in_flight.values():
+                        task.cancel()
                     break
-                ready_ids = [
+
+                newly_ready = [
                     node_id
-                    for node_id in remaining
-                    if _is_ready(node_id, run, incoming, groups)
+                    for node_id in list(remaining)
+                    if node_id not in in_flight and _is_ready(node_id, run, incoming, groups)
                 ]
-                if not ready_ids:
-                    run["status"] = RUN_STATUS_FAILED
-                    run["updated_at"] = utc_now_ms()
-                    self._publish(run, on_update)
-                    self._store.save_run(run)
-                    return
-                run["current_node_ids"] = list(ready_ids)
-                run["updated_at"] = utc_now_ms()
-                self._publish(run, on_update)
-                self._store.save_run(run)
-                await collaborate_ready_wave(graph, run, ready_ids)
-                await asyncio.gather(
-                    *(
-                        self._run_single_node(
-                            graph,
-                            run,
-                            _node_by_id(graph, node_id),
-                            on_update=on_update,
+                if newly_ready:
+                    enable_a2a = bool((graph.get("metadata") or {}).get("enable_a2a_collab"))
+                    if enable_a2a:
+                        with traj.span(
+                            agent_id="a2a",
+                            action="collaborate_ready_wave",
+                            phase="collaboration",
+                            role="peer",
+                            detail={"ready_ids": list(newly_ready)},
+                        ):
+                            await collaborate_ready_wave(graph, run, newly_ready)
+                    for node_id in newly_ready:
+                        remaining.discard(node_id)
+                        in_flight[node_id] = asyncio.create_task(
+                            _run_guarded(node_id),
+                            name=f"designer-node-{node_id}",
                         )
-                        for node_id in ready_ids
-                    )
+                    run["current_node_ids"] = list(in_flight.keys())
+                    self._publish(run, on_update)
+
+                if not in_flight:
+                    if remaining:
+                        run["status"] = RUN_STATUS_FAILED
+                        run["updated_at"] = utc_now_ms()
+                        self._publish(run, on_update)
+                        self._store.save_run(run)
+                        return
+                    break
+
+                done, _pending = await asyncio.wait(
+                    set(in_flight.values()),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                remaining -= {
-                    node_id
-                    for node_id in ready_ids
-                    if run["node_states"].get(node_id, {}).get("status") in _TERMINAL_NODE_STATUSES
-                }
+                finished_ids: list[str] = []
+                for task in done:
+                    for nid, t in list(in_flight.items()):
+                        if t is task:
+                            finished_ids.append(nid)
+                            in_flight.pop(nid, None)
+                            break
+                    exc = task.exception() if not task.cancelled() else None
+                    if exc is not None:
+                        logger.info("Node task error: %s", exc, exc_info=exc)
+
+                for node_id in finished_ids:
+                    state = (run.get("node_states") or {}).get(node_id) or {}
+                    traj.record(
+                        agent_id="supervisor",
+                        action="node_report",
+                        phase="orchestration",
+                        role="supervisor",
+                        detail={
+                            "node_id": node_id,
+                            "status": state.get("status"),
+                            "has_output": bool(state.get("output_ref")),
+                        },
+                    )
+
+                run["current_node_ids"] = list(in_flight.keys())
+                await _maybe_review_storyboard()
+                _maybe_adjust_clips()
                 graph, remaining, incoming, groups = self._expand_clips_if_needed(
                     graph, run, remaining, on_update=on_update
                 )
+                # Re-queue any newly expanded clip ids that are not in-flight.
+                for node in graph.get("nodes") or []:
+                    nid = str(node.get("id") or "")
+                    if not nid or nid in in_flight:
+                        continue
+                    st = (run.get("node_states") or {}).get(nid) or {}
+                    if st.get("status") not in _TERMINAL_NODE_STATUSES:
+                        remaining.add(nid)
                 if run.get("status") == RUN_STATUS_FAILED or self._is_cancelled(run_id):
                     break
             if self._is_cancelled(run_id):
@@ -540,6 +960,104 @@ class GraphExecutor:
                 run["status"] = RUN_STATUS_COMPLETED
             run["current_node_ids"] = []
             run["updated_at"] = utc_now_ms()
+
+            # Write-only reports: supervisor rates nodes → manager rates all + supervisor.
+            # Never feed ratings back into this run (no loop).
+            supervisor_plan = (graph.get("metadata") or {}).get("supervisor_plan") or {}
+            with traj.span(
+                agent_id="supervisor",
+                action="finalize",
+                phase="orchestration",
+                role="supervisor",
+                tool=("llm" if use_llm_orch else "heuristic"),
+            ):
+                supervisor_final = await SupervisorReviewer().finalize(
+                    graph,
+                    agent_feedback=agent_feedback,
+                    manager_review={},
+                    optimize_for=optimize_for,
+                    use_llm=use_llm_orch,
+                    node_states=run.get("node_states"),
+                )
+            with traj.span(
+                agent_id="manager",
+                action="review",
+                phase="orchestration",
+                role="manager",
+                tool=("llm" if use_llm_orch else "heuristic"),
+            ):
+                manager_review = await ManagerAgent().review(
+                    graph,
+                    agent_feedback=agent_feedback,
+                    supervisor_plan=supervisor_plan if isinstance(supervisor_plan, dict) else {},
+                    prior_feedback=None,
+                    optimize_for=optimize_for,
+                    use_llm=use_llm_orch,
+                    supervisor_report=supervisor_final,
+                    node_states=run.get("node_states"),
+                )
+            with traj.span(
+                agent_id="manager",
+                action="dual_rate_final",
+                phase="orchestration",
+                role="manager",
+                tool=("llm" if use_llm_orch else "heuristic"),
+            ):
+                manager_review = await ManagerAgent().dual_rate_final(
+                    graph,
+                    agent_feedback=agent_feedback,
+                    supervisor_final=supervisor_final,
+                    manager_review=manager_review,
+                    node_states=run.get("node_states"),
+                    use_llm=use_llm_orch,
+                )
+                traj.record(
+                    agent_id="manager",
+                    action="dual_rate_final_result",
+                    phase="orchestration",
+                    role="manager",
+                    detail={
+                        "aggregated_overall": manager_review.get("aggregated_overall"),
+                        "raters": len((manager_review.get("dual_raters") or {}).get("raters") or []),
+                    },
+                )
+            feedback_path = await write_run_feedback(
+                graph=graph,
+                run_id=run_id,
+                agent_feedback=agent_feedback,
+                supervisor_plan=supervisor_plan if isinstance(supervisor_plan, dict) else {},
+                manager_review=manager_review,
+                supervisor_final=supervisor_final,
+                optimize_for=optimize_for,
+            )
+            traj.set_feedback(
+                {
+                    "agents": agent_feedback,
+                    "supervisor": {
+                        "plan": supervisor_plan,
+                        "scores": supervisor_final.get("scores"),
+                        "node_reports": supervisor_final.get("node_reports"),
+                        "summary": supervisor_final.get("summary"),
+                        "suggestions": supervisor_final.get("suggestions"),
+                    },
+                    "manager": manager_review,
+                    "final": {
+                        "improvement_plan": supervisor_final.get("improvement_plan"),
+                        "aggregated_score": supervisor_final.get("aggregated_score"),
+                        "summary": supervisor_final.get("summary"),
+                        "apply_on": "run_again_only",
+                    },
+                    "feedback_path": str(feedback_path) if feedback_path else None,
+                }
+            )
+            meta = dict(graph.get("metadata") or {})
+            meta["last_feedback_run_id"] = run_id
+            meta["last_trajectory_run_id"] = run_id
+            meta["last_aggregated_score"] = supervisor_final.get("aggregated_score")
+            meta["last_improvement_plan"] = supervisor_final.get("improvement_plan")
+            meta["use_prior_feedback"] = False
+            graph["metadata"] = meta
+            self._store.save_graph(graph)
             self._publish(run, on_update)
             self._store.save_run(run)
         except asyncio.CancelledError:
@@ -552,7 +1070,17 @@ class GraphExecutor:
             run["updated_at"] = utc_now_ms()
             self._publish(run, on_update)
             self._store.save_run(run)
+            rec = get_trajectory(run_id)
+            if rec is not None:
+                rec.record(
+                    agent_id="executor",
+                    action="run_failed",
+                    phase="system",
+                    status="error",
+                    detail={"error": str(exc)},
+                )
         finally:
+            end_trajectory(run_id)
             self._cleanup_run(run_id)
 
     def reconcile_loaded_graph(self, graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
@@ -627,17 +1155,12 @@ class GraphExecutor:
         )
         if topology_matches and not bundled_frames:
             synced = apply_shot_generate_prompts(graph, prompts)
-            saved = synced if synced is graph else self._store.save_graph(synced)
-            if saved is not graph:
-                callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
-                if callback is not None:
-                    callback(deepcopy(saved))
-            states = run.setdefault("node_states", {})
-            for node in saved.get("nodes") or []:
-                node_id = str(node.get("id") or "")
-                if node_id:
-                    states.setdefault(node_id, {"status": NODE_STATUS_PENDING})
-            remaining = _pending_node_ids(saved, run)
+            if synced is graph:
+                return graph, remaining, data_predecessors(graph), sync_groups(graph)
+            saved = self._store.save_graph(synced)
+            callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
+            if callback is not None:
+                callback(deepcopy(saved))
             return saved, remaining, data_predecessors(saved), sync_groups(saved)
 
         saved = self._store.save_graph(
@@ -762,11 +1285,58 @@ class GraphExecutor:
         node: DesignerGraphNode,
         *,
         on_update: RunUpdateCallback | None,
+        agent_feedback: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         node_id = node["id"]
         started_at = utc_now_ms()
         blocked_by = list(sync_groups(graph).get(node_id, frozenset()) - {node_id})
         lock = self._state_locks.setdefault(run["run_id"], asyncio.Lock())
+        from jiuwenswarm.common.schema.designer_graph import node_role as _node_role_fn
+        from jiuwenswarm.server.runtime.designer.skills_loader import (
+            load_agent_skill,
+            load_subject_skill,
+        )
+        from jiuwenswarm.server.runtime.designer.trajectory import get_trajectory
+
+        role = str(
+            (node.get("config") or {}).get("role")
+            or _node_role_fn(node)
+            or node_id
+        )
+        traj = get_trajectory(run["run_id"])
+        # Leaf nodes: task skill only (already on config). Do not dump scenario/subjects.
+        skill = str((node.get("config") or {}).get("skill_excerpt") or "").strip()
+        if not skill:
+            skill = (load_agent_skill(role) or load_agent_skill(node_id) or "")[:1200]
+            if skill:
+                cfg = dict(node.get("config") or {})
+                cfg["skill_excerpt"] = skill
+                node["config"] = cfg
+        # Optional tiny subject hint for character/scene only (not full encyclopedia).
+        if role in {"character", "character_design", "scene"}:
+            subjects = list((graph.get("metadata") or {}).get("subject_keys") or [])[:1]
+            if subjects:
+                bit = load_subject_skill(subjects[0])
+                if bit:
+                    cfg = dict(node.get("config") or {})
+                    cfg["skill_excerpt"] = (
+                        str(cfg.get("skill_excerpt") or "") + "\n\n" + bit[:600]
+                    ).strip()[:1800]
+                    node["config"] = cfg
+        if (graph.get("metadata") or {}).get("use_prior_feedback"):
+            cfg = dict(node.get("config") or {})
+            prior_plan = str((graph.get("metadata") or {}).get("last_improvement_plan") or "")
+            suggestions = ((graph.get("metadata") or {}).get("prior_feedback") or {}).get(
+                "supervisor"
+            ) or {}
+            if isinstance(suggestions, dict):
+                node_suggestion = (suggestions.get("suggestions") or {}).get(node_id)
+                if node_suggestion:
+                    cfg["rerun_suggestion"] = str(node_suggestion)
+            if prior_plan and not cfg.get("rerun_suggestion"):
+                cfg["rerun_suggestion"] = prior_plan[:1500]
+            node["config"] = cfg
+
         async with lock:
             self._set_node_state(
                 run,
@@ -778,23 +1348,65 @@ class GraphExecutor:
                     "blocked_by": blocked_by,
                 },
             )
-            run["updated_at"] = utc_now_ms()
-            self._store.save_run(run)
             self._publish(run, on_update, node_id)
-        try:
-            ctx = NodeExecutionContext(
-                graph=graph,
-                run_id=run["run_id"],
-                node_id=node_id,
-                run=run,
+        tool_name = "node_agent" if node_uses_agent_runtime(node) else "handler"
+        span_cm = (
+            traj.span(
+                agent_id=node_id,
+                action="execute",
+                phase="node",
+                role=role,
+                tool=tool_name,
+                detail={
+                    "label": node.get("label"),
+                    "type": node.get("type"),
+                    "has_skill": bool((node.get("config") or {}).get("skill_excerpt")),
+                },
             )
-            if node_uses_agent_runtime(node):
-                result = await self._host.execute(node, ctx)
-            else:
-                handler = get_node_handler(node)
-                result = await handler.execute(node, ctx)
-                if _MOCK_NODE_DELAY_SECONDS:
-                    await asyncio.sleep(_MOCK_NODE_DELAY_SECONDS)
+            if traj is not None
+            else nullcontext()
+        )
+        try:
+            with span_cm as span_detail:
+                ctx = NodeExecutionContext(
+                    graph=graph,
+                    run_id=run["run_id"],
+                    node_id=node_id,
+                    run=run,
+                )
+                if node_uses_agent_runtime(node):
+                    result = await asyncio.wait_for(
+                        self._host.execute(node, ctx),
+                        timeout=_node_execute_timeout_sec(node),
+                    )
+                    handler_name = "NodeAgentHost"
+                else:
+                    handler = get_node_handler(node)
+                    result = await asyncio.wait_for(
+                        handler.execute(node, ctx),
+                        timeout=_node_execute_timeout_sec(node),
+                    )
+                    handler_name = type(handler).__name__
+                    if _MOCK_NODE_DELAY_SECONDS:
+                        await asyncio.sleep(_MOCK_NODE_DELAY_SECONDS)
+                if isinstance(span_detail, dict):
+                    span_detail["message"] = str(getattr(result, "message", "") or "")[:300]
+                    span_detail["handler"] = handler_name
+                if agent_feedback is not None:
+                    agent_feedback[node_id] = {
+                        "agent_id": (node.get("config") or {}).get("agent_id") or node_id,
+                        "agent_name": (node.get("config") or {}).get("agent_name")
+                        or node.get("label")
+                        or node_id,
+                        "role": role,
+                        "message": str(getattr(result, "message", "") or ""),
+                        "self_score": 7,
+                        "notes": str(getattr(result, "message", "") or "")[:500],
+                        "suggestion_for_next": str(
+                            (node.get("config") or {}).get("rerun_suggestion") or ""
+                        ),
+                        "tool": tool_name,
+                    }
             if self._is_cancelled(run["run_id"]):
                 return
             refs = [ref for ref in (result.output_refs or []) if ref]
@@ -813,12 +1425,21 @@ class GraphExecutor:
                 kept_refs = [kept]
             incoming_uri = str((primary or {}).get("uri") or "") if primary else ""
             kept_uri = str((kept or {}).get("uri") or "") if kept else ""
-            pending = bool(kept and primary and incoming_uri and incoming_uri != kept_uri)
+            # Auto-accept new outputs — never pause the pipeline for one-by-one approval.
+            auto_accept = bool(
+                (graph.get("metadata") or {}).get("auto_accept_outputs", True)
+            )
+            pending = bool(
+                not auto_accept
+                and kept
+                and primary
+                and incoming_uri
+                and incoming_uri != kept_uri
+            )
             if pending and (
                 node_role(node) == NODE_ROLE_COMPOSE or _should_auto_promote(kept, primary)
             ):
                 pending = False
-            accepted = kept if pending else primary
             async with lock:
                 self._set_node_state(
                     run,
@@ -827,7 +1448,7 @@ class GraphExecutor:
                         "status": NODE_STATUS_COMPLETED,
                         "started_at": started_at,
                         "completed_at": utc_now_ms(),
-                        "output_ref": accepted,
+                        "output_ref": kept if pending else primary,
                         "output_refs": kept_refs if pending else refs,
                         "candidate_output_ref": primary if pending else None,
                         "candidate_output_refs": refs if pending else [],
@@ -835,12 +1456,6 @@ class GraphExecutor:
                         "blocked_by": [],
                     },
                 )
-            self._persist_node_output_on_graph(
-                graph,
-                node_id,
-                accepted if isinstance(accepted, dict) else None,
-                run_id=str(run.get("run_id") or ""),
-            )
             if node_role(node) == NODE_ROLE_STORYBOARD:
                 live_graph = self._require_graph(str(run.get("graph_id") or graph.get("graph_id") or ""))
                 self._expand_clips_if_needed(live_graph, run, set(), on_update=on_update)
@@ -857,6 +1472,25 @@ class GraphExecutor:
                     },
                 )
                 run["status"] = RUN_STATUS_FAILED
+            if traj is not None:
+                traj.record(
+                    agent_id=node_id,
+                    action="execute_failed",
+                    phase="node",
+                    role=role,
+                    tool=tool_name,
+                    status="error",
+                    detail={"error": str(exc)},
+                )
+            if agent_feedback is not None:
+                agent_feedback[node_id] = {
+                    "agent_id": node_id,
+                    "role": role,
+                    "self_score": 2,
+                    "notes": str(exc),
+                    "suggestion_for_next": "Retry with adjusted params from manager plan",
+                    "tool": tool_name,
+                }
         finally:
             async with lock:
                 run["updated_at"] = utc_now_ms()
@@ -872,38 +1506,6 @@ class GraphExecutor:
     def _is_cancelled(self, run_id: str) -> bool:
         cancel_flag = self._cancel_flags.get(run_id)
         return cancel_flag is not None and cancel_flag.is_set()
-
-    def _persist_node_output_on_graph(
-        self,
-        graph: DesignerExecutionGraph,
-        node_id: str,
-        ref: dict[str, Any] | None,
-        *,
-        run_id: str,
-    ) -> None:
-        """Write the completed artifact onto the graph so a restart still shows it."""
-        if not node_id or not isinstance(ref, dict) or not str(ref.get("uri") or "").strip():
-            return
-        nodes = []
-        changed = False
-        for node in graph.get("nodes") or []:
-            if str(node.get("id") or "") != node_id:
-                nodes.append(node)
-                continue
-            current = node.get("output_ref")
-            if current == ref:
-                nodes.append(node)
-                continue
-            nodes.append({**node, "output_ref": dict(ref)})
-            changed = True
-        if not changed:
-            return
-        graph["nodes"] = nodes
-        saved = self._store.save_graph(graph)
-        graph.update(saved)
-        callback = self._on_graph_updates.get(run_id)
-        if callback is not None:
-            callback(deepcopy(saved))
 
     @staticmethod
     def _set_node_state(
@@ -1031,10 +1633,8 @@ def _is_media_ref(ref: object) -> bool:
 
 
 def _should_auto_promote(kept: object, primary: object) -> bool:
-    """Replace fallback notes with media, and replace regenerated markdown/tables in place."""
-    if _is_fallback_text_ref(kept) and _is_media_ref(primary):
-        return True
-    return _is_fallback_text_ref(kept) and _is_fallback_text_ref(primary)
+    """Replace fallback notes with a newly generated image/video instead of asking."""
+    return _is_fallback_text_ref(kept) and _is_media_ref(primary)
 
 
 def _node_by_id(graph: DesignerExecutionGraph, node_id: str) -> DesignerGraphNode:
@@ -1044,16 +1644,16 @@ def _node_by_id(graph: DesignerExecutionGraph, node_id: str) -> DesignerGraphNod
     raise KeyError(f"node not found: {node_id}")
 
 
-def _pending_node_ids(graph: DesignerExecutionGraph, run: DesignerExecutionRun) -> set[str]:
-    states = run.get("node_states") or {}
-    pending: set[str] = set()
-    for node in graph.get("nodes") or []:
-        node_id = str(node.get("id") or "")
-        if not node_id:
-            continue
-        if (states.get(node_id) or {}).get("status") not in _TERMINAL_NODE_STATUSES:
-            pending.add(node_id)
-    return pending
+def _node_execute_timeout_sec(node: DesignerGraphNode) -> float:
+    """Hard cap so one leaf cannot hang the ready-queue forever."""
+    role = node_role(node)
+    if role in {NODE_ROLE_CLIP, NODE_ROLE_COMPOSE}:
+        return 480.0
+    if role in {NODE_ROLE_FRAME, "character", "character_design", "scene"}:
+        return 300.0
+    if role in {"speech", "music"}:
+        return 120.0
+    return 180.0
 
 
 def _is_ready(
@@ -1069,6 +1669,10 @@ def _is_ready(
     for pred in preds:
         group = groups.get(pred, frozenset({pred}))
         for member in group:
+            # Sync groups often include this node (Align edges). Requiring it
+            # completed before it can start deadlocks storyboard forever.
+            if member == node_id:
+                continue
             member_status = (run.get("node_states", {}).get(member) or {}).get("status")
             if member_status != NODE_STATUS_COMPLETED:
                 return False

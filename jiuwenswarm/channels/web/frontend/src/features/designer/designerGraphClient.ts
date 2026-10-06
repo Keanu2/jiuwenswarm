@@ -33,15 +33,23 @@ export const designerGraphClient = {
     projectId?: string;
     projectDir?: string;
     workMode?: 'work' | 'code';
+    optimizeFor?: 'cost' | 'quality';
+    scenario?: string;
   }) =>
-    webRequest<DesignerGraphBootstrapResult>('designer.graph.bootstrap', {
-      prompt: params.prompt,
-      ...(params.title ? { title: params.title } : {}),
-      ...(params.name ? { name: params.name } : {}),
-      ...(params.projectId ? { project_id: params.projectId } : {}),
-      ...(params.projectDir ? { project_dir: params.projectDir } : {}),
-      ...(params.workMode ? { work_mode: params.workMode } : {}),
-    }),
+    webRequest<DesignerGraphBootstrapResult>(
+      'designer.graph.bootstrap',
+      {
+        prompt: params.prompt,
+        ...(params.title ? { title: params.title } : {}),
+        ...(params.name ? { name: params.name } : {}),
+        ...(params.projectId ? { project_id: params.projectId } : {}),
+        ...(params.projectDir ? { project_dir: params.projectDir } : {}),
+        ...(params.workMode ? { work_mode: params.workMode } : {}),
+        ...(params.optimizeFor ? { optimize_for: params.optimizeFor } : {}),
+        ...(params.scenario ? { scenario: params.scenario } : {}),
+      },
+      { timeoutMs: 120000 },
+    ),
 
   startRun: (params: { graphId?: string; runId?: string; nodeId?: string }) =>
     webRequest<{ run: DesignerExecutionRun }>('designer.run.start', {

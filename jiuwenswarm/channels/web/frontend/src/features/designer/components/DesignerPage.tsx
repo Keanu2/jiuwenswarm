@@ -5,7 +5,6 @@ import { useWorkspaceStore } from '../../../stores';
 import {
   collectDesignerMaterials,
   collectPendingRevisions,
-  shouldAutoPromoteDesignerRevision,
 } from '../designerMaterials';
 import { useDesignerChatStore } from '../designerChatStore';
 import { bindDesignerRuntime, useDesignerRunStore } from '../designerRunStore';
@@ -122,7 +121,7 @@ export function DesignerPage({ projectId }: DesignerPageProps) {
     for (const item of pendingRevisions) {
       const key = `${runId}:${item.nodeId}`;
       if (autoPromotedRef.current.has(key)) continue;
-      if (!shouldAutoPromoteDesignerRevision(item.original[0], item.incoming[0])) continue;
+      // Always auto-accept new assets — never require one-by-one Continue/approval.
       autoPromotedRef.current.add(key);
       void chooseOutput(item.nodeId, 'new').then(() => {
         if (chooserNodeId === item.nodeId) closeRevision();

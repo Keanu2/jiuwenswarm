@@ -85,8 +85,14 @@ def _normalize_api_key(value: str) -> str:
 
 def _dashscope_image_size(size: str) -> str:
     """DashScope Qwen-Image expects width*height, not OpenAI-style 1024x1024."""
-    raw = (size or "").strip().lower().replace("x", "*")
-    return raw or "1328*1328"
+    raw = (size or "").strip()
+    upper = raw.upper().replace(" ", "")
+    if upper in {"1K", "1024", "1K*1K"}:
+        return "1024*1024"
+    if upper in {"2K"}:
+        return "2048*2048"
+    normalized = raw.lower().replace("x", "*")
+    return normalized or "1024*1024"
 
 
 def _local_image_path(path: str) -> Path | None:
@@ -402,6 +408,7 @@ async def _invoke_model_image_generation(
     size: str = "1024x1024",
     quality: str = "standard",
     reference_images: list[str] | None = None,
+    max_tries: int = 3,
 ) -> dict:
     """
     Generate image via DashScope / MiniMax / 火山方舟 Seedream.
@@ -548,7 +555,9 @@ async def _invoke_model_image_generation(
 
             return await asyncio.to_thread(_generate_image_blocking)
 
-        result = await _RetryExecutor.with_backoff(_call, max_tries=3)
+        result = await _RetryExecutor.with_backoff(
+            _call, max_tries=max(1, min(3, int(max_tries or 1)))
+        )
 
         output_dir = get_agent_workspace_dir()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -172,27 +173,136 @@ def concatenate_clip_videos(paths: list[Path], dest: Path) -> Path:
     return dest.resolve()
 
 
+def _video_path_from_ref(ref: object) -> Path | None:
+    if not isinstance(ref, dict):
+        return None
+    uri = str(ref.get("uri") or "")
+    path = handler_io.path_from_uri(uri)
+    if (
+        path is not None
+        and path.is_file()
+        and path.suffix.lower() in _VIDEO_SUFFIXES
+        and path.stat().st_size > 0
+    ):
+        return path.resolve()
+    return None
+
+
+def _video_from_state(state: dict) -> Path | None:
+    candidates: list[object] = []
+    for key in ("output_ref", "candidate_output_ref"):
+        primary = state.get(key)
+        if primary is not None:
+            candidates.append(primary)
+    for key in ("output_refs", "candidate_output_refs"):
+        for ref in state.get(key) or []:
+            if ref is not None:
+                candidates.append(ref)
+    for ref in candidates:
+        path = _video_path_from_ref(ref)
+        if path is not None:
+            return path
+    return None
+
+
+def _workspace_clip_videos(run_id: str) -> list[Path]:
+    """Fallback: clip mp4s already on disk for this run (state lag / early compose)."""
+    root = handler_io.get_agent_workspace_dir()
+    if not root.is_dir():
+        return []
+    rid = str(run_id or "").strip()
+    found: list[Path] = []
+    patterns = (
+        f"designer_clip_{rid}*.mp4",
+        f"*{rid}*clip*.mp4",
+        f"designer_compose_{rid}*.mp4",
+    )
+    # Never treat still→mp4 freezes as real clip fallbacks in the quality path.
+    for pattern in patterns:
+        for path in sorted(root.glob(pattern)):
+            if (
+                path.is_file()
+                and path.stat().st_size > 0
+                and "compose" not in path.name.lower()
+                and "designer_clip_still_" not in path.name.lower()
+            ):
+                resolved = path.resolve()
+                if resolved not in found:
+                    found.append(resolved)
+    if found:
+        return found
+    # I2V backends often write generated_<timestamp>.mp4 without embedding run_id.
+    import time
+
+    now = time.time()
+    generated = [
+        p.resolve()
+        for p in sorted(
+            root.glob("generated_*.mp4"),
+            key=lambda item: item.stat().st_mtime if item.is_file() else 0,
+            reverse=True,
+        )
+        if p.is_file()
+        and p.stat().st_size > 0
+        and (now - p.stat().st_mtime) < 45 * 60
+    ]
+    return generated[:3]
+
+
 def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
     states = (ctx.run or {}).get("node_states") or {}
     clips = sorted(
         [node for node in (ctx.graph.get("nodes") or []) if node_role(node) == NODE_ROLE_CLIP],
         key=node_shot_index,
     )
+    # Prefer clips that actually feed this compose node when edges exist.
+    pred_ids = {
+        str(e.get("source") or "")
+        for e in (ctx.graph.get("edges") or [])
+        if str(e.get("target") or "") == str(ctx.node_id or "")
+    }
+    if pred_ids:
+        edged = [n for n in clips if str(n.get("id") or "") in pred_ids]
+        if edged:
+            clips = edged
+
     paths: list[Path] = []
     missing: list[str] = []
+
     for node in clips:
         node_id = str(node.get("id") or "")
-        ref = (states.get(node_id) or {}).get("output_ref") or {}
-        path = handler_io.path_from_uri(str(ref.get("uri") or ""))
-        if (
-            path is None
-            or not path.is_file()
-            or path.suffix.lower() not in _VIDEO_SUFFIXES
-        ):
+        state = states.get(node_id) or {}
+        if not isinstance(state, dict):
+            state = {}
+        path = _video_from_state(state)
+        if path is None:
             missing.append(node_id or f"shot {node_shot_index(node)}")
             continue
-        paths.append(path.resolve())
+        paths.append(path)
+
     if missing:
+        # Disk fallback when clip agents finished I2V but state still shows .md,
+        # or compose was spawned before node_states were published.
+        disk = _workspace_clip_videos(str(ctx.run_id or ""))
+        if disk and not paths:
+            logger.warning(
+                "compose using workspace clip mp4 fallback for run=%s missing=%s",
+                ctx.run_id,
+                missing,
+            )
+            return disk
+        if disk and paths:
+            for extra in disk:
+                if extra not in paths:
+                    paths.append(extra)
+            return paths
+        if paths:
+            logger.warning(
+                "compose proceeding with %s clip(s); still missing %s",
+                len(paths),
+                missing,
+            )
+            return paths
         raise RuntimeError(
             "以下视频片段尚未生成，无法成片：" + "、".join(missing)
         )
@@ -316,7 +426,20 @@ def mix_compose_bgm(video: Path, dest: Path, brief: str = "") -> Path:
 
 class ComposeNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        paths = collect_clip_video_paths(ctx)
+        paths: list[Path] = []
+        last_exc: Exception | None = None
+        # Brief retries: compose is often spawned before clip node_states publish.
+        for attempt in range(4):
+            try:
+                paths = collect_clip_video_paths(ctx)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= 3:
+                    break
+                await asyncio.sleep(0.4 * (attempt + 1))
+        if not paths:
+            raise RuntimeError(str(last_exc or "没有可合并的视频片段"))
         logger.info(
             "Designer compose concatenating %s clip(s) in shot order for run=%s",
             len(paths),
@@ -329,6 +452,15 @@ class ComposeNodeHandler:
             dest.parent / f"designer_compose_{ctx.run_id}_bgm.mp4",
             brief=role_output_text(ctx, NODE_ROLE_BRIEF) or "",
         )
+        scored = Path(scored)
+        if (
+            not scored.is_file()
+            or scored.suffix.lower() != ".mp4"
+            or scored.stat().st_size < 512
+        ):
+            raise RuntimeError(
+                f"Compose failed to produce a real mp4 film (got {scored})"
+            )
         output_ref: AssetRef = {
             "kind": NODE_TYPE_VIDEO,
             "uri": scored.resolve().as_uri(),

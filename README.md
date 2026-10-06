@@ -1,211 +1,126 @@
 **JiuwenSwarm extension to support multi-modal creation/design scenarios and designer-users.**
 
-This README is intentionally broken to mark WIP state.
+Branch: `design` (based on `img-vid-gen-inline` / image–video provider configuration).
 
-This README will be restored once this branch is ready as a PR.
+Upstream reference: https://github.com/fhfuih/jiuwenswarm/tree/design
 
-This branch is always (re-)based on `img-vid-gen-inline` and/or other branches that supports image and video generation provider configuration.
-
------------
-
-最终架构实现方向（**不一定现在就采用。做plugin抽离又是额外的架构考量。目前快速prototype直接写进主代码仓好了**）：
-
-- 目前主仓并没有提供含UI能力的拓展机制。只有：
-  - Plugin Package（plugin_packages，可热装）：Skills + Tools，对话里按包装配
-  - Harness Package：Tools / Skills / Rails，热激活
-  - Agent Template / Group：人设、角色组
-  - Skill / Swarm Skill：单 Agent 或团队协作流程
-  - `jiuwenswarm/extensions/`（`extension.yaml`）：后端钩子（如 AgentServerClient、ThirdAgent）
-  - A2UI：聊天里的生成式表单/卡片
-  - Settings overlay：设置页模块组合（偏内建扩展）
-- 在现有现状下，我们的实现全量合入主仓，默认随发行可用。
-  - 前端：扩写现有 channels/web/frontend（导航、Designer 空间、画布、prompt→project 跳转）。
-  - Agent 侧能力：放在 `jiuwenswarm/resources/agent/workspace/plugins/plugin_packages/<你的模块>/`（skills / tools，可参考 content-creation），作为内置 package，不是用户另装。
-  - 还需要进主仓、但通常不塞进 plugin_packages 的，是壳与编排：例如 `work_mode`/路由、project API、gateway handler、画布图执行/状态——这些跟现有 server/web 代码长在一起。
-
-----------
-
-----------
-
-**以下是目前可快速上手的大致架构和合作建议（AI于9月2日早生成，部分内容可能随开发变动而过时）**
-
-把「执行图」拆成三层，Python 侧放在 `jiuwenswarm/common/schema/`，前后端通过 WS RPC + 契约测试对齐；UI 和 executor 只依赖同一套 domain model，不互相 import。
-
-这和 README 里「壳与编排跟 server/web 长在一起」、以及仓库现有惯例（`common/schema/` 为 canonical、前端 hand-mirror TS、pytest 做跨层比对）是一致的。
+Operational pipeline notes (AI-first Play path): see also [`a.md`](./a.md) and [`designer_catalog_skills_reports_trajectory/`](./designer_catalog_skills_reports_trajectory/).
 
 ---
 
-## 1. 放哪里：三层，不要混成一份
+## What changed vs the original `design` description
 
-你们实际需要 **三种数据**，职责不同：
+The original branch README (and the earlier Q&A snapshot) described a **handler-default** Play path: bootstrap stamped `delegate: "handler"`, per-node DeepAgents were off, and scheduling was a simple ready-wave over handlers.
 
-| 层 | 是什么 | 放哪里 | 谁消费 |
-|---|---|---|---|
-| **A. Domain Graph（真相源）** | 节点/边/依赖/执行语义 | `jiuwenswarm/common/schema/designer_graph.py` | 后端 executor + 前端类型镜像 |
-| **B. Run State（运行时状态）** | 每个 node 的 running/done/failed、输出引用 | `jiuwenswarm/server/runtime/designer/`（或 `session/`） | executor 写，前端订阅 |
-| **C. View State（展示层）** | React Flow 的 `position`、`selected`、viewport | 前端 `features/designer/` | 仅 UI；可选持久化到 graph metadata |
+**This working tree keeps that canvas / E2A foundation, and upgrades the runtime to an AI-first framework when a Settings chat model (e.g. DeepSeek) is available.** Heuristics remain only the no-LLM fallback.
 
-**关键原则：React Flow 的 `nodes/edges` 不是真相源，只是 View 投影。**
+### Scheduler (ready-queue, not column barriers)
 
-```
-                    ┌─────────────────────┐
-  prompt/bootstrap  │  DesignerExecutionGraph │  ← schema_version, nodes[], edges[]
-                    └──────────┬──────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              ▼                ▼                ▼
-     toReactFlowView()   GraphExecutor    SubagentRail / tools
-     (UI 投影)           (调度/对齐/合并)   (真正跑 agent)
-              │                │
-              ▼                ▼
-     ReactFlow nodes/edges   ExecutionRun + node_states
-                             (WS events 推给前端)
-```
+| Topic | Original `design` (handler-centric) | Current framework |
+|-------|--------------------------------------|-------------------|
+| When a node starts | Ready when `data` / `sync` preds complete; wave-style launch | Same readiness rules, but a **continuous ready-queue**: as soon as any in-flight node finishes (`asyncio.wait(..., FIRST_COMPLETED)`), newly ready nodes are started |
+| Wave barriers | Implicit “finish the wave” thinking in docs | **No wave barrier** between independent branches (e.g. Character ∥ Scene ∥ Music-from-Brief) |
+| Concurrency | Task-per-ready-node | Cap **6** concurrent leaf tasks |
+| Orchestration timing | Handlers only | Before the queue: **SupervisorAgent.plan** + **ManagerAgent.validate_plan**; optional one-shot post-keyframe clip adjust; end-of-run ratings |
 
-Symphony 里已有 `execution_graph { nodes, edges }` 和 `workflow_state.py` 的运行态模式，可以 **借鉴 shape**，但不要直接复用 schema——Symphony 是 skill 拓扑，你们是 **Designer 多媒体创作 DAG**。
+Edges still gate **scheduling only** (not a payload bus). Handlers / agents still load artifacts by **role / shot_index** from `run.node_states[*].output_ref`.
 
----
+### AI agents vs heuristics
 
-## 2. Domain Graph
+| Piece | When `llm_available()` (DeepSeek / Settings chat model) | When no chat model |
+|-------|----------------------------------------------------------|--------------------|
+| Script / cast / shots | `analyze_creative_brief(use_llm=True)` → `source=llm` | Domain heuristics |
+| Supervisor / Manager | `use_llm=True` via `model_tools.call_model_tool` | `plan_fast` / `validate_plan_fast` |
+| Leaf creative nodes | `delegate=agent` → **NodeAgentHost** (openjiuwen DeepAgent + Designer tools) | `delegate=handler` |
+| Music / Speech | Usually `force_handler` bed until TTS/music backends exist; omit if not requested | Same |
+| Fallback honesty | Never label `[local-tool-fallback]` / schema-echo as `source=llm` | N/A |
 
-第一版地基尽量小，但字段要够你们后面扩展。写在 `jiuwenswarm/common/schema/designer_graph.py`
+Play stamps `metadata.ai_agent_pipeline` and `metadata.agent_runtime.mode` (`ai` | `heuristic`).
 
-**和 React Flow 的分工：**
+### Other framework additions (beyond original README)
 
-- Domain：`id`, `type`, `config`, `layout`（可选持久化位置）
-- React Flow：从 domain 映射出 `position`/`type`/`data`；选中态、拖拽中的临时坐标可以不立刻写回
-- **素材本体不进 node 大 payload**：node 只存 `asset_ref` / `output_ref`，大文件走 project 存储或 artifact API
+- **Smart graph bootstrap** (`smart_graph.py`): prompt → cast/scenes/shots, solo character sheets, optional audio nodes, short-clip `target_shot_count=1` for ~6s prompts.
+- **Identity + continuity**: costume locks, `identity_refs`, manager `CONTINUITY LOCK`, sequential keyframe edit when cameras compatible.
+- **NodeAgentHost tools**: `designer_*` LocalFunctions accept flat `**kwargs` (openjiuwen style); `patch` may be object or JSON string.
+- **Media materialization**: agents author specs; handlers materialize by **required family** (image vs video). A PNG must not count as a completed clip/compose.
+- **Dotenv**: load `~/.jiuwenswarm/config/.env` before LLM calls so API keys are real.
+- **Skills / catalog / trajectory / feedback** under `designer_catalog_skills_reports_trajectory/` and runtime helpers (`capabilities`, `continuity`, `paths`, `skills_loader`, …).
+- **Eval harness**: `scripts/eval_6s_ai_clip.py` (refuses heuristic creative path when LLM is required).
 
-Graph 的 Run State 单独一份（类似 `workflow_runs`），储存 graph 全局的state和内部每个node的state
+Upstream `design` UI/handler improvements that landed on remote (storyboard table UX, graph restore after refresh, later-keyframe anti-clone policy in upstream handlers) are merged for the **frontend / compose** side where they did not conflict; **runtime executor + creative handlers + AI orchestration stay on this framework**.
 
 ---
 
-## 3. 前后端怎么对接（沿用现有惯例）
+## 本版已澄清的三个问题 / Three questions clarified (updated)
 
-仓库没有 protobuf/OpenAPI codegen，做法是：
-
-| 项 | 位置 |
-|---|---|
-| Python canonical | `jiuwenswarm/common/schema/designer_graph.py` |
-| RPC 方法名 | `jiuwenswarm/common/schema/message.py` → `ReqMethod` |
-| Gateway handlers | `jiuwenswarm/gateway/.../app_web_handlers.py`（参考 `project.*`） |
-| 持久化 | `server/runtime/designer/graph_store.py`（参考 `project_store.py`） |
-| 前端类型 | `channels/web/frontend/src/features/designer/executionGraphTypes.ts` |
-| 前端 client | `designerGraphClient.ts`（参考 `projectRegistryClient.ts`） |
-| 契约测试 | `tests/unit_tests/test_designer_execution_graph_contract.py` |
-
-建议第一版 RPC（够两人并行）：
-
-```
-designer.graph.get          # 读 domain graph
-designer.graph.save         # 写 domain graph（含 layout）
-designer.graph.bootstrap    # prompt → project + 初始 graph
-designer.run.start          # 从某 node 或整图开跑
-designer.run.get            # 读 run state
-designer.run.pause / cancel
-```
-
-事件（WS push，参考 `chat.subtask_update`）：
-
-```
-designer.node.updated       # 单 node 状态变化
-designer.run.updated        # run 级状态
-designer.graph.updated      # 图结构被 agent 改写（可选）
-```
+下面按**当前实现**写实。画布连线在代码里叫 `edges`，产品里常叫 trajectory.
 
 ---
 
-## 4. 地基 PR 做到什么程度，够 UI / Agent 分头干
+### 1. Graph 中的 trajectory 是否具有输入 / 输出含义？
 
-目标：**两人只依赖 schema + stub API + fixture，不互相 block。**
+### 1. Do graph trajectories carry input / output meaning?
 
-### 必须做（第一地基 PR）
+**有调度含义，没有通用的“沿边传物料”语义。** Trajectories gate scheduling; they are not a generic payload bus.
 
-1. **Schema + 常量 + 示例 fixture**
-   - `designer_graph.py` + `executionGraphTypes.ts`
-   - `tests/fixtures/designer-execution-graph.v1.json`（含：概览 → 双 subagent 对齐 → 合并 → 分头生成）
-   - 契约测试：node types、edge kinds、`schema_version`、必填字段
-
-2. **Graph ↔ React Flow 纯函数 adapter（前端）**
-   - `toReactFlowGraph(domainGraph) → { nodes, edges }`
-   - `fromReactFlowGraph(rf, domainGraph) → domainGraph`（只回写 layout + 结构变更）
-   - 用 fixture 单测，**不依赖后端**
-
-3. **Graph store + RPC stub（后端）**
-   - `get/save/bootstrap` 能读写 JSON
-   - `run.start/get` 先返回 mock 状态机（例如 2s 后把 node 标成 done）
-   - executor 接口先定：`GraphExecutor.run(graph, run_id) -> AsyncIterator[NodeEvent]`
-
-4. **Executor 接口，不实现具体 subagent**
-   ```python
-   class NodeHandler(Protocol):
-       async def execute(self, node, ctx) -> NodeResult: ...
-
-   NODE_HANDLERS: dict[str, NodeHandler]  # type -> handler
-   ```
-   Agent 同学只需填 `character_design` / `storyboard` 等 handler；UI 同学不用碰。
-
-5. **Project 绑定**
-   - 每个 graph 挂 `project_id`（复用 `project_store`）
-   - `designer.graph.bootstrap`：`prompt → create project → 生成初始 graph`
-
-### 可以第二轮再做
-
-- 真实 subagent 调度（SubagentRail 集成）
-- `sync` 边的 barrier 逻辑
-- 画布多媒体 preview / NodeToolbar
-- Agent 自动改图（graph patch / merge）
-
-### 建议两人分工切线
-
-| 你（UI / React Flow） | 合作者（Agent / 执行流） |
-|---|---|
-| `features/designer/` 页面、React Flow 画布 | `server/runtime/designer/executor.py` |
-| `toReactFlowGraph` / 节点组件 stub | `NODE_HANDLERS` 各 type 实现 |
-| 订阅 `designer.node.updated` 染状态 | `sync` / `merge` 调度策略 |
-| layout 编辑 → `designer.graph.save` | prompt → 初始 graph 的生成逻辑 |
-
-**唯一共享面：fixture JSON + TypeScript types + Python schema + RPC 名。**
+- Each edge is `source → target` with kinds:
+  - `data`: target waits until every data predecessor (and that predecessor’s `sync` group) is completed.
+  - `sync`: barrier, not payload (e.g. Character ↔ Storyboard Align).
+- Actual inputs are loaded by **role / shot_index** from `run.node_states[*].output_ref`, not by walking edge payloads.
+- `config.inputs` is kept aligned with `data` edges at bootstrap/expand; handlers still resolve by role at execute time.
+- Scheduler: continuous ready-queue + concurrency cap (see above). Independent clips can still start when **their** keyframe finishes.
 
 ---
 
-## 5. 几个容易踩坑、现在就该定下来的点
+### 2. E2A 协议的调用和监听逻辑？
 
-1. **Graph 定义 vs Run 状态必须分开**  
-   否则 UI 拖拽保存会把 `running` 状态写乱，或 rerun 时清不干净。
+### 2. How does the E2A protocol call and listen?
 
-2. **Node `config` 要 typed，别全是 `Record<string, unknown>`**  
-   按 `type`  discriminated union；前后端各一份，契约测试 pin 合法 type 列表。
+Unchanged in spirit from the original `design` docs: E2A is the **Gateway ↔ AgentServer** envelope, not node-to-node sync.
 
-3. **对齐边（sync/barrier）是一等公民**  
-   角色设计 + 分镜设计「互相对齐」不要硬编码在 executor if-else，用 `edge.kind = "sync"` + scheduler 读入度/屏障。
+**Call:** Browser `webRequest('designer.graph.*' | 'designer.run.*')` → Gateway → unary E2A → `DesignerAdapter` → GraphStore / GraphExecutor → response.
 
-4. **素材引用，不是素材本体**  
-   node 里放 `output_ref: { kind: "image", uri: "..." }`，播放/预览 UI 再 resolve。
+**Listen:** `designer.run.start` returns a snapshot; progress is push:
 
-5. **不要放进 plugin_packages**  
-   按 README，壳与编排在 `server/web`；plugin_packages 只放 skills/tools（如「重新生成这张图」的具体 tool）。
+`designer.run.updated` / `designer.node.updated` / `designer.graph.updated`
 
-6. **别和 Symphony skill graph 混存储**  
-   可以抄 `SkillGraphPanel` 的布局思路，但 Designer graph 独立 `schema_version` 和存储路径。
+Specs: `docs/zh/E2A-protocol.md`, `docs/en/E2A-protocol.md`. Designer A2A collab bus and inbound chat A2A channels are **not** this E2A envelope.
 
 ---
 
-## 6. 建议的第一批文件清单
+### 3. 当前节点的 Agent 是否实际参与作用？作用机制如何？
 
-```
-jiuwenswarm/common/schema/designer_graph.py
-jiuwenswarm/common/schema/message.py                    # + ReqMethod
-jiuwenswarm/server/runtime/designer/graph_store.py
-jiuwenswarm/server/runtime/designer/executor.py         # 接口 + mock
-jiuwenswarm/server/runtime/designer/handlers/__init__.py
-jiuwenswarm/gateway/.../app_web_handlers.py             # designer.graph.* / designer.run.*
+### 3. Does the per-node Agent actually participate, and how?
 
-jiuwenswarm/channels/web/frontend/src/features/designer/
-  executionGraphTypes.ts
-  designerGraphAdapter.ts      # domain <-> React Flow
-  designerGraphClient.ts
-  fixtures/designer-execution-graph.v1.json
+**Updated answer (this is the important delta vs the original README):**
 
-tests/unit_tests/test_designer_execution_graph_contract.py
-```
+**When Settings has a chat model (`llm_available() == True`), Play is AI-first: leaf DeepAgents do run. Heuristics / handler-only mode is for when no chat model is configured.**
+
+Three layers:
+
+1. **Scheduling** — `_execute_wave_run` ready-queue (`FIRST_COMPLETED`, max 6). Bootstrap uses `_prefer_runtime_pipeline` / `apply_runtime_delegate` (agents when LLM exists; handlers otherwise). `force_handler` keeps music/speech on fast beds.
+2. **Orchestration agents** — `SupervisorAgent` / `ManagerAgent` via `call_model_tool` (+ skills). Script analysis prefers LLM JSON; rejects local-tool-fallback echoes.
+3. **Leaf NodeAgentHost** — DeepAgent with `designer_graph_get` / `patch` / `node_run` / `node_complete`; on failure or missing required media family, **handler materialization** (image / I2V / compose) runs. Music/Speech without backends stay handlers.
+
+Original README stated DeepAgents were off by default — that described the early handler prototype. **Do not treat that as current Play behavior when DeepSeek (or any Settings chat model) is configured.**
+
+---
+
+## Architecture notes (unchanged intent)
+
+Implementation is in-tree (not a separate plugin) for now: frontend under `channels/web/frontend` Designer features; shell/orchestration under `server/runtime/designer` + gateway adapter.
+
+Domain graph truth: `jiuwenswarm/common/schema/designer_graph.py`. Run state in designer runtime store. React Flow is a view projection.
+
+Further pipeline detail: [`a.md`](./a.md).
+
+---
+
+## Local browser test (before push)
+
+1. Configure chat model + keys in `~/.jiuwenswarm/config/.env` / Settings (`API_KEY`, `API_BASE`, e.g. DeepSeek).
+2. `jiuwenswarm-start all` (conda env `new` recommended).
+3. Open the web UI (typically http://localhost:5173 or the printed web port).
+4. Designer → prompt → Play; confirm run metadata `agent_runtime.mode=ai` / `script_analysis_mode=llm` and creative nodes `delegate=agent`.
+
+Do **not** push until you are satisfied with the browser pass.
