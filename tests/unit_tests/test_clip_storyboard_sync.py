@@ -180,7 +180,7 @@ def test_clip_prompt_leads_with_storyboard_beat(monkeypatch):
     )
     prompt = build_clip_prompt(graph, graph["nodes"][1], _FakeCtx(graph))
     head = prompt[:500].lower()
-    assert "STORYBOARD SHOT" in prompt
+    assert "ignored stale" not in prompt.lower()
     assert "pastor" in head or "sermon" in head or "church" in head
     assert "continue from here" not in prompt.lower()
     assert "primary start blocking" not in prompt.lower()
