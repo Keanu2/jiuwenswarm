@@ -115,8 +115,6 @@ async def test_cli_route_system_roundtrip(temp_home: Path, monkeypatch: pytest.M
 
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
-    # Readiness is detected from INFO lines on the subprocess console.
-    env["LOG_LEVEL"] = "INFO"
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"

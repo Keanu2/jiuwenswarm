@@ -123,10 +123,9 @@ auto_memory_enabled: false
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总（不含 gateway 日志）。
 # level：未单独指定时的默认级别。console_level：控制台；可省略则用 level。
 # 环境变量 LOG_LEVEL 仅覆盖控制台级别（不覆盖各日志文件）。
-# 控制台默认 WARNING，减少 terminal 刷屏；文件仍保留 INFO 便于排查。
 logging:
   level: INFO
-  console_level: WARNING
+  console_level: INFO
   gateway: INFO
   channel: INFO
   agent_server: INFO
