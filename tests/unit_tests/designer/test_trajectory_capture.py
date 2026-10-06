@@ -31,7 +31,6 @@ def _settings(tmp_path: Path, *, enabled: bool) -> TrajectoryStoreSettings:
         queue_size=16,
         batch_size=4,
         flush_interval_ms=10,
-        poll_interval_ms=10,
     )
 
 
