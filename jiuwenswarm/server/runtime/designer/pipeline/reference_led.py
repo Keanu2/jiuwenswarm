@@ -998,23 +998,38 @@ def _analysis_scenes(analysis: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [item for item in ((analysis or {}).get("scenes") or []) if isinstance(item, dict)]
 
 
-def _entity_keys(item: dict[str, Any]) -> set[str]:
+def _collect_term_keys(item: dict[str, Any], *fields: str) -> set[str]:
+    keys: set[str] = set()
+    for field in fields:
+        raw = item.get(field) or []
+        if isinstance(raw, list):
+            terms = raw
+        elif raw:
+            terms = [raw]
+        else:
+            terms = []
+        for term in terms:
+            n = _norm_id(term)
+            if n:
+                keys.add(n)
+    return keys
+
+
+def _identity_keys(item: dict[str, Any]) -> set[str]:
+    """Canonical character/scene identity: id, name, aliases — not wardrobe match_terms."""
     keys: set[str] = set()
     for field in ("id", "name"):
         n = _norm_id(item.get(field))
         if n:
             keys.add(n)
-    extra: list[Any] = []
-    for field in ("match_terms", "aliases"):
-        raw = item.get(field) or []
-        if isinstance(raw, list):
-            extra.extend(raw)
-        elif raw:
-            extra.append(raw)
-    for term in extra:
-        n = _norm_id(term)
-        if n:
-            keys.add(n)
+    keys.update(_collect_term_keys(item, "aliases"))
+    return keys
+
+
+def _entity_keys(item: dict[str, Any]) -> set[str]:
+    """Identity plus match_terms — used to *resolve* slot ids onto roster rows."""
+    keys = _identity_keys(item)
+    keys.update(_collect_term_keys(item, "match_terms"))
     return keys
 
 
@@ -1067,14 +1082,19 @@ def _reconcile_slot_ids(
 def _cover_character_keys(
     covered: set[str], slot_key: str, characters: list[dict[str, Any]]
 ) -> None:
+    """Mark a character covered by identity only.
+
+    Slot keys may still *find* a roster row via match_terms (after or without
+    reconcile), but only that row's id/name/aliases enter ``covered``. Shared
+    generic wardrobe tokens must not flood coverage onto other cast members.
+    """
     key = _norm_id(slot_key)
     if not key:
         return
     covered.add(key)
     for item in characters:
-        keys = _entity_keys(item)
-        if key in keys:
-            covered.update(keys)
+        if key in _entity_keys(item):
+            covered.update(_identity_keys(item))
 
 
 def _covered_character_ids(
@@ -1101,7 +1121,7 @@ def _companion_characters(
     """Analysis cast members not already covered by a still — never invent beyond analysis."""
     out: list[dict[str, Any]] = []
     for item in _analysis_characters(analysis):
-        keys = _entity_keys(item)
+        keys = _identity_keys(item)
         if keys & covered:
             continue
         if not keys:
@@ -1131,14 +1151,14 @@ def _covered_setting_ids(
 def _cover_setting_keys(
     covered: set[str], slot_key: str, scenes: list[dict[str, Any]]
 ) -> None:
+    """Mark a setting covered by identity only (same rule as characters)."""
     key = _norm_id(slot_key)
     if not key:
         return
     covered.add(key)
     for item in scenes:
-        keys = _entity_keys(item)
-        if key in keys:
-            covered.update(keys)
+        if key in _entity_keys(item):
+            covered.update(_identity_keys(item))
 
 
 def _companion_scenes(
@@ -1146,7 +1166,7 @@ def _companion_scenes(
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in _analysis_scenes(analysis):
-        keys = _entity_keys(item)
+        keys = _identity_keys(item)
         if keys & covered:
             continue
         if not keys:

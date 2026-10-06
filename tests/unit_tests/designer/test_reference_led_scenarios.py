@@ -1952,6 +1952,44 @@ def test_xiaoyue_alias_covers_char_1_and_parents_are_companions() -> None:
     assert slot["character_id"] == "char_1"
 
 
+def test_shared_generic_match_terms_do_not_skip_companion_sheets() -> None:
+    """#7725: shared wardrobe match_terms (无外套) must not mark other cast covered."""
+    shared = "无外套"
+    graph = _intent_graph(
+        [_slot([ROLE_CHARACTER], binding="verbatim", character_id="char_1")],
+        characters=[
+            {
+                "id": "char_1",
+                "name": "小月",
+                "description": "child lead",
+                "match_terms": [shared, "小月"],
+            },
+            {
+                "id": "char_2",
+                "name": "妈妈",
+                "description": "mom",
+                "match_terms": ["围裙"],
+            },
+            {
+                "id": "char_3",
+                "name": "爸爸",
+                "description": "dad",
+                "match_terms": [shared],
+            },
+            {
+                "id": "char_4",
+                "name": "奶奶",
+                "description": "grandma",
+                "match_terms": [shared, "灰发"],
+            },
+        ],
+        scenes=[],
+    )
+    sheets = _companion_sheets(graph)
+    assert {n["config"]["character_id"] for n in sheets} == {"char_2", "char_3", "char_4"}
+    assert not any(n["config"].get("character_id") == "char_1" for n in sheets)
+
+
 def test_character_still_plates_uncovered_analysis_scenes() -> None:
     """T6: character still + two storyboard rooms → companion plates."""
     graph = _intent_graph(
