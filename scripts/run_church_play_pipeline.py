@@ -161,6 +161,60 @@ async def main() -> int:
             if isinstance(shot, dict):
                 shot["shot_index"] = i
     analysis["target_shot_count"] = len(analysis.get("shots") or [])
+    # Always audible soundtrack for this narrative (preaching + crowd).
+    audio = dict(analysis.get("audio") or {}) if isinstance(analysis.get("audio"), dict) else {}
+    audio["include_speech"] = True
+    audio["include_music"] = True
+    audio["policy"] = "speech_and_music"
+    analysis["audio"] = audio
+    # Force shot casts so the preacher stays at the pulpit while another man leaves
+    # (prevents cloning one face onto both bodies).
+    chars = [c for c in (analysis.get("characters") or []) if isinstance(c, dict)]
+    by_role: dict[str, str] = {}
+    for c in chars:
+        cid = str(c.get("id") or "")
+        name = str(c.get("name") or "").lower()
+        if not cid:
+            continue
+        if any(k in name for k in ("preach", "pastor", "pulpit", "minister")):
+            by_role["preacher"] = cid
+        elif any(k in name for k in ("leav", "depart", "walk", "front")):
+            by_role["leaver"] = cid
+        elif any(k in name for k in ("woman", "weep", "tear", "mother")):
+            by_role["woman"] = cid
+        elif any(k in name for k in ("child", "kid", "boy", "girl")):
+            by_role["child"] = cid
+    if not by_role.get("preacher") and chars:
+        by_role["preacher"] = str(chars[0].get("id"))
+    if len(chars) > 1 and not by_role.get("leaver"):
+        by_role["leaver"] = str(chars[1].get("id"))
+    for shot in analysis.get("shots") or []:
+        if not isinstance(shot, dict):
+            continue
+        idx = int(shot.get("shot_index") or 0)
+        if idx == 1 and by_role.get("preacher"):
+            shot["character_ids"] = [by_role["preacher"]]
+            shot["action"] = (
+                str(shot.get("action") or "")
+                + " Preacher alone at pulpit; congregation listening in pews; "
+                "ONE preacher only — never duplicate him."
+            )[:500]
+        elif idx == 2 and by_role.get("preacher") and by_role.get("leaver"):
+            shot["character_ids"] = [by_role["preacher"], by_role["leaver"]]
+            shot["action"] = (
+                "TWO DIFFERENT men: Preacher remains speaking at the pulpit; "
+                "Man Leaving (different face/clothes, from front pew) stands and walks out the aisle. "
+                "Never clone the preacher as the walker. Same congregation as shot 1."
+            )[:500]
+        elif idx == 3:
+            ids = [by_role[k] for k in ("woman", "child") if by_role.get(k)]
+            if ids:
+                shot["character_ids"] = ids
+            shot["action"] = (
+                str(shot.get("action") or "")
+                + " Woman weeping and nodding with child beside her; same church crowd behind. "
+                "Do not show a duplicate preacher walking."
+            )[:500]
     report["script_analysis_source"] = analysis.get("source")
     report["shots"] = len(analysis.get("shots") or [])
     report["characters"] = [
@@ -181,25 +235,44 @@ async def main() -> int:
     )
     graph = apply_runtime_delegate(graph)
     graph = attach_skills_metadata(graph, PROMPT)
-    # Prefer handlers for media materialization (agents still author brief/storyboard).
+    # AI leaf agents (DeepSeek / Settings chat) with tools; handlers only materialize media.
+    # Keep force_handler on speech/music beds + compose ffmpeg path when present.
     for node in graph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
         role = str((node.get("config") or {}).get("role") or "")
         cfg = node.setdefault("config", {})
-        if role in {"character_design", "scene", "frame", "clip", "compose"}:
+        cfg["max_image_calls"] = max(4, int(cfg.get("max_image_calls") or 1))
+        if role in {"speech", "music", "compose", "scene"}:
             cfg["force_handler"] = True
             cfg["delegate"] = "handler"
-            cfg["max_image_calls"] = max(4, int(cfg.get("max_image_calls") or 1))
+        else:
+            cfg.pop("force_handler", None)
+            cfg["delegate"] = "agent"
+            cfg["skip_llm"] = False
+            cfg["kind"] = "agent"
     meta = dict(graph.get("metadata") or {})
     meta["script_analysis"] = analysis
     meta["script_analysis_mode"] = str(analysis.get("source") or "unknown")
     meta["pending_llm_analysis"] = False
     meta["auto_accept_outputs"] = True
     meta["allow_still_clip_fallback"] = False
-    meta["pipeline_test"] = "church_bible_play"
+    meta["pipeline_test"] = "church_bible_play_spatial_v3_audio"
     meta["ai_agent_pipeline"] = True
+    meta["audio_intent"] = {
+        "include_speech": True,
+        "include_music": True,
+        "policy": "speech_and_music",
+    }
     graph["metadata"] = meta
+
+    from jiuwenswarm.server.runtime.designer.orchestration import (
+        _ensure_audio_nodes_for_intent,
+        _manager_prune_and_cohere,
+    )
+
+    _ensure_audio_nodes_for_intent(graph)
+    _manager_prune_and_cohere(graph)
 
     pruned = prune_non_contributing_nodes(graph)
     report["pruned_before_run"] = pruned

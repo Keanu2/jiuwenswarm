@@ -53,10 +53,19 @@ def _character_prompt(source: str, *, combined_cast: bool = False) -> str:
     )
 
 
-def _scene_prompt(source: str) -> str:
+def _scene_prompt(source: str, *, derive_from_master: bool = False) -> str:
+    if derive_from_master:
+        return (
+            "EDIT / REFRAME the provided master environment reference. "
+            "Same building, pulpit location, aisle, windows, floor, and lighting direction. "
+            "Only change camera angle/framing for this shot. Environment only — no people. "
+            "Do NOT invent a new interior. Be fast — one clear image.\n"
+            f"{source}"
+        )
     return (
         "Cinematic establishing shot of the environment only, no people. "
         "Show space, weather, lighting, signage, and ground so a character can be placed later. "
+        "Empty pews only (no crowd). This is the CANONICAL plate — freeze architecture. "
         "Be fast — one clear image. No people, no subtitles, no storyboard grid.\n"
         f"{source}"
     )
@@ -160,6 +169,15 @@ def _shot_frame_prompt(
         "No subtitles, no storyboard grid, no table, no spreadsheet, no cell borders. "
         "Do not paint words like Shot, Timeline, Camera, Move, Character action, Scene change, or Comment."
     )
+    lead += (
+        " ANTI-CLONE: exactly one body per named character — never duplicate the same face "
+        "(e.g. preacher both at the pulpit and walking the aisle)."
+    )
+    lead += (
+        " CROWD LOCK: if the brief needs a listening congregation, show the SAME seated crowd "
+        "layout in the pews across shots (same coats/positions). Do not empty the pews in one "
+        "shot and invent a new crowd in another. Featured cast must stay distinct from extras."
+    )
     visual = _strip_markdown_tables(brief)
     if visual:
         return f"{lead}\nOverall visual style:\n{visual}"
@@ -225,12 +243,33 @@ async def _image_or_notes(
     max_tries: int = 4,
     require_image: bool = True,
 ) -> NodeResult:
+    refs = [str(p) for p in (reference_images or []) if str(p).strip()]
+    # Only pass real image files — markdown/extra stubs break DashScope uploads.
+    _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+    clean_refs: list[str] = []
+    for raw in refs:
+        path = Path(raw)
+        if path.is_file() and path.suffix.lower() in _IMG:
+            clean_refs.append(str(path.resolve()))
+    clean_refs = clean_refs[:3]
+
     generated = await handler_io.generate_designer_image(
         prompt,
         size=size,
-        reference_images=reference_images,
+        reference_images=clean_refs or None,
         max_tries=max_tries,
     )
+    err = str((generated or {}).get("error") or "")
+    # DashScope often rejects ref uploads ("Cannot determine file type") — retry T2I-only.
+    if (not generated or not generated.get("image_path")) and clean_refs and (
+        "file type" in err.lower() or "InvalidParameter" in err or "181001" in err
+    ):
+        generated = await handler_io.generate_designer_image(
+            prompt + " Match the described architecture and cast from text alone.",
+            size=size,
+            reference_images=None,
+            max_tries=max(2, max_tries // 2),
+        )
     if generated and generated.get("image_path"):
         path = Path(generated["image_path"])
         return NodeResult(
@@ -308,13 +347,36 @@ class SceneNodeHandler:
         source = focused or _aligned_source(ctx, NODE_ROLE_SCENE, node)
         size = str(cfg.get("image_size") or "1024x1024")
         max_tries = int(cfg.get("max_image_calls") or 1)
+        strategy = str(cfg.get("scene_strategy") or "").strip()
+        derive = strategy == "edit_master_view"
+        refs: list[str] = []
+        master_id = str(cfg.get("master_scene_node_id") or "n_scene").strip()
+        if derive:
+            from jiuwenswarm.server.runtime.designer.handlers.common import (
+                node_ids_output_image_paths,
+            )
+
+            master_paths = node_ids_output_image_paths(ctx, [master_id])
+            refs = [str(p) for p in master_paths]
+            if not refs:
+                raise RuntimeError(
+                    f"Scene view {ctx.node_id} requires master plate {master_id} "
+                    "before it can edit/reframe."
+                )
+            lock = cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else {}
+            if lock:
+                source = (
+                    f"{source}\nSPATIAL LOCK: "
+                    + "; ".join(f"{k}={v}" for k, v in lock.items() if str(v).strip())
+                )
         result = await _image_or_notes(
-            prompt=_scene_prompt(source),
+            prompt=_scene_prompt(source, derive_from_master=derive),
             notes=fallback_scene_notes(source),
             stem=f"designer_scene_{ctx.run_id}_{ctx.node_id}",
             kind_if_text=NODE_TYPE_TEXT,
             size=size,
-            max_tries=max_tries,
+            max_tries=max(4, max_tries),
+            reference_images=refs or None,
         )
         return _with_card_ref(result, ctx, NODE_ROLE_SCENE)
 

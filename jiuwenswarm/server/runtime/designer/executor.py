@@ -728,6 +728,100 @@ class GraphExecutor:
                 )
                 self._store.save_graph(graph)
 
+            # Quality one-pass gate (video + LLM): brief → manager brief → storyboard →
+            # manager storyboard, then manager validate/prune. Forward only, no loops.
+            scenario0 = str((graph.get("metadata") or {}).get("scenario") or "")
+            if scenario0 == "video" and use_llm_orch:
+                with traj.span(
+                    agent_id="supervisor",
+                    action="author_creative_brief",
+                    phase="orchestration",
+                    role="supervisor",
+                    tool="llm",
+                ):
+                    brief_ack = await SupervisorAgent().author_creative_brief(
+                        graph, use_llm=True
+                    )
+                    traj.record(
+                        agent_id="supervisor",
+                        action="author_creative_brief_result",
+                        phase="orchestration",
+                        role="supervisor",
+                        detail={
+                            "source": brief_ack.get("source"),
+                            "chars": brief_ack.get("chars"),
+                            "notes": str(brief_ack.get("notes") or "")[:400],
+                        },
+                    )
+                    graph = self._store.save_graph(graph)
+
+                with traj.span(
+                    agent_id="manager",
+                    action="review_brief",
+                    phase="orchestration",
+                    role="manager",
+                    tool="llm",
+                ):
+                    mgr_brief = await ManagerAgent().review_brief(graph, use_llm=True)
+                    traj.record(
+                        agent_id="manager",
+                        action="review_brief_result",
+                        phase="orchestration",
+                        role="manager",
+                        detail={
+                            "source": mgr_brief.get("source"),
+                            "patched": list(mgr_brief.get("patched") or [])[:20],
+                            "notes": str(mgr_brief.get("notes") or "")[:400],
+                        },
+                    )
+                    graph = self._store.save_graph(graph)
+
+                with traj.span(
+                    agent_id="supervisor",
+                    action="author_storyboard",
+                    phase="orchestration",
+                    role="supervisor",
+                    tool="llm",
+                ):
+                    sb_ack = await SupervisorAgent().author_storyboard(
+                        graph, use_llm=True
+                    )
+                    traj.record(
+                        agent_id="supervisor",
+                        action="author_storyboard_result",
+                        phase="orchestration",
+                        role="supervisor",
+                        detail={
+                            "source": sb_ack.get("source"),
+                            "shot_count": sb_ack.get("shot_count"),
+                            "notes": str(sb_ack.get("notes") or "")[:400],
+                        },
+                    )
+                    graph = self._store.save_graph(graph)
+
+                with traj.span(
+                    agent_id="manager",
+                    action="review_storyboard_pre",
+                    phase="orchestration",
+                    role="manager",
+                    tool="llm",
+                ):
+                    mgr_sb = await ManagerAgent().review_storyboard(
+                        graph, use_llm=True
+                    )
+                    traj.record(
+                        agent_id="manager",
+                        action="review_storyboard_pre_result",
+                        phase="orchestration",
+                        role="manager",
+                        detail={
+                            "source": mgr_sb.get("source"),
+                            "patched": list(mgr_sb.get("patched") or [])[:20],
+                            "notes": str(mgr_sb.get("notes") or "")[:400],
+                        },
+                    )
+                    graph = self._store.save_graph(graph)
+
             with traj.span(
                 agent_id="manager",
                 action="validate_plan",
@@ -1003,7 +1097,7 @@ class GraphExecutor:
                 role="manager",
                 tool=("llm" if use_llm_orch else "heuristic"),
             ):
-                manager_review = await ManagerAgent().dual_rate_final(
+                manager_review = await ManagerAgent().assign_dual_raters(
                     graph,
                     agent_feedback=agent_feedback,
                     supervisor_final=supervisor_final,
@@ -1019,6 +1113,9 @@ class GraphExecutor:
                     detail={
                         "aggregated_overall": manager_review.get("aggregated_overall"),
                         "raters": len((manager_review.get("dual_raters") or {}).get("raters") or []),
+                        "recommendations": len(
+                            manager_review.get("aggregated_recommendations") or []
+                        ),
                     },
                 )
             feedback_path = await write_run_feedback(
@@ -1128,6 +1225,19 @@ class GraphExecutor:
         )
         if not has_clip_pipeline:
             return graph, remaining, data_predecessors(graph), sync_groups(graph)
+        # Quality smart graphs are built with per-shot scene + solo cast wiring.
+        # Mid-run expand_shot_nodes dumps ALL cast/scenes into every frame and
+        # orphans carefully planned identity edges — sync prompts only.
+        meta = graph.get("metadata") or {}
+        if bool(meta.get("freeze_shot_topology") or meta.get("lean_pipeline")):
+            synced = apply_shot_generate_prompts(graph, prompts)
+            if synced is graph:
+                return graph, remaining, data_predecessors(graph), sync_groups(graph)
+            saved = self._store.save_graph(synced)
+            callback = self._on_graph_updates.get(str(run.get("run_id") or ""))
+            if callback is not None:
+                callback(deepcopy(saved))
+            return saved, remaining, data_predecessors(saved), sync_groups(saved)
         current_clip_ids = {
             str(node.get("id") or "")
             for node in graph.get("nodes") or []

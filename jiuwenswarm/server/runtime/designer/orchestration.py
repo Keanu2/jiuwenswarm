@@ -166,6 +166,196 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
     return notes
 
 
+def _spatial_geography_lock_patch(graph: DesignerExecutionGraph) -> list[str]:
+    """Stamp / refresh spatial_lock on scene/frame/clip so architecture stays faithful."""
+    notes: list[str] = []
+    meta = dict(graph.get("metadata") or {})
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    lock = meta.get("spatial_lock") if isinstance(meta.get("spatial_lock"), dict) else {}
+    if not lock and isinstance(analysis.get("spatial_lock"), dict):
+        lock = dict(analysis.get("spatial_lock") or {})
+    if not lock:
+        scenes = list(analysis.get("scenes") or [])
+        scene0 = scenes[0] if scenes and isinstance(scenes[0], dict) else {}
+        lock = {
+            "setting": str(scene0.get("name") or "Primary setting"),
+            "architecture": str(scene0.get("description") or "one coherent interior"),
+            "static_rule": (
+                "STATIC OBJECTS LOCKED across shots: pulpit/altar/windows/aisle/pews/floor/"
+                "light direction must match the master scene plate — only camera may change."
+            ),
+            "crowd_rule": (
+                "Empty pews on environment plates; keyframes keep the SAME congregation layout "
+                "across shots; never clone the preacher into two places at once."
+            ),
+        }
+    # Ensure required keys
+    lock.setdefault(
+        "static_rule",
+        "Keep pulpit side, aisle, windows, floor, and lighting identical to the master plate.",
+    )
+    lock.setdefault(
+        "crowd_rule",
+        "Do not invent a new congregation layout per shot.",
+    )
+    meta["spatial_lock"] = lock
+    if isinstance(analysis, dict):
+        analysis = dict(analysis)
+        analysis["spatial_lock"] = lock
+        meta["script_analysis"] = analysis
+    graph["metadata"] = meta
+
+    lock_clause = (
+        " SPATIAL LOCK: "
+        + "; ".join(f"{k}={v}" for k, v in lock.items() if str(v).strip())
+    )[:500]
+
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        cfg = dict(node.get("config") or {})
+        role = str(cfg.get("role") or "")
+        nid = str(node.get("id") or "")
+        if role not in {"scene", "frame", "clip", "keyframe", "brief", "storyboard"}:
+            continue
+        cfg["spatial_lock"] = lock
+        if role == "scene" and nid != "n_scene" and not cfg.get("master_scene_node_id"):
+            cfg["master_scene_node_id"] = "n_scene"
+            cfg.setdefault("scene_strategy", "edit_master_view")
+            notes.append(f"{nid}: master_scene_node_id=n_scene")
+        if role in {"frame", "clip", "keyframe", "scene"}:
+            gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
+            prompt = str(gen.get("prompt") or cfg.get("prompt") or "")
+            if lock_clause.strip() and "SPATIAL LOCK" not in prompt:
+                if gen.get("prompt") is not None or role in {"frame", "clip", "keyframe"}:
+                    gen["prompt"] = (prompt + lock_clause)[:1400]
+                    cfg["generate"] = gen
+                else:
+                    cfg["prompt"] = (prompt + lock_clause)[:1400]
+                notes.append(f"{nid}: spatial_lock stamped")
+        node["config"] = cfg
+    return notes
+
+
+def _manager_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
+    """Prune unused nodes, rewire spatial edges, keep every kept node useful for final film."""
+    from jiuwenswarm.server.runtime.designer.smart_graph import (
+        ensure_combined_cast_reach_compose,
+        prune_non_contributing_nodes,
+    )
+
+    notes: list[str] = []
+    # Drop unused combined cast sheets that never feed a frame/clip.
+    nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
+    edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
+    outs: dict[str, set[str]] = {}
+    for e in edges:
+        s, t = str(e.get("source") or ""), str(e.get("target") or "")
+        if s and t:
+            outs.setdefault(s, set()).add(t)
+    drop: list[str] = []
+    for n in nodes:
+        cfg = n.get("config") if isinstance(n.get("config"), dict) else {}
+        nid = str(n.get("id") or "")
+        if not nid:
+            continue
+        if cfg.get("combined_cast") and not any(
+            str(t).startswith("n_frame") or str(t).startswith("n_clip") or t == "n_compose"
+            for t in (outs.get(nid) or [])
+        ):
+            drop.append(nid)
+    if drop:
+        drop_set = set(drop)
+        graph["nodes"] = [n for n in nodes if str(n.get("id")) not in drop_set]
+        graph["edges"] = [
+            e
+            for e in edges
+            if str(e.get("source") or "") not in drop_set
+            and str(e.get("target") or "") not in drop_set
+        ]
+        notes.extend([f"drop_unused_combined:{x}" for x in drop])
+
+    # Coherence: master plate → shot views; frames/clips include master + shot scene.
+    ids = {
+        str(n.get("id"))
+        for n in (graph.get("nodes") or [])
+        if isinstance(n, dict) and n.get("id")
+    }
+    edge_pairs = {
+        (str(e.get("source") or ""), str(e.get("target") or ""))
+        for e in (graph.get("edges") or [])
+        if isinstance(e, dict)
+    }
+    master_id = "n_scene" if "n_scene" in ids else ""
+    for n in list(graph.get("nodes") or []):
+        if not isinstance(n, dict):
+            continue
+        cfg = dict(n.get("config") or {})
+        nid = str(n.get("id") or "")
+        role = str(cfg.get("role") or "")
+        if role == "scene" and nid != master_id and master_id:
+            cfg.setdefault("master_scene_node_id", master_id)
+            cfg.setdefault("scene_strategy", "edit_master_view")
+            inputs = [str(x) for x in (cfg.get("inputs") or []) if str(x)]
+            if master_id not in inputs:
+                inputs.append(master_id)
+                cfg["inputs"] = inputs
+                notes.append(f"cohere_inputs:{nid}+{master_id}")
+            if (master_id, nid) not in edge_pairs:
+                graph.setdefault("edges", []).append(
+                    {
+                        "id": f"e_mgr_{master_id}_{nid}",
+                        "source": master_id,
+                        "target": nid,
+                        "kind": "data",
+                        "label": "spatial_ref",
+                    }
+                )
+                edge_pairs.add((master_id, nid))
+                notes.append(f"cohere_edge:{master_id}->{nid}")
+            n["config"] = cfg
+        elif role in {"frame", "keyframe", "clip"} and master_id:
+            shot_idx = int(cfg.get("shot_index") or 0)
+            shot_scene = f"n_scene_{shot_idx}" if shot_idx >= 1 else ""
+            inputs = [str(x) for x in (cfg.get("inputs") or []) if str(x)]
+            changed = False
+            for need in (master_id, shot_scene):
+                if need and need in ids and need not in inputs:
+                    inputs.append(need)
+                    changed = True
+                if need and need in ids and (need, nid) not in edge_pairs:
+                    graph.setdefault("edges", []).append(
+                        {
+                            "id": f"e_mgr_{need}_{nid}",
+                            "source": need,
+                            "target": nid,
+                            "kind": "data",
+                            "label": "spatial_ref",
+                        }
+                    )
+                    edge_pairs.add((need, nid))
+                    notes.append(f"cohere_edge:{need}->{nid}")
+            if changed:
+                cfg["inputs"] = inputs
+                notes.append(f"cohere_inputs:{nid}")
+            n["config"] = cfg
+
+    pruned = prune_non_contributing_nodes(graph)
+    notes.extend([f"pruned:{x}" for x in pruned])
+    notes.extend(ensure_combined_cast_reach_compose(graph))
+    # Final structural prune after rewires (orphans must not remain).
+    pruned2 = prune_non_contributing_nodes(graph)
+    notes.extend([f"pruned:{x}" for x in pruned2])
+    ids = {str(n.get("id")) for n in (graph.get("nodes") or []) if isinstance(n, dict)}
+    if any(
+        str((n.get("config") or {}).get("scene_strategy") or "") == "edit_master_view"
+        for n in (graph.get("nodes") or [])
+        if isinstance(n, dict)
+    ) and "n_scene" not in ids:
+        notes.append("warn:edit_master_view_without_n_scene")
+    return notes
+
+
 def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
     """If audio intent / analysis asks for speech or music, ensure nodes exist."""
     from jiuwenswarm.common.schema.designer_graph import NODE_TYPE_AUDIO
@@ -186,6 +376,16 @@ def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
         or analysis_audio.get("include_music")
         or policy in {"optional_music", "music", "speech_and_music"}
     )
+    # Narrative films with dialogue should always carry an audible music bed unless silenced.
+    prompt_l = str(graph.get("description") or "").lower()
+    if (
+        not explicit_no_music
+        and policy != "silent"
+        and (want_speech or any(k in prompt_l for k in ("speak", "preach", "saying", "bible", "crowd")))
+    ):
+        want_music = True
+        want_speech = True
+        policy = "speech_and_music"
     if policy in {"silent", "speech"} and explicit_no_music:
         want_music = False
     if policy == "silent":
@@ -219,7 +419,8 @@ def _ensure_audio_nodes_for_intent(graph: DesignerExecutionGraph) -> list[str]:
                     "delegate": "handler",
                     "force_handler": True,
                     "tools": [tool, "read_upstream", "call_model"],
-                    "duration_sec": 4 if mode == "cost" else 6,
+                    "duration_sec": 18 if mode != "cost" else 6,
+                    "max_audio_sec": 24 if mode != "cost" else 8,
                 },
                 "layout": {"x": 1280.0, "y": 720.0 if role == "music" else 560.0, "width": 240, "height": 120},
             }
@@ -545,9 +746,11 @@ class SupervisorAgent:
             "You are the Designer Supervisor Agent. "
             "One forward pass only (no loops). "
             "From the user prompt, ensure a detailed brief covering character consistency, "
-            "scene consistency, motion consistency, and continuity. "
+            "scene consistency (spatial lock: pulpit/aisle/windows/light must not drift), "
+            "motion consistency, and continuity. "
             "Assign each leaf node a concrete task + tools so agents produce real media "
             "(images/video/audio), not markdown stubs. "
+            "Scene master plate must be authored first; later scene views must EDIT that plate. "
             "Coordinate node agents in a ComfyUI-like pipeline. "
             "Follow the scenario skill and audio policy. "
             "For each node, choose optimize_for (cost|quality) and a preferred_model "
@@ -558,6 +761,7 @@ class SupervisorAgent:
             "Respond with JSON only: "
             '{"optimize_for_global":"cost|quality",'
             '"brief_notes":"...",'
+            '"spatial_lock":{"setting":"...","pulpit":"...","aisle":"...","windows":"...","light":"...","static_rule":"..."},'
             '"node_directives":{"<node_id>":{"optimize_for":"...","preferred_model":"...","task":"..."}},'
             '"notes":"..."}'
         )
@@ -630,6 +834,9 @@ class SupervisorAgent:
             "node_directives": directives,
             "notes": str(parsed.get("notes") or result.get("text") or "")[:2000],
             "brief_notes": str(parsed.get("brief_notes") or "")[:2000],
+            "spatial_lock": parsed.get("spatial_lock")
+            if isinstance(parsed.get("spatial_lock"), dict)
+            else {},
             "planner_model": result.get("model"),
         }
         for node in nodes:
@@ -646,6 +853,14 @@ class SupervisorAgent:
         meta["supervisor_plan"] = plan
         if plan.get("brief_notes"):
             meta["supervisor_brief_notes"] = plan["brief_notes"]
+        if plan.get("spatial_lock"):
+            meta["spatial_lock"] = {
+                str(k): str(v)[:400] for k, v in plan["spatial_lock"].items() if str(v).strip()
+            }
+            analysis = dict(meta.get("script_analysis") or {})
+            analysis["spatial_lock"] = meta["spatial_lock"]
+            meta["script_analysis"] = analysis
+            _spatial_geography_lock_patch(graph)
         graph["metadata"] = meta
         audio_assign = assign_audio_node_agents(graph)
         plan["audio_assignment"] = audio_assign
@@ -653,6 +868,230 @@ class SupervisorAgent:
         meta["supervisor_plan"] = plan
         graph["metadata"] = meta
         return plan
+
+    async def author_creative_brief(
+        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+    ) -> dict[str, Any]:
+        """LLM-author a detailed brief onto n_brief; heuristic fallback only if LLM fails."""
+        from jiuwenswarm.server.runtime.designer.smart_graph import _write_brief_markdown
+
+        meta = dict(graph.get("metadata") or {})
+        analysis = (
+            dict(meta.get("script_analysis") or {})
+            if isinstance(meta.get("script_analysis"), dict)
+            else {}
+        )
+        characters = list(analysis.get("characters") or [])
+        scenes = list(analysis.get("scenes") or [])
+        audio = (
+            dict(analysis.get("audio") or meta.get("audio_intent") or {})
+            if isinstance(analysis.get("audio") or meta.get("audio_intent"), dict)
+            else {}
+        )
+        user_prompt = str(graph.get("description") or "")
+        brief_md = ""
+        source = "heuristic"
+        notes = "Heuristic brief from script analysis."
+        if use_llm:
+            try:
+                system = (
+                    "You are the Designer Supervisor. Author a detailed creative brief "
+                    "for a short film. Cover: character identity locks (face/hair/body/costume), "
+                    "scene geography (spatial lock), motion consistency, time-coherent continuity "
+                    "(e.g. after a man stands and leaves he must not reappear seated), "
+                    "shot-view coverage for every named beat, audio policy. "
+                    "Stay faithful to the user prompt — do not invent plot. "
+                    "Respond with markdown brief only (no JSON wrapper)."
+                )
+                result = await call_model_tool(
+                    prompt=json.dumps(
+                        {
+                            "user_prompt": user_prompt,
+                            "characters": characters,
+                            "scenes": scenes,
+                            "shots": analysis.get("shots"),
+                            "audio": audio,
+                            "spatial_lock": meta.get("spatial_lock"),
+                            "supervisor_brief_notes": meta.get("supervisor_brief_notes")
+                            or ((meta.get("supervisor_plan") or {}).get("brief_notes")),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    system=system,
+                    optimize_for="quality",
+                    max_tokens=1600,
+                )
+                text = str(result.get("text") or "").strip()
+                if text and len(text) > 80 and not text.startswith("[local-tool-fallback]"):
+                    brief_md = text if text.lstrip().startswith("#") else f"# Brief\n\n{text}"
+                    source = "llm"
+                    notes = "Supervisor LLM authored creative brief."
+            except Exception:  # noqa: BLE001
+                logger.info("Supervisor author_creative_brief LLM failed", exc_info=True)
+        if not brief_md:
+            brief_md = _write_brief_markdown(user_prompt, characters, scenes, audio)
+            source = "heuristic"
+            notes = "Heuristic brief (LLM unavailable or failed)."
+
+        stamped = False
+        for node in graph.get("nodes") or []:
+            cfg = dict(node.get("config") or {})
+            if str(cfg.get("role") or "") != "brief" and str(node.get("id") or "") != "n_brief":
+                continue
+            if cfg.get("skip_llm"):
+                cfg["prewritten"] = brief_md
+            else:
+                cfg["draft_prewritten"] = brief_md
+                cfg["prewritten"] = brief_md
+            cfg["kind"] = "agent"
+            node["config"] = cfg
+            stamped = True
+            break
+        meta["approved_brief"] = brief_md
+        meta["supervisor_brief_ack"] = {
+            "ok": True,
+            "source": source,
+            "notes": notes,
+            "stamped": stamped,
+            "chars": len(brief_md),
+        }
+        graph["metadata"] = meta
+        return dict(meta["supervisor_brief_ack"])
+
+    async def author_storyboard(
+        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+    ) -> dict[str, Any]:
+        """From approved brief + script_analysis, author storyboard markdown + planned_shots."""
+        from jiuwenswarm.server.runtime.designer.smart_graph import _write_storyboard_markdown
+
+        meta = dict(graph.get("metadata") or {})
+        analysis = (
+            dict(meta.get("script_analysis") or {})
+            if isinstance(meta.get("script_analysis"), dict)
+            else {}
+        )
+        characters = list(analysis.get("characters") or [])
+        shots = list(analysis.get("shots") or [])
+        user_prompt = str(graph.get("description") or "")
+        approved_brief = str(meta.get("approved_brief") or "")[:4000]
+        sb_md = ""
+        source = "heuristic"
+        notes = "Heuristic storyboard from planned shots."
+        if use_llm:
+            try:
+                system = (
+                    "You are the Designer Supervisor. Author a time-coherent storyboard from the "
+                    "approved brief and script analysis. For each shot provide shot_index, timeline "
+                    "(e.g. 0-5s), camera, action, character_ids, continuity_lock "
+                    "(forbid reseating someone who already left), keyframe_prompt. "
+                    "Cover every major prompt beat with enough distinct views. "
+                    "Respond JSON only: "
+                    '{"shots":[{"shot_index":1,"timeline":"0-5s","camera":"...",'
+                    '"action":"...","character_ids":["char_1"],'
+                    '"continuity_lock":{"forbid":"..."},"keyframe_prompt":"..."}],'
+                    '"storyboard_markdown":"| Shot | ...","notes":"..."}'
+                )
+                result = await call_model_tool(
+                    prompt=json.dumps(
+                        {
+                            "user_prompt": user_prompt,
+                            "approved_brief": approved_brief,
+                            "characters": characters,
+                            "shots": shots,
+                            "spatial_lock": meta.get("spatial_lock"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    system=system,
+                    optimize_for="quality",
+                    max_tokens=1800,
+                )
+                parsed = _extract_json_object(str(result.get("text") or "")) or {}
+                llm_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else []
+                if llm_shots:
+                    cleaned: list[dict[str, Any]] = []
+                    for i, raw in enumerate(llm_shots, start=1):
+                        if not isinstance(raw, dict):
+                            continue
+                        shot = dict(raw)
+                        shot["shot_index"] = int(shot.get("shot_index") or i)
+                        if not str(shot.get("timeline") or "").strip():
+                            shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
+                        if isinstance(shot.get("continuity_lock"), dict):
+                            shot["continuity_lock"] = {
+                                str(k): str(v) for k, v in shot["continuity_lock"].items()
+                            }
+                        elif str(shot.get("action") or "").strip():
+                            shot["continuity_lock"] = _infer_continuity_lock(
+                                str(shot.get("action") or "")
+                            )
+                        cleaned.append(shot)
+                    if cleaned:
+                        shots = cleaned
+                        source = "llm"
+                        notes = str(parsed.get("notes") or "Supervisor LLM authored storyboard.")[
+                            :1000
+                        ]
+                md_candidate = str(parsed.get("storyboard_markdown") or "").strip()
+                if md_candidate and len(md_candidate) > 40:
+                    sb_md = md_candidate
+                    source = "llm"
+            except Exception:  # noqa: BLE001
+                logger.info("Supervisor author_storyboard LLM failed", exc_info=True)
+
+        if shots:
+            analysis["shots"] = shots
+            meta["script_analysis"] = analysis
+        if not sb_md:
+            sb_md = _write_storyboard_markdown(shots, characters)
+
+        stamped = False
+        for node in graph.get("nodes") or []:
+            cfg = dict(node.get("config") or {})
+            if str(cfg.get("role") or "") != "storyboard" and str(node.get("id") or "") != "n_storyboard":
+                continue
+            if cfg.get("skip_llm"):
+                cfg["prewritten"] = sb_md
+            else:
+                cfg["draft_prewritten"] = sb_md
+                cfg["prewritten"] = sb_md
+            cfg["planned_shots"] = shots
+            cfg["kind"] = "agent"
+            node["config"] = cfg
+            stamped = True
+            break
+        # Propagate timelines/continuity into frame/clip configs once.
+        for node in graph.get("nodes") or []:
+            cfg = dict(node.get("config") or {})
+            if str(cfg.get("role") or "") not in {"frame", "clip", "keyframe"}:
+                continue
+            idx = int(cfg.get("shot_index") or 0)
+            for shot in shots:
+                if int(shot.get("shot_index") or 0) != idx:
+                    continue
+                if shot.get("action"):
+                    cfg["shot_action"] = str(shot["action"])[:500]
+                if shot.get("camera"):
+                    cfg["camera"] = str(shot["camera"])[:120]
+                if shot.get("timeline"):
+                    cfg["timeline"] = str(shot["timeline"])[:40]
+                if isinstance(shot.get("continuity_lock"), dict):
+                    cfg["continuity_lock"] = shot["continuity_lock"]
+                if isinstance(shot.get("character_ids"), list):
+                    cfg["character_ids"] = [str(x) for x in shot["character_ids"] if str(x)]
+                node["config"] = cfg
+                break
+
+        meta["approved_storyboard"] = sb_md
+        meta["supervisor_storyboard_ack"] = {
+            "ok": True,
+            "source": source,
+            "notes": notes,
+            "stamped": stamped,
+            "shot_count": len(shots),
+        }
+        graph["metadata"] = meta
+        return dict(meta["supervisor_storyboard_ack"])
 
 
 class NodeAgent:
@@ -1131,18 +1570,17 @@ class ManagerAgent:
         notes = _shot_distinctness_patch(graph)
         continuity_notes = _spatial_continuity_patch(graph)
         identity_notes = _identity_consistency_patch(graph)
-        from jiuwenswarm.server.runtime.designer.smart_graph import (
-            ensure_combined_cast_reach_compose,
-            prune_non_contributing_nodes,
-        )
+        spatial_notes = _spatial_geography_lock_patch(graph)
         from jiuwenswarm.server.runtime.designer.model_tools import llm_available
 
-        # Quality path: prune orphans; legacy combined-cast wire only if any remain.
-        pruned = prune_non_contributing_nodes(graph)
-        cast_wire_notes = ensure_combined_cast_reach_compose(graph)
+        # Prune unused nodes + keep graph coherent for compose; enforce agents when LLM up.
+        prune_notes = _manager_prune_and_cohere(graph)
         agent_notes = self._enforce_leaf_agents(graph, use_agents=llm_available())
         # Re-apply audio agent policy after modality (backends may clear force_handler).
         audio_assign = assign_audio_node_agents(graph)
+        # Second prune after audio assign (speech/music may be omitted).
+        prune_notes.extend(_manager_prune_and_cohere(graph))
+        ensure_notes = self.ensure_agents_and_prune(graph)
         rating_mod = str(
             (modality or {}).get("global_rating_modality")
             or meta.get("rating_modality")
@@ -1154,15 +1592,22 @@ class ManagerAgent:
             + cast_notes
             + continuity_notes
             + identity_notes
-            + cast_wire_notes
-            + [f"pruned:{x}" for x in pruned]
-            + agent_notes,
+            + spatial_notes
+            + prune_notes
+            + agent_notes
+            + list(ensure_notes.get("notes") or []),
             "cast_focus_fixes": cast_notes,
             "continuity_fixes": continuity_notes,
             "identity_fixes": identity_notes,
-            "cast_wire_fixes": cast_wire_notes,
-            "pruned_nodes": pruned,
+            "spatial_lock_fixes": spatial_notes,
+            "pruned_nodes": list(
+                dict.fromkeys(
+                    [x.split(":", 1)[-1] for x in prune_notes if x.startswith("pruned:")]
+                    + list(ensure_notes.get("pruned") or [])
+                )
+            ),
             "agent_enforcement": agent_notes,
+            "ensure_agents": ensure_notes,
             "audio_assignment": audio_assign,
             "rating_modality": rating_mod,
             "can_vision": bool((modality or {}).get("can_vision")),
@@ -1171,10 +1616,10 @@ class ManagerAgent:
             "can_music": bool((modality or {}).get("can_music")),
             "notes": (
                 f"Manager start validation: rating_modality={rating_mod}. "
-                f"Cast-focus fixes={len(cast_notes)}. "
-                f"Continuity locks={len(continuity_notes)}. "
-                f"Identity locks={len(identity_notes)}. "
-                f"Pruned={len(pruned)}. Agents={len(agent_notes)}. "
+                f"Cast-focus={len(cast_notes)}. Continuity={len(continuity_notes)}. "
+                f"Identity={len(identity_notes)}. Spatial={len(spatial_notes)}. "
+                f"Prune/cohere={len(prune_notes)}. Agents={len(agent_notes)}. "
+                f"Ensure={len(ensure_notes.get('notes') or [])}. "
                 f"{str((modality or {}).get('reason') or '')[:400]}"
             ),
             "source": "heuristic",
@@ -1183,6 +1628,88 @@ class ManagerAgent:
         meta["manager_plan_ack"] = ack
         graph["metadata"] = meta
         return ack
+
+    def ensure_agents_and_prune(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
+        """For every node: kind=agent, tools via _tools_for_node, delegate=agent when LLM up."""
+        from jiuwenswarm.server.runtime.designer.model_tools import llm_available
+        from jiuwenswarm.server.runtime.designer.smart_graph import prune_non_contributing_nodes
+
+        use_agents = bool(llm_available())
+        notes: list[str] = []
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            cfg = dict(node.get("config") or {})
+            nid = str(node.get("id") or "")
+            if not nid:
+                continue
+            cfg["kind"] = "agent"
+            tools = _tools_for_node(node)
+            if list(cfg.get("tools") or []) != tools:
+                notes.append(f"tools:{nid}")
+            cfg["tools"] = tools
+            if cfg.get("force_handler"):
+                cfg["delegate"] = "handler"
+            elif use_agents:
+                cfg["delegate"] = "agent"
+                cfg["skip_llm"] = False
+            else:
+                cfg["delegate"] = "handler"
+            node["config"] = cfg
+
+        pruned = prune_non_contributing_nodes(graph)
+        notes.extend([f"pruned:{x}" for x in pruned])
+
+        # Ensure compose is a sink: every clip (and audio) edge into compose when present.
+        ids = {str(n.get("id") or "") for n in (graph.get("nodes") or []) if isinstance(n, dict)}
+        if "n_compose" in ids:
+            edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
+            existing = {
+                (str(e.get("source") or ""), str(e.get("target") or "")) for e in edges
+            }
+            for node in graph.get("nodes") or []:
+                if not isinstance(node, dict):
+                    continue
+                nid = str(node.get("id") or "")
+                role = str((node.get("config") or {}).get("role") or "")
+                if role in {"clip", "speech", "music"} or nid.startswith("n_clip"):
+                    key = (nid, "n_compose")
+                    if key not in existing and nid != "n_compose":
+                        edges.append(
+                            {
+                                "id": f"e_{nid}_compose",
+                                "source": nid,
+                                "target": "n_compose",
+                                "kind": "data",
+                            }
+                        )
+                        existing.add(key)
+                        notes.append(f"compose_sink:{nid}")
+            graph["edges"] = edges
+            # Compose inputs list stays in sync.
+            for node in graph.get("nodes") or []:
+                if str(node.get("id") or "") != "n_compose":
+                    continue
+                cfg = dict(node.get("config") or {})
+                inputs = [
+                    str(e.get("source") or "")
+                    for e in (graph.get("edges") or [])
+                    if str(e.get("target") or "") == "n_compose"
+                ]
+                cfg["inputs"] = [x for x in inputs if x]
+                node["config"] = cfg
+                break
+
+        result = {
+            "ok": True,
+            "notes": notes[:60],
+            "pruned": list(pruned),
+            "use_agents": use_agents,
+        }
+        meta = dict(graph.get("metadata") or {})
+        meta["manager_ensure_agents"] = result
+        graph["metadata"] = meta
+        return result
 
     def _enforce_leaf_agents(
         self, graph: DesignerExecutionGraph, *, use_agents: bool
@@ -1193,25 +1720,14 @@ class ManagerAgent:
             if not isinstance(node, dict):
                 continue
             cfg = dict(node.get("config") or {})
-            role = str(cfg.get("role") or "")
             nid = str(node.get("id") or "")
             if not nid:
                 continue
             cfg["kind"] = "agent"
-            tools = list(cfg.get("tools") or [])
-            if not tools:
-                if role in {"clip", "compose"}:
-                    tools = ["call_video_model", "read_upstream", "call_model"]
-                elif role in {"frame", "character", "character_design", "scene"}:
-                    tools = ["call_image_model", "read_upstream", "call_model"]
-                elif role in {"speech"}:
-                    tools = ["call_speech_model", "read_upstream", "call_model"]
-                elif role in {"music"}:
-                    tools = ["call_music_model", "read_upstream", "call_model"]
-                else:
-                    tools = ["call_model", "write_artifact", "read_upstream"]
-                cfg["tools"] = tools
+            tools = _tools_for_node(node)
+            if list(cfg.get("tools") or []) != tools:
                 notes.append(f"tools:{nid}")
+            cfg["tools"] = tools
             if cfg.get("force_handler"):
                 cfg["delegate"] = "handler"
             elif use_agents:
@@ -1221,6 +1737,118 @@ class ManagerAgent:
                 cfg["delegate"] = "handler"
             node["config"] = cfg
         return notes
+
+    async def review_brief(
+        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+    ) -> dict[str, Any]:
+        """One-pass fidelity check of approved brief vs user prompt; patch if needed."""
+        meta = dict(graph.get("metadata") or {})
+        user_prompt = str(graph.get("description") or "")
+        brief = str(meta.get("approved_brief") or "")
+        analysis = (
+            dict(meta.get("script_analysis") or {})
+            if isinstance(meta.get("script_analysis"), dict)
+            else {}
+        )
+        characters = list(analysis.get("characters") or [])
+        ack: dict[str, Any] = {
+            "ok": True,
+            "source": "heuristic",
+            "notes": "Brief fidelity pass.",
+            "patched": [],
+        }
+        patched: list[str] = []
+        # Heuristic: ensure each character name appears in the brief.
+        missing: list[str] = []
+        low = brief.lower()
+        for c in characters:
+            name = str(c.get("name") or "").strip()
+            if name and name.lower() not in low:
+                missing.append(name)
+        if missing:
+            extra = "\n".join(f"- **{n}:** must appear with identity lock" for n in missing)
+            brief = (brief.rstrip() + "\n\n**Manager cast fidelity:**\n" + extra + "\n")[:8000]
+            patched.append("cast_names")
+        # Heuristic: mention multi-view / shot coverage when prompt is long.
+        if len(user_prompt) > 120 and "shot" not in low and "view" not in low:
+            brief = (
+                brief.rstrip()
+                + "\n\n**Shot views:** cover establishing, mid, reaction close-ups "
+                "for every major prompt beat.\n"
+            )[:8000]
+            patched.append("shot_views")
+
+        if use_llm:
+            try:
+                system = (
+                    "You are the Designer Manager. Review the creative brief once for fidelity "
+                    "to the user prompt. Flag missing characters or insufficient shot views. "
+                    "Patch the brief markdown if needed — do not invent new plot. "
+                    "Respond JSON only: "
+                    '{"ok":true,"patched_brief_markdown":"...","notes":"...","issues":["..."]}'
+                )
+                result = await call_model_tool(
+                    prompt=json.dumps(
+                        {
+                            "user_prompt": user_prompt,
+                            "brief": brief[:6000],
+                            "characters": characters,
+                            "shots": analysis.get("shots"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    system=system,
+                    optimize_for="quality",
+                    max_tokens=1400,
+                )
+                parsed = _extract_json_object(str(result.get("text") or "")) or {}
+                patched_md = str(parsed.get("patched_brief_markdown") or "").strip()
+                if patched_md and len(patched_md) > 80:
+                    brief = patched_md[:8000]
+                    patched.append("llm_brief")
+                    ack["source"] = "llm"
+                ack["notes"] = str(parsed.get("notes") or ack["notes"])[:1000]
+                ack["issues"] = list(parsed.get("issues") or [])[:20]
+            except Exception:  # noqa: BLE001
+                logger.info("Manager review_brief LLM failed; keeping heuristic", exc_info=True)
+
+        for node in graph.get("nodes") or []:
+            cfg = dict(node.get("config") or {})
+            if str(cfg.get("role") or "") != "brief" and str(node.get("id") or "") != "n_brief":
+                continue
+            if cfg.get("skip_llm"):
+                cfg["prewritten"] = brief
+            else:
+                cfg["draft_prewritten"] = brief
+                cfg["prewritten"] = brief
+            node["config"] = cfg
+            break
+        meta["approved_brief"] = brief
+        ack["patched"] = patched[:20]
+        meta["manager_brief_ack"] = ack
+        graph["metadata"] = meta
+        return ack
+
+    async def review_storyboard(
+        self, graph: DesignerExecutionGraph, *, use_llm: bool = False
+    ) -> dict[str, Any]:
+        """Pre-run one-pass storyboard fidelity + enhancements (crowd, beauty, duration, continuity)."""
+        meta = dict(graph.get("metadata") or {})
+        if meta.get("storyboard_pre_reviewed"):
+            return dict(meta.get("manager_storyboard_pre_ack") or {"ok": True, "skipped": True})
+        # Clear mid-run once-flag so review_storyboard_once applies patches now.
+        meta.pop("storyboard_reviewed", None)
+        graph["metadata"] = meta
+        ack = await self.review_storyboard_once(
+            graph, node_states=None, use_llm=use_llm
+        )
+        meta = dict(graph.get("metadata") or {})
+        meta["storyboard_pre_reviewed"] = True
+        meta["manager_storyboard_pre_ack"] = ack
+        # Allow a second pass after the storyboard leaf completes during the ready-queue.
+        meta["storyboard_reviewed"] = False
+        graph["metadata"] = meta
+        return ack
 
     async def review_storyboard_once(
         self,
@@ -1278,10 +1906,12 @@ class ManagerAgent:
         if use_llm:
             try:
                 system = (
-                    "You are the Designer Manager. Review the storyboard once for fidelity to the "
-                    "user prompt and approved brief. Fix missing characters/views, enhance sparse "
-                    "shots (crowd, atmosphere) without inventing new plot, set shot durations, and "
-                    "enforce time-coherent continuity. Respond JSON only: "
+                    "You are the Designer Manager. Review the storyboard once for best quality "
+                    "while remaining completely faithful to the user prompt, approved brief, and "
+                    "story beats (no new plot). Fix missing characters/views, enhance sparse shots "
+                    "(crowd, atmosphere), set shot durations, enforce time-coherent continuity, and "
+                    "keep geography locked (same pulpit/aisle/windows across views). "
+                    "Respond JSON only: "
                     '{"ok":true,"shot_fixes":[{"shot_index":1,"action":"...","camera":"...",'
                     '"timeline":"0-5s","continuity_lock":{"forbid":"..."},"character_ids":["char_1"]}],'
                     '"notes":"..."}'
@@ -1370,7 +2000,15 @@ class ManagerAgent:
             except Exception:  # noqa: BLE001
                 logger.info("Storyboard patch into nodes failed", exc_info=True)
 
+        # After storyboard edits: prune unused + keep spatial graph coherent for final clip.
+        prune_notes = _manager_prune_and_cohere(graph)
+        spatial_notes = _spatial_geography_lock_patch(graph)
+        patched.extend(prune_notes)
+        patched.extend(spatial_notes)
+
         ack["patched"] = patched[:40]
+        ack["pruned_nodes"] = [x.split(":", 1)[-1] for x in prune_notes if x.startswith("pruned:")]
+        ack["spatial_lock_fixes"] = spatial_notes
         meta["storyboard_reviewed"] = True
         meta["manager_storyboard_ack"] = ack
         graph["metadata"] = meta
@@ -1388,20 +2026,23 @@ class ManagerAgent:
             return ack
         analysis = (graph.get("metadata") or {}).get("script_analysis") or {}
         system = (
-            "You are the Designer Manager Agent. Validate the supervisor cast/shot plan "
-            "and brief/storytelling once (no loops). Check: "
+            "You are the Designer Manager Agent. Validate once (no loops) for best cinematic "
+            "quality while remaining completely faithful to the user prompt, brief, and "
+            "storyboard — do not invent plot, cast, or geography. Check: "
             "(1) each shot's character_ids match that beat's focus subjects, "
             "(2) later beats do not reuse the wrong earlier cast, "
-            "(3) enough shots cover every major character, "
+            "(3) enough shots cover every major character and prompt beat, "
             "(4) brief/storyboard are comprehensive enough for keyframe and clip prompting, "
-            "(5) SPATIAL CONTINUITY: motion direction and geography must stay consistent, "
+            "(5) SPATIAL CONTINUITY: motion + geography — pulpit/aisle/windows/light must "
+            "match the master scene plate across shot views (edit/ref, not new buildings), "
             "(6) IDENTITY CONSISTENCY: every frame/clip must reference canonical SOLO character "
-            "sheets (identity_refs.character_node_ids), not reinvent costumes — e.g. a preacher "
-            "cannot be a suit in shot 1 and a white robe in shot 2 unless the brief says so. "
-            "Multi-person shots compose from those solo sheets; sequential shots with compatible "
-            "cameras should edit the prior keyframe when possible. "
+            "sheets (identity_refs.character_node_ids), not reinvent costumes, "
+            "(7) GRAPH USEFULNESS: every node must be useful for the final compose clip — "
+            "list prune_ids for unused/orphan nodes; after prune the remaining graph must stay "
+            "coherent (master scene → shot views → frames → clips → compose). "
             "Respond JSON only: "
-            '{"ok":true|false,"issues":["..."],'
+            '{"ok":true|false,"issues":["..."],"prune_ids":["n_unused"],'
+            '"spatial_lock":{"pulpit":"...","aisle":"...","windows":"...","light":"...","static_rule":"..."},'
             '"shot_fixes":[{"shot_index":1,"character_ids":["char_1"],'
             '"action":"...","continuity_lock":{"motion":"...","facing":"...","forbid":"..."},'
             '"costume_lock":"...","camera":"..."}],"notes":"..."}'
@@ -1411,6 +2052,7 @@ class ManagerAgent:
                 "user_prompt": graph.get("description"),
                 "script_analysis": analysis,
                 "continuity_locks": (graph.get("metadata") or {}).get("continuity_locks"),
+                "spatial_lock": (graph.get("metadata") or {}).get("spatial_lock"),
                 "nodes": [
                     {
                         "id": n.get("id"),
@@ -1421,6 +2063,9 @@ class ManagerAgent:
                         "shot_action": (n.get("config") or {}).get("shot_action"),
                         "camera": (n.get("config") or {}).get("camera"),
                         "continuity_lock": (n.get("config") or {}).get("continuity_lock"),
+                        "spatial_lock": (n.get("config") or {}).get("spatial_lock"),
+                        "scene_strategy": (n.get("config") or {}).get("scene_strategy"),
+                        "inputs": (n.get("config") or {}).get("inputs"),
                         "generate_prompt": ((n.get("config") or {}).get("generate") or {}).get(
                             "prompt"
                         ),
@@ -1535,16 +2180,57 @@ class ManagerAgent:
             except Exception:  # noqa: BLE001
                 pass
 
-        # Re-stamp continuity + identity after LLM fixes.
+        # Re-stamp continuity + identity + spatial after LLM fixes; prune unused nodes.
+        if isinstance(parsed.get("spatial_lock"), dict):
+            meta = dict(graph.get("metadata") or {})
+            meta["spatial_lock"] = {
+                str(k): str(v)[:400]
+                for k, v in parsed["spatial_lock"].items()
+                if str(v).strip()
+            }
+            analysis2 = dict(meta.get("script_analysis") or {})
+            analysis2["spatial_lock"] = meta["spatial_lock"]
+            meta["script_analysis"] = analysis2
+            graph["metadata"] = meta
+        # Explicit prune_ids from manager LLM (then structural prune).
+        # Never drop shot clips or required audio — every shot must reach the final film with sound.
+        protected = {
+            str(n.get("id"))
+            for n in (graph.get("nodes") or [])
+            if isinstance(n, dict)
+            and (
+                str(n.get("id") or "").startswith("n_clip")
+                or str(n.get("id") or "").startswith("n_frame")
+                or str(n.get("id") or "") in {"n_scene", "n_compose", "n_speech", "n_music"}
+                or str((n.get("config") or {}).get("role") or "")
+                in {"clip", "frame", "keyframe", "compose", "speech", "music"}
+            )
+        }
+        prune_ids = [
+            str(x)
+            for x in (parsed.get("prune_ids") or [])
+            if str(x).strip() and str(x) not in protected and str(x) != "n_compose"
+        ]
+        if prune_ids:
+            drop = set(prune_ids)
+            graph["nodes"] = [
+                n
+                for n in (graph.get("nodes") or [])
+                if not isinstance(n, dict) or str(n.get("id")) not in drop
+            ]
+            graph["edges"] = [
+                e
+                for e in (graph.get("edges") or [])
+                if str(e.get("source") or "") not in drop
+                and str(e.get("target") or "") not in drop
+            ]
+            applied.extend([f"manager_prune:{x}" for x in prune_ids])
+
         continuity_notes = _spatial_continuity_patch(graph)
         identity_notes = _identity_consistency_patch(graph)
-        from jiuwenswarm.server.runtime.designer.smart_graph import (
-            ensure_combined_cast_reach_compose,
-            prune_non_contributing_nodes,
-        )
-
-        pruned = prune_non_contributing_nodes(graph)
-        cast_wire_notes = ensure_combined_cast_reach_compose(graph)
+        spatial_notes = _spatial_geography_lock_patch(graph)
+        prune_notes = _manager_prune_and_cohere(graph)
+        ensure_notes = self.ensure_agents_and_prune(graph)
 
         ack = {
             **ack,
@@ -1555,12 +2241,19 @@ class ManagerAgent:
             + applied
             + continuity_notes
             + identity_notes
-            + cast_wire_notes
-            + [f"pruned:{x}" for x in pruned],
+            + spatial_notes
+            + prune_notes
+            + list(ensure_notes.get("notes") or []),
             "continuity_fixes": list(ack.get("continuity_fixes") or []) + continuity_notes,
             "identity_fixes": list(ack.get("identity_fixes") or []) + identity_notes,
-            "cast_wire_fixes": list(ack.get("cast_wire_fixes") or []) + cast_wire_notes,
-            "pruned_nodes": pruned,
+            "spatial_lock_fixes": list(ack.get("spatial_lock_fixes") or []) + spatial_notes,
+            "pruned_nodes": list(
+                dict.fromkeys(
+                    [x.split(":", 1)[-1] for x in prune_notes if x.startswith("pruned:")]
+                    + list(ensure_notes.get("pruned") or [])
+                )
+            ),
+            "ensure_agents": ensure_notes,
             "source": "llm",
         }
         meta = dict(graph.get("metadata") or {})
@@ -1867,11 +2560,39 @@ class ManagerAgent:
             suggestions["supervisor"] = aggregated["feedback_supervisor"]
         if aggregated["graph_design"]:
             suggestions["graph_design"] = aggregated["graph_design"]
+        recommendations = [
+            str(aggregated.get("feedback_supervisor") or "").strip(),
+            str(aggregated.get("feedback_manager") or "").strip(),
+            str(aggregated.get("graph_design") or "").strip(),
+            *[f"{nid}: {txt}" for nid, txt in list(feedback_nodes.items())[:12]],
+        ]
+        aggregated["aggregated_recommendations"] = [r for r in recommendations if r][:20]
         manager_review = dict(manager_review)
         manager_review["suggestions"] = suggestions
         manager_review["dual_raters"] = aggregated
+        manager_review["aggregated_recommendations"] = aggregated["aggregated_recommendations"]
         manager_review["aggregated_overall"] = aggregated["aggregated_overall"]
         return manager_review
+
+    async def assign_dual_raters(
+        self,
+        graph: DesignerExecutionGraph,
+        *,
+        agent_feedback: dict[str, dict[str, Any]],
+        supervisor_final: dict[str, Any],
+        manager_review: dict[str, Any],
+        node_states: dict[str, Any] | None,
+        use_llm: bool = False,
+    ) -> dict[str, Any]:
+        """Public alias: two independent raters → dual_raters + aggregated_recommendations."""
+        return await self.dual_rate_final(
+            graph,
+            agent_feedback=agent_feedback,
+            supervisor_final=supervisor_final,
+            manager_review=manager_review,
+            node_states=node_states,
+            use_llm=use_llm,
+        )
 
 
 class SupervisorReviewer:
@@ -2083,8 +2804,15 @@ async def write_run_feedback(
             "rating_modality": manager_review.get("rating_modality") or "text_only",
             "vision_used": bool(manager_review.get("vision_used")),
             "dual_raters": manager_review.get("dual_raters") or {},
+            "aggregated_recommendations": manager_review.get("aggregated_recommendations")
+            or (manager_review.get("dual_raters") or {}).get("aggregated_recommendations")
+            or [],
             "aggregated_overall": manager_review.get("aggregated_overall"),
         },
+        "dual_raters": manager_review.get("dual_raters") or {},
+        "aggregated_recommendations": manager_review.get("aggregated_recommendations")
+        or (manager_review.get("dual_raters") or {}).get("aggregated_recommendations")
+        or [],
         "final": {
             "aggregated_score": supervisor_final.get("aggregated_score"),
             "dual_rater_overall": manager_review.get("aggregated_overall"),

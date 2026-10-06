@@ -3,14 +3,14 @@
 
 Quality layout (default, forward-only):
   Brief → Storyboard
-  → Solo cast sheet(s) + per-shot Scene views (parallel)
-  → Keyframes (compose solos + that shot's scene; optional edit of prior KF)
+  → Solo cast sheet(s) + canonical Scene master plate
+  → Per-shot Scene views (edit/ref from master — spatial lock)
+  → Keyframes (compose solos + shot scene + master; optional edit prior KF)
   → Clips (I2V) + optional Speech/Music → Film (ffmpeg assemble)
 
-Cast: **always** one canonical solo sheet per character — never concatenated
-group sheets in the quality path. Multi-person shots compose solos into the
-keyframe. Keyframe/clip nodes carry ``identity_refs`` (solo node ids +
-costume_lock). Manager prunes any node that cannot reach ``n_compose``.
+Cast: always one canonical solo sheet per character. Scene geography is locked
+by the master plate; later views must not invent a new building. Manager
+prunes any node that cannot reach ``n_compose``.
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ from jiuwenswarm.common.schema.designer_graph import (
 )
 from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
 
-_MAX_LEAN_SHOTS = 4
-_MAX_SPLIT_CHARS = 4
+_MAX_LEAN_SHOTS = 5
+_MAX_SPLIT_CHARS = 6
 _IMAGE_SIZE = "1024x1024"
 
 
@@ -736,8 +736,70 @@ def build_smart_video_graph(
         edges.append(_edge(f"e_sb_{nid}", "n_storyboard", nid))
         edges.append(_edge(f"e_brief_{nid}", "n_brief", nid))
 
-    # Per-shot scene views (environment only) — distinct cameras/angles.
+    # Canonical sanctuary plate, then per-shot views DERIVED from it (spatial lock).
     scene_base = scenes[0] if scenes else {"id": "scene_1", "name": "Setting", "description": ""}
+    spatial_lock = {
+        "setting": str(scene_base.get("name") or "Primary setting"),
+        "architecture": str(scene_base.get("description") or "keep one coherent interior"),
+        "static_rule": (
+            "STATIC OBJECTS LOCKED: pulpit/altar/windows/aisle/pews/floor/light direction "
+            "must match the master plate in every shot view — only camera/framing may change."
+        ),
+        "crowd_rule": (
+            "Environment plates: empty pews (no faces). Keyframes/clips: SAME locked congregation "
+            "silhouette in the pews across every shot (same coats/positions); do not invent a new "
+            "crowd per shot. Featured cast are distinct people — never clone the preacher."
+        ),
+    }
+    # Prefer analysis-provided lock if supervisor already stamped one.
+    prior_lock = analysis.get("spatial_lock") if isinstance(analysis.get("spatial_lock"), dict) else {}
+    for k, v in prior_lock.items():
+        if str(v).strip():
+            spatial_lock[str(k)] = str(v).strip()[:400]
+
+    lock_line = (
+        f"SPATIAL LOCK: setting={spatial_lock.get('setting')}; "
+        f"{spatial_lock.get('architecture')}; {spatial_lock.get('static_rule')} "
+        f"{spatial_lock.get('crowd_rule')}"
+    )
+    master_id = "n_scene"
+    nodes.append(
+        {
+            "id": master_id,
+            "type": NODE_TYPE_IMAGE,
+            "label": f"Scene master — {scene_base.get('name') or 'Setting'}",
+            "config": {
+                "role": NODE_ROLE_SCENE,
+                "prompt": (
+                    f"{speed}\nCANONICAL environment plate (no people): {scene_base.get('name')} — "
+                    f"{scene_base.get('description')}. Establishing wide of the full space. "
+                    f"Empty pews only (no crowd faces). Freeze architecture for all later views. "
+                    f"{lock_line} Story: {prompt_text[:160]}"
+                ),
+                "scene_id": scene_base.get("id"),
+                "shot_index": 0,
+                "scene_strategy": "master_plate",
+                "spatial_lock": spatial_lock,
+                "image_size": _IMAGE_SIZE,
+                "max_image_calls": 1,
+                "inputs": ["n_brief", "n_storyboard"],
+                "optimize_for": mode,
+                "agent_name": "Scene Master Agent",
+                "kind": "agent",
+                "skill_id": "scene",
+                "tools": ["call_image_model", "read_upstream", "call_model"],
+                "delegate": ("agent" if ai_mode else "handler"),
+                "supervisor_task": (
+                    "Generate the single canonical environment plate. Lock pulpit side, aisle, "
+                    "windows, floor, and lighting. No people."
+                ),
+            },
+            "layout": {"x": 680, "y": float(40 + len(cast_sheets) * 160), "width": 260, "height": 150},
+        }
+    )
+    edges.append(_edge("e_sb_scene_master", "n_storyboard", master_id))
+    edges.append(_edge("e_brief_scene_master", "n_brief", master_id))
+
     scene_node_by_shot: dict[int, str] = {}
     for shot in shots:
         idx = int(shot.get("shot_index") or 0)
@@ -755,62 +817,45 @@ def build_smart_video_graph(
                 "config": {
                     "role": NODE_ROLE_SCENE,
                     "prompt": (
-                        f"{speed}\nEnvironment only (no people): {scene_base.get('name')} — "
-                        f"{scene_base.get('description')}. Shot {idx} view: camera {camera}. "
-                        f"Beat context: {action}. Keep architecture/lighting consistent across views. "
-                        f"Story: {prompt_text[:140]}"
+                        f"{speed}\nDERIVE this camera view from the master plate (edit/ref — "
+                        f"do NOT invent a new building). Environment only, no people. "
+                        f"Camera: {camera}. Beat context: {action}. "
+                        f"{lock_line} Same pulpit location, aisle, windows, materials, light."
                     ),
                     "scene_id": scene_base.get("id"),
                     "shot_index": idx,
                     "camera": camera,
+                    "scene_strategy": "edit_master_view",
+                    "master_scene_node_id": master_id,
+                    "spatial_lock": spatial_lock,
                     "image_size": _IMAGE_SIZE,
                     "max_image_calls": 1,
-                    "inputs": ["n_brief", "n_storyboard"],
+                    "inputs": ["n_brief", "n_storyboard", master_id],
                     "optimize_for": mode,
                     "agent_name": f"Scene-{idx} Agent",
                     "kind": "agent",
                     "skill_id": "scene",
                     "tools": ["call_image_model", "read_upstream", "call_model"],
                     "delegate": ("agent" if ai_mode else "handler"),
+                    "supervisor_task": (
+                        f"Edit/ref-guide from {master_id} only: reframe to camera '{camera}'. "
+                        "Keep every static object faithful to the master."
+                    ),
                 },
-                "layout": {"x": 680, "y": float(40 + (len(cast_sheets) + idx - 1) * 160), "width": 260, "height": 150},
+                "layout": {
+                    "x": 680,
+                    "y": float(40 + (len(cast_sheets) + idx) * 160),
+                    "width": 260,
+                    "height": 150,
+                },
             }
         )
         edges.append(_edge(f"e_sb_{scene_id}", "n_storyboard", scene_id))
         edges.append(_edge(f"e_brief_{scene_id}", "n_brief", scene_id))
+        edges.append(_edge(f"e_master_{scene_id}", master_id, scene_id, label="spatial_ref"))
 
-    # Fallback single scene if analysis had no shots (should not happen).
     if not scene_node_by_shot:
-        scene_id = "n_scene_1"
-        scene_node_by_shot[1] = scene_id
-        nodes.append(
-            {
-                "id": scene_id,
-                "type": NODE_TYPE_IMAGE,
-                "label": str(scene_base.get("name") or "Scene"),
-                "config": {
-                    "role": NODE_ROLE_SCENE,
-                    "prompt": (
-                        f"{speed}\nEnvironment only (no people): {scene_base.get('name')} — "
-                        f"{scene_base.get('description')}. Story: {prompt_text[:160]}"
-                    ),
-                    "scene_id": scene_base.get("id"),
-                    "shot_index": 1,
-                    "image_size": _IMAGE_SIZE,
-                    "max_image_calls": 1,
-                    "inputs": ["n_brief", "n_storyboard"],
-                    "optimize_for": mode,
-                    "agent_name": "Scene Agent",
-                    "kind": "agent",
-                    "skill_id": "scene",
-                    "tools": ["call_image_model", "read_upstream", "call_model"],
-                    "delegate": ("agent" if ai_mode else "handler"),
-                },
-                "layout": {"x": 680, "y": 280, "width": 260, "height": 150},
-            }
-        )
-        edges.append(_edge("e_sb_scene", "n_storyboard", scene_id))
-        edges.append(_edge("e_brief_scene", "n_brief", scene_id))
+        scene_node_by_shot[1] = master_id
 
     clip_ids: list[str] = []
     prev_frame_id: str | None = None
@@ -840,6 +885,36 @@ def build_smart_video_graph(
             if not s.get("combined_cast")
         ] or list(dict.fromkeys(char_node_ids))
         focus_cids = [str(x) for x in (shot.get("character_ids") or []) if str(x)]
+        # If this beat keeps someone on screen while another acts (e.g. preacher still
+        # speaking while a man leaves), pull every named cast id mentioned in the action.
+        action_l = str(shot.get("action") or shot.get("keyframe_prompt") or "").lower()
+        if any(k in action_l for k in ("still speak", "still preaching", "at the pulpit", "leaves", "leaving")):
+            for c in characters:
+                cid = str(c.get("id") or "")
+                name = str(c.get("name") or "").lower()
+                if not cid:
+                    continue
+                tokens = [t for t in name.replace("-", " ").split() if len(t) > 2]
+                if any(t in action_l for t in tokens) or (
+                    any(k in name for k in ("preach", "pastor", "pulpit"))
+                    and any(k in action_l for k in ("preach", "pulpit", "speak", "bible"))
+                ) or (
+                    any(k in name for k in ("leav", "depart", "walk"))
+                    and any(k in action_l for k in ("leav", "stand", "walk", "gets up"))
+                ):
+                    if cid not in focus_cids:
+                        focus_cids.append(cid)
+            shot["character_ids"] = focus_cids
+            id_to_node: dict[str, str] = {}
+            for s in cast_sheets:
+                if s.get("combined_cast"):
+                    continue
+                ids = [str(x) for x in (s.get("character_ids") or []) if str(x)]
+                if len(ids) == 1 and s.get("node_id"):
+                    id_to_node[ids[0]] = str(s["node_id"])
+            rebuilt = [id_to_node[c] for c in focus_cids if c in id_to_node]
+            if rebuilt:
+                focus_char_nodes = list(dict.fromkeys(rebuilt))
         focus_names = [
             str(c.get("name"))
             for c in characters
@@ -884,50 +959,62 @@ def build_smart_video_graph(
         keyframe_strategy = (
             "edit_prior_keyframe" if use_prior_edit else "compose_from_solo_refs"
         )
-        shot_scene_id = scene_node_by_shot.get(idx) or next(iter(scene_node_by_shot.values()))
+        shot_scene_id = scene_node_by_shot.get(idx) or master_id
         frame_inputs = [
             *focus_char_nodes,
+            master_id,
             shot_scene_id,
             "n_storyboard",
         ]
+        # Dedupe if shot view is master fallback
+        frame_inputs = list(dict.fromkeys(frame_inputs))
         if use_prior_edit and prev_frame_id:
             frame_inputs.append(prev_frame_id)
         # Clip depends on keyframe (+ storyboard for continuity text); identity via KF.
-        clip_inputs = ["n_storyboard", frame_id]
+        clip_inputs = ["n_storyboard", frame_id, master_id]
+        if shot_scene_id != master_id:
+            clip_inputs.append(shot_scene_id)
         if prev_frame_id:
             clip_inputs.append(prev_frame_id)
+        clip_inputs = list(dict.fromkeys(clip_inputs))
         y = 40 + (idx - 1) * 160
         if multi:
             cast_ref_line = (
                 f"IDENTITY: compose individual solo sheets for {cast_who} "
                 f"(node refs {', '.join(focus_char_nodes)}) into this keyframe with scene "
-                f"{shot_scene_id}. Do NOT invent new costumes. "
+                f"view {shot_scene_id} (master {master_id}). Do NOT invent new costumes or "
+                f"relocate static architecture. "
                 f"Costume lock: {costume_lock or cast_who}. "
-                f"The keyframe MUST show ALL of them: {cast_who}."
+                f"The keyframe MUST show ALL of them as DISTINCT people with DIFFERENT faces: "
+                f"{cast_who}. NEVER clone one face onto two bodies."
             )
         else:
             cast_ref_line = (
                 f"IDENTITY: use solo cast sheet(s) {', '.join(focus_char_nodes)} for {cast_who} "
-                f"with scene {shot_scene_id}. "
-                f"Costume lock: {costume_lock or cast_who}. Do not change wardrobe."
+                f"with scene view {shot_scene_id} (master {master_id}). "
+                f"Costume lock: {costume_lock or cast_who}. Do not change wardrobe or move the pulpit."
             )
         if use_prior_edit and prev_frame_id:
             cast_ref_line += (
                 f" STRATEGY={keyframe_strategy}: edit prior keyframe {prev_frame_id} "
-                f"for this beat (same/compatible camera); keep faces and costumes locked."
+                f"for this beat (same/compatible camera); keep faces, costumes, and spatial_lock."
             )
         else:
             cast_ref_line += (
-                f" STRATEGY={keyframe_strategy}: compose solo cast + this shot's scene view."
+                f" STRATEGY={keyframe_strategy}: compose solo cast into the locked scene view "
+                f"(derived from master plate)."
             )
         continuity = shot.get("continuity_lock") if isinstance(shot.get("continuity_lock"), dict) else {}
         cont_bits = ", ".join(f"{k}={v}" for k, v in continuity.items()) if continuity else ""
         guide = (
             f"UNIQUE shot {idx} keyframe. {cast_ref_line} "
+            f"{lock_line} "
             f"Action (everyone listed must participate as described): {action}. "
             f"Camera: {camera}. "
             + (f"CONTINUITY: {cont_bits}. " if cont_bits else "")
-            + "Must look different from other shots in pose/action, not in identity. "
+            + "ANTI-CLONE: one instance per named person. "
+            + "CROWD LOCK: same seated congregation across shots when the brief needs a crowd. "
+            + "Must look different from other shots in pose/action, not in identity, architecture, or crowd layout. "
             "Be fast, one still only."
         )
         identity_refs = {
@@ -936,8 +1023,10 @@ def build_smart_video_graph(
             "cast_names": list(focus_names),
             "costume_lock": costume_lock,
             "scene_node_id": shot_scene_id,
+            "master_scene_node_id": master_id,
             "prior_keyframe_node_id": prev_frame_id if use_prior_edit else None,
             "keyframe_strategy": keyframe_strategy,
+            "spatial_lock": spatial_lock,
         }
         nodes.append(
             {
@@ -958,6 +1047,8 @@ def build_smart_video_graph(
                     "prior_keyframe_node_id": prev_frame_id if use_prior_edit else None,
                     "keyframe_strategy": keyframe_strategy,
                     "continuity_lock": continuity or None,
+                    "spatial_lock": spatial_lock,
+                    "master_scene_node_id": master_id,
                     "generate": {"prompt": guide},
                     "image_size": _IMAGE_SIZE,
                     "max_image_calls": 1,
@@ -970,7 +1061,8 @@ def build_smart_video_graph(
                     "delegate": ("agent" if ai_mode else "handler"),
                     "supervisor_task": (
                         f"Compose keyframe {idx} from solo sheets {focus_char_nodes} "
-                        f"and scene {shot_scene_id} ({cast_who}). Strategy={keyframe_strategy}."
+                        f"into locked scene {shot_scene_id} (master {master_id}). "
+                        f"Strategy={keyframe_strategy}. Obey spatial_lock."
                     ),
                 },
                 "layout": {"x": 1020, "y": float(y), "width": 240, "height": 140},
@@ -989,17 +1081,24 @@ def build_smart_video_graph(
             "identity_refs": identity_refs,
             "costume_lock": costume_lock,
             "continuity_lock": continuity or None,
+            "spatial_lock": spatial_lock,
+            "master_scene_node_id": master_id,
             "allow_still_clip_fallback": False,
             "generate": {
                 "prompt": (
                     f"Film shot {idx} only ({timeline}). Camera {camera}. Action: {action}. "
                     f"Cast on screen: {cast_who}. "
                     + (f"All of {cast_who} must be visible and acting. " if multi else "")
-                    + f"IDENTITY from keyframe {frame_id} / sheets {', '.join(focus_char_nodes)}. "
+                    + f"Animate ONLY keyframe {frame_id} as first frame — do NOT re-attach solo "
+                    + "sheets (prevents cloning). "
+                    + "ANTI-CLONE: one body per person; never show the same preacher both walking "
+                    + "and still at the pulpit. Keep the same congregation as the keyframe. "
                     + f"Costume lock: {costume_lock}. "
+                    + f"{lock_line} "
                     + (f"CONTINUITY: {cont_bits}. " if cont_bits else "")
                     + "Real I2V motion required — never still freezes. "
-                    "Distinct action from other clips; same faces/costumes."
+                    + "Do not relocate pulpit/aisle/windows. "
+                    + "Distinct action from other clips; same faces/costumes/architecture/crowd."
                 )
             },
             "max_video_calls": 1,
@@ -1011,7 +1110,8 @@ def build_smart_video_graph(
             "tools": ["call_video_model", "read_upstream", "call_model"],
             "delegate": ("agent" if ai_mode else "handler"),
             "supervisor_task": (
-                f"I2V from keyframe {frame_id}; keep identity ({cast_who}). Real video only."
+                f"I2V from keyframe {frame_id}; keep identity ({cast_who}) and spatial_lock. "
+                "Real video only."
             ),
         }
         if prev_frame_id:
@@ -1053,6 +1153,8 @@ def build_smart_video_graph(
                         "modality": "audio",
                         "delegate": "handler",
                         "force_handler": True,
+                        "duration_sec": film_sec,
+                        "max_audio_sec": film_sec,
                         "tools": ["call_speech_model", "read_upstream", "call_model"],
                     },
                     "layout": {"x": 1320, "y": float(40 + len(shots) * 160), "width": 240, "height": 120},
@@ -1136,7 +1238,7 @@ def build_smart_video_graph(
         "nodes": nodes,  # type: ignore[typeddict-item]
         "edges": edges,  # type: ignore[typeddict-item]
         "metadata": {
-            "bootstrap": "designer.graph.smart_video.quality.v3",
+            "bootstrap": "designer.graph.smart_video.quality.v4",
             "scenario": "video",
             "optimize_for": mode,
             "agentic": True,
@@ -1144,20 +1246,26 @@ def build_smart_video_graph(
             "script_analysis": analysis,
             "audio_intent": audio,
             "lean_pipeline": True,
+            # Freeze shot topology at Play time — do not expand_shot_nodes mid-run
+            # (that rewires ALL cast/scenes into every frame and leaves orphans).
+            "freeze_shot_topology": True,
             "ai_agent_pipeline": bool(ai_mode),
             "allow_still_clip_fallback": False,
             "combined_cast": False,
             "cast_layout": cast_layout,
+            "spatial_lock": spatial_lock,
             "consistency_plan": {
                 "character_identity": "solo_sheets_only",
                 "multi_shot_compose": "compose_solos_plus_shot_scene",
+                "scene_spatial": "master_plate_then_edit_views",
                 "sequential_keyframe": "edit_prior_when_camera_compatible",
                 "costume_lock": True,
                 "identity_refs_on_frame_clip": True,
                 "per_shot_scene_views": True,
                 "notes": (
-                    "Brief→Storyboard→solo cast + per-shot scenes→keyframes→clips→film. "
-                    "No concatenated cast sheets. Manager prunes nodes that cannot reach compose."
+                    "Brief→Storyboard→solo cast + master scene→derived shot scenes→"
+                    "keyframes→clips→film. Shot scenes must ref-edit the master plate. "
+                    "Manager prunes nodes that cannot reach compose."
                 ),
             },
             "max_shots": len(shots),

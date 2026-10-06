@@ -200,9 +200,24 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
         paths = list(role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN))
 
     scene_paths = list(role_output_image_paths(ctx, NODE_ROLE_SCENE))
+    # Prefer explicit master + this shot's scene view from node inputs / identity_refs.
+    preferred_scene_ids: list[str] = []
+    master_id = str(
+        identity.get("master_scene_node_id") or cfg.get("master_scene_node_id") or ""
+    ).strip()
+    shot_scene_id = str(
+        identity.get("scene_node_id") or cfg.get("scene_node_id") or ""
+    ).strip()
+    if master_id:
+        preferred_scene_ids.append(master_id)
+    if shot_scene_id and shot_scene_id not in preferred_scene_ids:
+        preferred_scene_ids.append(shot_scene_id)
     input_ids = [str(x) for x in (cfg.get("inputs") or []) if str(x).startswith("n_scene")]
-    if input_ids:
-        scene_paths = node_ids_output_image_paths(ctx, input_ids) or scene_paths
+    for iid in input_ids:
+        if iid not in preferred_scene_ids:
+            preferred_scene_ids.append(iid)
+    if preferred_scene_ids:
+        scene_paths = node_ids_output_image_paths(ctx, preferred_scene_ids) or scene_paths
 
     prior_id = str(
         identity.get("prior_keyframe_node_id")
@@ -225,12 +240,15 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
         else [*paths, *scene_paths, *prior_paths]
     )
     for path in ordered:
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
+            continue
         key = str(path.resolve())
         if key in seen:
             continue
         seen.add(key)
         merged.append(path)
-    return merged
+    # Cap refs — DashScope often rejects large multi-ref batches.
+    return merged[:4]
 
 
 def role_output_image_paths(ctx: NodeExecutionContext, role: str) -> list[Path]:

@@ -171,6 +171,19 @@ def _result_satisfies_required_media(
     if not _result_has_media(result, required=required):
         return False
     role = str(node_role(node) or "").strip().lower()
+    # Scene / character sheets: primary output_ref must itself be the image.
+    # Agents often attach upstream master PNGs as extra_uris while primary is .md —
+    # that must NOT count as this node producing an image.
+    if required == "image" and role in {
+        "scene",
+        "character",
+        "character_design",
+        "frame",
+        "keyframe",
+    }:
+        primary = result.output_ref if result is not None else None
+        if _ref_media_family(primary) != "image":
+            return False
     if required != "image" or role not in {"frame", "keyframe"}:
         return True
     refs: list[Any] = []

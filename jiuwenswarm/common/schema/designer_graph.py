@@ -1170,10 +1170,24 @@ def expand_shot_nodes(
                 "kind": EDGE_KIND_DATA,
             }
         )
+    compose_inputs = [clip_node_id(index) for index in range(1, count + 1)]
+    # Restore speech/music → compose so expand cannot orphan audio (or strip sound).
+    for audio_id in ("n_speech", "n_music"):
+        if audio_id in kept_ids:
+            compose_inputs.append(audio_id)
+            kept_edges.append(
+                {
+                    "id": f"e_{audio_id}_compose",
+                    "source": audio_id,
+                    "target": COMPOSE_NODE_ID,
+                    "kind": EDGE_KIND_DATA,
+                }
+            )
     compose_config: dict[str, Any] = {
         "role": NODE_ROLE_COMPOSE,
-        "inputs": [clip_node_id(index) for index in range(1, count + 1)],
+        "inputs": compose_inputs,
         "delegate": CONFIG_DELEGATE_HANDLER,
+        "force_handler": True,
     }
     compose_node: DesignerGraphNode = {
         "id": COMPOSE_NODE_ID,

@@ -143,7 +143,12 @@ def collect_clip_reference_images(
     shot_index: int = 1,
     node: DesignerGraphNode | None = None,
 ) -> list[Path]:
-    """Per-shot I2V refs: focus cast sheet(s), scene, this keyframe, optional prior keyframe."""
+    """I2V refs: prefer keyframe only.
+
+    Passing solo cast sheets *plus* a keyframe that already contains those faces
+    commonly clones the pastor (one walking, one stuck on the pulpit). When a
+    keyframe exists, use it alone as the first-frame / identity source.
+    """
     from jiuwenswarm.server.runtime.designer.handlers.common import (
         node_ids_output_image_paths,
         role_output_image_paths,
@@ -162,6 +167,12 @@ def collect_clip_reference_images(
         seen.add(key)
         paths.append(resolved)
 
+    first = collect_clip_first_frame(ctx, shot_index)
+    if first is not None:
+        add(first)
+        return paths
+
+    # No keyframe image yet — fall back to cast + scene stills.
     if ctx is not None:
         cfg = node.get("config") if isinstance(node, dict) and isinstance(node.get("config"), dict) else {}
         preferred = [str(x) for x in (cfg.get("character_node_ids") or []) if str(x).strip()]
@@ -174,11 +185,6 @@ def collect_clip_reference_images(
         scene_paths = role_output_image_paths(ctx, NODE_ROLE_SCENE)
         if scene_paths:
             add(scene_paths[0])
-        continuity_id = str(cfg.get("continuity_frame_node_id") or "").strip()
-        if continuity_id:
-            for path in node_ids_output_image_paths(ctx, [continuity_id])[:1]:
-                add(path)
-    add(collect_clip_first_frame(ctx, shot_index))
     return paths
 
 
@@ -242,9 +248,12 @@ def _clip_prompt_lead(
     return (
         f"Create shot {shot_index} as a {duration}-second video — unique action for THIS shot only."
         f"{extras}{focus} "
-        "Keep identity and location consistent, but the camera and action must match this shot "
-        "and must not repeat a previous shot. "
-        "Start from this shot's keyframe. No subtitles, no cutaways.\n\n"
+        "Animate ONLY the attached first-frame keyframe. "
+        "ONE instance per person — never clone/duplicate a face (e.g. do NOT show the same "
+        "pastor both walking AND still standing at the pulpit). "
+        "Do not invent new people or a new congregation; keep the same crowd layout as the keyframe. "
+        "Keep identity and location consistent; camera/action must match this shot only. "
+        "No subtitles, no cutaways.\n\n"
     )
 
 
@@ -309,10 +318,15 @@ def build_clip_prompt(
         for x in (identity.get("character_node_ids") or cfg.get("character_node_ids") or [])
         if str(x).strip()
     ]
-    if char_nodes:
+    if char_nodes and not has_frame:
         parts.append(
             f"Use character reference sheets from nodes: {', '.join(char_nodes)}. "
-            "Match faces and wardrobe exactly."
+            "Match faces and wardrobe exactly. One instance per person — no clones."
+        )
+    elif has_frame:
+        parts.append(
+            "ANTI-CLONE: the keyframe already contains the cast — animate those bodies only; "
+            "do not spawn a second copy of anyone."
         )
     lock = cfg.get("continuity_lock") if isinstance(cfg.get("continuity_lock"), dict) else None
     if not lock and action:
@@ -416,11 +430,18 @@ class ClipNodeHandler:
         _, shot = _shot_for_node(ctx.graph, node, ctx)
         duration = parse_shot_duration_seconds((shot or {}).get("timeline") or "", default=5)
         prompt = build_clip_prompt(ctx.graph, node, ctx)
+        # Do not re-send the keyframe as a second identity sheet (causes pastor clones).
+        ff_key = str(first_frame.resolve()) if first_frame is not None else ""
+        extra_refs = [
+            str(path)
+            for path in refs
+            if path.is_file() and (not ff_key or str(path.resolve()) != ff_key)
+        ]
         try:
             result = await generate_clip_video(
                 prompt,
                 first_frame=str(first_frame) if first_frame is not None else None,
-                reference_images=[str(path) for path in refs] or None,
+                reference_images=extra_refs or None,
                 duration=duration,
             )
             path = Path(str(result["video_path"]))

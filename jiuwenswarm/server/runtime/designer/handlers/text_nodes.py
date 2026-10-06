@@ -31,31 +31,42 @@ from jiuwenswarm.server.runtime.designer.subagent import complete_designer_node_
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
 _BRIEF_INSTRUCTION = """Turn the request below into an executable short-film Brief.
-Write English Markdown with: one-line logline, visual style, main character/subject, setting, 5-second duration, and what to avoid.
-Output Markdown only, no explanation.
+Write English Markdown with these sections:
+- User prompt (verbatim intent)
+- Logline
+- Cast (solo identity locks — face, hair, body, costume for EACH character; never concatenate)
+- Setting / scene geography and lighting
+- Consistency gates: character, scene, motion/continuity, camera views covering every beat
+- Shot-view coverage list (distinct cameras/angles needed)
+- Duration target and per-shot timing budget
+- Audio policy (speech vs music)
+- What to avoid
+Preserve every named character and beat from the user prompt. Output Markdown only.
 
 Request:
 """
 
-_STORYBOARD_COLUMNS = "Shot | Timeline | Camera | Move | Character action | Scene change | Comment"
+# Keep Continuity as a first-class column so time-coherent forbids survive parsing.
+_STORYBOARD_COLUMNS = "Shot | Timeline | Camera | Move | Character action | Continuity | Comment"
 
-_STORYBOARD_INSTRUCTION = """Write a 5-second storyboard from the Brief. This is a camera script table, not a drawing.
+_STORYBOARD_INSTRUCTION = """Write a time-coherent storyboard from the Brief. This is a camera script table, not a drawing.
 Use English Markdown. Include this heading and one table:
 
 ## Storyboard
 
 Use a Markdown table whose columns MUST be:
-Shot | Timeline | Camera | Move | Character action | Scene change | Comment
+Shot | Timeline | Camera | Move | Character action | Continuity | Comment
 
 Rules:
-- Whole film about 5 seconds, 2-4 shots
-- Timeline as start-end seconds, e.g. 0.0-2.0s
-- Camera is shot size + angle, e.g. wide/slight high, medium/eye-level
+- Cover every major beat from the user prompt (typically 3-5 shots; duration ~12-24s total unless brief says shorter)
+- Timeline as start-end seconds, e.g. 0.0-4.0s — durations must sum coherently
+- Camera is shot size + angle, e.g. wide/establishing, medium/eye-level, close-up/eye-level, medium/slow pan
 - Move is push/pull/pan/dolly/static and speed
-- Character action must match the character sheet: same subject, look, costume, materials; only write motion, facing, and enter/exit for this shot
-- Scene change must match the scene sheet: same place, weather, lighting; only write how environment, props, and background change in this shot
-- Comment is the keyframe prompt for this shot: subject, composition, light, action instant, environment. Write English that can go straight to image generation. Do not only repeat other columns
-- Do not invent a new character or a new world
+- Character action: who is on screen and what they do THIS shot only (match cast identity locks)
+- Continuity: explicit forbids from prior shots (e.g. after a man stands and leaves, later shots MUST NOT reseat him; posture/facing/location locks)
+- Comment is the keyframe prompt: subject(s), composition, light, action instant, environment — ready for image gen
+- Enhance sparse prompts: crowd, atmosphere, lighting, wardrobe detail — without inventing new lead characters
+- Do not invent a new world that contradicts the brief
 
 Do not output storyboard drawings. Do not explain.
 
@@ -82,7 +93,14 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "camera": ("Camera", "镜头视角", "景别"),
     "move": ("Move", "运镜"),
     "character_action": ("Character action", "Character", "人物变化"),
-    "scene_change": ("Scene change", "Scene", "场景变化"),
+    # Continuity is preferred; Scene change kept as alias for older tables.
+    "scene_change": (
+        "Continuity",
+        "Scene change",
+        "Scene",
+        "场景变化",
+        "连续性",
+    ),
     "comment": ("Comment", "Notes", "注释", "备注", "画面描述", "提示词"),
 }
 _POSITIONAL_FIELDS = (
@@ -91,7 +109,7 @@ _POSITIONAL_FIELDS = (
     "camera",
     "move",
     "character_action",
-    "scene_change",
+    "scene_change",  # Continuity column lands here positionally
     "comment",
 )
 
@@ -217,10 +235,13 @@ def shot_generate_prompt(shot: StoryboardShot) -> str:
 def fallback_brief(prompt: str) -> str:
     return (
         "# Brief\n\n"
-        f"- Logline: {prompt}\n"
-        "- Duration: 5 seconds\n"
-        "- Resolution: 480P (dev)\n"
-        "- Visual: follow the user description, avoid unrelated elements\n"
+        f"**User prompt (verbatim intent):** {prompt}\n\n"
+        f"**Logline:** {prompt[:280]}\n\n"
+        "- Cast: lock face/hair/body/costume per named character (solo sheets)\n"
+        "- Setting: follow the user description; keep architecture/lighting consistent\n"
+        "- Continuity: time-coherent actions (no reseating someone who already left)\n"
+        "- Duration: ~12-20 seconds unless prompt says otherwise\n"
+        "- Visual: cinematic, coherent lighting, no subtitles/watermarks\n"
     )
 
 
@@ -230,8 +251,9 @@ def fallback_storyboard(prompt: str) -> str:
         "## Storyboard\n\n"
         f"| {_STORYBOARD_COLUMNS} |\n"
         "| --- | --- | --- | --- | --- | --- | --- |\n"
-        f"| 1 | 0.0-2.0s | wide / slight high | slow pan from puddle reflection to subject | subject not yet in frame, or only the reflection | establish the scene: {prompt[:80]} | rain-night neon alley in a puddle reflection, wide slight-high, subject not yet seen |\n"
-        "| 2 | 2.0-5.0s | medium / eye-level | follow then hold | subject enters and completes one clear action | neon and puddle shatter with the camera | medium eye-level, subject enters and completes one action, neon and puddle shatter |\n"
+        f"| 1 | 0.0-4.0s | wide / establishing | slow push | establish subjects from prompt | hold geography | {prompt[:120]} |\n"
+        "| 2 | 4.0-8.0s | medium / eye-level | hold | main action continues | no reset of prior poses | medium eye-level follow-through |\n"
+        "| 3 | 8.0-12.0s | close-up / eye-level | slow pan | reaction beat | prior exits stay gone | emotional close-up reaction |\n"
     )
 
 
@@ -312,12 +334,15 @@ class StoryboardNodeHandler:
                 for i, shot in enumerate(planned[:_MAX_STORYBOARD_SHOTS], start=1):
                     if not isinstance(shot, dict):
                         continue
+                    lock = shot.get("continuity_lock") if isinstance(shot.get("continuity_lock"), dict) else {}
+                    cont = "; ".join(f"{k}={v}" for k, v in list(lock.items())[:3]) or "hold continuity"
                     rows.append(
-                        "| {shot} | {tl} | {cam} | static | {action} | hold | {kf} |".format(
+                        "| {shot} | {tl} | {cam} | static | {action} | {cont} | {kf} |".format(
                             shot=i,
-                            tl=str(shot.get("timeline") or f"{(i-1)*2:.1f}-{i*2:.1f}s"),
+                            tl=str(shot.get("timeline") or f"{(i-1)*4:.1f}-{i*4:.1f}s"),
                             cam=str(shot.get("camera") or "medium / eye-level"),
                             action=str(shot.get("action") or shot.get("title") or "")[:120],
+                            cont=cont[:120],
                             kf=str(shot.get("keyframe_prompt") or shot.get("action") or "")[:160],
                         )
                     )

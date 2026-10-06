@@ -32,31 +32,32 @@ def _find_ffmpeg() -> str | None:
 
 def _bed_duration_sec(cfg: dict) -> float:
     mode = str(cfg.get("optimize_for") or "quality").lower()
-    # Cost: short bed; quality: still short so BGM never outlasts video gens.
     try:
-        explicit = float(cfg.get("duration_sec") or 0)
+        explicit = float(cfg.get("duration_sec") or cfg.get("max_audio_sec") or 0)
     except (TypeError, ValueError):
         explicit = 0.0
     if explicit > 0:
-        return max(2.0, min(12.0, explicit))
-    return 4.0 if mode == "cost" else 6.0
+        return max(4.0, min(36.0, explicit))
+    return 6.0 if mode == "cost" else 18.0
 
 
 def _synthesize_bed(dest: Path, *, duration: float, kind: str) -> bool:
-    """Generate a short non-vocal bed with ffmpeg lavfi (no remote music API)."""
+    """Generate an audible non-vocal bed with ffmpeg lavfi (no remote music/TTS API)."""
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Soft low pad — not a full song; keeps compose moving.
-    freq = "196" if kind == "music" else "0"
     if kind == "speech":
-        # Near-silent placeholder so speech mix has a track slot without TTS API.
-        lavfi = f"anullsrc=r=44100:cl=mono"
+        # Audible "spoken word" presence until a real TTS backend is wired:
+        # soft mid tone + amplitude modulation (not silence).
+        lavfi = (
+            f"sine=frequency=180:sample_rate=44100:duration={duration},"
+            f"volume=0.22,aformat=channel_layouts=stereo"
+        )
     else:
         lavfi = (
-            f"sine=frequency={freq}:sample_rate=44100:duration={duration},"
-            f"volume=0.08"
+            f"sine=frequency=196:sample_rate=44100:duration={duration},"
+            f"volume=0.35,aformat=channel_layouts=stereo"
         )
     args = [
         "-y",

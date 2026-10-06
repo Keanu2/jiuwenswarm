@@ -177,6 +177,13 @@ def _video_path_from_ref(ref: object) -> Path | None:
     if not isinstance(ref, dict):
         return None
     uri = str(ref.get("uri") or "")
+    # Never treat markdown / text stubs as video inputs for compose.
+    low = uri.lower()
+    if any(low.endswith(suf) for suf in (".md", ".markdown", ".txt", ".json", ".html")):
+        return None
+    mime = str(ref.get("mime_type") or "").lower()
+    if mime.startswith("text/") or "markdown" in mime:
+        return None
     path = handler_io.path_from_uri(uri)
     if (
         path is not None
@@ -250,12 +257,13 @@ def _workspace_clip_videos(run_id: str) -> list[Path]:
 
 
 def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
+    """Collect every shot clip mp4 in storyboard order — all must feed the final film."""
     states = (ctx.run or {}).get("node_states") or {}
     clips = sorted(
         [node for node in (ctx.graph.get("nodes") or []) if node_role(node) == NODE_ROLE_CLIP],
         key=node_shot_index,
     )
-    # Prefer clips that actually feed this compose node when edges exist.
+    # Prefer edged clips when present, but never drop other completed clips.
     pred_ids = {
         str(e.get("source") or "")
         for e in (ctx.graph.get("edges") or [])
@@ -263,8 +271,8 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
     }
     if pred_ids:
         edged = [n for n in clips if str(n.get("id") or "") in pred_ids]
-        if edged:
-            clips = edged
+        extras = [n for n in clips if str(n.get("id") or "") not in pred_ids]
+        clips = [*edged, *extras] if edged else clips
 
     paths: list[Path] = []
     missing: list[str] = []
@@ -291,22 +299,164 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
                 missing,
             )
             return disk
-        if disk and paths:
-            for extra in disk:
-                if extra not in paths:
-                    paths.append(extra)
-            return paths
-        if paths:
-            logger.warning(
-                "compose proceeding with %s clip(s); still missing %s",
-                len(paths),
-                missing,
-            )
-            return paths
         raise RuntimeError(
-            "以下视频片段尚未生成，无法成片：" + "、".join(missing)
+            "以下视频片段尚未生成，无法成片（全部镜头必须进入成片）："
+            + "、".join(missing)
         )
     return paths
+
+
+def _audio_path_from_ref(ref: dict | None) -> Path | None:
+    if not isinstance(ref, dict):
+        return None
+    uri = str(ref.get("uri") or "").strip()
+    if not uri:
+        return None
+    try:
+        from urllib.parse import unquote, urlparse
+
+        parsed = urlparse(uri)
+        raw = unquote(parsed.path or "")
+        if raw.startswith("/") and len(raw) > 2 and raw[2] == ":":
+            raw = raw[1:]
+        path = Path(raw) if uri.startswith("file:") else Path(uri)
+    except Exception:  # noqa: BLE001
+        return None
+    audio_ext = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+    if path.is_file() and path.suffix.lower() in audio_ext and path.stat().st_size > 64:
+        return path.resolve()
+    return None
+
+
+def _collect_role_audio_paths(ctx: NodeExecutionContext, roles: set[str]) -> list[Path]:
+    """Collect real audio files from speech/music nodes (skip markdown stubs)."""
+    states = (ctx.run or {}).get("node_states") or {}
+    found: list[Path] = []
+    for node in ctx.graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        role = str((node.get("config") or {}).get("role") or "")
+        if role not in roles:
+            continue
+        nid = str(node.get("id") or "")
+        state = states.get(nid) if isinstance(states.get(nid), dict) else {}
+        refs: list[dict] = []
+        if isinstance(state.get("output_ref"), dict):
+            refs.append(state["output_ref"])
+        for r in state.get("output_refs") or []:
+            if isinstance(r, dict):
+                refs.append(r)
+        for ref in refs:
+            path = _audio_path_from_ref(ref)
+            if path is not None:
+                found.append(path)
+                break
+    return found
+
+
+def _mix_audio_tracks(
+    ffmpeg: str, tracks: list[Path], dest: Path, duration: float
+) -> Path | None:
+    """Amix speech + music (+ optional bed) to a single AAC bed of film length."""
+    if not tracks:
+        return None
+    seconds = max(1.0, float(duration))
+    dest = Path(dest).with_suffix(".m4a")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    args: list[str] = ["-y"]
+    for track in tracks:
+        args.extend(["-i", str(track.resolve())])
+    n = len(tracks)
+    # Loud enough to hear; speech slightly above music.
+    filters = []
+    for i in range(n):
+        vol = 0.85 if i == 0 and n > 1 else 0.55
+        filters.append(
+            f"[{i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+            f"volume={vol},atrim=0:{seconds},apad=whole_dur={seconds}[a{i}]"
+        )
+    mix_ins = "".join(f"[a{i}]" for i in range(n))
+    filters.append(
+        f"{mix_ins}amix=inputs={n}:duration=longest:dropout_transition=0,"
+        f"loudnorm=I=-16:TP=-1.5:LRA=11,afade=t=in:st=0:d=0.4,"
+        f"afade=t=out:st={max(0.0, seconds - 0.8)}:d=0.7[out]"
+    )
+    args.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[out]",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-t",
+            f"{seconds:.2f}",
+            str(dest),
+        ]
+    )
+    mixed = _run_ffmpeg(ffmpeg, args)
+    if mixed.returncode != 0 or not _output_ok(dest):
+        logger.warning(
+            "compose audio mix failed: %s",
+            (mixed.stderr or mixed.stdout or "")[:800],
+        )
+        dest.unlink(missing_ok=True)
+        return None
+    return dest.resolve()
+
+
+def mix_compose_soundtrack(
+    video: Path,
+    dest: Path,
+    *,
+    ctx: NodeExecutionContext | None = None,
+    brief: str = "",
+) -> Path:
+    """Mux audible soundtrack: prefer upstream speech/music nodes, else cinematic bed."""
+    _ = brief
+    video = Path(video)
+    dest = Path(dest)
+    try:
+        ffmpeg = _find_ffmpeg()
+    except RuntimeError:
+        return video
+    duration = _media_duration_seconds(ffmpeg, video)
+    if duration is None or duration < 0.4:
+        return video
+
+    upstream: list[Path] = []
+    if ctx is not None:
+        # Prefer music then speech so speech sits on top when mixed (order in _mix).
+        speech = _collect_role_audio_paths(ctx, {"speech"})
+        music = _collect_role_audio_paths(ctx, {"music"})
+        # Put speech first for slightly higher volume in mixer.
+        upstream = [*speech, *music]
+
+    score: Path | None = None
+    if upstream:
+        score = _mix_audio_tracks(
+            ffmpeg, upstream, dest.parent / f"{dest.stem}_mix", duration
+        )
+    if score is None:
+        # Always add audible bed — silent films are not acceptable for quality path.
+        score = _render_cinematic_bgm(
+            ffmpeg, dest.parent / f"{dest.stem}_score", duration
+        )
+    if score is None:
+        return video
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.resolve() == video.resolve():
+        dest = video.with_name(f"{video.stem}_bgm{video.suffix}")
+    if _mux_bgm(ffmpeg, video, score, dest):
+        return dest.resolve()
+    return video
+
+
+def mix_compose_bgm(video: Path, dest: Path, brief: str = "") -> Path:
+    """Backward-compatible wrapper — always produce audible score."""
+    return mix_compose_soundtrack(video, dest, ctx=None, brief=brief)
 
 
 def _media_duration_seconds(ffmpeg: str, path: Path) -> float | None:
@@ -345,14 +495,16 @@ def _render_cinematic_bgm(ffmpeg: str, dest: Path, duration: float) -> Path | No
             f"anoisesrc=color=brown:sample_rate=44100:duration={seconds}",
             "-filter_complex",
             (
-                "[0]volume=0.07[a];[1]volume=0.045[b];[2]lowpass=f=280,volume=0.03[c];"
+                # Audible cinematic bed (previous 0.07 levels were effectively silent).
+                "[0]volume=0.28[a];[1]volume=0.18[b];[2]lowpass=f=280,volume=0.12[c];"
                 "[a][b][c]amix=inputs=3:duration=longest:dropout_transition=0,"
-                f"afade=t=in:st=0:d=1.2,afade=t=out:st={fade_out}:d=1.6"
+                f"loudnorm=I=-16:TP=-1.5:LRA=11,"
+                f"afade=t=in:st=0:d=1.0,afade=t=out:st={fade_out}:d=1.4"
             ),
             "-c:a",
             "aac",
             "-b:a",
-            "128k",
+            "192k",
             str(dest),
         ],
     )
@@ -447,9 +599,10 @@ class ComposeNodeHandler:
         )
         dest = handler_io.get_agent_workspace_dir() / f"designer_compose_{ctx.run_id}.mp4"
         merged = concatenate_clip_videos(paths, dest)
-        scored = mix_compose_bgm(
+        scored = mix_compose_soundtrack(
             merged,
             dest.parent / f"designer_compose_{ctx.run_id}_bgm.mp4",
+            ctx=ctx,
             brief=role_output_text(ctx, NODE_ROLE_BRIEF) or "",
         )
         scored = Path(scored)

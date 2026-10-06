@@ -1,6 +1,7 @@
 # Designer pipeline (`a.md`)
 
 AI-first, **forward-only** quality path for prompt → film (real images/video/audio).
+Full reproduction: **`DETAIL.md`**.
 
 ## Frontend ↔ backend
 
@@ -14,36 +15,39 @@ AI-first, **forward-only** quality path for prompt → film (real images/video/a
 
 Heuristics run **only** when `llm_available()` is false (no Settings chat model).
 
-## Quality DAG (v3)
+## Quality DAG (v4)
 
 ```
 Brief (agent)
   → Storyboard (agent) → Manager storyboard review (once)
   → Solo character sheets (one each, never concatenated)
-     + Per-shot scene views (environment only)
-  → Keyframes (compose solos + that shot’s scene; optional edit prior KF)
-  → Clips (real I2V; still→mp4 disabled by default)
-     + Speech / Music (handlers until backends; always edge into compose)
-  → Film / Compose (ffmpeg; must emit real non-empty .mp4)
+  → Scene **master plate** (canonical architecture / spatial_lock)
+  → Per-shot scene views (**edit/ref from master** — not independent T2I worlds)
+  → Keyframes (compose solos + shot scene + master; optional edit prior KF)
+  → Clips (I2V from keyframe only — anti-clone; still→mp4 off)
+     + Speech / Music (handlers; edged into compose)
+  → Film / Compose (concat **all** clips + mux speech/music; real non-empty .mp4)
 ```
 
-Manager **prunes** any node that cannot reach `n_compose`. Compose / clips refuse markdown stubs as video.
+Manager **prunes** unused nodes, rewires spatial edges, protects clips/audio, and keeps
+fidelity to prompt / brief / storyboard. Bootstrap: `designer.graph.smart_video.quality.v4`
+with `freeze_shot_topology` (no mid-run shot expand).
 
 ## Orchestration (one pass, no loops)
 
-1. Supervisor LLM analysis + plan (brief notes, per-node tasks/tools/models)
-2. Manager validates fidelity, identity/continuity, enforces agents+tools, prunes orphans
-3. Ready-queue leaves (max concurrency **3**); after storyboard completes → manager continuity/enhance once
+1. Supervisor LLM analysis + plan (`spatial_lock`, brief notes, per-node tasks/tools)
+2. Manager validates fidelity / identity / continuity / spatial; prune + cohere + agents
+3. Ready-queue leaves (max concurrency **3**); after storyboard → manager review once
 4. After keyframes → supervisor may adjust clip briefs once
-5. End: supervisor finalize + manager review + **two rater agents**; aggregate JSON under `designer/feedback/` and `runs/*.report` — applied **only** on Run again (`use_prior_feedback`)
+5. End: finalize + dual raters; feedback applied **only** on Run again
 
-Image API calls are further capped (semaphore **2**) with RateQuota backoff. See **`DETAIL.md`** for full reproduction.
+Image API: semaphore **2** + RateQuota backoff; ref-upload failures fall back to T2I.
 
 ## Media honesty
 
-- `.md` / text never counts as image or video (`node_agent._ref_media_family`)
+- `.md` never counts as image/video; primary `output_ref` must be real media for scene/char/frame
 - Clip still→mp4 only if `allow_still_clip_fallback` (default **false**)
-- Compose raises if output is missing / not `.mp4` / tiny file
+- Compose requires every shot clip; muxes speech/music (or audible bed)
 
 ## Where outputs live
 
@@ -53,10 +57,15 @@ Root: `JIUWENSWARM_DATA_DIR` or `~/.jiuwenswarm`.
 |------|----------|
 | `agent/workspace/` | Generated media (clips, compose mp4) |
 | `agent/designer/graphs\|runs\|feedback/` | Graphs, run state, rater JSON |
-| `designer_catalog_skills_reports_trajectory/` | Trajectory / eval reports |
+
+## Headless check
+
+```bash
+conda run -n new --no-capture-output python scripts/run_church_play_pipeline.py --timeout-sec 2700
+```
 
 ## If something looks heuristic-only
 
 1. Confirm dotenv + Settings chat model (`llm_available()`).
 2. New bootstrap / Play so analysis is `script_analysis_mode=llm`.
-3. Check `metadata.ai_agent_pipeline`, `agent_runtime`, `bootstrap` (`…quality.v3`).
+3. Check `metadata.ai_agent_pipeline`, `agent_runtime`, `bootstrap` (`…quality.v4`).

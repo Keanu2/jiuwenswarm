@@ -112,7 +112,7 @@ Implementation is in-tree (not a separate plugin) for now: frontend under `chann
 
 Domain graph truth: `jiuwenswarm/common/schema/designer_graph.py`. Run state in designer runtime store. React Flow is a view projection.
 
-Further pipeline detail: [`a.md`](./a.md).
+Further pipeline detail: [`a.md`](./a.md) (short) and [`DETAIL.md`](./DETAIL.md) (full quality.v4 reproduction).
 
 ---
 
