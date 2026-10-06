@@ -53,6 +53,19 @@ _FORBIDDEN = ("moon cake", "月饼", "climb a wall", "as a painting")
 _CASES_PER_SCENARIO = 1000
 
 
+@pytest.fixture(autouse=True)
+def _no_configured_audio_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.capabilities.detect_audio_backends",
+        lambda: {
+            "can_speech": False,
+            "can_music": False,
+            "can_video_audio": False,
+            "video_audio_model": "",
+        },
+    )
+
+
 def _cases(kind: str) -> list[dict]:
     rows = []
     for index in range(_CASES_PER_SCENARIO):
