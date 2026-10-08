@@ -406,7 +406,6 @@ def build_reference_led_video_graph(
     prompt: str,
     analysis: dict[str, Any],
     title: str | None = None,
-    optimize_for: str = "quality",
 ) -> dict[str, Any]:
     """Materialise a reference-led DAG. Caller runs normalize / prune / skills."""
     from jiuwenswarm.common.schema.designer_graph import (
@@ -450,7 +449,6 @@ def build_reference_led_video_graph(
     analysis["shots"] = shots
     analysis["user_prompt"] = prompt_text
     job = _job_plan(slots, analysis)
-    mode = "cost" if str(optimize_for).strip().lower() == "cost" else "quality"
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
 
@@ -478,7 +476,6 @@ def build_reference_led_video_graph(
                 "delegate": "agent",
                 "kind": "agent",
                 "skill_id": "brief",
-                "optimize_for": mode,
                 "director_task": (
                     "Author the brief from the user request and the reference roles. "
                     "Do not replace a reference-led subject with an invented cast."
@@ -500,7 +497,6 @@ def build_reference_led_video_graph(
                 "delegate": "agent",
                 "kind": "agent",
                 "skill_id": "storyboard",
-                "optimize_for": mode,
                 "director_task": (
                     "Each shot advances the previous end state. "
                     "Do not repeat a finished action."
@@ -577,7 +573,6 @@ def build_reference_led_video_graph(
                     "style_lock": dict(style),
                     "inputs": ["n_storyboard", slot["node_id"]],
                     "delegate": "handler",
-                    "optimize_for": mode,
                     "prompt": still_task_prompt(
                         {
                             "reference_still_task": "identity_sheet",
@@ -628,7 +623,6 @@ def build_reference_led_video_graph(
                     "style_lock": dict(style),
                     "inputs": ["n_storyboard"],
                     "delegate": "handler",
-                    "optimize_for": mode,
                     "prompt": _companion_sheet_prompt(character, style),
                 },
                 "layout": {"x": 320, "y": 220 + (sheet_index - 1) * 160, "width": 240, "height": 140},
@@ -670,7 +664,6 @@ def build_reference_led_video_graph(
                     "style_lock": dict(style),
                     "inputs": ["n_storyboard"],
                     "delegate": "handler",
-                    "optimize_for": mode,
                     "prompt": _combined_companion_sheet_prompt(combined_companions, style),
                 },
                 "layout": {"x": 320, "y": 220 + (sheet_index - 1) * 160, "width": 240, "height": 140},
@@ -697,7 +690,6 @@ def build_reference_led_video_graph(
                     "style_lock": dict(style),
                     "inputs": inputs,
                     "delegate": "handler",
-                    "optimize_for": mode,
                     "prompt": still_task_prompt(
                         {"reference_still_task": "medium_change", "style_lock": style}
                     ),
@@ -731,7 +723,6 @@ def build_reference_led_video_graph(
                         "style_lock": dict(style),
                         "inputs": ["n_storyboard"],
                         "delegate": "handler",
-                        "optimize_for": mode,
                     },
                     "layout": {"x": 600, "y": 220 + (index - 1) * 160, "width": 240, "height": 140},
                 }
@@ -772,7 +763,6 @@ def build_reference_led_video_graph(
             "delegate": "agent",
             "kind": "agent",
             "skill_id": "clip",
-            "optimize_for": mode,
             "max_video_calls": 1,
         }
         if job["call_mode"] == "i2v" and job.get("motion_slots"):
@@ -830,7 +820,6 @@ def build_reference_led_video_graph(
                 "delegate": "agent",
                 "kind": "agent",
                 "skill_id": "compose",
-                "optimize_for": mode,
                 "director_task": "Concatenate the clips in shot order.",
             },
             "layout": {"x": 1200, "y": 40, "width": 240, "height": 140},
@@ -853,7 +842,6 @@ def build_reference_led_video_graph(
         "metadata": {
             "bootstrap": "designer.graph.reference_led.v1",
             "scenario": "video",
-            "optimize_for": mode,
             "script_analysis": analysis,
             "creative_intent": analysis.get("creative_intent"),
             "style_lock": dict(style),

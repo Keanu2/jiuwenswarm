@@ -195,7 +195,6 @@ async def test_call_model_tool_does_not_retry_after_402() -> None:
         result = await model_tools.call_model_tool(
             prompt="hello",
             system="reply",
-            optimize_for="cost",
         )
         assert result["ok"] is False
         assert result["unavailable"] is True
@@ -214,7 +213,6 @@ async def test_require_llm_allows_retry_after_402_recharge(
         blocked = await model_tools.call_model_tool(
             prompt="hello",
             system="reply",
-            optimize_for="cost",
         )
         assert blocked["ok"] is False
         assert blocked["unavailable"] is True
@@ -232,7 +230,6 @@ async def test_require_llm_allows_retry_after_402_recharge(
         result = await model_tools.call_model_tool(
             prompt="hello",
             system="reply",
-            optimize_for="cost",
         )
         assert result["ok"] is False
         assert result.get("unavailable") is not True

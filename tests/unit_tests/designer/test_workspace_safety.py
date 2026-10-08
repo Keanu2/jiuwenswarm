@@ -185,7 +185,6 @@ async def test_selected_model_context_reaches_designer_model_calls(monkeypatch):
         result = await model_tools.call_model_tool(
             prompt="prompt",
             system="system",
-            optimize_for="quality",
         )
 
     assert result["model"] == "selected-model"
@@ -213,6 +212,10 @@ async def test_chat_auto_run_failure_is_returned_in_summary(monkeypatch):
     from jiuwenswarm.server.runtime.designer import leader_chat as leader_chat_module
 
     monkeypatch.setattr(leader_chat_module, "run_leader_chat", fake_leader_chat)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.model_tools.require_llm",
+        lambda: None,
+    )
     monkeypatch.setattr(designer_adapter._store, "get_graph", lambda graph_id: graph)
     monkeypatch.setattr(
         designer_adapter._executor,

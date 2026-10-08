@@ -626,7 +626,6 @@ def _graph(case: dict) -> dict:
         project_id=f"proj_{case['id']}",
         prompt=f"reference case {case['id']}",
         analysis=_analysis(case),
-        optimize_for="quality",
     )
 
 
@@ -1367,7 +1366,6 @@ def _intent_graph(
             scenes=scenes,
             video_binding=video_binding,
         ),
-        optimize_for="quality",
     )
 
 

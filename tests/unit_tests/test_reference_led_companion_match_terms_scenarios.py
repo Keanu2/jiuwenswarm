@@ -225,7 +225,6 @@ def _graph(analysis: dict) -> dict:
         project_id=f"proj_match_terms_{hash(str(analysis.get('creative_intent'))) & 0xFFFF:x}",
         prompt="reference-led companion match_terms coverage",
         analysis=analysis,
-        optimize_for="quality",
     )
 
 
