@@ -9,10 +9,22 @@ type DesignerUiStore = {
   canvasTool: DesignerCanvasTool;
   dockPanel: DesignerDockPanel;
   successorMenuNodeId: string | null;
+  chatSidebarOpen: boolean;
+  assetsSidebarOpen: boolean;
+  minimapVisible: boolean;
+  zoomPercent: number;
+  layoutRequestId: number;
   setCanvasTool: (tool: DesignerCanvasTool) => void;
   setDockPanel: (panel: DesignerDockPanel) => void;
   toggleSuccessorMenu: (nodeId: string) => void;
   closeDock: () => void;
+  toggleChatSidebar: () => void;
+  setChatSidebarOpen: (open: boolean) => void;
+  toggleAssetsSidebar: () => void;
+  setAssetsSidebarOpen: (open: boolean) => void;
+  toggleMinimap: () => void;
+  setZoomPercent: (percent: number) => void;
+  requestAutoLayout: () => void;
   inspectNode: (nodeId: string, materialIndex?: number) => void;
   startEdit: (materialId: string) => void;
   openViewer: (id: string) => void;
@@ -31,6 +43,11 @@ const initialState = {
   canvasTool: 'select' as DesignerCanvasTool,
   dockPanel: null as DesignerDockPanel,
   successorMenuNodeId: null as string | null,
+  chatSidebarOpen: true,
+  assetsSidebarOpen: false,
+  minimapVisible: true,
+  zoomPercent: 100,
+  layoutRequestId: 0,
 };
 
 export const useDesignerUiStore = create<DesignerUiStore>((set) => ({
@@ -75,6 +92,20 @@ export const useDesignerUiStore = create<DesignerUiStore>((set) => ({
     })),
 
   closeDock: () => set({ dockPanel: null, successorMenuNodeId: null }),
+
+  toggleChatSidebar: () => set((state) => ({ chatSidebarOpen: !state.chatSidebarOpen })),
+
+  setChatSidebarOpen: (open) => set({ chatSidebarOpen: open }),
+
+  toggleAssetsSidebar: () => set((state) => ({ assetsSidebarOpen: !state.assetsSidebarOpen })),
+
+  setAssetsSidebarOpen: (open) => set({ assetsSidebarOpen: open }),
+
+  toggleMinimap: () => set((state) => ({ minimapVisible: !state.minimapVisible })),
+
+  setZoomPercent: (percent) => set({ zoomPercent: percent }),
+
+  requestAutoLayout: () => set((state) => ({ layoutRequestId: state.layoutRequestId + 1 })),
 
   reset: () => set({ ...initialState }),
 }));

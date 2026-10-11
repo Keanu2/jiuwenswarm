@@ -102,6 +102,8 @@ interface ConversationSidebarProps {
   floating?: boolean;
   /** 切换侧边栏收起/展开 */
   onToggleCollapse?: () => void;
+  /** 隐藏模式行内的收起按钮（例如设计画布页把按钮挪到顶栏） */
+  hideCollapseButton?: boolean;
 }
 
 interface ConversationListItemProps {
@@ -683,6 +685,7 @@ export function ConversationSidebar({
   collapsed = false,
   floating = false,
   onToggleCollapse,
+  hideCollapseButton = false,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
   const { tooltip: conversationsTooltip, handlers: conversationsTooltipHandlers } = useAdaptiveTooltip();
@@ -1189,15 +1192,17 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
             </button>
           </div>
         ) : null}
-        <button
-          type="button"
-          className="conversation-sidebar__mode-collapse"
-          onClick={onToggleCollapse}
-          aria-label={t('common.collapse') || 'Collapse'}
-          data-testid="multi-session-sidebar-collapse"
-        >
-          <PanelCollapseIcon aria-hidden />
-        </button>
+        {hideCollapseButton ? null : (
+          <button
+            type="button"
+            className="conversation-sidebar__mode-collapse"
+            onClick={onToggleCollapse}
+            aria-label={t('common.collapse') || 'Collapse'}
+            data-testid="multi-session-sidebar-collapse"
+          >
+            <PanelCollapseIcon aria-hidden />
+          </button>
+        )}
         </div>
         {workMode === 'design' ? (
           <>

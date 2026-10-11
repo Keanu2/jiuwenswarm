@@ -18,7 +18,8 @@ import {
 
 export const DESIGNER_CANVAS_NODE_WIDTH = 280;
 export const DESIGNER_CANVAS_NODE_HEIGHT = 160;
-export const DESIGNER_NODE_HEADER_HEIGHT = 36;
+/** External caption above the bordered card (icon + label + gap). */
+export const DESIGNER_NODE_HEADER_HEIGHT = 28;
 export const DESIGNER_MEDIA_FIT_MAX_WIDTH = 280;
 export const DESIGNER_MEDIA_FIT_MAX_BODY = 320;
 export const DESIGNER_MEDIA_FIT_MIN_WIDTH = 140;

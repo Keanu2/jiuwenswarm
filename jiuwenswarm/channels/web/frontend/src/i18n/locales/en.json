@@ -16,6 +16,7 @@
     "and": "and",
     "modify": "Modify",
     "collapse": "Collapse",
+    "expand": "Expand",
     "delete": "Delete",
     "hide": "Hide",
     "show": "Show",
@@ -119,9 +120,12 @@
       "restart": "Rerun workflow",
       "cancel": "Cancel"
     },
-    "subtitle": "Creation execution canvas",
+    "subtitle": "Multi-modal creation from idea to design",
     "toolbar": {
       "modeLabel": "Node mode",
+      "minimap": "Minimap",
+      "openChat": "Open AI chat",
+      "yesterday": "Yesterday",
       "upload": "Upload",
       "edit": "Edit",
       "generate": "Generate",
@@ -149,7 +153,9 @@
     "sidebar": {
       "tabsLabel": "Sidebar",
       "assistant": "Assistant",
-      "assets": "Assets"
+      "conversation": "Chat",
+      "assets": "Assets",
+      "canvas": "Current canvas"
     },
     "assets": {
       "empty": "No assets yet. Attach image, video, or audio when creating a task, or upload/generate on the canvas.",
@@ -167,11 +173,11 @@
       "selectHint": "Select and move nodes. Shortcut V; hold Space to pan.",
       "hand": "Pan canvas",
       "handHint": "Drag to pan. Shortcut H.",
-      "layout": "Auto layout",
+      "layout": "Organize",
       "layoutHint": "Rearrange nodes by connections so they sit close without overlapping.",
-      "assets": "Asset pack",
-      "assetsTitle": "Asset pack",
-      "assetsHint": "Open the asset pack. Drag an item onto the canvas to create a node.",
+      "assets": "Asset library",
+      "assetsTitle": "Current canvas",
+      "assetsHint": "Toggle the current-canvas asset list.",
       "comfyuiHint": "Import a ComfyUI workflow (.json). Only vLLM-Omni Generate Image / Generate Video nodes are added.",
       "group": {
         "image": "Image",
@@ -469,6 +475,7 @@
         "minimax": "MiniMax",
         "mimo": "Xiaomi MiMo",
         "openrouter": "OpenRouter",
+        "vllm-omni": "vLLM-Omni",
         "volcengine": "Volcengine",
         "zhipu": "Zhipu GLM",
         "unrecognized": "Unrecognized provider ({{vendor}})"

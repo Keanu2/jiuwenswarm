@@ -1,37 +1,43 @@
 import {
   FolderOpen,
   Hand,
-  LayoutGrid,
+  Headphones,
+  Image as ImageIcon,
   MousePointer2,
-  Plus,
+  Video,
+  Workflow,
 } from 'lucide-react';
-import { useCallback } from 'react';
+import { useCallback, useRef, type ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useReactFlow } from '@xyflow/react';
-import { DesignerAddNodeMenu } from './DesignerAddNodeMenu';
-import { DesignerAssetsPanel } from './DesignerAssetsPanel';
 import {
+  DESIGNER_ADD_TEMPLATES,
   buildManualDesignerNode,
   offsetCanvasPosition,
   type DesignerAddTemplate,
 } from '../designerCanvasNodes';
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
-import { DESIGNER_FIT_VIEW_PADDING } from '../designerFitView';
 import { useComfyuiImport } from '../useComfyuiImport';
+
+function TypeIcon({ type }: { type: string }) {
+  if (type === 'video') return <Video size={18} aria-hidden />;
+  if (type === 'audio') return <Headphones size={18} aria-hidden />;
+  return <ImageIcon size={18} aria-hidden />;
+}
 
 export function DesignerCanvasDock() {
   const { t } = useTranslation();
-  const { fitView, screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition } = useReactFlow();
   const addNode = useDesignerStore((state) => state.addNode);
-  const autoLayout = useDesignerStore((state) => state.autoLayout);
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const canvasTool = useDesignerUiStore((state) => state.canvasTool);
-  const dockPanel = useDesignerUiStore((state) => state.dockPanel);
+  const assetsSidebarOpen = useDesignerUiStore((state) => state.assetsSidebarOpen);
   const setCanvasTool = useDesignerUiStore((state) => state.setCanvasTool);
-  const setDockPanel = useDesignerUiStore((state) => state.setDockPanel);
+  const toggleAssetsSidebar = useDesignerUiStore((state) => state.toggleAssetsSidebar);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
   const importComfyui = useComfyuiImport();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const canvasCenter = useCallback(() => {
     const pane = document.querySelector('.designer-page__canvas');
@@ -65,51 +71,50 @@ export function DesignerCanvasDock() {
     [canvasCenter, closeDock, domainGraph?.nodes.length, importComfyui],
   );
 
-  const runAutoLayout = useCallback(() => {
-    autoLayout();
-    closeDock();
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        void fitView({ padding: DESIGNER_FIT_VIEW_PADDING, duration: 220 });
-      });
-    });
-  }, [autoLayout, closeDock, fitView]);
+  const onComfyuiChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? []);
+      event.target.value = '';
+      if (files.length) placeComfyui(files);
+    },
+    [placeComfyui],
+  );
 
   return (
     <div className="designer-canvas-dock" data-testid="designer-canvas-dock">
-      {dockPanel === 'add' ? (
-        <div className="designer-canvas-dock__panel" data-testid="designer-canvas-dock-add">
-          <DesignerAddNodeMenu
-            title={t('designer.dock.addTitle')}
-            testIdPrefix="designer-canvas-add"
-            onPick={placeAndAdd}
-            onImportComfyui={placeComfyui}
-          />
-        </div>
-      ) : null}
-
-      {dockPanel === 'assets' ? (
-        <div
-          className="designer-canvas-dock__panel designer-canvas-dock__panel--assets"
-          data-testid="designer-canvas-dock-assets"
-        >
-          <p className="designer-canvas-dock__panel-title">{t('designer.dock.assetsTitle')}</p>
-          <DesignerAssetsPanel />
-        </div>
-      ) : null}
-
       <div className="designer-canvas-dock__bar" role="toolbar" aria-label={t('designer.dock.label')}>
+        {DESIGNER_ADD_TEMPLATES.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className="designer-canvas-dock__btn"
+            aria-label={t(`designer.dock.node.${item.id}`)}
+            title={t(`designer.dock.node.${item.id}`)}
+            data-testid={`designer-canvas-dock-add-${item.id}`}
+            onClick={() => placeAndAdd(item)}
+          >
+            <TypeIcon type={item.type} />
+          </button>
+        ))}
         <button
           type="button"
-          className={`designer-canvas-dock__btn${dockPanel === 'add' ? ' is-active' : ''}`}
-          aria-label={t('designer.dock.add')}
-          title={t('designer.dock.add')}
-          aria-pressed={dockPanel === 'add'}
-          data-testid="designer-canvas-dock-add-btn"
-          onClick={() => setDockPanel('add')}
+          className="designer-canvas-dock__btn"
+          aria-label={t('designer.dock.node.comfyui')}
+          title={t('designer.dock.comfyuiHint')}
+          data-testid="designer-canvas-dock-add-comfyui"
+          onClick={() => fileInputRef.current?.click()}
         >
-          <Plus size={18} aria-hidden />
+          <Workflow size={18} aria-hidden />
         </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json,application/json"
+          multiple
+          hidden
+          data-testid="designer-canvas-dock-comfyui-input"
+          onChange={onComfyuiChange}
+        />
         <span className="designer-canvas-dock__split" aria-hidden />
         <button
           type="button"
@@ -133,26 +138,15 @@ export function DesignerCanvasDock() {
         >
           <Hand size={18} aria-hidden />
         </button>
-        <button
-          type="button"
-          className="designer-canvas-dock__btn"
-          aria-label={t('designer.dock.layout')}
-          title={t('designer.dock.layoutHint')}
-          data-testid="designer-canvas-dock-layout"
-          disabled={!domainGraph?.nodes.length}
-          onClick={runAutoLayout}
-        >
-          <LayoutGrid size={18} aria-hidden />
-        </button>
         <span className="designer-canvas-dock__split" aria-hidden />
         <button
           type="button"
-          className={`designer-canvas-dock__btn${dockPanel === 'assets' ? ' is-active' : ''}`}
+          className={`designer-canvas-dock__btn${assetsSidebarOpen ? ' is-active' : ''}`}
           aria-label={t('designer.dock.assets')}
           title={t('designer.dock.assetsHint')}
-          aria-pressed={dockPanel === 'assets'}
+          aria-pressed={assetsSidebarOpen}
           data-testid="designer-canvas-dock-assets-btn"
-          onClick={() => setDockPanel('assets')}
+          onClick={toggleAssetsSidebar}
         >
           <FolderOpen size={18} aria-hidden />
         </button>

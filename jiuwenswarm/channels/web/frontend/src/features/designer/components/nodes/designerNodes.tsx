@@ -199,20 +199,9 @@ function DesignerNodeShell({
       data-selected={selected ? 'true' : 'false'}
       data-status={status}
     >
-      <Handle type="target" position={Position.Left} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
-      {isComfyui ? (
-        <span
-          className="designer-node__comfyui-badge"
-          title={t('designer.comfyui.badgeHint')}
-          aria-label={t('designer.comfyui.badgeHint')}
-          data-testid="designer-node-comfyui-badge"
-        >
-          C
-        </span>
-      ) : null}
-      <div className="designer-node__header">
+      <div className="designer-node__caption">
         <span className="designer-node__type-icon" aria-hidden data-testid="designer-node-type-icon" data-node-type={nodeType}>
-          <TypeIcon size={14} strokeWidth={1.75} />
+          <TypeIcon size={12} strokeWidth={1.75} />
         </span>
         <span className="designer-node__label">{label}</span>
         <button
@@ -224,18 +213,31 @@ function DesignerNodeShell({
           onClick={onDelete}
           onMouseDown={(event) => event.stopPropagation()}
         >
-          <Trash2 size={13} strokeWidth={2.25} aria-hidden />
+          <Trash2 size={12} strokeWidth={2.25} aria-hidden />
         </button>
       </div>
-      <div className="designer-node__body">{body}</div>
-      {nodeError ? (
-        <p className="designer-node__error" data-testid="designer-node-error" title={nodeError}>
-          {nodeError}
-        </p>
-      ) : null}
-      <Handle type="source" position={Position.Right} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
-      <DesignerNodeSuccessorControl nodeId={nodeId} />
-      <DesignerNodeResizeHandle nodeId={nodeId} />
+      <div className="designer-node__card">
+        <Handle type="target" position={Position.Left} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
+        {isComfyui ? (
+          <span
+            className="designer-node__comfyui-badge"
+            title={t('designer.comfyui.badgeHint')}
+            aria-label={t('designer.comfyui.badgeHint')}
+            data-testid="designer-node-comfyui-badge"
+          >
+            C
+          </span>
+        ) : null}
+        <div className="designer-node__body">{body}</div>
+        {nodeError ? (
+          <p className="designer-node__error" data-testid="designer-node-error" title={nodeError}>
+            {nodeError}
+          </p>
+        ) : null}
+        <Handle type="source" position={Position.Right} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
+        <DesignerNodeSuccessorControl nodeId={nodeId} />
+        <DesignerNodeResizeHandle nodeId={nodeId} />
+      </div>
       {toolbar}
     </div>
   );

@@ -16,6 +16,7 @@
     "and": "和",
     "modify": "修改",
     "collapse": "收起",
+    "expand": "展开",
     "delete": "删除",
     "hide": "隐藏",
     "show": "显示",
@@ -119,9 +120,12 @@
       "restart": "重跑工作流",
       "cancel": "取消"
     },
-    "subtitle": "创作执行图画布",
+    "subtitle": "从想法到设计的多模态创作",
     "toolbar": {
       "modeLabel": "节点模式",
+      "minimap": "小地图",
+      "openChat": "打开AI对话",
+      "yesterday": "昨天",
       "upload": "上传",
       "edit": "编辑",
       "generate": "生成",
@@ -149,7 +153,9 @@
     "sidebar": {
       "tabsLabel": "侧栏",
       "assistant": "助手",
-      "assets": "素材"
+      "conversation": "对话",
+      "assets": "素材",
+      "canvas": "当前画布"
     },
     "assets": {
       "empty": "还没有素材。创建任务时附上图片/视频/音频，或在节点上上传、生成后会显示在这里。",
@@ -167,11 +173,11 @@
       "selectHint": "选择并移动节点。快捷键 V；按住空格可临时平移。",
       "hand": "平移画布",
       "handHint": "拖动画布。快捷键 H。",
-      "layout": "自动布局",
+      "layout": "整理",
       "layoutHint": "按连线重新排列节点，避免重叠并靠近摆放。",
-      "assets": "素材包",
-      "assetsTitle": "素材包",
-      "assetsHint": "打开素材包，可拖到画布上生成节点。",
+      "assets": "素材库",
+      "assetsTitle": "当前画布",
+      "assetsHint": "打开当前画布素材列表。",
       "comfyuiHint": "导入 ComfyUI 工作流（.json）。仅添加 vLLM-Omni 的 Generate Image / Generate Video 节点。",
       "group": {
         "image": "图片",
@@ -469,6 +475,7 @@
         "minimax": "MiniMax",
         "mimo": "小米 MiMo",
         "openrouter": "OpenRouter",
+        "vllm-omni": "vLLM-Omni",
         "volcengine": "火山引擎",
         "zhipu": "智谱 GLM",
         "unrecognized": "未识别提供商（{{vendor}}）"

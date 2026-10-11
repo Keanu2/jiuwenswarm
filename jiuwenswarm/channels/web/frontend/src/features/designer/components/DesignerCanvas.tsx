@@ -173,9 +173,14 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
   const canvasTool = useDesignerUiStore((state) => state.canvasTool);
   const setCanvasTool = useDesignerUiStore((state) => state.setCanvasTool);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
+  const minimapVisible = useDesignerUiStore((state) => state.minimapVisible);
+  const layoutRequestId = useDesignerUiStore((state) => state.layoutRequestId);
+  const setZoomPercent = useDesignerUiStore((state) => state.setZoomPercent);
+  const autoLayout = useDesignerStore((state) => state.autoLayout);
   const getAsset = useDesignerAssetLibraryStore((state) => state.getById);
   const [spacePan, setSpacePan] = useState(false);
   const fittedGraphIdRef = useRef<string | null>(null);
+  const lastLayoutRequestRef = useRef(0);
   const handMode = canvasTool === 'hand' || spacePan;
   // Keep visual emphasis separate from edge selection, which controls edge actions.
   const highlightedEdges = useMemo(() => {
@@ -213,6 +218,24 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
       window.removeEventListener('keyup', onKeyUp);
     };
   }, [setCanvasTool]);
+
+  useEffect(() => {
+    if (!layoutRequestId || layoutRequestId === lastLayoutRequestRef.current) return;
+    lastLayoutRequestRef.current = layoutRequestId;
+    autoLayout();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        void fitView({ padding: DESIGNER_FIT_VIEW_PADDING, duration: 220 });
+      });
+    });
+  }, [autoLayout, fitView, layoutRequestId]);
+
+  const syncZoomPercent = useCallback(
+    (zoom: number) => {
+      setZoomPercent(Math.max(1, Math.round(zoom * 100)));
+    },
+    [setZoomPercent],
+  );
 
   useEffect(() => {
     setNodes((previous) => {
@@ -379,6 +402,8 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         onDragOver={onDragOver}
         onDrop={onDrop}
         onPaneClick={closeDock}
+        onMove={(_, viewport) => syncZoomPercent(viewport.zoom)}
+        onInit={(instance) => syncZoomPercent(instance.getZoom())}
         panOnDrag={handMode || canvasLocked ? true : [1]}
         panOnScroll
         panOnScrollMode={PanOnScrollMode.Free}
@@ -397,8 +422,20 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         data-testid="designer-canvas"
       >
         <Background gap={20} size={1} />
-        <Controls position="bottom-right" className="designer-canvas__controls" />
-        {canvasLocked ? null : <MiniMap position="bottom-right" pannable zoomable />}
+        {canvasLocked || !minimapVisible ? null : (
+          <MiniMap
+            position="bottom-right"
+            pannable
+            zoomable
+            className="designer-canvas__minimap"
+          />
+        )}
+        <Controls
+          position="bottom-right"
+          orientation="horizontal"
+          className={`designer-canvas__controls${minimapVisible && !canvasLocked ? ' designer-canvas__controls--below-minimap' : ''}`}
+          showInteractive={false}
+        />
       </ReactFlow>
       {canvasLocked ? null : <DesignerCanvasDock />}
     </div>

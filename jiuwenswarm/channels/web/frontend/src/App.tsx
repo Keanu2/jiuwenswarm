@@ -633,6 +633,7 @@ function AppContent({
         );
         useWorkspaceStore.getState().setSelectedProject(project ?? null);
       });
+      setConversationSidebarCollapsed(true);
       setTeamAreaExpanded(false);
       setSingleAgentPanelExpanded(false);
       setToolPanelHidden(true);
@@ -652,7 +653,7 @@ function AppContent({
       setTeamAreaExpanded(false);
       setSingleAgentPanelExpanded(false);
     }
-  }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden]);
+  }, [navigate, route, setConversationSidebarCollapsed, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden]);
 
   useEffect(() => {
     ensureSessionRuntimes(sessionId);
@@ -3710,10 +3711,19 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 collapsed={conversationSidebarCollapsed}
                 floating={conversationSidebarFloating}
                 onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
+                hideCollapseButton={
+                  workspaceWorkMode === 'design' && route.kind === 'design-project'
+                }
               />
               {workspaceWorkMode === 'design' ? (
                 route.kind === 'design-project' ? (
-                  <DesignerPage projectId={route.projectId} />
+                  <DesignerPage
+                    projectId={route.projectId}
+                    sidebarCollapsed={conversationSidebarCollapsed}
+                    onToggleSidebarCollapse={() =>
+                      setConversationSidebarCollapsed((v) => !v)
+                    }
+                  />
                 ) : (
                   <DesignerLanding onCreated={handleDesignWorkspaceCreated} />
                 )
