@@ -201,7 +201,7 @@ async def test_chat_auto_run_failure_is_returned_in_summary(monkeypatch):
         "edges": [],
     }
 
-    async def fake_leader_chat(*args, **kwargs):
+    async def fake_director_chat(*args, **kwargs):
         return {
             "graph": graph,
             "changed": False,
@@ -209,9 +209,9 @@ async def test_chat_auto_run_failure_is_returned_in_summary(monkeypatch):
             "run_node_ids": ["node_1"],
         }
 
-    from jiuwenswarm.server.runtime.designer import leader_chat as leader_chat_module
+    from jiuwenswarm.server.runtime.designer.orchestration import Director
 
-    monkeypatch.setattr(leader_chat_module, "run_leader_chat", fake_leader_chat)
+    monkeypatch.setattr(Director, "chat", fake_director_chat)
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.designer.model_tools.require_llm",
         lambda: None,

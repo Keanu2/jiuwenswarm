@@ -1177,8 +1177,35 @@ def _choose_output(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str |
     return {"run": dict(run)}, None, None
 
 
+async def _start_chat_run(
+    request: AgentRequest,
+    graph: dict[str, Any],
+    run_node_ids: list[str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Start the run a chat turn asked for; returns (run payload, error)."""
+    start_params: dict[str, Any] = {"graph_id": graph["graph_id"], "node_id": run_node_ids[0]}
+    latest = _store.get_latest_run_for_graph(graph["graph_id"])
+    if latest is not None:
+        start_params["run_id"] = str(latest.get("run_id") or "")
+    payload, error, _code = _start_run(start_params)
+    if error is not None or payload is None:
+        return None, error
+    run = await _executor.start_run(
+        str(payload["run_id"]),
+        on_update=_run_update_callback(request),
+        on_graph_update=_graph_update_callback(request),
+    )
+    run_payload = dict(run)
+    await _push_designer_event(
+        request=request,
+        event_type=EventType.DESIGNER_RUN_UPDATED.value,
+        payload={"run": run_payload},
+    )
+    return run_payload, None
+
+
 async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    from jiuwenswarm.server.runtime.designer.leader_chat import run_leader_chat
+    from jiuwenswarm.server.runtime.designer.orchestration import Director
     from jiuwenswarm.server.runtime.designer.chat_document_sync import (
         ChatDocumentConflict,
         read_chat_documents,
@@ -1213,7 +1240,7 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
         was_active = _executor.has_active_tasks(graph_id)
         preferred_model = str((graph.get("metadata") or {}).get("model_name") or "")
         with use_preferred_designer_model(preferred_model):
-            result = await run_leader_chat(
+            result = await Director().chat(
                 graph,
                 message,
                 documents=documents,
@@ -1279,26 +1306,11 @@ async def _chat_graph(request: AgentRequest, params: dict[str, Any]) -> tuple[di
     run_payload = dict(run) if run is not None and result.get("changed") else None
     run_ids = list(result.get("run_node_ids") or [])
     if run_ids:
-        start_params: dict[str, Any] = {"graph_id": saved["graph_id"], "node_id": run_ids[0]}
-        latest = _store.get_latest_run_for_graph(saved["graph_id"])
-        if latest is not None:
-            start_params["run_id"] = str(latest.get("run_id") or "")
-        payload, error, code = _start_run(start_params)
-        if error is None and payload is not None:
-            run = await _executor.start_run(
-                str(payload["run_id"]),
-                on_update=_run_update_callback(request),
-                on_graph_update=_graph_update_callback(request),
-            )
-            run_payload = dict(run)
-            await _push_designer_event(
-                request=request,
-                event_type=EventType.DESIGNER_RUN_UPDATED.value,
-                payload={"run": run_payload},
-            )
+        started, error = await _start_chat_run(request, saved, run_ids)
+        if started is not None:
+            run_payload = started
         elif error:
-            result["summary"] = f"{result.get('summary') or ''} ({error})".strip()
-            summary = str(result["summary"])
+            summary = f"{summary} ({error})".strip()
     return {
         "graph": dict(saved),
         "updated_text_uris": updated_text_uris,

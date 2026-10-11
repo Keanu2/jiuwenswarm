@@ -15,8 +15,8 @@ from jiuwenswarm.server.runtime.designer.activity import (
     graph_node_states,
     should_publish,
 )
-from jiuwenswarm.server.runtime.designer.leader_chat import (
-    apply_leader_plan,
+from jiuwenswarm.server.runtime.designer.director_chat import (
+    apply_chat_plan,
     message_asks_to_run,
 )
 
@@ -143,7 +143,7 @@ def _sample_graph() -> dict:
     }
 
 
-def test_apply_leader_plan_refine_selected_node() -> None:
+def test_apply_chat_plan_refine_selected_node() -> None:
     graph = _sample_graph()
     plan = {
         "intent": "refine_node",
@@ -160,14 +160,14 @@ def test_apply_leader_plan_refine_selected_node() -> None:
         },
         "run_node_ids": ["n_character"],
     }
-    next_graph, run_ids, summary = apply_leader_plan(graph, plan)
+    next_graph, run_ids, summary = apply_chat_plan(graph, plan)
     assert run_ids == ["n_character"]
     char = next(node for node in next_graph["nodes"] if node["id"] == "n_character")
     assert "赛博" in str(char["config"]["prompt"])
     assert "Updated" in summary or "Character" in summary
 
 
-def test_apply_leader_plan_stamps_type_for_inserted_scene_and_clip() -> None:
+def test_apply_chat_plan_stamps_type_for_inserted_scene_and_clip() -> None:
     from jiuwenswarm.common.schema.designer_graph import DesignerGraphValidationError
 
     graph = _sample_graph()
@@ -195,7 +195,7 @@ def test_apply_leader_plan_stamps_type_for_inserted_scene_and_clip() -> None:
             ],
         },
     }
-    next_graph, run_ids, _summary = apply_leader_plan(graph, plan)
+    next_graph, run_ids, _summary = apply_chat_plan(graph, plan)
     assert run_ids == []
     scene = next(node for node in next_graph["nodes"] if node["id"] == "n_scene_4")
     clip = next(node for node in next_graph["nodes"] if node["id"] == "n_clip_4")
@@ -210,7 +210,7 @@ def test_apply_leader_plan_stamps_type_for_inserted_scene_and_clip() -> None:
     )
 
     try:
-        apply_leader_plan(
+        apply_chat_plan(
             graph,
             {
                 "intent": "edit_graph",
@@ -224,7 +224,7 @@ def test_apply_leader_plan_stamps_type_for_inserted_scene_and_clip() -> None:
         raise AssertionError("untyped unknown node should be rejected")
 
 
-def test_apply_leader_plan_add_node_without_run() -> None:
+def test_apply_chat_plan_add_node_without_run() -> None:
     graph = _sample_graph()
     plan = {
         "intent": "edit_graph",
@@ -249,7 +249,7 @@ def test_apply_leader_plan_add_node_without_run() -> None:
         },
         "run_node_ids": [],
     }
-    next_graph, run_ids, _summary = apply_leader_plan(graph, plan)
+    next_graph, run_ids, _summary = apply_chat_plan(graph, plan)
     assert run_ids == []
     types = {node["type"] for node in next_graph["nodes"]}
     assert "audio" in types

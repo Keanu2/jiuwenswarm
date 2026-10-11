@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from jiuwenswarm.common.schema.designer_graph import (
     DesignerExecutionGraph,
@@ -1065,6 +1065,40 @@ class Director:
         }
         meta["director_user_node_onboard"] = result
         graph["metadata"] = meta
+        return result
+
+    async def chat(
+        self,
+        graph: DesignerExecutionGraph,
+        message: str,
+        *,
+        documents: dict[str, Any],
+        selected_node_id: str = "",
+        run_new_nodes: bool = False,
+        progress: Callable[..., None] | None = None,
+        pending_documents: bool = False,
+    ) -> dict[str, Any]:
+        """Handle one canvas follow-up turn and gate the edited graph like a canvas patch.
+
+        Full plan validation stays at Play; it prunes and rewires the graph, which would
+        override the user's scoped chat edit.
+        """
+        from jiuwenswarm.server.runtime.designer.director_chat import run_director_chat
+
+        result = await run_director_chat(
+            graph,
+            message,
+            documents=documents,
+            selected_node_id=selected_node_id,
+            run_new_nodes=run_new_nodes,
+            progress=progress,
+            pending_documents=pending_documents,
+        )
+        if result.get("changed"):
+            try:
+                self.onboard_user_added_nodes(result["graph"])
+            except Exception:  # noqa: BLE001
+                logger.debug("Director user-node onboard after chat failed", exc_info=True)
         return result
 
     def adjust_clips_after_scenes(

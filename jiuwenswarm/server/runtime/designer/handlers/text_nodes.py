@@ -320,7 +320,7 @@ def sync_shot_nodes_from_storyboard_markdown(
     graph: dict[str, Any],
     markdown: str,
 ) -> list[str]:
-    """Refresh frame/Shot_action + camera from the authored storyboard table.
+    """Refresh clip_action + camera from the authored storyboard table.
 
     Only updates beat text — does not touch identity/occupancy wiring.
     """
