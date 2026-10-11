@@ -128,7 +128,7 @@ def test_wan_api_clause_does_not_paste_prior_prompt_marker() -> None:
         clip_index=1,
         prompt=f"{marker} STYLE LOCK dump " + ("lock " * 20) + " Child walked away from the table.",
         node_id="n_clip_1",
-        shot_action="child walked away",
+        clip_action="child walked away",
     )
     c1 = graph["nodes"][0]["config"]
     c2 = graph["nodes"][1]["config"]

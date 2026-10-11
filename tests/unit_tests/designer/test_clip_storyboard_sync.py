@@ -38,7 +38,7 @@ def test_contaminated_filter_allows_scene_specs_and_long_text():
     assert _looks_like_contaminated_prompt("PREVIOUS CLIP HAD: something\nYOUR ASSIGNMENT: else")
 
 
-def test_storyboard_row_wins_over_stale_shot_action(monkeypatch):
+def test_storyboard_row_wins_over_stale_clip_action(monkeypatch):
     graph = {
         "nodes": [
             {

@@ -161,7 +161,7 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
 
 
 def _spatial_geography_lock_patch(graph: DesignerExecutionGraph) -> list[str]:
-    """Stamp / refresh spatial_lock on scene/frame/shot so architecture stays faithful."""
+    """Stamp / refresh spatial_lock on scene/clip so architecture stays faithful."""
     notes: list[str] = []
     meta = dict(graph.get("metadata") or {})
     analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
@@ -243,7 +243,7 @@ def _director_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
     )
 
     notes: list[str] = []
-    # Drop unused combined cast sheets that never feed a frame/clip.
+    # Drop unused combined cast sheets that never feed a clip.
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
     edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
     outs: dict[str, set[str]] = {}
@@ -527,7 +527,7 @@ def _director_reedit_artifacts_after_prune(
         graph["metadata"] = meta
         notes.append("reedit_approved_brief")
 
-    # Stamp occupancy / already_done onto surviving frame+shot nodes.
+    # Stamp occupancy / already_done onto surviving clip nodes.
     by_idx = {
         int(s.get("clip_index") or 0): s
         for s in (analysis.get("clips") or [])
@@ -1705,7 +1705,7 @@ class Director:
         if shots:
             analysis["target_clip_count"] = len(shots)
             meta["script_analysis"] = analysis
-        # Propagate timelines/consistency/audio locks into frame/shot configs once.
+        # Propagate timelines/consistency/audio locks into clip configs once.
         from jiuwenswarm.server.runtime.designer.audio_locks import stamp_audio_fields_on_clip_config
 
         for node in graph.get("nodes") or []:
@@ -2119,7 +2119,7 @@ class Director:
         graph: DesignerExecutionGraph,
         node: DesignerGraphNode,
     ) -> dict[str, Any]:
-        """Gate every frame/shot media prompt against locks + prior handoff / already_done."""
+        """Gate every clip media prompt against locks + prior handoff / already_done."""
         from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
             collect_prior_clip_prompts,
         )
@@ -2729,7 +2729,7 @@ class Director:
             action = str(cfg.get("clip_action") or "").strip()
             if action and f"Primary action for shot {clip_index}" not in prompt:
                 prompt = prompt + f"\nPrimary action for shot {clip_index}: {action}"
-                notes.append("inject_this_shot_action")
+                notes.append("inject_this_clip_action")
                 changed = True
 
             # Language / speech / BGM locks — Director enforces on every shot.
@@ -3632,7 +3632,7 @@ class Director:
                     else {}
                 ),
             )
-            # Patch storyboard + downstream frame/clip configs once.
+            # Patch storyboard + downstream clip configs once.
             try:
                 from jiuwenswarm.server.runtime.designer.audio_locks import (
                     stamp_audio_fields_on_clip_config,
@@ -3804,7 +3804,7 @@ class Director:
                 code=LLM_API_ERROR,
             ) from exc
 
-        # Apply one-shot shot_fixes into analysis + frame/shot configs (no re-loop).
+        # Apply one-shot shot_fixes into analysis + clip configs (no re-loop).
         fixes = parsed.get("shot_fixes") if isinstance(parsed.get("shot_fixes"), list) else []
         applied: list[str] = []
         analysis = dict(analysis) if isinstance(analysis, dict) else {}
@@ -4347,7 +4347,7 @@ def _heuristic_node_score(
 
 
 def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
-    """Ensure each shot/frame has unique shot_action + generate prompt (text-only)."""
+    """Ensure each clip has a unique clip_action + generate prompt (text-only)."""
     notes: list[str] = []
     camera_cycle = (
         "wide / establishing",
@@ -4371,7 +4371,7 @@ def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
                 "Do not restage another window from a new camera angle."
             )
             cfg["clip_action"] = action
-            notes.append(f"{node.get('id')}: filled missing shot_action from time window")
+            notes.append(f"{node.get('id')}: filled missing clip_action from time window")
         gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
         prompt = str(gen.get("prompt") or "").strip()
         marker = f"shot {idx}"

@@ -183,7 +183,7 @@ def apply_wan_call_locks(
     receives who each image is, where they are, what they do, and what they say.
 
     When generate.prompt_origin == user with a non-empty user prompt, that text
-    seeds action/camera instead of stale shot_action/camera beats.
+    seeds action/camera instead of stale clip_action/camera beats.
     """
     # Stamp/notes must mutate the caller's cfg. ensure_prior_clip_story_on_cfg
     # returns a shallow copy — use that copy only as the director working view.

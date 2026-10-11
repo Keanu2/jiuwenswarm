@@ -57,7 +57,7 @@ def test_stamp_handoff_saves_own_prompt_and_does_not_stamp_next_clip():
         clip_index=1,
         prompt=big,
         node_id="n_clip_1",
-        shot_action="man starts running",
+        clip_action="man starts running",
     )
     assert notes
     c1 = graph["nodes"][0]["config"]

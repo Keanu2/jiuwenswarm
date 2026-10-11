@@ -410,7 +410,7 @@ def apply_story_state_to_next_cfg(
     cfg["already_done"] = done[:16]
     cfg["previous_clip_finished_events"] = events[:12]
     # Always give the next agent positive prior story state. Prefer cleaned Wan
-    # body; fall back to shot_action so already_done is never alone without prior.
+    # body; fall back to clip_action so already_done is never alone without prior.
     if narrative:
         cfg["previous_clip_wan_prompt"] = narrative
     elif action:

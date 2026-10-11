@@ -229,7 +229,7 @@ class GraphExecutor:
                 clip_index=clip_index,
                 prompt=text,
                 node_id=node_id,
-                shot_action=str(cfg.get("clip_action") or ""),
+                clip_action=str(cfg.get("clip_action") or ""),
                 speech_line=str(cfg.get("speech_line") or ""),
             )
         if role in {NODE_ROLE_CLIP} and clip_index >= 1:
@@ -1631,9 +1631,9 @@ class GraphExecutor:
         )
         if not has_shot_pipeline:
             return graph, remaining, execution_predecessors(graph)
-        # Flexible Director graphs: if storyboard shot count differs from frame
+        # Flexible Director graphs: if storyboard clip count differs from clip
         # nodes, rebuild from analysis (do NOT use expand_shot_nodes — that dumps
-        # all cast into every frame and breaks identity wiring).
+        # all cast into every clip and breaks identity wiring).
         meta = graph.get("metadata") or {}
         current_clip_ids = {
             str(node.get("id") or "")
@@ -2345,7 +2345,7 @@ class GraphExecutor:
                 except Exception:  # noqa: BLE001
                     logger.debug("storyboard→shot sync failed", exc_info=True)
                 self._expand_shots_if_needed(live_graph, run, set(), on_update=on_update)
-            # Stamp prior-shot prompt handoff after frame/shot media completes.
+            # Stamp prior-clip prompt handoff after clip media completes.
             if node_pipeline(node) == NODE_ROLE_CLIP:
                 live_graph = self._require_graph(
                     str(run.get("graph_id") or graph.get("graph_id") or "")

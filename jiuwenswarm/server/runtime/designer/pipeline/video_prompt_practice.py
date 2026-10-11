@@ -1164,7 +1164,7 @@ def prompt_respects_practice(
     if str(cfg.get("previous_clip_wan_prompt") or cfg.get("previous_clip_action") or "").strip():
         if not re.search(r"(?i)\b(?:continue|continues|same setting|same placement|same room)\b", text):
             reasons.append("missing_prior_continue")
-    # Toolbar user edits are authoritative for beat fidelity; do not force stale shot_action.
+    # Toolbar user edits are authoritative for beat fidelity; do not force stale clip_action.
     if not honor_user_origin:
         action = str(cfg.get("clip_action") or "").strip()
         if action and not _covers_beat(text, action):
@@ -1350,7 +1350,7 @@ def director_approve_video_prompt(
     via compose_practice_prompt into the story-form Image-N binding.
 
     When generate.prompt_origin == user and a non-empty user prompt exists, that text
-    is authoritative for beat fidelity; storyboard shot_action/camera are not forced.
+    is authoritative for beat fidelity; storyboard clip_action/camera are not forced.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     user_text = resolve_user_origin_prompt(cfg, prompt)

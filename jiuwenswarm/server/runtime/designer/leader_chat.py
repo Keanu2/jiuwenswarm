@@ -98,24 +98,24 @@ Rules:
 - Input and output use the SAME config paths. The effective generation prompt is config.prompt;
   update it there. The server also updates the execution prompt from that value. pipeline and
   review_fields_if_action_changes describe the input; do not copy them into the output node.
-- Preserve existing node IDs and unrelated content. Renumber clip_index consecutively after inserting/deleting a shot, including its frame/clip; update each affected timeline, action, camera and prompt.
+- Preserve existing node IDs and unrelated content. Renumber clip_index consecutively after inserting/deleting a clip; update each affected timeline, action, camera and prompt.
 - Set edit_documents=true for content edits, including requests that only change prose. A separate document editor will receive the original documents and the applied graph changes. Do not return text replacements in this plan.
 - Resolve the requested object before editing. Singular referents and background collections are distinct: e.g. changing one bicycle does not change other parked bicycles of the same color. Do not globally substitute color/material words in a sentence or record. In thinking, identify specific similar objects/details you will preserve.
-- For deleting an ENTIRE SHOT, put an existing clip/frame ID in remove_shot_ids. Use the
-  supplied shots inventory to resolve the target. The server removes ALL frame/clip nodes
-  belonging to that original shot and their edges. Do not rely on remove_node_ids or your
-  summary to express a whole-shot deletion. Use patch.remove_node_ids for explicit individual
+- For deleting an ENTIRE CLIP, put an existing clip ID in remove_shot_ids. Use the
+  supplied clips inventory to resolve the target. The server removes ALL clip nodes
+  belonging to that original clip and their edges. Do not rely on remove_node_ids or your
+  summary to express a whole-clip deletion. Use patch.remove_node_ids for explicit individual
   node deletions and requested exclusive scene cleanup; never delete shared dependencies.
-  Leave remove_shot_ids empty when deleting only a scene/image/video node, keeping its shot.
-- When deleting a shot, REMOVE each continuity claim that refers to it. Do not replace its number with the previous or next surviving number. A surviving shot does not inherit the deleted shot's events or props. Renumber references only if their original target survives.
+  Leave remove_shot_ids empty when deleting only a scene/image/video node, keeping its clip.
+- When deleting a clip, REMOVE each continuity claim that refers to it. Do not replace its number with the previous or next surviving number. A surviving clip does not inherit the deleted clip's events or props. Renumber references only if their original target survives.
 - Keep description and brief/storyboard prompts consistent with the edited request. Do not create/remove brief/storyboard nodes unless explicitly requested; never edit output references or artifact paths.
 - Update generation prompts of affected downstream nodes when changing a character, scene or explicit dependency.
 - Generation uses the detailed config as well as prompt. Keep camera, cast_actions, blocking, scene_specs, start_state, end_state, pose_holds, spatial_lock, costume_lock, continuity_lock, relationship_lock and director_task consistent with the edit, preserving unrelated details. Nested records replace the entire field; include unchanged members.
 - Camera descriptions may name the edited subject or prop. Update those details in config.camera while preserving framing, angle, focus target and camera motion unless the user asks to change them.
-- Whenever shot_action changes, explicitly include every field in that node's review_fields_if_action_changes in upsert_nodes.config. Return each complete field with updated action/prop details, preserving unrelated members. These fields feed generation directly; do not leave hidden old action/prop details. Whenever a scene prompt or scene_specs changes, explicitly include both its complete scene_specs and updated config.prompt. For clips too, return config.prompt when it is listed.
+- Whenever clip_action changes, explicitly include every field in that node's review_fields_if_action_changes in upsert_nodes.config. Return each complete field with updated action/prop details, preserving unrelated members. These fields feed generation directly; do not leave hidden old action/prop details. Whenever a scene prompt or scene_specs changes, explicitly include both its complete scene_specs and updated config.prompt. For clips, return config.prompt when it is listed.
 - Costume/identity settings merge by field like other config. Update costume_lock when the request changes clothing or accessories; otherwise omit it to keep the original value. An action or prop edit alone does not require restating unchanged clothing.
 - positioning_lock, action_lock, occupancy.cast_actions, identity_refs mirrors and scene architecture prompts are derived by the server. Do not author these copies. Only return pose_holds for custom holds; Opening hold / Opening facing entries are rebuilt from start_state.
-- Before finishing each node entry, check its review_fields_if_action_changes list against the config keys you returned. If you changed shot_action, every listed key MUST be present with its complete value, including spatial_lock. Review nested landmarks, poses and cameras for the requested object as well as the main action.
+- Before finishing each node entry, check its review_fields_if_action_changes list against the config keys you returned. If you changed clip_action, every listed key MUST be present with its complete value, including spatial_lock. Review nested landmarks, poses and cameras for the requested object as well as the main action.
 - Pure layout/label edits use edit_documents=false. Never generate media just to edit text.
 """
 
@@ -324,7 +324,7 @@ def _merge_prompt_updates(graph: DesignerExecutionGraph, plan: dict[str, Any]) -
 
 
 def _shot_removal_patch(graph: DesignerExecutionGraph, patch: dict[str, Any], shot_ids: list[str]) -> dict[str, Any]:
-    """Expand explicit whole-shot targets using the original stable identities."""
+    """Expand explicit whole-clip targets using the original stable identities."""
     shots = {node["id"]: node_clip_index(node) for node in graph["nodes"]
              if node_pipeline(node) == "clip"}
     unknown = set(shot_ids) - shots.keys()
@@ -368,7 +368,7 @@ def _sanitize_plan(plan: dict[str, Any] | None) -> dict[str, Any]:
             raise DesignerGraphValidationError(f"Leader returned invalid {key}")
     shot_ids = plan.get("remove_shot_ids", [])
     if not isinstance(shot_ids, list) or any(not isinstance(item, str) or not item.strip() for item in shot_ids):
-        raise DesignerGraphValidationError("remove_shot_ids must be an array of current clip/frame IDs")
+        raise DesignerGraphValidationError("remove_shot_ids must be an array of current clip IDs")
     intent = str(plan.get("intent") or "answer").strip()
     if intent not in {"edit_graph", "refine_node", "answer"}:
         intent = "answer"

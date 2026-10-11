@@ -1332,7 +1332,7 @@ class DesignerGraphToolkit:
                 clip_index=clip_index,
                 prompt=str(text),
                 node_id=str(node.get("id") or ""),
-                shot_action=str(cfg.get("clip_action") or ""),
+                clip_action=str(cfg.get("clip_action") or ""),
                 speech_line=str(cfg.get("speech_line") or ""),
             )
         except Exception:  # noqa: BLE001

@@ -115,7 +115,7 @@ def stamp_wan_prompt_handoff(
     clip_index: int,
     prompt: str,
     node_id: str = "",
-    shot_action: str = "",
+    clip_action: str = "",
     speech_line: str = "",
 ) -> list[str]:
     """Save Wan prompt on this clip only (debug/regenerate).
@@ -124,14 +124,14 @@ def stamp_wan_prompt_handoff(
     """
     notes: list[str] = []
     text = (prompt or "").strip()
-    if not text and not shot_action:
+    if not text and not clip_action:
         return notes
     meta = dict(graph.get("metadata") or {})
     log = dict(meta.get("clip_wan_prompt_log") or {})
     key = str(node_id or f"n_clip_{clip_index}")
     src = next((n for n in _clip_nodes(graph) if str(n.get("id") or "") == key), None)
     src_cfg = src.get("config") if isinstance(src, dict) else {}
-    action = _short_action(shot_action or _action_from_clip_node(src) or text)
+    action = _short_action(clip_action or _action_from_clip_node(src) or text)
     speech = (speech_line or str((src_cfg or {}).get("speech_line") or "")).strip()
     log[key] = {
         "clip_index": int(clip_index or 0),

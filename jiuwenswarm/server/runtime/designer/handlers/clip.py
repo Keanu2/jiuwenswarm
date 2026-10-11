@@ -692,7 +692,7 @@ def build_clip_prompt(
             or []
         )
         shot_row = shot if isinstance(shot, dict) else None
-        # Staging must use the preferred narrative (storyboard), not stale cfg.shot_action.
+        # Staging must use the preferred narrative (storyboard), not stale cfg.clip_action.
         staging_cfg = dict(cfg)
         if action:
             staging_cfg["clip_action"] = action
@@ -1093,7 +1093,7 @@ class ClipNodeHandler:
                     clip_index=clip_index,
                     prompt=str(prompt),
                     node_id=str(node.get("id") or ""),
-                    shot_action=str(cfg.get("clip_action") or ""),
+                    clip_action=str(cfg.get("clip_action") or ""),
                     speech_line=str(cfg.get("speech_line") or ""),
                 )
             except Exception:  # noqa: BLE001

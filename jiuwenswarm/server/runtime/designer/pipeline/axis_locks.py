@@ -460,7 +460,7 @@ def apply_aspect_to_node_config(cfg: dict[str, Any], aspect: dict[str, Any] | No
 
 
 def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
-    """Stamp aspect + style + axis clauses onto scene/frame/clip configs."""
+    """Stamp aspect + style + axis clauses onto scene/clip configs."""
     notes: list[str] = []
     meta = dict(graph.get("metadata") or {})
     analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}

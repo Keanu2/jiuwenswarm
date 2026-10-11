@@ -539,8 +539,8 @@ def _plan_cast_sheets(
 def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[str]:
     """Safety net: every combined-cast node must be an edge source into the DAG.
 
-    If a combined sheet never sources an edge to a scene/shot/compose/storyboard,
-    wire it to ``n_clip_1`` (then scene / compose / legacy frame) and append to that
+    If a combined sheet never sources an edge to a scene/clip/compose/storyboard,
+    wire it to ``n_clip_1`` (then scene / compose) and append to that
     target's ``config.inputs``.
     """
     notes: list[str] = []
