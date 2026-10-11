@@ -217,7 +217,7 @@ def _is_image_file(path: Path, ref: dict | None = None) -> bool:
 
 
 def uploaded_material_image_paths(node: dict | None) -> list[Path]:
-    """Image files the user attached on this node, ahead of generated upstream stills."""
+    """Image files the user attached on this node, ahead of generated upstream images."""
     if not isinstance(node, dict):
         return []
     config = node.get("config") if isinstance(node.get("config"), dict) else {}
@@ -241,7 +241,7 @@ def uploaded_material_image_paths(node: dict | None) -> list[Path]:
 
 
 def user_replaced_output_image(graph: dict | None, node_id: str) -> list[Path]:
-    """The file the user uploaded in place of this node's generated still."""
+    """The file the user uploaded in place of this node's generated image."""
     if not isinstance(graph, dict) or not node_id:
         return []
     for node in graph.get("nodes") or []:
@@ -267,7 +267,7 @@ def user_replaced_output_image(graph: dict | None, node_id: str) -> list[Path]:
 
 
 def apply_uploaded_outputs_to_run(run: dict, graph: dict) -> bool:
-    """Copy a user-uploaded still into the run so a rerun does not restore the old file."""
+    """Copy a user-uploaded image into the run so a rerun does not restore the old file."""
     from jiuwenswarm.common.schema.designer_graph import NODE_STATUS_COMPLETED
 
     if not isinstance(run, dict) or not isinstance(graph, dict):
@@ -597,10 +597,10 @@ def node_ids_output_image_paths(ctx: NodeExecutionContext, node_ids: list[str]) 
     return paths
 
 
-def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
-    """Continuity refs for clip stills: on_screen character spec sheets only (+ optional user refs).
+def collect_compose_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
+    """Continuity refs for clip images: on_screen character spec sheets only (+ optional user refs).
 
-    A file the user attached on this node replaces those generated stills.
+    A file the user attached on this node replaces those generated images.
     Scene consistency comes from scene_specs + prompt handoff text — not prior clip images.
     Never attach scene specs or off-screen cast sheets.
     """

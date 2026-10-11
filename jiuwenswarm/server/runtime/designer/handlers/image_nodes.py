@@ -18,7 +18,7 @@ from jiuwenswarm.common.schema.designer_graph import (
 )
 from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
 from jiuwenswarm.server.runtime.designer.handlers.common import (
-    collect_frame_reference_images,
+    collect_compose_reference_images,
     file_output_ref,
     graph_prompt,
     role_output_image_paths,
@@ -156,7 +156,7 @@ def _shot_frame_prompt(
     names = [str(n).strip() for n in (cast_names or []) if str(n).strip()]
     who = ", ".join(names)
     lead = (
-        f"Cinematic scene spec, one style-consistent still for shot {shot['shot_no']}{timeline}. "
+        f"Cinematic scene spec, one style-consistent image for shot {shot['shot_no']}{timeline}. "
         "Clear composition, this instant only, no comic grid."
     )
     if who:
@@ -179,7 +179,7 @@ def _shot_frame_prompt(
         f"scene change {shot['scene_change'] or 'unspecified'}."
     )
     n_refs = max(1, int(character_ref_count or 1))
-    prior_edit = clip_strategy in {"edit_prior_clip"}
+    prior_edit = clip_strategy in {"edit_prior_image"}
     if has_character and has_scene:
         if prior_edit:
             lead += (
@@ -200,7 +200,7 @@ def _shot_frame_prompt(
         elif n_refs > 1:
             lead += (
                 f" This is image-to-image. The first {n_refs} references are CANONICAL character specs "
-                f"cast sheets{f' for {who}' if who else ''}. COMPOSE a new SCENE MASTER still: "
+                f"cast sheets{f' for {who}' if who else ''}. COMPOSE a new SCENE MASTER image: "
                 "generate the scene AND put every listed on-screen character into it. "
                 "IDENTITY LOCK: same face, hair, body, and costume as each sheet — "
                 "never redesign wardrobe between shots. No empty scene specs."
@@ -208,7 +208,7 @@ def _shot_frame_prompt(
         else:
             lead += (
                 " This is image-to-image. The first reference is the canonical character sheet. "
-                "Compose a SCENE MASTER still: generate the scene and put that character in it. "
+                "Compose a SCENE MASTER image: generate the scene and put that character in it. "
                 "Keep identity and costume from the sheet."
             )
     elif has_character:
@@ -394,7 +394,7 @@ class CharacterDesignNodeHandler:
         combined = bool(cfg.get("combined_cast"))
         max_tries = max(2, int(cfg.get("max_image_calls") or 1))
         user_images = [str(path) for path in wired_user_reference_images(ctx, node)]
-        task = str(cfg.get("reference_still_task") or "").strip()
+        task = str(cfg.get("reference_image_task") or "").strip()
         if task in {"character_specs", "medium_change"}:
             from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
                 still_task_prompt,
@@ -530,7 +530,7 @@ class SceneNodeHandler:
         return _with_card_ref(result, ctx, NODE_ROLE_SCENE)
 
 
-class FrameNodeHandler:
+class ClipSpecImageHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         clip_index = node_clip_index(node)
         storyboard = role_output_text(ctx, NODE_ROLE_STORYBOARD)
@@ -545,7 +545,7 @@ class FrameNodeHandler:
         )
         allow_without_scene = clip_strategy in {
             "compose_from_character_specs",
-            "edit_prior_clip",
+            "edit_prior_image",
         }
         if not all_chars or (not all_scenes and not allow_without_scene):
             missing = []
@@ -558,9 +558,9 @@ class FrameNodeHandler:
                 + " and ".join(missing)
                 + " with this shot. Finish the Character and Scene nodes first."
             )
-        refs_paths = collect_frame_reference_images(ctx, node)
+        refs_paths = collect_compose_reference_images(ctx, node)
         # Never dump every character specs when occupancy is empty/wrong — that paints
-        # off-screen cast into the still. Prefer on_screen identity refs only.
+        # off-screen cast into the image. Prefer on_screen identity refs only.
         preferred_char_nodes = [
             str(x)
             for x in (

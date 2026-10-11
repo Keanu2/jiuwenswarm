@@ -48,7 +48,7 @@ from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
 from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
     reference_led_graph,
     refresh_reference_continuity,
-    reject_removed_reference_stills,
+    reject_removed_reference_images,
 )
 
 
@@ -150,7 +150,8 @@ def _candidate_shots(text: str) -> list[StoryboardShot]:
             continue
         headers = [cell.strip() for cell in lines[0].strip().strip("|").split("|")]
         headers = [
-            "Shot" if cell.casefold() in {"shot", "镜号", "分镜#"}
+            "Shot"
+            if cell.casefold() in {"clip", "shot", "镜号", "分镜#", "片段"}
             else "Timeline" if cell.casefold() in {"timeline", "时间轴"}
             else cell
             for cell in headers
@@ -171,7 +172,9 @@ def _candidate_shots(text: str) -> list[StoryboardShot]:
         return shots
     hierarchical = "\n".join(prose)
     shots = parse_storyboard_shots(hierarchical)
-    if len(shots) != len(re.findall(r"(?im)^\s*###\s+Shot\s+\d+\b", hierarchical)):
+    if len(shots) != len(
+        re.findall(r"(?im)^\s*###\s+(?:Clip|Shot)\s+\d+\b", hierarchical)
+    ):
         raise DesignerGraphValidationError("Could not parse every storyboard shot heading")
     return shots
 
@@ -181,7 +184,7 @@ def validate_shot_topology(graph: DesignerExecutionGraph) -> dict[int, list[Desi
     groups: dict[int, list[DesignerGraphNode]] = {}
     for node in graph.get("nodes", []):
         pipeline = node_pipeline(node)
-        if pipeline not in {"frame", "clip"}:
+        if pipeline != "clip":
             continue
         raw_index = node_config(node).get("clip_index", node_clip_index(node))
         if isinstance(raw_index, bool) or not re.fullmatch(r"[1-9]\d*", str(raw_index).strip()):
@@ -411,7 +414,7 @@ def prepare_document_update(
                 for replacement in edit["replacements"]:
                     if redirects_removed_continuity(replacement["old"], replacement["new"], old_targets, new_targets):
                         raise DesignerGraphValidationError("Remove continuity claims about deleted shots instead of redirecting them to unrelated shots")
-        shot_indices = {node_clip_index(node) for node in nodes.values() if node_pipeline(node) in {"frame", "clip"}}
+        shot_indices = {node_clip_index(node) for node in nodes.values() if node_pipeline(node) == "clip"}
         for key, doc in remaining.items():
             # Deterministic scrub of prior-canvas / stale missing-shot prose before validate.
             texts[key] = scrub_missing_shot_references(texts[key], shot_indices)
@@ -423,7 +426,7 @@ def prepare_document_update(
         removed = {node["id"] for node in before.get("nodes", [])} - nodes.keys()
         reference_led = reference_led_graph(graph)
         if reference_led:
-            reject_removed_reference_stills(graph, removed)
+            reject_removed_reference_images(graph, removed)
         for node in nodes.values():
             cfg = node_config(node)
             for source in (cfg, cfg.get("identity_refs") or {}):
@@ -463,7 +466,7 @@ def prepare_document_update(
                 durations = [timeline_seconds(row["timeline"]) for row in analysis["clips"]]
                 analysis["target_duration_sec"] = float(sum(end - start for start, end in durations))
         if "target_clip_count" in meta:
-            meta["target_clip_count"] = len({node_clip_index(n) for n in nodes.values() if node_pipeline(n) in {"frame", "clip"}})
+            meta["target_clip_count"] = len({node_clip_index(n) for n in nodes.values() if node_pipeline(n) == "clip"})
         _sync_entity_records(before, graph)
         for node in nodes.values():
             cfg = node_config(node)

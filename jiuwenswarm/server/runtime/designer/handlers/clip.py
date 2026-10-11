@@ -46,7 +46,7 @@ def _find_ffmpeg() -> str | None:
         exe = str(imageio_ffmpeg.get_ffmpeg_exe() or "").strip()
         return exe or None
     except Exception:
-        logger.debug("imageio_ffmpeg unavailable for still→mp4", exc_info=True)
+        logger.debug("imageio_ffmpeg unavailable for image→mp4", exc_info=True)
         return None
 
 
@@ -262,10 +262,9 @@ def collect_clip_reference_images(
     clip_index: int = 1,
     node: DesignerGraphNode | None = None,
 ) -> list[Path]:
-    """Wan reference_images: on-screen character specs, then user stills, then the scene spec.
+    """Wan reference_images: on-screen character specs, then user images, then the scene spec.
 
-    Design clips always attach these as R2V refs — never as a single first-frame
-    still. Order matches Wan R2V labeling: character specs are character1…, uploads and
+    Design clips always attach these as R2V refs — never as a single first-frame image. Order matches Wan R2V labeling: character specs are character1…, uploads and
     user-wired image nodes follow, and the scene spec stays last as the
     environment.
     """
@@ -794,7 +793,7 @@ def build_clip_prompt(
     if roster:
         parts.append(
             "User reference slots (original files are visual/audio authority). "
-            "Video and audio are generic references — not the first frame or clip still:\n"
+            "Video and audio are generic references — not the first frame or clip image:\n"
             f"{roster}"
         )
     if user_reference_video_path(graph) is not None:
@@ -1119,7 +1118,7 @@ class ClipNodeHandler:
                 logger.debug("post-clip last-frame stamp failed", exc_info=True)
         except Exception as exc:
             raise RuntimeError(
-                f"Video gen failed for shot {clip_index}; still→mp4 fallback is disabled: {exc}"
+                f"Video gen failed for shot {clip_index}; image→mp4 fallback is disabled: {exc}"
             ) from exc
         output_ref: AssetRef = {
             "kind": NODE_TYPE_VIDEO,

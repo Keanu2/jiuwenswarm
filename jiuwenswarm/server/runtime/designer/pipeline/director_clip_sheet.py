@@ -115,7 +115,7 @@ def stamp_director_clip_sheets(
                 str((by_id.get(c) or {}).get("name") or c) for c in off
             ]
             is_master = (
-                str(shot.get("clip_strategy") or "") == "master_still"
+                str(shot.get("clip_strategy") or "") == "setting_master"
                 or bool(shot.get("ensemble_master"))
             )
             if is_master:
@@ -126,7 +126,7 @@ def stamp_director_clip_sheets(
                 ]
                 shot["camera_framing_rule"] = (
                     f"SETTING MASTER FRAMING: show ALL of {', '.join(ens) or 'ensemble'} "
-                    "clearly readable in this establishing still; bake seats/crowd now."
+                    "clearly readable in this establishing image; bake seats/crowd now."
                 )[:360]
             elif off_names and on_names:
                 shot["camera_framing_rule"] = (

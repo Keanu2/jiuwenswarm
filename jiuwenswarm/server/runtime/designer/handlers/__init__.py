@@ -41,7 +41,7 @@ from jiuwenswarm.server.runtime.designer.handlers.comfyui_nodes import (
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.image_nodes import (
     CharacterDesignNodeHandler,
-    FrameNodeHandler,
+    ClipSpecImageHandler,
     SceneNodeHandler,
 )
 from jiuwenswarm.server.runtime.designer.handlers.media_nodes import (

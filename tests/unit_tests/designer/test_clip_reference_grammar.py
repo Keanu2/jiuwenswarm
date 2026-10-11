@@ -17,9 +17,11 @@ _DURATION_FALSE_POSITIVES = (
     "每一镜头 8 秒",
     "各镜头 3 分钟",
     "每 镜头 12 秒",
+    "每个片段 5 秒",
     "each shot 5 seconds",
     "every shot 4 sec",
     "per shot 6 s",
+    "each clip 5 seconds",
     "each shot 2 minutes",
     "镜头 5 秒的节奏",
     "shot 7 seconds of hold",
@@ -29,12 +31,16 @@ _DURATION_FALSE_POSITIVES = (
 _REAL_REFERENCES = (
     ("### 镜头 3｜开场", {3}),
     ("**Shot 2 | close**", {2}),
+    ("### Clip 5｜settle", {5}),
+    ("片段 6：收束", {6}),
     ("分镜 4：推进", {4}),
     ("shot #11 holds", {11}),
+    ("clip #12 holds", {12}),
     ("镜头1→镜头2→镜头3", {1, 2, 3}),
     ("BGM: shot 1 -> shot 2 -> shot 4", {1, 2, 4}),
     ("承接镜头 2 的站位", {2}),
     ("continuing from shot 8", {8}),
+    ("continuing from clip 9", {9}),
 )
 
 

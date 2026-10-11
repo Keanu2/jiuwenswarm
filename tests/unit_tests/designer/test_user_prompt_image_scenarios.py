@@ -94,7 +94,7 @@ def _cfg(*, role: str, user_prompt: str, stale: str = _STALE) -> dict:
 
 
 @pytest.mark.parametrize("index", range(_EDIT_N))
-def test_still_user_prompt_resolve_scenario(index: int) -> None:
+def test_image_user_prompt_resolve_scenario(index: int) -> None:
     detail = _pick(_DETAILS, index)
     role = _pick(_ROLES, index, 3)
     user = _user_plate(detail)
@@ -106,7 +106,7 @@ def test_still_user_prompt_resolve_scenario(index: int) -> None:
 
 
 @pytest.mark.parametrize("index", range(_PIPELINE_N))
-def test_still_user_prompt_pipeline_scenario(index: int) -> None:
+def test_image_user_prompt_pipeline_scenario(index: int) -> None:
     detail = _pick(_DETAILS, index, 1)
     role = _pick(_ROLES, index, 5)
     user = _user_plate(detail)
@@ -125,7 +125,7 @@ def test_still_user_prompt_pipeline_scenario(index: int) -> None:
     assert (cfg.get("regenerate_packet") or {}).get("prompt") == user
     assert detail in str(cfg.get("last_wan_prompt") or "")
     assert (cfg.get("generate") or {}).get("prompt_origin") == "user"
-    assert "still_user_authority" in (cfg.get("director_still_prompt_notes") or [])
+    assert "image_user_authority" in (cfg.get("director_image_prompt_notes") or [])
 
     # Second regen: stale generate cannot poison authority.
     cfg["generate"] = {"prompt": _STALE, "prompt_origin": "user"}
@@ -134,7 +134,7 @@ def test_still_user_prompt_pipeline_scenario(index: int) -> None:
     assert cfg.get("user_edit_prompt") == user
 
 
-def test_still_llm_prompt_passes_without_rewrite() -> None:
+def test_image_llm_prompt_passes_without_rewrite() -> None:
     """No user_edit → leaf LLM text is sent as-is (no ensure_still compose)."""
     llm = _user_plate("red wagon dashboard with blue air-freshener")
     cfg = {
@@ -147,10 +147,10 @@ def test_still_llm_prompt_passes_without_rewrite() -> None:
     approved = apply_image_call_locks(llm, cfg=cfg, graph={})
     assert approved == llm
     assert "red wagon" in approved
-    assert "still_llm_authority" in (cfg.get("director_still_prompt_notes") or [])
+    assert "image_llm_authority" in (cfg.get("director_image_prompt_notes") or [])
 
 
-def test_still_user_edit_wins_without_origin_flag() -> None:
+def test_image_user_edit_wins_without_origin_flag() -> None:
     user = _user_plate("cream-and-teal canopy")
     cfg = {
         "role": "scene",

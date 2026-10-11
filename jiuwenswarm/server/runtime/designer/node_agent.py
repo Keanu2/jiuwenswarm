@@ -49,7 +49,7 @@ _AUDIO_URI_SUFFIXES = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
 _MEDIA_URI_SUFFIXES = _IMAGE_URI_SUFFIXES + _VIDEO_URI_SUFFIXES + _AUDIO_URI_SUFFIXES
 
 # Role → required media family for handler materialization.
-# Clip/compose must not treat a character/scene image as "done" (agents often attach stills).
+# Clip/compose must not treat a character/scene image as "done" (agents often attach images).
 _ROLE_REQUIRED_MEDIA: dict[str, str] = {
     "character": "image",
     "character": "image",
@@ -420,7 +420,7 @@ def flatten_template_prompt(template: Any, *, language: str = "cn") -> str:
 
 
 _DESIGNER_MEMBERS = frozenset(
-    {"leader", "character", "scene", "storyboard", "frame", "clip"}
+    {"leader", "character", "scene", "storyboard", "clip"}
 )
 
 
@@ -640,7 +640,7 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "starts them after this node completes. Only designer_node_run a node you "
         "just added with designer_graph_patch.\n"
         "TOOLS (not heuristics): Use call_model for text reasoning; call_image_model "
-        "for stills (configured image model); call_video_model for clips (configured "
+        "for images (configured image model); call_video_model for clips (configured "
         "video model); ffmpeg_compose / mix_audio for film assemble; read_upstream "
         "for prior outputs. Prefer tool-produced file URIs in designer_node_complete.\n"
         "LOCKS (must keep in every tool prompt before image/video calls): "
@@ -910,7 +910,7 @@ class DesignerGraphToolkit:
                 )
 
                 refs.extend(str(p) for p in node_ids_output_image_paths(self.ctx, nids))
-        # Toolbar user edits win over leaf narration before the still call.
+        # Toolbar user edits win over leaf narration before the image call.
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
                 resolve_user_origin_prompt,
@@ -1734,7 +1734,7 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
             make_tool(
                 "call_image_model",
                 (
-                    "Generate a still via the configured image model. "
+                    "Generate an image via the configured image model. "
                     + image_tool_hint
                 ),
                 {
@@ -1792,7 +1792,7 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
                         "duration": {"type": "integer"},
                         "first_frame": {
                             "type": "string",
-                            "description": "Optional legacy still. Clip-as-shot uses reference images, not a first frame.",
+                            "description": "Optional legacy image. Clip-as-shot uses reference images, not a first frame.",
                         },
                     },
                     "required": ["prompt"],

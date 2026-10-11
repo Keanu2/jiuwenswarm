@@ -19,11 +19,11 @@ from jiuwenswarm.common.schema.designer_graph import (
 )
 
 _SHOT_REFERENCE = re.compile(
-    r"(?:\bshot\s*#?\s*|分镜\s*#?\s*|镜头\s*#?\s*)([1-9]\d*)(?![0-9A-Za-z_])",
+    r"(?:\b(?:clip|shot)\s*#?\s*|分镜\s*#?\s*|镜头\s*#?\s*|片段\s*#?\s*)([1-9]\d*)(?![0-9A-Za-z_])",
     re.I,
 )
 _CONTINUITY_REFERENCE = re.compile(
-    r"(?:承接|延续|接续|continu(?:ing|es?)\s+from)\s*(?:shot|分镜|镜头)\s*#?\s*([1-9]\d*)",
+    r"(?:承接|延续|接续|continu(?:ing|es?)\s+from)\s*(?:clip|shot|分镜|镜头|片段)\s*#?\s*([1-9]\d*)",
     re.I,
 )
 # Duration units after a captured number — not a shot index (e.g. 每个镜头 5 秒).
@@ -44,7 +44,7 @@ _DISTRIBUTIVE_BEFORE = re.compile(
 )
 _REMOVED_SHOT_MARKER = re.compile(r"\[\[REMOVED_SHOT:[^\]]+\]\]")
 _SHOT_HEADING_TITLE = re.compile(
-    r"(?:shot|分镜|镜头)\s*#?\s*([1-9]\d*)\b.*",
+    r"(?:clip|shot|分镜|镜头|片段)\s*#?\s*([1-9]\d*)\b.*",
     re.I,
 )
 

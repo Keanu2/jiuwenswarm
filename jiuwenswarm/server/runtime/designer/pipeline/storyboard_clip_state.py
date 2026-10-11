@@ -115,7 +115,7 @@ def _norm_phrase(text: str) -> str:
 
 
 def _is_action_restatement(text: str, *actions: str) -> bool:
-    """True when text is the previous shot's motion, not a still result."""
+    """True when text is the previous shot's motion, not an image result."""
     raw = re.sub(r"\s+", " ", str(text or "").strip().lower())
     if "after this shot" in raw or "already past:" in raw:
         return True

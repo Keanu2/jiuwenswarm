@@ -280,7 +280,7 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
         )
     if action_done:
         lines.append(
-            "- Prior action is already finished. Open on the resulting still, then play only this shot."
+            "- Prior action is already finished. Open on the resulting image, then play only this shot."
         )
     speech_done = str(
         end.get("speech_done") or cfg.get("previous_clip_speech") or ""

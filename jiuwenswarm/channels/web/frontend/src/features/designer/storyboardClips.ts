@@ -16,7 +16,7 @@ export type StoryboardClip = {
 };
 
 const FIELD_ALIASES: Record<keyof StoryboardClip, string[]> = {
-  clip_no: ['Clip', 'Shot', '镜号'],
+  clip_no: ['Clip', 'Shot', '镜号', '片段', '分镜#'],
   timeline: ['Timeline', '时间轴'],
   camera: ['Camera', '镜头视角', '景别'],
   move: ['Move', '运镜'],
@@ -84,7 +84,7 @@ export function parseStoryboardClips(text: string): StoryboardClip[] {
     if (!cells.some(Boolean)) continue;
     if (isSeparator(cells)) continue;
     const joined = cells.join('');
-    if (!headerSeen && /clip|shot|timeline|镜号|时间轴/i.test(joined)) {
+    if (!headerSeen && /clip|shot|timeline|镜号|片段|分镜|时间轴/i.test(joined)) {
       headerSeen = true;
       fieldMap = headerFieldMap(cells);
       continue;

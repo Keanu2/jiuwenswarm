@@ -886,7 +886,7 @@ async def test_clip_passes_user_video_as_file_not_first_frame(
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
     from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 
-    frame = tmp_path / "clip_still.png"
+    frame = tmp_path / "clip_image.png"
     video = tmp_path / "ref.mp4"
     out = tmp_path / "clip.mp4"
     frame.write_bytes(_png_bytes())

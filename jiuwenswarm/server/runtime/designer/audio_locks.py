@@ -23,7 +23,7 @@ def configured_image_gen_model() -> str:
 
 
 def image_gen_is_minimax() -> bool:
-    """True when the configured stills backend is MiniMax image-01 / live."""
+    """True when the configured image backend is MiniMax image-01 / live."""
     from jiuwenswarm.agents.harness.common.tools.gen_toolkits import MINIMAX
     from jiuwenswarm.server.runtime.designer.media_generation import slot_settings
 
@@ -32,7 +32,7 @@ def image_gen_is_minimax() -> bool:
 
 
 def image_prompt_limit_guidance() -> str:
-    """LLM-facing stills prompt length rule from the configured VISUAL_GEN backend."""
+    """LLM-facing image prompt length rule from the configured VISUAL_GEN backend."""
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
             image_prompt_limit_guidance as _guide,
@@ -42,7 +42,7 @@ def image_prompt_limit_guidance() -> str:
     except Exception:  # noqa: BLE001
         return (
             "IMAGE PROMPT LIMIT: follow the configured image backend's documented "
-            "prompt length; write a dense shot-ready stills prompt."
+            "prompt length; write a dense shot-ready image prompt."
         )
 
 

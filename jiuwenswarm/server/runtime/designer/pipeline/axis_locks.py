@@ -4,7 +4,7 @@
 Structural locks derived from analysis blocking / cast (not an LLM substitute):
   - identity under occlusion (partially hidden person must keep sex/age/hair)
   - 180-degree screen L/R (camera pan must not flip who sits left vs right)
-  - same aspect ratio on every still and clip
+  - same aspect ratio on every image and clip
   - landmark placements stay put; extras do not spawn/vanish
 """
 
@@ -52,19 +52,19 @@ def infer_aspect_lock(prompt: str) -> dict[str, str]:
     if _VERTICAL_RE.search(text):
         ratio = "9:16"
         image_size = "576x1024"
-        rule = "EVERY still and clip MUST be 9:16 portrait. Do not letterbox or crop to 16:9."
+        rule = "EVERY image and clip MUST be 9:16 portrait. Do not letterbox or crop to 16:9."
     elif _SQUARE_RE.search(text):
         ratio = "1:1"
         image_size = "1K"
-        rule = "EVERY still and clip MUST be 1:1. Do not change aspect mid-film."
+        rule = "EVERY image and clip MUST be 1:1. Do not change aspect mid-film."
     elif _ULTRAWIDE_RE.search(text):
         ratio = "21:9"
         image_size = "1792x768"
-        rule = "EVERY still and clip MUST stay 21:9. Do not crop to 16:9."
+        rule = "EVERY image and clip MUST stay 21:9. Do not crop to 16:9."
     else:
         ratio = "16:9"
         image_size = "1024x576"
-        rule = "EVERY still and clip MUST be 16:9 landscape. Do not square-crop or switch to 9:16."
+        rule = "EVERY image and clip MUST be 16:9 landscape. Do not square-crop or switch to 9:16."
     asked = resolution_mentioned(text)
     lock = {
         "ratio": ratio,
@@ -195,7 +195,7 @@ def infer_time_of_day_lock(prompt: str = "", scene_desc: str = "") -> dict[str, 
         "time_of_day": tod,
         "lighting": light,
         "rule": (
-            f"TIME OF DAY LOCK={tod}: every same-setting still/clip must keep this "
+            f"TIME OF DAY LOCK={tod}: every same-setting image/clip must keep this "
             "time-of-day and lighting direction — no day↔night jump mid-scene."
         ),
     }
@@ -541,7 +541,7 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
         cfg["aspect_lock"] = aspect
         if style:
             cfg["style_lock"] = style
-        # Per-shot or film-wide time-of-day lock on every still/clip.
+        # Per-shot or film-wide time-of-day lock on every image/clip.
         tod_node = (
             (shots.get(idx) or {}).get("time_of_day_lock")
             if idx and isinstance((shots.get(idx) or {}).get("time_of_day_lock"), dict)

@@ -11,7 +11,10 @@ from typing import TypedDict
 from jiuwenswarm.common.schema.designer_graph import DesignerGraphValidationError
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-_SHOT = re.compile(r"(?:shot|分镜|镜头)\s*#?\s*([1-9]\d*)(?:\s*[:：—-]\s*.+)?", re.I)
+_SHOT = re.compile(
+    r"(?:clip|shot|分镜|镜头|片段)\s*#?\s*([1-9]\d*)(?:\s*[:：—-]\s*.+)?",
+    re.I,
+)
 _FIELD = re.compile(r"^\s*[-*+]\s+(?:\*\*)?([^:：*]+?)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
 
 

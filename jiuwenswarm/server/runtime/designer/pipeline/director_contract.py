@@ -64,7 +64,7 @@ _DURATION_RE = re.compile(
 
 # One shot == one scene spec + one clip in this pipeline, so "N 个关键帧/分镜" is the
 # same contract as "N clips".
-_SHOT_UNIT_CN = r"(?:分镜|镜头|关键帧|帧|幕)"
+_SHOT_UNIT_CN = r"(?:分镜|镜头|片段|关键帧|帧|幕)"
 _THREE_SHOT_RE = re.compile(
     r"\bthree[- ]shot\b|\b3[- ]shot\b|\bthree\s+shots?\b|"
     rf"三分镜|三个?{_SHOT_UNIT_CN}|3\s*个?{_SHOT_UNIT_CN}",
@@ -100,11 +100,11 @@ _BEAT_CUE_RE = re.compile(
     r"画面(?:切换|切至|切到|转向|转为)|镜头(?:切换|切至|切到|转向|拉近|推近|拉远|摇向)|"
     r"下一(?:幕|镜|个镜头)|"
     r"\band then\b|\bafter that\b|\bfinally\b|\bmeanwhile\b|\bcut(?:s)?\s+to\b|"
-    r"\bpan(?:s)?\s+to\b|\bnext\s+(?:shot|scene|beat)\b",
+    r"\bpan(?:s)?\s+to\b|\bnext\s+(?:clip|shot|scene|beat)\b",
     re.I,
 )
 _SHOT_LABEL_RE = re.compile(
-    r"(?:^|[\n,，。；;])\s*(?:镜头|分镜|shot)\s*[#no.：:]*\s*(?P<n>\d{1,2})\b",
+    r"(?:^|[\n,，。；;])\s*(?:镜头|分镜|片段|clip|shot)\s*[#no.：:]*\s*(?P<n>\d{1,2})\b",
     re.I | re.M,
 )
 

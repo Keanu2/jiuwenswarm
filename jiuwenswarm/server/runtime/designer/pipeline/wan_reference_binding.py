@@ -5,7 +5,7 @@ Alibaba Wan R2V maps ``reference_urls`` order → ``character1``, ``character2``
 (each person ref = one subject). Every clip, including the first of a setting:
 
   On-screen character spec sheets first (character1…), then the scene specs last
-  as the room. No composed still and no scene-spec as first_frame.
+  as the room. No composed image and no scene-spec as first_frame.
   Prior-clip last frames are not attached.
 """
 
@@ -110,7 +110,7 @@ def build_wan_reference_binding(
     ref_i = 1
     if prior_last_frame and n_hist > 0:
         lines.append(
-            f"- Prior ending stills are not attached ({n_hist} kept as story state only). "
+            f"- Prior ending images are not attached ({n_hist} kept as story state only). "
             "This shot continues in the same room."
         )
 

@@ -214,7 +214,7 @@ def _shot_positions(graph: DesignerExecutionGraph) -> dict[str, ShotPosition]:
     return {
         node["id"]: {"index": node_clip_index(node), "timeline": node_config(node)["timeline"]}
         for node in graph["nodes"]
-        if node_pipeline(node) in {"frame", "clip"}
+        if node_pipeline(node) == "clip"
     }
 
 
@@ -254,7 +254,7 @@ def document_edit_context(
     old_positions, new_positions = _shot_positions(before), _shot_positions(candidate)
     targets = {
         node_clip_index(node): node["id"]
-        for role in ("frame", "clip")
+        for role in ("clip",)
         for node in before["nodes"] if node_pipeline(node) == role
     }
     reference_targets = {

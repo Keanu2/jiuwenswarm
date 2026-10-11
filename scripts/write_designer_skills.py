@@ -32,7 +32,7 @@ Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard
 3. Storyboard must emit timed shots with camera, action, and shot prompts.
 4. Each shot is an R2V clip from on-screen character specs + scene specs.
 5. Compose/final stitches clips; honor audio policy from the brief.
-6. Named director styles live in `metadata.video_style` (e.g. `final_frame_reverse` = reference still is the LAST 1s endpoint; reverse-form the action; see `skills/styles/`).
+6. Named director styles live in `metadata.video_style` (e.g. `final_frame_reverse` = reference image is the LAST 1s endpoint; reverse-form the action; see `skills/styles/`).
 
 ## Audio policy
 - If user says **no sound / silent / mute / 无声**: set `audio_intent.policy=silent`; do not add speech or music nodes; tell clip/compose agents to avoid implied dialogue.
@@ -50,11 +50,11 @@ Cinematic lighting, consistent identity, readable action, configured resolution 
 """,
     "image": """---
 name: designer-scenario-image
-description: Still-image / poster / illustration pipeline.
+description: Image / poster / illustration pipeline.
 ---
 
 # Image Scenario Skill
-Brief → concept → generate/edit → refine → final still.
+Brief → concept → generate/edit → refine → final image.
 Prefer 1K square unless user requests another aspect. Use subject guides for humans/products/vehicles.
 """,
     "music": """---
@@ -139,7 +139,7 @@ Emit a timed camera table. Each shot needs: timeline, camera, move, action, scen
 """,
     "clip": """# Clip Agent Skill
 Generate shot video via **R2V** (on-screen character specs + scene specs). Keep duration short. Honor silent policy (no implied dialogue) or leave room for later speech mix.
-When `metadata.video_style=final_frame_reverse`: this shot sits on an arc that ENDS on the user reference / classic still — decisive motion early, settle late, motif-motivated continuity; never turntable a finished pose.
+When `metadata.video_style=final_frame_reverse`: this shot sits on an arc that ENDS on the user reference / classic image — decisive motion early, settle late, motif-motivated continuity; never turntable a finished pose.
 """,
     "compose": """# Compose / Final Agent Skill
 Stitch clips, normalize resolution, apply audio mix policy: silent → no tracks; speech → voiceover; music → bed; both → duck music under speech.
@@ -180,7 +180,7 @@ DesignSwarm 视频生成风格之一（`video_style=final_frame_reverse`）。
 4. 每次切镜必须有视觉母题转场：烟尘、雨丝、旗布、羽毛、圣光、布料、枪火、人物擦镜、栏杆线条、倒影、云雾等。
 5. 节奏：前段推进冲击与空间穿越；中段关键特写打点；后段减速归位；最后 1 秒定格对齐参考图。
 6. 最后一枚场景规格 + 最后一镜 clip 必须收束到参考构图（姿态、取景、光线）。
-7. 管线用每镜 R2V：角色规格板 + 空场景规格板；整片弧线的终点才是用户参考定格。
+7. 管线用每镜 R2V：角色规格 + 空场景规格；整片弧线的终点才是用户参考定格。
 
 ## Brief / Storyboard 写法
 

@@ -13,7 +13,7 @@ from jiuwenswarm.server.runtime.gateway_adapter.designer_adapter import (
 )
 
 
-def test_uploaded_still_replaces_the_generated_one(tmp_path) -> None:
+def test_uploaded_image_replaces_the_generated_one(tmp_path) -> None:
     old = tmp_path / "generated.png"
     uploaded = tmp_path / "uploaded.png"
     old.write_bytes(b"old")
@@ -112,9 +112,9 @@ def test_upload_uri_wins_over_a_stale_generated_output(tmp_path) -> None:
 
 
 def test_material_upload_is_the_clip_input(tmp_path) -> None:
-    clip_still = tmp_path / "clip_still.png"
+    clip_image = tmp_path / "clip_image.png"
     material = tmp_path / "material.png"
-    clip_still.write_bytes(b"kf")
+    clip_image.write_bytes(b"kf")
     material.write_bytes(b"mat")
     graph = {
         "nodes": [
@@ -124,7 +124,7 @@ def test_material_upload_is_the_clip_input(tmp_path) -> None:
                 "config": {"role": "clip", "clip_index": 1},
                 "output_ref": {
                     "kind": "image",
-                    "uri": clip_still.resolve().as_uri(),
+                    "uri": clip_image.resolve().as_uri(),
                     "mime_type": "image/png",
                 },
             },
@@ -159,10 +159,10 @@ def test_material_upload_is_the_clip_input(tmp_path) -> None:
 
     refs = collect_clip_reference_images(ctx, 1, clip)
     assert refs == [material.resolve()]
-    assert clip_still.resolve() not in refs
+    assert clip_image.resolve() not in refs
 
 
-def test_user_stills_join_r2v_refs_without_replacing_them(tmp_path) -> None:
+def test_user_images_join_r2v_refs_without_replacing_them(tmp_path) -> None:
     character_spec = tmp_path / "character_spec.png"
     scene = tmp_path / "scene.png"
     first = tmp_path / "extra-a.png"

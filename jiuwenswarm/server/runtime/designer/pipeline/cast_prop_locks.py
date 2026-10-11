@@ -4,7 +4,7 @@
 General rules (no scene-genre branches):
   1. Brand mascots / logos are props — never featured human heroes.
   2. Props appear only as on-device UI (phone/laptop/app), not free-flying bodies.
-  3. setting_id change ⇒ compose_from_character_specs; same setting ⇒ edit_prior_clip.
+  3. setting_id change ⇒ compose_from_character_specs; same setting ⇒ edit_prior_image.
   4. Within a setting, humans who did not exit stay in occupancy.must_appear.
   5. New setting starts from this shot's storyboard cast (no cross-set occupancy leak).
 """
@@ -403,14 +403,14 @@ def enforce_setting_transitions(analysis: dict[str, Any]) -> list[str]:
         if not prev_set or changed:
             if str(shot.get("clip_strategy") or "") != "compose_from_character_specs":
                 notes.append(
-                    f"shot{idx}: setting {sid} first KF forced compose_from_character_specs"
+                    f"shot{idx}: setting {sid} first clip forced compose_from_character_specs"
                 )
             shot["clip_strategy"] = "compose_from_character_specs"
             shot["same_setting_prior_edit"] = False
             shot["compose_setting_master"] = True
             shot["ensemble_master"] = False
         else:
-            shot["clip_strategy"] = "edit_prior_clip"
+            shot["clip_strategy"] = "edit_prior_image"
             shot["same_setting_prior_edit"] = True
             shot["compose_setting_master"] = False
         prev_set = sid

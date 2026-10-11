@@ -230,7 +230,7 @@ async def test_clip_handler_sends_character_and_scene_as_references(
     )
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
 
-    frame = tmp_path / "clip_still.png"
+    frame = tmp_path / "clip_image.png"
     character = tmp_path / "character.png"
     scene = tmp_path / "scene.png"
     story = tmp_path / "storyboard.md"
@@ -392,7 +392,7 @@ async def test_generate_clip_video_raises_on_provider_error(
 
 
 @pytest.mark.asyncio
-async def test_clip_handler_allows_text_only_when_notes_replace_stills(
+async def test_clip_handler_allows_text_only_when_notes_replace_images(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

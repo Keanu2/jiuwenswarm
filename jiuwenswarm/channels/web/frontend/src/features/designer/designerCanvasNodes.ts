@@ -336,7 +336,7 @@ function nodeColumnKind(node: DesignerGraphNode): 'scene' | 'clip' | null {
   const pipeline = String(config.pipeline ?? '');
   const role = String(config.role ?? '');
   const label = String(node.label ?? '');
-  const clipLabel = /\bclip\b/i.test(label);
+  const clipLabel = /\b(clip|shot|keyframe)\b/i.test(label);
   if (
     pipeline === 'clip' ||
     role === 'clip' ||
@@ -347,7 +347,7 @@ function nodeColumnKind(node: DesignerGraphNode): 'scene' | 'clip' | null {
   if (
     pipeline === 'scene' ||
     role === 'scene' ||
-    (node.type === 'image' && /scene/i.test(label) && !/clip/i.test(label))
+    (node.type === 'image' && /scene/i.test(label) && !/\b(clip|shot|keyframe)\b/i.test(label))
   ) {
     return 'scene';
   }

@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 _GENERIC_SHOT_TITLE = re.compile(
-    r"(?i)^(clip|beat|scene|focus|untitled)\s*\d*$"
+    r"(?i)^(clip|shot|beat|scene|keyframe|focus|untitled)\s*\d*$"
 )
 _LEADING_FILLER_WORDS = {
     # Structural request wrappers (any story) — not topic nouns.

@@ -46,7 +46,7 @@ def build_movie_consistency_guide(
         "that master (reframe/zoom/pose/exit) — do not erase people still in must_appear. "
         "New setting_id → new master. Character specs = identity only (few Image-N); no scene specs invented. "
         "Partial occlusion of a placed person still = SAME identity (sex/age/hair/wardrobe).\n"
-        "7) LANDMARKS: furniture/landmarks keep place vs the setting master still; "
+        "7) LANDMARKS: furniture/landmarks keep place vs the setting master image; "
         "do not teleport a landmark to mid-room or invent chairs.\n"
         "8) ASPECT: one ratio for the whole film (see aspect_lock); never square-crop mid-film.\n"
         "9) REFERENCE BINDING: when images are attached, prompt MUST name Image 1, Image 2, … "

@@ -14,7 +14,7 @@ Compose a short cinematic pipeline: Brief → Character (**character_specs**) �
 3. Storyboard must emit a timed clip table: camera, action, and clip prompts per row.
 4. Each row becomes one R2V **clip** from on-screen **character_specs** + **scene_specs**.
 5. Compose/final stitches clips; honor audio policy from the brief.
-6. Named director styles live in `metadata.video_style` (e.g. `final_frame_reverse` = reference still is the LAST ~1s endpoint of the arc; reverse-form the action; see `skills/styles/`).
+6. Named director styles live in `metadata.video_style` (e.g. `final_frame_reverse` = reference image is the LAST ~1s endpoint of the arc; reverse-form the action; see `skills/styles/`).
 7. Default path is **clip** agents only — no separate frame/keyframe leaf in the graph.
 
 ## Consistency

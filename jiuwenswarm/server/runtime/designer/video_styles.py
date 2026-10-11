@@ -20,12 +20,12 @@ VIDEO_STYLES: dict[str, dict[str, Any]] = {
     VIDEO_STYLE_FINAL_FRAME_REVERSE: {
         "id": VIDEO_STYLE_FINAL_FRAME_REVERSE,
         "label": "终帧倒推 · 定格前最后几秒",
-        "label_en": "Final-frame reverse (last seconds before the still)",
+        "label_en": "Final-frame reverse (last seconds before the image)",
         "duration_hint_sec": "10-15",
         # The style is multi-beat by definition (rule: never a pure single take).
         "min_shots": 4,
         "summary": (
-            "Treat the user reference / classic still as the LAST 1s endpoint. "
+            "Treat the user reference / classic image as the LAST 1s endpoint. "
             "Reverse-engineer the action that forms that composition; "
             "pseudo-oner push + key close-ups; motif-driven transitions; "
             "speed early, settle late, freeze on the reference framing."
@@ -61,10 +61,14 @@ VIDEO_STYLES: dict[str, dict[str, Any]] = {
             "oil painting",
             "masterpiece",
             "homage to",
-            "endpoint still",
-            "still as endpoint",
-            "before the still",
-            "resolve into the still",
+            "endpoint still",  # legacy user phrasing
+            "still as endpoint",  # legacy user phrasing
+            "before the still",  # legacy user phrasing
+            "resolve into the still",  # legacy user phrasing
+            "endpoint image",
+            "image as endpoint",
+            "before the image",
+            "resolve into the image",
         ),
     },
     VIDEO_STYLE_DEFAULT_CINEMATIC: {
@@ -133,11 +137,11 @@ def detect_video_style(
     if forced_id in VIDEO_STYLES:
         return forced_id
     blob = (prompt or "").lower()
-    # Prefer the reverse style when classic-still language is present.
+    # Prefer the reverse style when classic-image language is present.
     for cue in VIDEO_STYLES[VIDEO_STYLE_FINAL_FRAME_REVERSE]["cues"]:
         if cue.lower() in blob:
             return VIDEO_STYLE_FINAL_FRAME_REVERSE
-    # Uploaded still + short-form language often means "animate into this pose".
+    # Uploaded image + short-form language often means "animate into this pose".
     if has_reference_images and any(
         k in blob
         for k in (
@@ -259,16 +263,16 @@ def final_frame_reverse_playbook() -> str:
     """Director playbook injected into Director / Storyboard / Clip when active."""
     return """
 ## Video style: final_frame_reverse（终帧倒推）
-User reference / classic still = LAST ~1s ENDPOINT, not the opening frame.
+User reference / classic image = LAST ~1s ENDPOINT, not the opening frame.
 Reverse-engineer the final few seconds BEFORE that composition locks.
 
 Formula:
-  endpoint still → action chain that forms it → pseudo-oner spatial push →
+  endpoint image → action chain that forms it → pseudo-oner spatial push →
   key close-ups (face / hands / prop) → motif-driven transitions →
   last second resolves into the reference framing and freezes.
 
 Rules:
-1. Do NOT orbit a finished still as a 3D model turntable.
+1. Do NOT orbit a finished image as a 3D model turntable.
 2. Not pure one-take: long push builds space/energy; cut to close-ups for emotion/action/prop.
 3. Every cut needs a visual carrier (smoke, rain, cloth, feather, light shaft, muzzle flash,
    wipe-by body, rail line, reflection, fog) — never an unmotivated hard cut list.
@@ -279,7 +283,7 @@ Rules:
    negative prompts → one execution principle.
 
 Negatives: static showcase orbit, vague "cinematic" with no action, all-slow drift,
-unmotivated cuts, ending that misses the reference still.
+unmotivated cuts, ending that misses the reference image.
 """.strip()
 
 
@@ -290,14 +294,14 @@ def video_style_clause(style_id: str, *, for_clip: bool = False) -> str:
     if for_clip:
         return (
             "VIDEO STYLE LOCK (final_frame_reverse): This shot is part of a 10–15s arc "
-            "that ENDS on the user reference / classic still. Animate toward that final "
+            "that ENDS on the user reference / classic image. Animate toward that final "
             "composition — do not orbit a finished pose. Prefer decisive motion early; "
             "if this is a late shot, decelerate and settle. Use motif-motivated continuity "
             "from the prior beat (cloth/smoke/light/reflection wipe). "
             "No turntable showcase. No subtitles."
         )
     return (
-        "VIDEO STYLE LOCK (final_frame_reverse): Reference still = final 1s endpoint. "
+        "VIDEO STYLE LOCK (final_frame_reverse): Reference image = final 1s endpoint. "
         "Author beats that reverse-form that framing; pseudo-oner + key close-ups; "
         "motif transitions; speed→settle→freeze on reference composition."
     )

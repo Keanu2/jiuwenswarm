@@ -105,9 +105,9 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
         shot["continuity_lock"] = lock
         shot_locks[idx] = lock
         clause = _continuity_prompt_clause(lock)
-        kf = str(shot.get("clip_prompt") or action)
-        if clause and "CONSISTENCY LOCK" not in kf:
-            shot["clip_prompt"] = (kf[:500] + clause)[:700]
+        prompt = str(shot.get("clip_prompt") or action)
+        if clause and "CONSISTENCY LOCK" not in prompt:
+            shot["clip_prompt"] = (prompt[:500] + clause)[:700]
             notes.append(f"analysis shot {idx}: consistency lock stamped")
 
     if analysis.get("clips"):
@@ -1460,7 +1460,7 @@ class Director:
                 "First shot of each setting: "
                 "clip_strategy=compose_from_character_specs — composer places ONLY "
                 "on_screen cast with cast_actions (who is doing what). "
-                "Later same setting: edit_prior_clip (architecture locked); "
+                "Later same setting: edit_prior_image (architecture locked); "
                 "storyboard updates on_screen / offscreen / cast_actions. "
                 "offscreen = in this scene but not in frame; never draw them. "
                 "Cast absent from a setting must not appear there. "
@@ -1849,9 +1849,9 @@ class Director:
                 "Honor explicit N-shot / N分镜 as a HARD ceiling. "
                 "First clip of each setting: compose_from_character_specs with on_screen + "
                 "cast_actions (composer decides who appears and what they are doing). "
-                "Later same setting: edit_prior_clip (architecture locked). "
+                "Later same setting: edit_prior_image (architecture locked). "
                 "offscreen stay out of frame. "
-                "Scene specs ARE required — environment-only Qwen stills. "
+                "Scene specs ARE required — environment-only Qwen images. "
                 "Each shot: clip_index, timeline, camera, action, on_screen, offscreen, "
                 "cast_actions, featured_cast_ids, ensemble_cast_ids, setting_id, "
                 "clip_prompt, exiting_character_ids, clip_strategy, "
@@ -2211,7 +2211,7 @@ class Director:
 
         # Prior clip: short consistency note only (never paste full prior generate.prompt).
         prior_clip_action = str(cfg.get("previous_clip_action") or "").strip()
-        prior_kf_prompt = str(cfg.get("previous_clip_prompt") or "").strip()
+        prior_prompt = str(cfg.get("previous_clip_prompt") or "").strip()
         if not prior_clip_action and clip_index > 1:
             prev_id = prior_clip_id or f"n_clip_{clip_index - 1}"
             for n in graph.get("nodes") or []:
@@ -2223,23 +2223,23 @@ class Director:
                     or pcfg.get("character_action")
                     or ""
                 ).strip()
-                prior_kf_prompt = str(
+                prior_prompt = str(
                     pcfg.get("last_approved_prompt")
                     or (pcfg.get("generate") or {}).get("prompt")
                     or ""
                 ).strip()
-                if prior_clip_action or prior_kf_prompt:
+                if prior_clip_action or prior_prompt:
                     if prior_clip_action:
                         cfg["previous_clip_action"] = prior_clip_action[:300]
                     # Soft-dep readiness marker — do not inject full text into prompt.
-                    if prior_kf_prompt and not str(cfg.get("previous_clip_prompt") or "").strip():
-                        cfg["previous_clip_prompt"] = prior_kf_prompt[:800]
+                    if prior_prompt and not str(cfg.get("previous_clip_prompt") or "").strip():
+                        cfg["previous_clip_prompt"] = prior_prompt[:800]
                     cfg["previous_clip_node_id"] = prev_id
                     notes.append("pull_prior_clip_action")
                     changed = True
                 break
         if (
-            (prior_clip_action or prior_kf_prompt)
+            (prior_clip_action or prior_prompt)
             and "PREVIOUS CLIP HAD" not in prompt
             and "PRIOR CLIP PROMPT" not in prompt
         ):
@@ -2247,15 +2247,15 @@ class Director:
                 clip_continuity_note,
             )
 
-            kf_note = clip_continuity_note(
+            prior_note = clip_continuity_note(
                 clip_index=clip_index,
                 this_action=str(cfg.get("clip_action") or cfg.get("character_action") or ""),
                 this_camera=str(cfg.get("camera") or ""),
-                prior_action=prior_clip_action or prior_kf_prompt[:220],
+                prior_action=prior_clip_action or prior_prompt[:220],
                 prior_clip_index=clip_index - 1 if clip_index > 1 else None,
             )
-            if kf_note:
-                prompt = prompt + "\n\n" + kf_note
+            if prior_note:
+                prompt = prompt + "\n\n" + prior_note
                 notes.append("inject_prior_clip_note")
                 changed = True
 
@@ -2494,7 +2494,7 @@ class Director:
                 prompt = (
                     prompt
                     + f"\nASPECT LOCK: {ratio or 'film ratio'} — "
-                    + (rule or f"keep {ratio} on every still and shot; never change mid-film.")
+                    + (rule or f"keep {ratio} on every image and clip; never change mid-film.")
                 )
                 notes.append("inject_aspect_lock")
                 changed = True
@@ -2811,7 +2811,7 @@ class Director:
                     notes.append("reinforce_audio_locks")
                     changed = True
 
-        # Soft anti-repeat for stills only. Shot video calls stay positive — director
+        # Soft anti-repeat for images only. Shot video calls stay positive — director
         # omits exited cast instead of appending forbid lines.
         if role != "clip":
             for item in already_done:
@@ -2920,7 +2920,7 @@ class Director:
                 changed = True
 
         # Always stamp Director lock gate; patched=True when prompt text changed.
-        # Stills + shots: positive practice prompts only (no LOCK essays on tool body).
+        # Images + clips: positive practice prompts only (no LOCK essays on tool body).
         if role in {"scene", "character", "character"}:
             meta_l = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             analysis_l = (
@@ -2964,7 +2964,7 @@ class Director:
                 style_l = meta_l.get("style_lock") if isinstance(meta_l.get("style_lock"), dict) else {}
             if style_l and not isinstance(cfg.get("style_lock"), dict):
                 cfg["style_lock"] = style_l
-            # Still/image: user toolbar text wins; otherwise keep the LLM prompt.
+            # Image: user toolbar text wins; otherwise keep the LLM prompt.
             # No hard-coded ensure_still rewrite — the leaf LLM authors the body.
             try:
                 from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
@@ -2974,15 +2974,15 @@ class Director:
                 user_still = resolve_user_origin_prompt(cfg, "")
                 if user_still and user_still != str(prompt or "").strip():
                     prompt = user_still
-                    notes.append("still_user_authority")
+                    notes.append("image_user_authority")
                     changed = True
-                    cfg["director_still_prompt_notes"] = ["still_user_authority"]
+                    cfg["director_image_prompt_notes"] = ["image_user_authority"]
                 else:
                     cfg.setdefault(
-                        "director_still_prompt_notes",
-                        ["still_llm_authority"],
+                        "director_image_prompt_notes",
+                        ["image_llm_authority"],
                     )
-                cfg["director_still_prompt_approved"] = True
+                cfg["director_image_prompt_approved"] = True
             except Exception:  # noqa: BLE001
                 pass
 
@@ -3079,7 +3079,7 @@ class Director:
         consistency_notes = _spatial_continuity_patch(graph)
         identity_notes = _identity_consistency_patch(graph)
         spatial_notes = _spatial_geography_lock_patch(graph)
-        # Film-wide aspect/style/axis locks on every still + shot node.
+        # Film-wide aspect/style/axis locks on every image + clip node.
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                 apply_axis_locks_to_graph,
@@ -3839,9 +3839,9 @@ class Director:
                 if lock:
                     shot["continuity_lock"] = {str(k): str(v) for k, v in lock.items()}
                     clause = _continuity_prompt_clause(shot["continuity_lock"])
-                    kf = str(shot.get("clip_prompt") or "")
-                    if clause and "CONSISTENCY LOCK" not in kf:
-                        shot["clip_prompt"] = (kf + clause)[:700]
+                    prompt = str(shot.get("clip_prompt") or "")
+                    if clause and "CONSISTENCY LOCK" not in prompt:
+                        shot["clip_prompt"] = (prompt + clause)[:700]
                 if camera:
                     shot["camera"] = camera[:120]
                 if costume:
@@ -4013,7 +4013,7 @@ class Director:
             for nid, path in collect_rateable_image_paths(graph, node_states, limit=2):
                 q = (
                     "Rate briefly for a short film pipeline: is this image usable and "
-                    "consistent with a cinematic still? Reply in 2 short sentences; "
+                    "consistent with a cinematic image? Reply in 2 short sentences; "
                     "say match/mismatch/clear/blank if relevant."
                 )
                 ans = await inspect_image_for_rating(path, q)
@@ -4103,7 +4103,7 @@ class Director:
             "You are an independent Rater Agent for a Designer film pipeline. "
             "Strict Hollywood bar: score overall 0-10 (floats ok). "
             "Rate fidelity to user prompt, identity consistency, motion honesty "
-            "(real video not stills), graph design, and per-node prompt/tool quality. "
+            "(real video not images), graph design, and per-node prompt/tool quality. "
             "Respond JSON only: "
             '{"overall":0-10,"node_scores":{"<id>":0-10},'
             '"feedback_nodes":{"<id>":"..."},'

@@ -1207,7 +1207,7 @@ def _normalize_llm_analysis(
             entry["irreversible"] = irreversible[:160]
         if isinstance(sh.get("cast_states"), dict) and sh.get("cast_states"):
             entry["cast_states"] = sh["cast_states"]
-        if strategy in {"compose_from_character_specs", "edit_prior_clip"}:
+        if strategy in {"compose_from_character_specs", "edit_prior_image"}:
             entry["clip_strategy"] = strategy
         from jiuwenswarm.server.runtime.designer.node_labels import derive_clip_name
 
@@ -1407,7 +1407,7 @@ async def analyze_creative_brief(
             "(angle coverage only if the user asked for multi-cam / same-moment angles). "
             "New setting_id / hard cut / wardrobe / on-screen cast change → new shot. "
             "Qwen image: lock identity+wardrobe; first setting clip = compose_from_character_specs, "
-            "later same setting = edit_prior_clip; prefer ≤2–3 people with refs. "
+            "later same setting = edit_prior_image; prefer ≤2–3 people with refs. "
             "Clip prompt = this shot's motion and camera only. "
             "Explicit user N-shot / N分镜 is the only shot ceiling. "
             "Do not drop shots to fit a fixed count. "

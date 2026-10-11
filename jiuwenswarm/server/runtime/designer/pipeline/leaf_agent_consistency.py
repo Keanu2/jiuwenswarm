@@ -75,7 +75,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         "Only name on_screen / returned cast. If someone left the setting, omit them from every "
         "later same-setting prompt until the storyboard returns them. Never spawn unnamed extras.\n"
         "8) LANGUAGE: use storyboard speech_line exactly (empty = silent — do not invent lines).\n"
-        "9) ASPECT: obey film aspect_lock on every still/clip.\n"
+        "9) ASPECT: obey film aspect_lock on every image/clip.\n"
         "10) IMAGE-N: if references exist, name Image 1, Image 2… in attach order in your prompt.\n"
         "11) Finish with designer_node_complete(text=<FINAL visual-model prompt only>). "
         "The pipeline materializes media from that text — make it shot-ready, not a memo.\n"

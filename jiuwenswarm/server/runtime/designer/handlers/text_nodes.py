@@ -113,7 +113,7 @@ class StoryboardShot(TypedDict):
 
 
 _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
-    "shot_no": ("Shot", "镜号"),
+    "shot_no": ("Clip", "Shot", "镜号", "片段", "分镜#"),
     "timeline": ("Timeline", "时间轴"),
     "camera": ("Camera", "镜头视角", "景别"),
     "move": ("Move", "运镜"),
@@ -237,11 +237,11 @@ def _parse_storyboard_table(text: str) -> list[StoryboardShot]:
 
 
 _HIER_SHOT_RE = re.compile(
-    r"(?im)^###\s*Shot\s+(\d+)\s*[—\-–:]?\s*(.*)$"
+    r"(?im)^###\s*(?:Clip|Shot)\s+(\d+)\s*[—\-–:]?\s*(.*)$"
 )
 _HIER_FIELD_RE = re.compile(
     r"(?im)^-\s*(Timeline|Camera|Camera move|Move|Action|Character action|"
-    r"Comment|Clip spec|Doing|Speech)\s*:\s*(.*)$"
+    r"Comment|Clip spec|Keyframe|Doing|Speech)\s*:\s*(.*)$"
 )
 
 
@@ -285,7 +285,7 @@ def _parse_storyboard_hierarchical(text: str) -> list[StoryboardShot]:
                 current["character_action"] = val
             if key == "action":
                 current["comment"] = val or current.get("comment") or ""
-        elif key in {"comment", "clip_prompt"}:
+        elif key in {"comment", "clip spec", "keyframe"}:
             current["comment"] = val
         elif key == "speech" and not current.get("character_action"):
             current["character_action"] = val

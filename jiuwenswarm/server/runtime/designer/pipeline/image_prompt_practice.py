@@ -286,7 +286,7 @@ def ensure_still_tool_prompt(
 
         user = resolve_user_origin_prompt(cfg, "")
         if user:
-            return user[:2200], ["still_user_authority"]
+            return user[:2200], ["image_user_authority"]
     except Exception:  # noqa: BLE001
         pass
     role_l = str(role or cfg.get("role") or "").lower()

@@ -81,11 +81,11 @@ STYLE_LOCK_DEFAULT = {
 
 QWEN_IMAGE_PLAYBOOK = """
 ## Configured image model (call_image_model)
-Use for character specs and scene specs / stills.
+Use for character specs and scene specs / images.
 - PROMPT LENGTH: obey the IMAGE PROMPT LIMIT stamped from the configured VISUAL_GEN
   backend (Director / leaf context). Prefer dense shot-ready prose; do not pad.
 - COST: Prefer ~1K resolution (size 1K / 1024x1024 or aspect-matched ~1K). Do not request 2K/4K.
-- EVERY on-screen character gets an identity spec sheet before any clip, including an unnamed group that shares one look.
+- EVERY on-screen character gets character specs before any clip, including an unnamed group that shares one look.
 - First clip of a setting_id: compose_from_character_specs — GENERATE the setting AND place ONLY
     storyboard on_screen cast with cast_actions. Author a detailed SCENE SPECS (objects,
   lighting, crowd, hierarchical views: front/left/right/side/top/bottom).

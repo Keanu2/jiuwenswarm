@@ -326,10 +326,10 @@ def _merge_prompt_updates(graph: DesignerExecutionGraph, plan: dict[str, Any]) -
 def _shot_removal_patch(graph: DesignerExecutionGraph, patch: dict[str, Any], shot_ids: list[str]) -> dict[str, Any]:
     """Expand explicit whole-shot targets using the original stable identities."""
     shots = {node["id"]: node_clip_index(node) for node in graph["nodes"]
-             if node_pipeline(node) in {"frame", "clip"}}
+             if node_pipeline(node) == "clip"}
     unknown = set(shot_ids) - shots.keys()
     if unknown:
-        raise DesignerGraphValidationError(f"Shot deletion requires current clip/frame IDs: {sorted(unknown)}")
+        raise DesignerGraphValidationError(f"Clip deletion requires current clip IDs: {sorted(unknown)}")
     indices = {shots[node_id] for node_id in shot_ids}
     removed = {node_id for node_id, index in shots.items() if index in indices}
     return {**patch, "remove_node_ids": sorted(set(patch.get("remove_node_ids", [])) | removed)}
@@ -416,9 +416,9 @@ async def _llm_leader_plan(
         "documents": [{"node_id": doc.node_id, "pipeline": doc.pipeline, "text": doc.text} for doc in documents.values()],
         "clips": [
             {"index": index, "node_ids": [node["id"] for node in graph["nodes"]
-                                        if node_pipeline(node) in {"frame", "clip"} and node_clip_index(node) == index]}
+                                        if node_pipeline(node) == "clip" and node_clip_index(node) == index]}
             for index in sorted({node_clip_index(node) for node in graph["nodes"]
-                                 if node_pipeline(node) in {"frame", "clip"}})
+                                 if node_pipeline(node) == "clip"})
         ],
         "nodes": [_leader_node_context(node) for node in graph["nodes"]],
         "edges": [

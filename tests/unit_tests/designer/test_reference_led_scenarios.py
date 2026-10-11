@@ -36,7 +36,7 @@ from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
     ROLE_PRODUCT,
     ROLE_SCENE,
     ROLE_STYLE,
-    VIDEO_ANIMATE_STILL,
+    VIDEO_ANIMATE_IMAGE,
     VIDEO_MULTI_REF,
     compose_reference_clip_prompt,
     stamp_creative_intent,
@@ -83,8 +83,8 @@ _SCENARIO_KINDS = (
     "advertise_product_story",
     "act_character_family",
     "dinner_scene_story",
-    "animate_still_solo",
-    "animate_still_cast",
+    "animate_image_solo",
+    "animate_image_cast",
     "packing_resolve_merge",
     "image_n_labels",
     "overflow_combined_cast",
@@ -262,8 +262,8 @@ def _analysis(case: dict) -> dict:
     elif kind in {
         "motion",
         "motion_cast",
-        "animate_still_solo",
-        "animate_still_cast",
+        "animate_image_solo",
+        "animate_image_cast",
         "still_condition_solo",
         "still_condition_cast",
         "motion_role_without_binding",
@@ -273,7 +273,7 @@ def _analysis(case: dict) -> dict:
             if kind
             in {
                 "motion_cast",
-                "animate_still_cast",
+                "animate_image_cast",
                 "still_condition_cast",
                 "motion_role_without_binding",
             }
@@ -524,8 +524,8 @@ def _analysis(case: dict) -> dict:
     elif kind in {
         "motion",
         "motion_cast",
-        "animate_still_solo",
-        "animate_still_cast",
+        "animate_image_solo",
+        "animate_image_cast",
         "still_condition_solo",
         "still_condition_cast",
         "motion_stale_flags",
@@ -540,7 +540,7 @@ def _analysis(case: dict) -> dict:
         )
         character_id = "char_1"
         setting_id = ""
-        video_binding = VIDEO_ANIMATE_STILL
+        video_binding = VIDEO_ANIMATE_IMAGE
     elif kind == "motion_role_without_binding":
         # ROLE_MOTION present but no video_binding → must stay multi_ref / R2V.
         roles = [ROLE_MOTION]
@@ -643,7 +643,7 @@ def _tasks(graph: dict, task: str) -> list[dict]:
     found = []
     for node in graph.get("nodes") or []:
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        if str(cfg.get("reference_still_task") or "") == task:
+        if str(cfg.get("reference_image_task") or "") == task:
             found.append(node)
     return found
 
@@ -666,7 +666,7 @@ def _assert_shared_contract(case: dict, graph: dict) -> None:
         assert action in prompt
         assert case["lighting"] in prompt
         assert case["crowd"] in prompt
-        # set_lock / style_authority may rewrite the film lock to match_reference_still.
+        # set_lock / style_authority may rewrite the film lock to match_reference_image.
         from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
             MATCH_REFERENCE_LOOK,
             MATCH_REFERENCE_MEDIUM,
@@ -753,10 +753,10 @@ def _assert_reference_case(case: dict) -> None:
                 f"motion-{case['index']}.png"
             )
     elif kind == "motion_cast":
-        # animate_still + extra cast → R2V so companions pack as refs.
+        # animate_image + extra cast → R2V so companions pack as refs.
         for clip in clips:
             assert clip["config"]["reference_call_mode"] == "r2v"
-            assert clip["config"].get("reference_video_binding") == VIDEO_ANIMATE_STILL
+            assert clip["config"].get("reference_video_binding") == VIDEO_ANIMATE_IMAGE
             plan = clip["config"]["reference_image_plan"]
             assert plan[0]["role"] == ROLE_MOTION
             assert any(e["node_id"].startswith("n_character_") for e in plan)
@@ -837,7 +837,7 @@ def _assert_reference_case(case: dict) -> None:
         assert not _scene_nodes(graph)
         for clip in clips:
             assert clip["config"]["reference_call_mode"] == "r2v"
-            assert clip["config"].get("reference_video_binding") == VIDEO_ANIMATE_STILL
+            assert clip["config"].get("reference_video_binding") == VIDEO_ANIMATE_IMAGE
     elif kind in {
         "story_motion_role_ignored",
         "dinner_scene_story",
@@ -880,12 +880,12 @@ def _assert_reference_case(case: dict) -> None:
             prompt = cfg["generate"]["prompt"]
             assert "Image 1" in prompt
             assert "Image 2" in prompt
-    elif kind == "animate_still_solo":
+    elif kind == "animate_image_solo":
         for clip in clips:
             assert clip["config"]["reference_call_mode"] == "i2v"
             assert "first frame" in clip["config"]["generate"]["prompt"].lower()
         assert _companion_sheets(graph) == []
-    elif kind == "animate_still_cast":
+    elif kind == "animate_image_cast":
         companions = _companion_sheets(graph)
         assert len(companions) == 2
         for clip in clips:
@@ -1080,7 +1080,7 @@ def test_id_reconcile_scenario(case: dict) -> None:
 
 
 @pytest.mark.parametrize("case", _cases("five_stills"), ids=lambda case: case["id"])
-def test_five_stills_scenario(case: dict) -> None:
+def test_five_images_scenario(case: dict) -> None:
     _assert_reference_case(case)
 
 
@@ -1095,7 +1095,7 @@ def test_mixed_roles_scenario(case: dict) -> None:
 
 
 @pytest.mark.parametrize("case", _cases("two_character_stills"), ids=lambda case: case["id"])
-def test_two_character_stills_scenario(case: dict) -> None:
+def test_two_character_images_scenario(case: dict) -> None:
     _assert_reference_case(case)
 
 
@@ -1131,8 +1131,8 @@ def test_motion_stale_flags_scenario(case: dict) -> None:
         "advertise_product_story",
         "act_character_family",
         "dinner_scene_story",
-        "animate_still_solo",
-        "animate_still_cast",
+        "animate_image_solo",
+        "animate_image_cast",
         "packing_resolve_merge",
         "image_n_labels",
         "overflow_combined_cast",
@@ -1238,7 +1238,7 @@ def test_chat_shot_removal_rechains_reference_led_clips() -> None:
     assert cfg["generate"]["prompt"].startswith("Shot 2,")
 
 
-def test_chat_cannot_remove_a_still_a_reference_led_clip_uses() -> None:
+def test_chat_cannot_remove_an_image_a_reference_led_clip_uses() -> None:
     from copy import deepcopy
 
     from jiuwenswarm.common.schema.designer_graph import DesignerGraphValidationError
@@ -1427,7 +1427,7 @@ def test_character_omitted_binding_defaults_to_verbatim() -> None:
     assert ref["config"]["reference_card_role"] == "character"
 
 
-def test_character_condition_still_builds_character_specs() -> None:
+def test_character_condition_image_builds_character_specs() -> None:
     graph = _intent_graph(
         [_slot([ROLE_CHARACTER], binding="condition", character_id="char_1")],
         scenes=[],
@@ -1516,7 +1516,7 @@ def test_scene_set_lock_locks_set_and_skips_plate() -> None:
         assert scene_entries[-1]["path"].endswith("room.png")
 
 
-# --- Fix 4/5: medium inheritance from an authority still --------------------
+# --- Fix 4/5: medium inheritance from an authority image --------------------
 
 
 def test_style_authority_without_vision_locks_to_reference() -> None:
@@ -1600,7 +1600,7 @@ def test_product_verbatim_keeps_plan_path_and_card() -> None:
 def test_motion_verbatim_i2v_without_restyle() -> None:
     graph = _intent_graph(
         [_slot([ROLE_MOTION], binding="verbatim", path="/refs/frame.png")],
-        video_binding=VIDEO_ANIMATE_STILL,
+        video_binding=VIDEO_ANIMATE_IMAGE,
         scenes=[],
     )
     assert not _tasks(graph, "medium_change")
@@ -1615,7 +1615,7 @@ def test_motion_verbatim_i2v_without_restyle() -> None:
 def test_motion_condition_builds_restyle_node() -> None:
     graph = _intent_graph(
         [_slot([ROLE_MOTION], binding="condition", path="/refs/frame.png")],
-        video_binding=VIDEO_ANIMATE_STILL,
+        video_binding=VIDEO_ANIMATE_IMAGE,
         scenes=[],
     )
     assert len(_tasks(graph, "medium_change")) == 1
@@ -1819,13 +1819,13 @@ def test_motion_multi_cast_mints_companions_ignoring_stale_flags() -> None:
         [_slot([ROLE_MOTION], binding="verbatim", path="/refs/frame.png", character_id="xiaoyue")],
         characters=_FAMILY,
         scenes=[],
-        video_binding=VIDEO_ANIMATE_STILL,
+        video_binding=VIDEO_ANIMATE_IMAGE,
     )
     sheets = _tasks(graph, "character_specs")
     assert len(sheets) == 2
     assert {n["config"]["character_id"] for n in sheets} == {"father", "mother"}
     for clip in _clips(graph):
-        # Extra cast upgrades animate_still to R2V so companions pack as refs.
+        # Extra cast upgrades animate_image to R2V so companions pack as refs.
         assert clip["config"]["reference_call_mode"] == "r2v"
         plan = clip["config"]["reference_image_plan"]
         assert plan[0]["path"].endswith("frame.png")
@@ -1845,12 +1845,12 @@ def test_motion_multi_cast_mints_companions_ignoring_stale_flags() -> None:
         ],
         characters=_FAMILY,
         scenes=[],
-        video_binding=VIDEO_ANIMATE_STILL,
+        video_binding=VIDEO_ANIMATE_IMAGE,
     )
     assert len(_tasks(stale, "character_specs")) == 2
 
 
-def test_multi_still_covers_each_id_only_uncovered_get_companions() -> None:
+def test_multi_image_covers_each_id_only_uncovered_get_companions() -> None:
     graph = _intent_graph(
         [
             _slot(
@@ -1988,7 +1988,7 @@ def test_shared_generic_match_terms_do_not_skip_companion_sheets() -> None:
     assert not any(n["config"].get("character_id") == "char_1" for n in sheets)
 
 
-def test_character_still_plates_uncovered_analysis_scenes() -> None:
+def test_character_image_plates_uncovered_analysis_scenes() -> None:
     """T6: character specs + two storyboard rooms → companion plates."""
     graph = _intent_graph(
         [_slot([ROLE_CHARACTER], binding="verbatim", character_id="char_1")],
@@ -2000,7 +2000,7 @@ def test_character_still_plates_uncovered_analysis_scenes() -> None:
     assert {p["config"]["setting_id"] for p in plates} == {"set_1", "set_2"}
 
 
-def test_scene_still_plates_only_uncovered_setting() -> None:
+def test_scene_image_plates_only_uncovered_setting() -> None:
     """T7: locked set_1 of two analysis sets → plate set_2 only."""
     graph = _intent_graph(
         [
@@ -2180,12 +2180,12 @@ def test_overflow_mints_combined_cast_card() -> None:
         assert any(e["node_id"] == combined[0]["id"] for e in clip["config"]["reference_image_plan"])
 
 
-def test_animate_still_cast_packs_refs_not_null() -> None:
+def test_animate_image_cast_packs_refs_not_null() -> None:
     graph = _intent_graph(
         [_slot([ROLE_MOTION], binding="verbatim", path="/refs/frame.png", character_id="xiaoyue")],
         characters=_FAMILY,
         scenes=[],
-        video_binding=VIDEO_ANIMATE_STILL,
+        video_binding=VIDEO_ANIMATE_IMAGE,
     )
     for node in graph["nodes"]:
         if (node.get("config") or {}).get("companion_cast"):

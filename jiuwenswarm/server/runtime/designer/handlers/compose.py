@@ -96,8 +96,8 @@ def _clip_video_usable(path: Path, *, ffmpeg: str | None = None) -> bool:
             return False
         if path.stat().st_size < _MIN_CLIP_BYTES:
             return False
-        # Still→mp4 freezes are never acceptable film inputs on the quality path.
-        if "designer_clip_still_" in path.name.lower():
+        # Image→mp4 freezes are never acceptable film inputs on the quality path.
+        if "designer_clip_image_" in path.name.lower():
             return False
     except OSError:
         return False
@@ -299,7 +299,7 @@ def _workspace_clip_videos(run_id: str) -> list[Path]:
         f"designer_clip_{rid}*.mp4",
         f"*{rid}*clip*.mp4",
     )
-    # Never treat still→mp4 freezes or unrelated generated_*.mp4 as film inputs.
+    # Never treat image→mp4 freezes or unrelated generated_*.mp4 as film inputs.
     for pattern in patterns:
         for path in sorted(root.glob(pattern)):
             if (

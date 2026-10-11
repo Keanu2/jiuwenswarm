@@ -7,4 +7,4 @@ Generate **clip** video via **R2V** (on-screen **character_specs** + **scene_spe
 - **scene_consistency**: Scene N **scene_specs** last; empty of cast.
 - **shot_consistency**: when continuing a setting, respect prior-clip last-frame handoff and storyboard end states.
 
-When `metadata.video_style=final_frame_reverse`: this **clip** sits on an arc that ENDS on the user reference / classic still — decisive motion early, settle late, motif-motivated continuity; never turntable a finished pose.
+When `metadata.video_style=final_frame_reverse`: this **clip** sits on an arc that ENDS on the user reference / classic image — decisive motion early, settle late, motif-motivated continuity; never turntable a finished pose.

@@ -4,7 +4,7 @@
 Last-frame media is used ONLY when the next clip continues the same setting
 (soft cut). Hard cuts / new settings break the chain.
 
-Within one scene we accumulate ending stills from every prior same-scene clip
+Within one scene we accumulate ending images from every prior same-scene clip
 (back to the first shot of that setting) so exited cast can still be localized.
 The immediate prior ending remains the primary continuity start; older endings
 are history refs. The Wan prompt narrates what led to what.
@@ -121,7 +121,7 @@ def should_keep_scene_frame_chain(
     later_cfg: dict[str, Any] | None,
     earlier_cfg: dict[str, Any] | None,
 ) -> bool:
-    """Softer gate for history stills inside one scene (exited cast allowed)."""
+    """Softer gate for history images inside one scene (exited cast allowed)."""
     return should_use_prior_last_frame(
         this_cfg=later_cfg,
         prev_cfg=earlier_cfg,
@@ -353,22 +353,22 @@ def last_frame_continuity_clause(
     path: str = "",
     chain: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Narrate same-scene ending stills: what led to what → continue from latest."""
+    """Narrate same-scene ending images: what led to what → continue from latest."""
     items = [c for c in (chain or []) if isinstance(c, dict) and str(c.get("path") or "").strip()]
     if not items and not used:
         return ""
     if not items and used:
         return (
             "CONTINUITY FIRST FRAME = last frame of the previous clip "
-            f"({path or 'prior ending still'}). "
+            f"({path or 'prior ending image'}). "
             "Use it only to localize last-seen people and place. "
             "THIS clip's action/camera come from the storyboard shot — "
-            "do not replace that beat with a different plot from the still. "
+            "do not replace that beat with a different plot from the image. "
             "Face/wardrobe authority remains character specs reference images."
         )
 
     lines: list[str] = [
-        "SAME-SCENE CONSISTENCY CHAIN (ending stills localize last-seen people/place; "
+        "SAME-SCENE CONSISTENCY CHAIN (ending images localize last-seen people/place; "
         "they are NOT the plot for THIS clip):",
     ]
     for i, item in enumerate(items):
@@ -387,7 +387,7 @@ def last_frame_continuity_clause(
         arrow = " → ".join(f"shot {int(c.get('clip_index') or 0)}" for c in items)
         lines.append(f"Beat progression in this setting: {arrow} → THIS shot.")
     lines.append(
-        "Do NOT attach these stills as Wan refs (they steal character1 and restage a crop). "
+        "Do NOT attach these images as Wan refs (they steal character1 and restage a crop). "
         "Identity = on-screen character specs; geography = scene spec LAST; plot = THIS storyboard shot "
         "continuing the previous Wan prompt. People who left stay off-screen — "
         "do not teleport them back or restage walking away unless the storyboard asks."
@@ -402,11 +402,11 @@ def collect_same_scene_last_frame_chain(
     ctx: Any = None,
     max_frames: int = MAX_SCENE_LAST_FRAME_REFS,
 ) -> list[dict[str, Any]]:
-    """Oldest→newest gated ending stills from the first clip of this setting to N-1.
+    """Oldest→newest gated ending images from the first clip of this setting to N-1.
 
     Walks prior clips with the same setting_id. A hard cut / setting change breaks
     the chain. Cast overlap is NOT required for history frames (exits allowed);
-    the immediate prior still prefers cast overlap when deciding primary continuity,
+    the immediate prior image prefers cast overlap when deciding primary continuity,
     but same-setting history is kept for localization.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -652,7 +652,7 @@ def stamp_last_frame_onto_next_clips(
     if src is not None:
         src["config"] = src_cfg
 
-    # Build same-scene history ending stills on the completed clip, then extend for next.
+    # Build same-scene history ending images on the completed clip, then extend for next.
     prior_chain = [
         c
         for c in (src_cfg.get("scene_last_frame_chain") or [])
@@ -702,7 +702,7 @@ def stamp_last_frame_onto_next_clips(
                 cfg["prior_last_frame_history_only"] = True
             notes.append(
                 f"{nid}: gated scene last-frame chain ON "
-                f"({len(prior_chain)} stills) from {completed_clip_id}"
+                f"({len(prior_chain)} images) from {completed_clip_id}"
             )
         else:
             cfg.pop("previous_clip_last_frame", None)

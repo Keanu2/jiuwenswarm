@@ -2,13 +2,13 @@
 """Clip spec policies — domain-agnostic (any brief / any setting).
 
 Plan A commercial path (ensemble_master / setting-master):
-  Per setting_id, the FIRST clip spec is a MASTER still that GENERATES the environment
+  Per setting_id, the FIRST clip spec is a MASTER image that GENERATES the environment
   together with ALL named cast who appear in that setting (clearly visible, blocked).
   No scene specs template. Character spec sheets = identity locks only (few Image-N slots).
   Later same-set clip specs EDIT the prior/master (reframe / zoom / pose / exits).
   New setting_id → new master with that setting's ensemble, then edit again.
 
-Plan B (master_still): shot-1 master with featured cast; later edit prior.
+Plan B (setting_master): shot-1 master with featured cast; later edit prior.
 """
 
 from __future__ import annotations
@@ -263,7 +263,7 @@ def apply_compose_character_specs_setting_policy(analysis: dict[str, Any]) -> di
     ensembles = compute_setting_ensembles(shots, characters)
     # Do NOT force orphan cast into scene 1 visuals — character specs still come from characters[].
     out["setting_ensembles"] = ensembles
-    # Scene specs are the geography lock for clip R2V (Qwen stills).
+    # Scene specs are the geography lock for clip R2V (Qwen images).
     out["scene_consistency_mode"] = "scene_specs_plus_clips"
 
     # Distinct place text per setting_id (from scenes[] or first compose action).
@@ -398,7 +398,7 @@ def apply_compose_character_specs_setting_policy(analysis: dict[str, Any]) -> di
                 "compose_cast_actions": prior_actions,
             }
             if str(shot.get("shot_relation") or "").lower() == "hard_cut":
-                shot["master_still_hard_cut"] = True
+                shot["setting_master_hard_cut"] = True
 
         # Angle orbit only when the user asked for coverage. Otherwise each clip
         # is its own time window, not front/left/right of one empty action.

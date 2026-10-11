@@ -43,7 +43,7 @@ def infer_pose_from_action(action: str, *, fallback: str = "engaged_in_beat") ->
 
 def contact_anti_penetration_clause(*, for_clip: bool = True) -> str:
     """Hard spatial physics for placing people into environment refs — any set."""
-    where = "this clip" if for_clip else "this still"
+    where = "this clip" if for_clip else "this image"
     return (
         f"CONTACT / ANTI-PENETRATION LOCK ({where}, all scenes): "
         "Bodies occupy empty volume only — never intersect solid furniture, walls, "
@@ -86,12 +86,12 @@ def wan_reference_media_rules(*, prior_ending_count: int = 0) -> str:
     ]
     if int(prior_ending_count or 0) > 0:
         lines.append(
-            "- Prior ending stills are not attached. "
+            "- Prior ending images are not attached. "
             "This clip plays the current storyboard shot in the same setting, with the same placement."
         )
     else:
         lines.append(
-            "- First clip of a setting: no prior ending still — play the storyboard shot "
+            "- First clip of a setting: no prior ending image — play the storyboard shot "
             "using identity character specs + scene specs."
         )
     return "\n".join(lines)

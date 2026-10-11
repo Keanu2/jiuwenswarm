@@ -91,7 +91,7 @@ PAINTING_REMAKE = (
 
 
 def test_painting_remake_activates_style():
-    """原画/致敬/魔改/油画 also mean 'classic still as endpoint'."""
+    """原画/致敬/魔改/油画 also mean 'classic image as endpoint'."""
     assert detect_video_style(PAINTING_REMAKE) == VIDEO_STYLE_FINAL_FRAME_REVERSE
 
 

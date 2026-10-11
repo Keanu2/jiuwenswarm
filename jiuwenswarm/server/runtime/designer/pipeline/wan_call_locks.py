@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Still-image locks, and the short prompt sent to the video model.
+"""Image locks, and the short prompt sent to the video model.
 
-Clip spec stills receive style and wardrobe locks. Clip calls are
+Clip-spec images receive style and wardrobe locks. Clip calls are
 rewritten into a concise story-form prompt (wardrobe/seats/visibility
 folded into narrative); those locks stay on the node for the agent.
 """
@@ -105,7 +105,7 @@ def apply_image_call_locks(
     cfg: dict[str, Any] | None = None,
     graph: dict[str, Any] | None = None,
 ) -> str:
-    """Resolve still/image call text without hard-coded practice rewrites.
+    """Resolve image call text without hard-coded practice rewrites.
 
     User toolbar text (``user_edit_prompt`` / packet) wins; otherwise the
     LLM-authored ``prompt`` argument is sent as-is. Structured locks stay on
@@ -127,10 +127,10 @@ def apply_image_call_locks(
             user_origin=bool(user_text),
             user_edit=user_text,
         )
-        cfg_map["director_still_prompt_notes"] = (
-            ["still_user_authority"] if user_text else ["still_llm_authority"]
+        cfg_map["director_image_prompt_notes"] = (
+            ["image_user_authority"] if user_text else ["image_llm_authority"]
         )
-        cfg_map["director_still_prompt_approved"] = True
+        cfg_map["director_image_prompt_approved"] = True
     return text
 
 

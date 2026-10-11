@@ -170,7 +170,7 @@ async def generate_image(
     reference_images: list[str] | None = None,
     save_dir: str | None = None,
 ) -> dict[str, str]:
-    """Generate one still; returns ``{"image_path": ...}`` or ``{"error": ...}``."""
+    """Generate one image; returns ``{"image_path": ...}`` or ``{"error": ...}``."""
     target = _target("image")
     if isinstance(target, str):
         return {"error": target}

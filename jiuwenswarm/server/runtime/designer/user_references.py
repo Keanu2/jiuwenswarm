@@ -152,7 +152,7 @@ def user_reference_image_paths(graph: dict[str, Any] | None) -> list[Path]:
 
 
 def wired_user_reference_images(ctx: Any, node: dict[str, Any] | None) -> list[Path]:
-    """Upload stills that actually arrive on this node's incoming edges."""
+    """Upload images that actually arrive on this node's incoming edges."""
     from jiuwenswarm.server.runtime.designer.handlers.clip import edge_image_flow
 
     flow = edge_image_flow(ctx, node if isinstance(node, dict) else None)
@@ -203,7 +203,7 @@ async def classify_reference_images(
     refs: list[dict[str, Any]] | None,
     analysis: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Ask the model what each uploaded still is, before any edge is chosen.
+    """Ask the model what each uploaded image is, before any edge is chosen.
 
     A person, a place, a product, and a motion frame are different destinations.
     Default binding is use-as-is (verbatim); this call only returns that judgment.
@@ -252,10 +252,10 @@ async def classify_reference_images(
             )
     system = (
         "You inspect each attached reference image together with the user's full "
-        "request, and judge what the user wants done with that exact still. "
+        "request, and judge what the user wants done with that exact image. "
         "DEFAULT for every role is use-as-is: binding='verbatim'. Only choose "
         "binding='condition' when the user clearly asks to restyle, redraw, "
-        "decompose, or generate a new character specs / set plate from the still. "
+        "decompose, or generate new character specs / set plate from the image. "
         "Output ONLY one JSON object: "
         '{"reference_reads":[{"slot":1,"subject":"object","roles":["product_hero"],'
         '"binding":"verbatim","video_binding":"multi_ref_story",'
@@ -265,7 +265,7 @@ async def classify_reference_images(
         "One read per image; slot numbers follow the roster order. "
         "roles is a list. Use character_identity for a person who will perform, "
         "scene_source for a place, product_hero for an item that must stay as itself, "
-        "still_motion_source only when this image is the opening still for a "
+        "motion_source only when this image is the opening image for a "
         "true animate-this-frame job, style_source when only the medium and palette "
         "should be copied. subject remains character, scene, or object for compatibility.\n"
         "Decide these fields from the user's intent and wording in ANY language — "
@@ -274,24 +274,24 @@ async def classify_reference_images(
         "'multi_ref_story' (DEFAULT) for advertise / act / film / dinner / celebrate / "
         "product shot / story with identity or set references — clips use R2V and keep "
         "all uploads + generated cast/set as reference images. "
-        "'animate_still' ONLY when the user wants that still itself animated as the "
+        "'animate_image' ONLY when the user wants that image itself animated as the "
         "video's opening frame (e.g. animate this picture / painting / photo as the clip). "
-        "Story verbs alone must NOT select animate_still (use multi_ref_story instead).\n"
+        "Story verbs alone must NOT select animate_image (use multi_ref_story instead).\n"
         "- binding: prefer 'verbatim' (file itself is the reference card; no "
         "image-gen pass). Use 'condition' ONLY for an explicit restyle / redraw / "
         "new sheet / new plate request. Advertise / act / dinner / product shot while "
         "keeping the look = character_identity|scene_source|product_hero + verbatim + "
-        "video_binding=multi_ref_story. Add still_motion_source only together with "
-        "video_binding=animate_still when the still IS the image to animate.\n"
-        "- set_lock: true when this still must stay the exact environment geometry of "
+        "video_binding=multi_ref_story. Add motion_source only together with "
+        "video_binding=animate_image when the image IS the one to animate.\n"
+        "- set_lock: true when this image must stay the exact environment geometry of "
         "the film (the user is staging the story or ad inside this place). For a "
         "scene used as-is this is usually true.\n"
         "- style_authority: true when the film's medium/look should follow this "
-        "still's rendering (typical for as-is character/scene/product). "
+        "image's rendering (typical for as-is character/scene/product). "
         "Leave it false only when the user named a competing medium in text "
-        "(e.g. a photoreal live-action ad over a cartoon still) so their words win.\n"
+        "(e.g. a photoreal live-action ad over a cartoon image) so their words win.\n"
         "- character_id / setting_id: copy an id from the analysis cast/set roster "
-        "when the still depicts that person or place. Prefer roster ids over new names.\n"
+        "when the image depicts that person or place. Prefer roster ids over new names.\n"
         "- medium/look/palette: if you can see the picture, name its medium (e.g. "
         "anime, cartoon, photoreal, oil painting), its look, and palette. Leave them "
         "empty if you cannot see pixels — do NOT guess a medium from topic words.\n"
@@ -893,7 +893,7 @@ def materialize_user_references_for_analysis(raw: Any) -> list[dict[str, Any]]:
 
     Enter historically used ``dest_dir=None`` preview records. Base64-only
     uploads then had an empty ``path``, so classify/stamp were skipped and the
-    classic quality graph regenerated the still. Analysis must materialize.
+    classic quality graph regenerated the image. Analysis must materialize.
     """
     if raw in (None, "", []):
         return []
