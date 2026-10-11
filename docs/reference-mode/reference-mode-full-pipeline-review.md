@@ -36,7 +36,7 @@ It is **not** reproduce-ready for a new engineer: several claims are overstated 
 | Header / modules | Paths under `jiuwenswarm/server/...`; repo root `jiuwenswarm/` | Nested package lives at `jiuwenswarm/jiuwenswarm/server/...`; relative to git root the table is OK. Workspace root `openjiuwen-ai/` needs one more `jiuwenswarm/` segment. | Match (with path caveat) |
 | Intro bullets | use-as-is defaults; base64 materialize-before-classify; companions under authority style | `_DEFAULT_BINDING` all `verbatim` (`reference_led.py:56-65`); `materialize_user_references_for_analysis` (`user_references.py:856-866`); `_style_lock_from_references` + `_companion_sheet_prompt` (`reference_led.py:1034-1067`, `986-995`) | Match |
 | §1 Still verbatim → handler card | `n_ref_*`, pixels never image-gen’d | Builder: `force_handler`, `immutable_source`, optional `reference_card_role` (`reference_led.py:488-525`, `_verbatim_card_role` `1003-1021`) | Match |
-| §1 Still condition → regen | `identity_sheet` / `medium_change` / scene plate | Condition char sheets (`531-564`); motion restyle (`597-625`); condition scene plates via `restyle_scene` (`1118-1162`) | Match |
+| §1 Still condition → regen | `character_specs` / `medium_change` / scene specs | Condition char sheets (`531-564`); motion restyle (`597-625`); condition scene specs via `restyle_scene` (`1118-1162`) | Match |
 | §1 Uncovered people/**places** → companions | “not covered by a still → companion sheets/**plates**” | Characters: always uncovered − covered unless suppress (`1092-1100`). **Places only if `needs_set`** = scene role OR `(product AND analysis.scenes AND not motion)` (`1125-1131`). Pure character + incidental `analysis.scenes` does **not** mint plates (`1125-1128`, tests `character_family` / `test_verbatim_character_multi_cast…`). | **Mismatch** (places overstated) |
 | §1 Suppress / solo / keyframe | LLM flags → no companions | `_suppress_companions` intent+slots (`879-888`); stamps intent flags (`173-179`) | Match |
 | §1 Multi-still coverage | Each still covers its id; only uncovered companions | `_covered_character_ids` / `_covered_setting_ids` (`908-968`); multi-still test (`1153-1186`) | Match |
@@ -50,7 +50,7 @@ It is **not** reproduce-ready for a new engineer: several claims are overstated 
 | §2 Mermaid ends at Director author → Play | Implies author then Play | After sync bootstrap, Director authors brief/storyboard/graph + validate (`designer_adapter.py:1426-1467`). Mermaid collapses this and omits **classify empty → hard fail** (`1388-1392`) and second `apply_runtime_delegate` (`1451`). | Partial |
 | §3 Roles / bindings / flags | Five roles; verbatim/condition; set_lock / style_authority / suppress trio | Constants `22-65`; flags carried `809-830` | Match |
 | §4 `_job_plan` mermaid | suppress → cover → motion i2v vs r2v → needs_set plates | `_job_plan` `1069-1201` | Match (main forks) |
-| §4 Coverage rules | Char/scene id normalize; motion+cid; motion+solo cast | `_covered_character_ids` `908-923`; motion-solo cover `1095-1099`; `_norm_id` `845-849` | Match |
+| §4 Coverage rules | Char/scene id normalize; motion+cid; motion+character cast | `_covered_character_ids` `908-923`; motion-solo cover `1095-1099`; `_norm_id` `845-849` | Match |
 | §4 Companions never beyond analysis | | `_companion_characters` / `_companion_scenes` `926-983` | Match |
 | §5 Node table: `n_ref_*` force_handler | | `488-525` | Match |
 | §5 `n_character_*` / `n_restyle_01` / `n_scene_*` **Delegate = agent** | “agent after stamp” / “agent” | Builder sets **`delegate: "handler"`** for sheets, companions, restyle, plates (`550`, `588`, `615`, `649`) **without** `force_handler`. Enter then runs `apply_runtime_delegate` (`designer_adapter.py:937-947`, `1451`), which upgrades non-`force_handler` nodes to **agent** (`smart_graph.py:87-121`). Unit tests calling `build_smart_video_graph` alone keep handlers. | Partial / misleading |
@@ -127,7 +127,7 @@ Missing from MD but required to reproduce Enter behavior:
 | Soft catch: materialize exception → `user_refs_preview = []` (can skip reference-led) | `1357-1358` |
 | Director author/review brief → storyboard → `design_execution_graph` → validate | `1426-1450` |
 | `apply_runtime_delegate` after build **and** after Director | `937-947`, `1451` |
-| `director_composed_on_bootstrap` / `freeze_shot_topology` stamped | `954-957`, `1458` |
+| `director_composed_on_bootstrap` / `freeze_clip_topology` stamped | `954-957`, `1458` |
 | Max **3** image refs (`MAX_REFS_BY_KIND`) | `user_references.py:50` |
 | Inline base64 cap **6MB** | `51`, `1066-1070` |
 | `analysis_prompt_with_references` wraps prompt with roster | `1359` |
@@ -181,7 +181,7 @@ Missing from MD but required to reproduce Enter behavior:
 6. Document `style_source` (restyle inputs only) and product card-role always-on quirk.
 7. Correct §9: remove or mark `reference-mode-test-catalog.md` as TODO.
 8. Clarify workspace vs git-root paths (`openjiuwen-ai/jiuwenswarm/jiuwenswarm/server/...` vs `jiuwenswarm/server/...`).
-9. §4: call out motion-solo cover when `len(cast)==1` and no character still (`1095-1099`).
+9. §4: call out motion-solo cover when `len(cast)==1` and no character specs (`1095-1099`).
 10. §6: note `_cap_plan` keeps first product + last scene, middle filled (`1227-1236`) — already sketched; add that truncated companions can disappear from Wan inputs.
 
 *(No MD patches applied in this pass — gaps are documented here per task preference.)*

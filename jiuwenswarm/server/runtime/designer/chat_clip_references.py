@@ -52,7 +52,7 @@ _SHOT_HEADING_TITLE = re.compile(
 # Authored generation prose; derived copies and document bodies are synchronized later.
 NODE_PROSE_FIELDS = (
     "prompt",
-    "shot_action",
+    "clip_action",
     "shot_title",
     "camera",
     "cast_actions",
@@ -69,7 +69,7 @@ NODE_PROSE_FIELDS = (
 )
 
 
-def _is_shot_index_reference(text: str, match: re.Match[str]) -> bool:
+def _is_clip_index_reference(text: str, match: re.Match[str]) -> bool:
     """True when the match names a concrete shot index, not a duration/distributive idiom."""
     after = text[match.end(1) :]
     if _DURATION_AFTER.match(after):
@@ -83,7 +83,7 @@ def _is_shot_index_reference(text: str, match: re.Match[str]) -> bool:
 def iter_shot_reference_matches(text: str) -> Iterator[re.Match[str]]:
     """Yield `_SHOT_REFERENCE` matches that are real shot indices."""
     for match in _SHOT_REFERENCE.finditer(text or ""):
-        if _is_shot_index_reference(text, match):
+        if _is_clip_index_reference(text, match):
             yield match
 
 
@@ -97,7 +97,7 @@ def map_shot_references(text: str, targets: dict[int, tuple[str, int | None]]) -
     source = text or ""
 
     def replace(match: re.Match[str]) -> str:
-        if not _is_shot_index_reference(source, match):
+        if not _is_clip_index_reference(source, match):
             return match[0]
         target = targets.get(int(match[1]))
         if target is None:
@@ -131,7 +131,7 @@ def missing_shot_tombstones(
 
 
 def _collapse_blank_lines(text: str) -> str:
-    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"[ \s]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -199,7 +199,7 @@ def _neutralize_inline_missing_refs(text: str, missing: set[int]) -> str:
         return text
 
     def replace_shot(match: re.Match[str]) -> str:
-        if not _is_shot_index_reference(text, match):
+        if not _is_clip_index_reference(text, match):
             return match[0]
         if int(match[1]) in missing:
             return ""
@@ -217,7 +217,7 @@ def _neutralize_inline_missing_refs(text: str, missing: set[int]) -> str:
     out = re.sub(r"[→\-–—]+(?:\s*[→\-–—]+)+", "→", out)
     out = re.sub(r"(?:^|[\s,，、])[→\-–—]+", " ", out)
     out = re.sub(r"[→\-–—]+(?:\s|$)", " ", out)
-    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"[ \s]{2,}", " ", out)
     return out
 
 

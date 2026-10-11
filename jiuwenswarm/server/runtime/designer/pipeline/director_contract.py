@@ -62,8 +62,8 @@ _DURATION_RE = re.compile(
     re.I,
 )
 
-# One shot == one keyframe + one clip in this pipeline, so "N 个关键帧" is the
-# same contract as "N 个分镜".
+# One shot == one scene spec + one clip in this pipeline, so "N 个关键帧/分镜" is the
+# same contract as "N clips".
 _SHOT_UNIT_CN = r"(?:分镜|镜头|关键帧|帧|幕)"
 _THREE_SHOT_RE = re.compile(
     r"\bthree[- ]shot\b|\b3[- ]shot\b|\bthree\s+shots?\b|"
@@ -130,7 +130,7 @@ def _cid_list(raw: Any, valid: set[str], by_name: dict[str, str] | None = None) 
     return out
 
 
-def _explicit_shot_count_from_prompt(prompt: str) -> int:
+def _explicit_clip_count_from_prompt(prompt: str) -> int:
     """Honor explicit N-shot / N分镜 language only (language-agnostic count, not plot rules)."""
     text = prompt or ""
     if _THREE_SHOT_RE.search(text):
@@ -145,7 +145,7 @@ def _explicit_shot_count_from_prompt(prompt: str) -> int:
         if raw in _CN_NUM:
             return max(1, _CN_NUM[raw])
     m2 = re.search(
-        r"\b(?P<n>\d+)\s*[- ]?(?:shot|shots|beat|beats|keyframe|keyframes|key\s+frames?)\b",
+        r"\b(?P<n>\d+)\s*[- ]?(?:shot|shots|beat|beats|clip|clips|keyframe|keyframes|key\s+frames?)\b",
         text,
         re.I,
     )
@@ -182,14 +182,14 @@ def count_narrative_beats(prompt: str) -> int:
 
 def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
     """Domain-agnostic shot budget. Explicit N wins; C slices when runtime > Wan max."""
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
         WAN_MAX_CLIP_SEC,
         needs_duration_slicing,
         requested_film_duration_sec,
         sequential_shot_count,
     )
 
-    explicit = _explicit_shot_count_from_prompt(prompt)
+    explicit = _explicit_clip_count_from_prompt(prompt)
     if needs_duration_slicing(prompt):
         asked = int(requested_film_duration_sec(prompt) or 0)
         n_c = sequential_shot_count(asked)
@@ -199,10 +199,10 @@ def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
     if explicit >= 1:
         return max(1, explicit)
     try:
-        target = int(analysis.get("target_shot_count") or 0)
+        target = int(analysis.get("target_clip_count") or 0)
     except (TypeError, ValueError):
         target = 0
-    n_shots = len(analysis.get("shots") or [])
+    n_shots = len(analysis.get("clips") or [])
     authored = max(target, n_shots)
     # A named director style may forbid a single take (final_frame_reverse).
     style_floor = 0
@@ -267,7 +267,7 @@ def _pick_exiting(
     characters: list[dict[str, Any]],
     on_screen: list[str],
 ) -> list[str]:
-    action = str(shot.get("action") or shot.get("keyframe_prompt") or "")
+    action = str(shot.get("action") or shot.get("clip_prompt") or "")
     if not _action_has_exit(action):
         return []
     by_id = {str(c.get("id")): c for c in characters if c.get("id")}
@@ -301,7 +301,7 @@ def _blocking_for_shot(
     characters: list[dict[str, Any]],
     on_screen: list[str],
 ) -> dict[str, Any]:
-    action = str(shot.get("action") or shot.get("keyframe_prompt") or "")
+    action = str(shot.get("action") or shot.get("clip_prompt") or "")
     camera = str(shot.get("camera") or "").lower()
     by_id = {str(c.get("id")): c for c in characters if c.get("id")}
     positions: list[dict[str, str]] = []
@@ -338,7 +338,7 @@ def _blocking_for_shot(
         )
     landmark = ""
     for key in ("table", "pulpit", "desk", "window", "aisle", "pew", "door", "counter", "phone"):
-        if key in action.lower() or key in str(shot.get("keyframe_prompt") or "").lower():
+        if key in action.lower() or key in str(shot.get("clip_prompt") or "").lower():
             landmark = key
             break
     return {
@@ -505,7 +505,7 @@ def _ensure_stay_on_leave_beats(
         "lead",
     )
     for shot in shots:
-        action = str(shot.get("action") or shot.get("keyframe_prompt") or "")
+        action = str(shot.get("action") or shot.get("clip_prompt") or "")
         if not _action_has_exit(action) and not _action_has_exit(blob):
             continue
         if not (_STAY_SPEAK_RE.search(action) or _STAY_SPEAK_RE.search(blob)):
@@ -602,10 +602,10 @@ def _expand_shots_to_budget(
             shot.pop("exiting_character_ids", None)
             shot.pop("exiting", None)
         action = beats[i] if i < len(beats) else str(shot.get("action") or (beats[-1] if beats else ""))[:400]
-        shot["shot_index"] = i + 1
+        shot["clip_index"] = i + 1
         shot["title"] = f"Shot {i + 1}"
         shot["action"] = action[:500]
-        shot["keyframe_prompt"] = action[:500]
+        shot["clip_prompt"] = action[:500]
         # Focus cast: score against this shot
         if characters:
             ranked = sorted(
@@ -656,12 +656,12 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
             a = str(alias or "").strip()
             if a:
                 by_name[a.lower()] = cid
-    shots = [s for s in (out.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (out.get("clips") or []) if isinstance(s, dict)]
     budget = infer_shot_budget(prompt, out)
     # Explicit multi-shot language must win over short-clip single-shot analysis.
     shots = _expand_shots_to_budget(prompt, shots, characters, budget)
     for i, shot in enumerate(shots, start=1):
-        shot["shot_index"] = i
+        shot["clip_index"] = i
         on_screen = _cid_list(
             shot.get("on_screen") or shot.get("character_ids"),
             valid,
@@ -672,7 +672,7 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
             ranked = sorted(
                 (
                     (
-                        _score_in_text(ch, str(shot.get("action") or shot.get("keyframe_prompt") or "")),
+                        _score_in_text(ch, str(shot.get("action") or shot.get("clip_prompt") or "")),
                         str(ch.get("id")),
                     )
                     for ch in characters
@@ -693,7 +693,7 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
         shot["exiting"] = list(exiting)
         staying = [c for c in on_screen if c not in exiting]
         shot["staying"] = staying
-        action = str(shot.get("action") or shot.get("keyframe_prompt") or "")
+        action = str(shot.get("action") or shot.get("clip_prompt") or "")
         explicit_rel = str(shot.get("shot_relation") or "").strip().lower()
         if explicit_rel in {"hard_cut", "angle_variant", "continuation"}:
             relation = explicit_rel
@@ -733,9 +733,9 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
             base_action = str(shot.get("action") or "")
             if "BLOCKING:" not in base_action:
                 shot["action"] = (base_action + extra)[:500]
-                kp = str(shot.get("keyframe_prompt") or base_action)
+                kp = str(shot.get("clip_prompt") or base_action)
                 if "BLOCKING:" not in kp:
-                    shot["keyframe_prompt"] = (kp + extra)[:500]
+                    shot["clip_prompt"] = (kp + extra)[:500]
     _ensure_stay_on_leave_beats(prompt, characters, shots)
     # Refresh blocking after stay/leave fix
     for shot in shots:
@@ -754,8 +754,8 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
             base_action = re.split(r"\sBLOCKING:", base_action, maxsplit=1)[0]
             shot["action"] = (base_action + extra)[:500]
     _apply_exit_propagation(shots)
-    out["shots"] = shots
-    out["target_shot_count"] = len(shots)
+    out["clips"] = shots
+    out["target_clip_count"] = len(shots)
     scenes = [s for s in (out.get("scenes") or []) if isinstance(s, dict)]
     if not isinstance(out.get("spatial_lock"), dict) or not out.get("spatial_lock"):
         out["spatial_lock"] = _spatial_lock_from_prompt(prompt, scenes)
@@ -766,10 +766,10 @@ def enrich_analysis_heuristically(prompt: str, analysis: dict[str, Any]) -> dict
         "shot_count": len(shots),
     }
     out["experiment_plan"] = "A"
-    out["keyframe_policy"] = "compose_solos"
+    out["clip_policy"] = "compose_character_specs"
     out["skip_domain_role_locks"] = True
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import apply_shot_scope
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import apply_shot_scope
 
         out = apply_shot_scope(out, prompt)
     except Exception:  # noqa: BLE001
@@ -795,12 +795,12 @@ async def enrich_analysis_with_llm(
     base = enrich_analysis_heuristically(prompt, analysis)
     try:
         characters = base.get("characters") or []
-        shots = base.get("shots") or []
+        shots = base.get("clips") or []
         system = (
             "You are a film DIRECTOR writing a production shot sheet for a multi-shot AI video. "
             "Domain-agnostic: never assume church, dinner, or office unless the prompt says so. "
             "Return ONE compact raw JSON object only — no markdown fences, no commentary. "
-            "For EACH shot provide: shot_index, title, action (full detail for THIS window: "
+            "For EACH shot provide: clip_index, title, action (full detail for THIS window: "
             "blocking, posture, gaze, speech — not a one-liner, not the entire remaining plot), "
             "on_screen (character ids featured ON CAMERA now), "
             "off_camera (other cast ids who exist in the setting but must stay OFF FRAME this shot), "
@@ -825,13 +825,13 @@ async def enrich_analysis_with_llm(
             "(6) location changes reflected per beat; "
             "(7) off_camera people are NOT deleted — camera simply excludes them. "
             "Schema: "
-            '{"shots":[...],"spatial_lock":{...},"target_shot_count":N,"notes":"..."}'
+            '{"clips":[...],"spatial_lock":{...},"target_clip_count":N,"notes":"..."}'
         )
         user_payload = {
             "user_prompt": prompt,
             "characters": characters,
             "draft_shots": shots,
-            "budget": base.get("target_shot_count"),
+            "budget": base.get("target_clip_count"),
             "instruction": (
                 "Refine draft_shots into a strict director contract. "
                 "Keep character ids unchanged. Obey budget."
@@ -880,14 +880,14 @@ async def enrich_analysis_with_llm(
             name = str(ch.get("name") or "").strip()
             if name:
                 by_name[name.lower()] = cid
-        new_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else None
+        new_shots = parsed.get("clips") if isinstance(parsed.get("clips"), list) else None
         if not new_shots:
             raise DesignerLlmError(
                 "Chat model did not return any usable director contract shots.",
                 code=LLM_API_ERROR,
             )
-        budget = int(parsed.get("target_shot_count") or base.get("target_shot_count") or len(new_shots))
-        asked_n = _explicit_shot_count_from_prompt(prompt)
+        budget = int(parsed.get("target_clip_count") or base.get("target_clip_count") or len(new_shots))
+        asked_n = _explicit_clip_count_from_prompt(prompt)
         if asked_n >= 1:
             budget = asked_n
         else:
@@ -906,7 +906,7 @@ async def enrich_analysis_with_llm(
             draft = deepcopy(shots[i - 1]) if i - 1 < len(shots) else {}
             merged = dict(draft)
             merged.update({k: v for k, v in sh.items() if v is not None})
-            merged["shot_index"] = i
+            merged["clip_index"] = i
             merged["character_ids"] = on_screen or list(draft.get("character_ids") or [])
             merged["on_screen"] = list(merged["character_ids"])
             merged["exiting_character_ids"] = exiting
@@ -955,9 +955,9 @@ async def enrich_analysis_with_llm(
                 base_action = str(merged.get("action") or "")
                 if "BLOCKING:" not in base_action:
                     merged["action"] = (base_action + extra)[:500]
-                kp = str(merged.get("keyframe_prompt") or base_action)
+                kp = str(merged.get("clip_prompt") or base_action)
                 if "BLOCKING:" not in kp:
-                    merged["keyframe_prompt"] = (kp + extra)[:500]
+                    merged["clip_prompt"] = (kp + extra)[:500]
             norm.append(merged)
         if not norm:
             raise DesignerLlmError(
@@ -970,8 +970,8 @@ async def enrich_analysis_with_llm(
         _ensure_stay_on_leave_beats(prompt, characters, norm)
         _apply_exit_propagation(norm)
         out = deepcopy(base)
-        out["shots"] = norm
-        out["target_shot_count"] = len(norm)
+        out["clips"] = norm
+        out["target_clip_count"] = len(norm)
         if isinstance(parsed.get("spatial_lock"), dict):
             out["spatial_lock"] = {
                 **(out.get("spatial_lock") or {}),
@@ -985,10 +985,10 @@ async def enrich_analysis_with_llm(
             "notes": str(parsed.get("notes") or "")[:400],
         }
         out["experiment_plan"] = "A"
-        out["keyframe_policy"] = "compose_solos"
+        out["clip_policy"] = "compose_character_specs"
         out["skip_domain_role_locks"] = True
         try:
-            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
                 apply_shot_scope,
             )
 
@@ -1024,13 +1024,13 @@ async def apply_director_contract(
 def validate_director_contract(analysis: dict[str, Any]) -> list[str]:
     """Return human-readable gate failures (empty = ok)."""
     errors: list[str] = []
-    shots = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (analysis.get("clips") or []) if isinstance(s, dict)]
     if not shots:
         errors.append("no shots")
         return errors
     exited: set[str] = set()
     for shot in shots:
-        idx = shot.get("shot_index")
+        idx = shot.get("clip_index")
         on_screen = {str(x) for x in (shot.get("character_ids") or []) if str(x)}
         bad = on_screen & exited
         if bad:
@@ -1046,3 +1046,4 @@ def validate_director_contract(analysis: dict[str, Any]) -> list[str]:
         for cid in shot.get("exiting_character_ids") or []:
             exited.add(str(cid))
     return errors
+

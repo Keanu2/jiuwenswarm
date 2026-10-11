@@ -16,7 +16,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphValidationError,
     node_config,
     node_pipeline,
-    node_shot_index,
+    node_clip_index,
 )
 
 ROLE_CHARACTER = "character_identity"
@@ -39,8 +39,8 @@ MODE_REFERENCE = "reference_led"
 # How clips call the video model. Roles describe what a still *is*;
 # video_binding alone decides I2V vs R2V (never role presence alone).
 VIDEO_MULTI_REF = "multi_ref_story"
-VIDEO_ANIMATE_KEYFRAME = "animate_keyframe"
-VIDEO_BINDINGS = frozenset({VIDEO_MULTI_REF, VIDEO_ANIMATE_KEYFRAME})
+VIDEO_ANIMATE_STILL = "animate_still"
+VIDEO_BINDINGS = frozenset({VIDEO_MULTI_REF, VIDEO_ANIMATE_STILL})
 WAN_REF_CAP = 5
 
 # When an authority still owns the look but no vision labelled its medium, the
@@ -200,7 +200,7 @@ def video_generation_overrides(
         frame = str(cfg.get("reference_first_frame") or "").strip()
         if not frame:
             frame = _node_still_path(graph, str(cfg.get("reference_first_frame_node") or ""))
-        # Pure keyframe animate: first_frame only. If companions also resolved
+        # Pure animate-still: first_frame only. If companions also resolved
         # onto the plan, attach them as identity refs (never hard-null cast).
         companion_refs = [
             p for p in _merge_ref_paths(planned, fallback) if p and p != frame
@@ -248,7 +248,7 @@ def reference_prompt_issues(prompt: str, cfg: dict[str, Any] | None) -> list[str
     reasons: list[str] = []
     if not text:
         return ["empty"]
-    action = str(cfg.get("shot_action") or "").strip()
+    action = str(cfg.get("clip_action") or "").strip()
     if action and action not in text:
         reasons.append("missing_action")
     style = cfg.get("style_lock") if isinstance(cfg.get("style_lock"), dict) else {}
@@ -262,7 +262,7 @@ def reference_prompt_issues(prompt: str, cfg: dict[str, Any] | None) -> list[str
     if crowd and crowd not in text:
         reasons.append("missing_crowd")
     try:
-        index = int(cfg.get("shot_index") or 1)
+        index = int(cfg.get("clip_index") or 1)
     except (TypeError, ValueError):
         index = 1
     if index > 1:
@@ -288,10 +288,10 @@ def compose_reference_clip_prompt(cfg: dict[str, Any] | None) -> str:
     look = str(style.get("look") or "").strip()
     medium = str(style.get("medium") or "").strip()
     try:
-        index = int(cfg.get("shot_index") or 1)
+        index = int(cfg.get("clip_index") or 1)
     except (TypeError, ValueError):
         index = 1
-    action = str(cfg.get("shot_action") or "").strip()
+    action = str(cfg.get("clip_action") or "").strip()
     camera = str(cfg.get("camera") or "medium / eye-level").strip()
     timeline = str(cfg.get("timeline") or "").strip()
     duration = cfg.get("duration_sec")
@@ -353,7 +353,7 @@ def compose_reference_clip_prompt(cfg: dict[str, Any] | None) -> str:
 
 
 def reference_led_graph(graph: DesignerExecutionGraph) -> bool:
-    return graph.get("metadata", {}).get("scene_continuity_mode") == MODE_REFERENCE
+    return graph.get("metadata", {}).get("scene_consistency_mode") == MODE_REFERENCE
 
 
 def reject_removed_reference_stills(graph: DesignerExecutionGraph, removed: set[str]) -> None:
@@ -376,7 +376,7 @@ def refresh_reference_continuity(
     old_configs = {node["id"]: node_config(node) for node in before["nodes"]}
     clips = sorted(
         (node for node in graph["nodes"] if node_pipeline(node) == "clip"),
-        key=node_shot_index,
+        key=node_clip_index,
     )
     previous_action = ""
     previous_end = ""
@@ -384,8 +384,8 @@ def refresh_reference_continuity(
     for node in clips:
         cfg = node_config(node)
         old = old_configs.get(node["id"], {})
-        action = str(cfg.get("shot_action") or "")
-        old_action = str(old.get("shot_action") or "")
+        action = str(cfg.get("clip_action") or "")
+        old_action = str(old.get("clip_action") or "")
         if action != old_action and cfg.get("end_state") == f"completed: {old_action}":
             cfg["end_state"] = f"completed: {action}"
         cfg["previous_action"] = previous_action
@@ -412,7 +412,7 @@ def build_reference_led_video_graph(
         EDGE_KIND_DATA,
         GRAPH_SOURCE_PROMPT,
         NODE_ROLE_BRIEF,
-        NODE_ROLE_CHARACTER_DESIGN,
+        NODE_ROLE_CHARACTER,
         NODE_ROLE_CLIP,
         NODE_ROLE_COMPOSE,
         NODE_ROLE_SCENE,
@@ -446,7 +446,7 @@ def build_reference_led_video_graph(
     style = _style_lock_from_references(style, slots)
     analysis["style_lock"] = dict(style)
     shots = _prepare_shots(analysis, prompt_text)
-    analysis["shots"] = shots
+    analysis["clips"] = shots
     analysis["user_prompt"] = prompt_text
     job = _job_plan(slots, analysis)
     nodes: list[dict[str, Any]] = []
@@ -552,7 +552,7 @@ def build_reference_led_video_graph(
 
     sheet_ids: list[str] = []
     sheet_index = 0
-    # Condition-bound stills: identity sheet redrawn from the upload.
+    # Condition-bound stills: character specs redrawn from the upload.
     for slot in job.get("character_sheet_slots") or []:
         sheet_index += 1
         cid = str(slot.get("character_id") or f"char_{sheet_index}")
@@ -565,17 +565,17 @@ def build_reference_led_video_graph(
                 "type": NODE_TYPE_IMAGE,
                 "label": character.get("name") or f"Character {sheet_index}",
                 "config": {
-                    "role": NODE_ROLE_CHARACTER_DESIGN,
+                    "role": NODE_ROLE_CHARACTER,
                     "character_id": character.get("id") or cid,
                     "character_name": character.get("name") or f"Character {sheet_index}",
-                    "reference_still_task": "identity_sheet",
+                    "reference_still_task": "character_specs",
                     "require_reference_images": True,
                     "style_lock": dict(style),
                     "inputs": ["n_storyboard", slot["node_id"]],
                     "delegate": "handler",
                     "prompt": still_task_prompt(
                         {
-                            "reference_still_task": "identity_sheet",
+                            "reference_still_task": "character_specs",
                             "character_name": character.get("name") or f"Character {sheet_index}",
                             "style_lock": style,
                         }
@@ -587,7 +587,7 @@ def build_reference_led_video_graph(
         add_edge("n_storyboard", sheet_id)
         add_edge(str(slot["node_id"]), sheet_id)
 
-    # Uncovered analysis cast: companion identity sheets under the same style_lock.
+    # Uncovered analysis cast: companion character specs under the same style_lock.
     # No upload input — never regenerate a verbatim still for these ids.
     # On-screen companions fill the Wan cap before off-screen extras.
     on_screen = _on_screen_character_keys(analysis)
@@ -614,10 +614,10 @@ def build_reference_led_video_graph(
                 "type": NODE_TYPE_IMAGE,
                 "label": name,
                 "config": {
-                    "role": NODE_ROLE_CHARACTER_DESIGN,
+                    "role": NODE_ROLE_CHARACTER,
                     "character_id": cid,
                     "character_name": name,
-                    "reference_still_task": "identity_sheet",
+                    "reference_still_task": "character_specs",
                     "require_reference_images": False,
                     "companion_cast": True,
                     "style_lock": dict(style),
@@ -653,11 +653,11 @@ def build_reference_led_video_graph(
                 "type": NODE_TYPE_IMAGE,
                 "label": "Supporting cast",
                 "config": {
-                    "role": NODE_ROLE_CHARACTER_DESIGN,
+                    "role": NODE_ROLE_CHARACTER,
                     "character_id": ids[0] if len(ids) == 1 else "",
                     "character_ids": ids,
                     "character_name": ", ".join(names) if names else "Supporting cast",
-                    "reference_still_task": "identity_sheet",
+                    "reference_still_task": "character_specs",
                     "require_reference_images": False,
                     "companion_cast": True,
                     "combined_cast": True,
@@ -684,7 +684,7 @@ def build_reference_led_video_graph(
                 "type": NODE_TYPE_IMAGE,
                 "label": "Restyle still",
                 "config": {
-                    "role": NODE_ROLE_CHARACTER_DESIGN,
+                    "role": NODE_ROLE_CHARACTER,
                     "reference_still_task": "medium_change",
                     "require_reference_images": True,
                     "style_lock": dict(style),
@@ -736,15 +736,15 @@ def build_reference_led_video_graph(
     previous_action = ""
     previous_end = ""
     for shot in shots:
-        index = int(shot["shot_index"])
+        index = int(shot["clip_index"])
         clip_id = f"n_clip_{index}"
         clip_ids.append(clip_id)
         lighting = str(shot.get("lighting") or "").strip()
         crowd = str(shot.get("crowd") or "").strip()
         cfg: dict[str, Any] = {
             "role": NODE_ROLE_CLIP,
-            "shot_index": index,
-            "shot_action": shot.get("action"),
+            "clip_index": index,
+            "clip_action": shot.get("action"),
             "camera": shot.get("camera"),
             "timeline": shot.get("timeline"),
             "duration_sec": shot.get("duration_sec"),
@@ -784,7 +784,7 @@ def build_reference_led_video_graph(
             for extra_id in list(sheet_ids) + list(plate_ids):
                 if extra_id not in cfg["inputs"]:
                     cfg["inputs"].append(extra_id)
-            # Animate-upgraded R2V: keep keyframe node as an explicit input too.
+            # Animate-upgraded R2V: keep animate-still node as an explicit input too.
             if restyle_id and restyle_id not in cfg["inputs"]:
                 cfg["inputs"].append(restyle_id)
             elif job.get("motion_slots"):
@@ -846,9 +846,9 @@ def build_reference_led_video_graph(
             "creative_intent": analysis.get("creative_intent"),
             "style_lock": dict(style),
             "film_duration_sec": total,
-            "target_shot_count": len(shots),
-            "freeze_shot_topology": True,
-            "scene_continuity_mode": "reference_led",
+            "target_clip_count": len(shots),
+            "freeze_clip_topology": True,
+            "scene_consistency_mode": "reference_led",
         },
         "created_at": now,
         "updated_at": now,
@@ -1167,7 +1167,7 @@ def _companion_sheet_prompt(character: dict[str, Any], style: dict[str, Any]) ->
     name = str(character.get("name") or "the person").strip()
     desc = str(character.get("description") or "").strip()
     medium = str(style.get("medium") or style.get("look") or "the approved style").strip()
-    bits = [f"Create an identity sheet for {name}."]
+    bits = [f"Create an character specs for {name}."]
     if desc:
         bits.append(desc if desc.endswith(".") else f"{desc}.")
     bits.append("Plain studio backdrop. Do not invent a different person.")
@@ -1187,7 +1187,7 @@ def _combined_companion_sheet_prompt(
     label = ", ".join(names) if names else "the supporting cast"
     medium = str(style.get("medium") or style.get("look") or "the approved style").strip()
     return (
-        f"Create one identity sheet showing {label} as distinct people side by side. "
+        f"Create one character specs showing {label} as distinct people side by side. "
         "Keep each face and wardrobe recognisable. Plain studio backdrop. "
         f"Visual style: {medium}."
     )
@@ -1199,19 +1199,19 @@ def _partition_companions_for_cap(
     reserved_slots: int,
     cap: int = WAN_REF_CAP,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split companions into solo sheets vs one combined overflow card.
+    """Split companions into individual character specs vs one combined overflow card.
 
-    Returns ``(solo_companions, combined_members)``. Combined members share one
-    Wan slot when solos would exceed the remaining budget.
+    Returns ``(individual_companions, combined_members)``. Combined members share one
+    Wan slot when individual specs would exceed the remaining budget.
     """
     room = max(0, int(cap) - max(0, int(reserved_slots)))
     if len(companions) <= room:
         return list(companions), []
     if room <= 1:
         return [], list(companions)
-    solos = list(companions[: room - 1])
+    individual = list(companions[: room - 1])
     combined = list(companions[room - 1 :])
-    return solos, combined
+    return individual, combined
 
 
 def _image_n_labels(cfg: dict[str, Any]) -> list[str]:
@@ -1234,7 +1234,7 @@ def _image_n_labels(cfg: dict[str, Any]) -> list[str]:
         elif role == ROLE_SCENE:
             who = "the place"
         elif role == ROLE_MOTION:
-            who = "the keyframe subject"
+            who = "the animate-still subject"
         elif role == ROLE_CHARACTER:
             who = "the person"
         else:
@@ -1266,7 +1266,7 @@ def _verbatim_card_role(slot: dict[str, Any]) -> str:
     if ROLE_MOTION in roles:
         return "motion" if _slot_binding(slot, ROLE_MOTION) == BINDING_VERBATIM else ""
     if ROLE_CHARACTER in roles and _slot_binding(slot, ROLE_CHARACTER) == BINDING_VERBATIM:
-        return "character_design"
+        return "character"
     if ROLE_SCENE in roles and (
         _slot_binding(slot, ROLE_SCENE) == BINDING_VERBATIM or bool(slot.get("set_lock"))
     ):
@@ -1343,10 +1343,10 @@ def _job_plan(
     # Covered = any still that already supplies that cast/set id (verbatim or
     # condition). Companions are always analysis entries minus that covered set.
     covered_chars = _covered_character_ids(slots, analysis)
-    # True keyframe animate: a single analysis character with no character still
-    # is the keyframe subject — do not mint a redundant identity sheet for them.
+    # True animate-still: a single analysis character with no character specs
+    # is the animate subject — do not mint a redundant character specs for them.
     if (
-        video_binding == VIDEO_ANIMATE_KEYFRAME
+        video_binding == VIDEO_ANIMATE_STILL
         and motion
         and not character
         and len(cast) == 1
@@ -1365,7 +1365,7 @@ def _job_plan(
 
     # A character the LLM bound verbatim (the default) is shown from its own
     # file: no sheet for that id. Only an explicit `condition` character
-    # regenerates a redrawn identity sheet for its still.
+    # regenerates a redrawn character specs for its still.
     sheet_characters = [
         slot for slot in character if binding_of(slot, ROLE_CHARACTER) == BINDING_CONDITION
     ]
@@ -1387,7 +1387,7 @@ def _job_plan(
     covered_settings = _covered_setting_ids(slots, analysis)
 
     # Uncovered analysis.scenes become plates for multi-ref stories and for
-    # keyframe jobs that also need extra set. Pure solo keyframe keeps no plates.
+    # animate-still jobs that also need extra set. Pure animate-still keeps no plates.
     plate_scenes: list[dict[str, Any]] = []
     needs_plates = video_binding == VIDEO_MULTI_REF or bool(companions)
     if needs_plates:
@@ -1404,12 +1404,12 @@ def _job_plan(
                 if match is not None and match not in plate_scenes:
                     plate_scenes.insert(0, match)
 
-    # Cap overflow: keep solo companions that fit; fold the rest into one card.
+    # Cap overflow: keep character companions that fit; fold the rest into one card.
     upload_reserve = len(product) + len(verbatim_characters) + len(locked_scene)
-    if video_binding == VIDEO_ANIMATE_KEYFRAME and motion:
-        upload_reserve += 1  # keyframe still occupies a plan / first-frame slot
+    if video_binding == VIDEO_ANIMATE_STILL and motion:
+        upload_reserve += 1  # animate still occupies a plan / first-frame slot
     reserved = upload_reserve + len(sheet_characters) + (1 if plate_scenes else 0)
-    solo_companions, combined_companions = _partition_companions_for_cap(
+    character_companions, combined_companions = _partition_companions_for_cap(
         companions, reserved_slots=reserved, cap=WAN_REF_CAP
     )
 
@@ -1419,11 +1419,11 @@ def _job_plan(
         if isinstance(intent, dict):
             intent["video_binding"] = video_binding
 
-    # True animate-keyframe alone → I2V. Extra cast/set upgrades to R2V so
-    # companions/plates are packed as reference images (keyframe as Image 1).
-    if video_binding == VIDEO_ANIMATE_KEYFRAME and motion:
+    # True animate-still alone → I2V. Extra cast/set upgrades to R2V so
+    # companions/plates are packed as reference images (animate still as Image 1).
+    if video_binding == VIDEO_ANIMATE_STILL and motion:
         binding = binding_of(motion[0], ROLE_MOTION)
-        has_extra = bool(solo_companions) or bool(combined_companions) or bool(
+        has_extra = bool(character_companions) or bool(combined_companions) or bool(
             sheet_characters
         ) or bool(plate_scenes)
         if has_extra:
@@ -1432,7 +1432,7 @@ def _job_plan(
                 "contract": "motion",
                 "video_binding": video_binding,
                 "sheets": bool(sheet_characters)
-                or bool(solo_companions)
+                or bool(character_companions)
                 or bool(combined_companions),
                 "plates": bool(plate_scenes),
                 "restyle": binding == BINDING_CONDITION,
@@ -1442,7 +1442,7 @@ def _job_plan(
                 "character_slots": character,
                 "character_sheet_slots": sheet_characters,
                 "character_verbatim_slots": verbatim_characters,
-                "companion_characters": solo_companions,
+                "companion_characters": character_companions,
                 "combined_companion_characters": combined_companions,
                 "companion_scenes": plate_scenes,
                 "style_slots": style,
@@ -1488,7 +1488,7 @@ def _job_plan(
         "contract": contract,
         "video_binding": video_binding,
         "sheets": bool(sheet_characters)
-        or bool(solo_companions)
+        or bool(character_companions)
         or bool(combined_companions),
         "plates": bool(plate_scenes),
         "restyle": False,
@@ -1498,7 +1498,7 @@ def _job_plan(
         "character_slots": character,
         "character_sheet_slots": sheet_characters,
         "character_verbatim_slots": verbatim_characters,
-        "companion_characters": solo_companions,
+        "companion_characters": character_companions,
         "combined_companion_characters": combined_companions,
         "companion_scenes": plate_scenes,
         "style_slots": style,
@@ -1514,7 +1514,7 @@ def _reference_plan(
 ) -> list[dict[str, str]]:
     plan: list[dict[str, str]] = []
     meta = sheet_meta or {}
-    # Keyframe / motion stills lead when the job is animate-upgraded R2V.
+    # Animate-still / motion stills lead when the job is animate-upgraded R2V.
     for slot in job.get("motion_slots") or []:
         plan.append(
             {
@@ -1564,7 +1564,7 @@ def _reference_plan(
 
 def _on_screen_character_keys(analysis: dict[str, Any] | None) -> set[str]:
     keys: set[str] = set()
-    for shot in ((analysis or {}).get("shots") or []):
+    for shot in ((analysis or {}).get("clips") or []):
         if not isinstance(shot, dict):
             continue
         for field in ("on_screen", "character_ids", "visible_cast_ids"):
@@ -1579,7 +1579,7 @@ def _on_screen_character_keys(analysis: dict[str, Any] | None) -> set[str]:
 
 
 def _cap_plan(plan: list[dict[str, str]], cap: int = WAN_REF_CAP) -> list[dict[str, str]]:
-    """Prefer product, keyframe, and user uploads; keep combined cast when present."""
+    """Prefer product, animate-still, and user uploads; keep combined cast when present."""
     if len(plan) <= cap:
         return plan
 
@@ -1618,7 +1618,7 @@ def _cap_plan(plan: list[dict[str, str]], cap: int = WAN_REF_CAP) -> list[dict[s
 
 
 def _prepare_shots(analysis: dict[str, Any], prompt: str) -> list[dict[str, Any]]:
-    raw = [dict(item) for item in (analysis.get("shots") or []) if isinstance(item, dict)]
+    raw = [dict(item) for item in (analysis.get("clips") or []) if isinstance(item, dict)]
     if not raw:
         raw = [{"action": prompt[:500], "setting_id": "set_1"}]
     shots: list[dict[str, Any]] = []
@@ -1637,7 +1637,7 @@ def _prepare_shots(analysis: dict[str, Any], prompt: str) -> list[dict[str, Any]
         shots.append(
             {
                 **shot,
-                "shot_index": index,
+                "clip_index": index,
                 "action": action,
                 "camera": str(shot.get("camera") or "medium / eye-level"),
                 "duration_sec": duration_sec,

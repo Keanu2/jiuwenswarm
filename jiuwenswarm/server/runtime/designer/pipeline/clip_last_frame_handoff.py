@@ -23,7 +23,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Leave headroom for character solos + scene card in Wan reference_images.
+# Leave headroom for character specs + scene spec in Wan reference_images.
 MAX_SCENE_LAST_FRAME_REFS = 4
 
 
@@ -53,7 +53,7 @@ def _looks_like_hard_cut(this_cfg: dict[str, Any] | None, prev_cfg: dict[str, An
     blob = " ".join(
         str(x)
         for x in (
-            this_cfg.get("shot_action"),
+            this_cfg.get("clip_action"),
             this_cfg.get("scene_change"),
             this_cfg.get("scene_distinctness"),
             (this_cfg.get("continuity_lock") or {}).get("forbid")
@@ -140,20 +140,20 @@ def _clip_nodes_sorted(graph: dict[str, Any] | None) -> list[dict[str, Any]]:
         nid = str(node.get("id") or "")
         if role not in {"clip", "video"} and not nid.startswith("n_clip_"):
             continue
-        idx = int(cfg.get("shot_index") or 0) or 0
+        idx = int(cfg.get("clip_index") or 0) or 0
         if idx <= 0:
             continue
         clips.append(node)
     return sorted(
         clips,
-        key=lambda n: int((n.get("config") or {}).get("shot_index") or 0) or 0,
+        key=lambda n: int((n.get("config") or {}).get("clip_index") or 0) or 0,
     )
 
 
 def _short_beat(cfg: dict[str, Any] | None, *, limit: int = 140) -> str:
     cfg = cfg if isinstance(cfg, dict) else {}
     raw = str(
-        cfg.get("shot_action")
+        cfg.get("clip_action")
         or cfg.get("character_action")
         or cfg.get("previous_clip_action")
         or ""
@@ -364,7 +364,7 @@ def last_frame_continuity_clause(
             "Use it only to localize last-seen people and place. "
             "THIS clip's action/camera come from the storyboard shot — "
             "do not replace that beat with a different plot from the still. "
-            "Face/wardrobe authority remains character solo reference images."
+            "Face/wardrobe authority remains character specs reference images."
         )
 
     lines: list[str] = [
@@ -372,7 +372,7 @@ def last_frame_continuity_clause(
         "they are NOT the plot for THIS clip):",
     ]
     for i, item in enumerate(items):
-        idx = int(item.get("shot_index") or 0) or "?"
+        idx = int(item.get("clip_index") or 0) or "?"
         beat = str(item.get("action") or "").strip() or "(prior beat)"
         speech = str(item.get("speech") or "").strip()
         bit = f"- Shot {idx} ENDED here: {beat}"
@@ -384,11 +384,11 @@ def last_frame_continuity_clause(
             bit += " (history — localize exited / off-screen people who were last seen here)."
         lines.append(bit)
     if len(items) > 1:
-        arrow = " → ".join(f"shot {int(c.get('shot_index') or 0)}" for c in items)
+        arrow = " → ".join(f"shot {int(c.get('clip_index') or 0)}" for c in items)
         lines.append(f"Beat progression in this setting: {arrow} → THIS shot.")
     lines.append(
         "Do NOT attach these stills as Wan refs (they steal character1 and restage a crop). "
-        "Identity = on-screen solos; geography = scene card LAST; plot = THIS storyboard shot "
+        "Identity = on-screen character specs; geography = scene spec LAST; plot = THIS storyboard shot "
         "continuing the previous Wan prompt. People who left stay off-screen — "
         "do not teleport them back or restage walking away unless the storyboard asks."
     )
@@ -411,7 +411,7 @@ def collect_same_scene_last_frame_chain(
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     graph = graph if isinstance(graph, dict) else {}
-    this_idx = int(cfg.get("shot_index") or 0) or 0
+    this_idx = int(cfg.get("clip_index") or 0) or 0
     if this_idx <= 1:
         return []
     if bool(cfg.get("forbid_prior_last_frame")) or bool(cfg.get("hard_cut")):
@@ -422,7 +422,7 @@ def collect_same_scene_last_frame_chain(
     priors = [
         n
         for n in _clip_nodes_sorted(graph)
-        if int((n.get("config") or {}).get("shot_index") or 0) < this_idx
+        if int((n.get("config") or {}).get("clip_index") or 0) < this_idx
     ]
     if not priors:
         return []
@@ -447,7 +447,7 @@ def collect_same_scene_last_frame_chain(
             continue
         selected_rev.append(
             {
-                "shot_index": int(pcfg.get("shot_index") or 0) or 0,
+                "clip_index": int(pcfg.get("clip_index") or 0) or 0,
                 "node_id": str(node.get("id") or ""),
                 "path": str(path),
                 "action": _short_beat(pcfg),
@@ -474,7 +474,7 @@ def resolve_gated_last_frame_chain(
 ) -> list[dict[str, Any]]:
     """Resolve same-scene chain; empty when gate forbids continuity."""
     cfg = cfg if isinstance(cfg, dict) else {}
-    this_idx = int(cfg.get("shot_index") or 0) or 0
+    this_idx = int(cfg.get("clip_index") or 0) or 0
     # Hard guard: first clip of a film/shot never attaches prior endings.
     if this_idx <= 1:
         return []
@@ -501,7 +501,7 @@ def resolve_gated_last_frame_chain(
         if path.is_file():
             stamped.append(
                 {
-                    "shot_index": int(item.get("shot_index") or 0) or 0,
+                    "clip_index": int(item.get("clip_index") or 0) or 0,
                     "node_id": str(item.get("node_id") or ""),
                     "path": str(path.resolve()),
                     "action": str(item.get("action") or "")[:140],
@@ -516,7 +516,7 @@ def resolve_gated_last_frame_chain(
     if one.is_file() and bool(cfg.get("use_prior_last_frame")):
         return [
             {
-                "shot_index": int(cfg.get("previous_clip_shot_index") or 0) or 0,
+                "clip_index": int(cfg.get("previous_clip_clip_index") or 0) or 0,
                 "node_id": str(cfg.get("previous_clip_node_id") or ""),
                 "path": str(one.resolve()),
                 "action": str(cfg.get("previous_clip_action") or "")[:140],
@@ -556,7 +556,7 @@ def stamp_scene_last_frame_chain(
             continue
         compact.append(
             {
-                "shot_index": int(item.get("shot_index") or 0) or 0,
+                "clip_index": int(item.get("clip_index") or 0) or 0,
                 "node_id": str(item.get("node_id") or ""),
                 "path": path,
                 "action": str(item.get("action") or "")[:140],
@@ -586,7 +586,7 @@ def chain_prior_speech_across_clips(graph: dict[str, Any]) -> list[str]:
         nid = str(node.get("id") or "")
         if role not in {"clip", "video"} and not nid.startswith("n_clip_"):
             continue
-        idx = int(cfg.get("shot_index") or 0) or 0
+        idx = int(cfg.get("clip_index") or 0) or 0
         if idx <= 0:
             continue
         clips.append((idx, node))
@@ -604,7 +604,7 @@ def chain_prior_speech_across_clips(graph: dict[str, Any]) -> list[str]:
             cfg["forbidden_speech"] = forbid[:8]
             if prev_id and not str(cfg.get("previous_clip_node_id") or "").strip():
                 cfg["previous_clip_node_id"] = prev_id
-                cfg["previous_clip_shot_index"] = prev_idx
+                cfg["previous_clip_clip_index"] = prev_idx
             before = str(cfg.get("speech_line") or "").strip()
             cfg = scrub_restated_speech(cfg)
             after = str(cfg.get("speech_line") or "").strip()
@@ -631,7 +631,7 @@ def stamp_last_frame_onto_next_clips(
     *,
     completed_clip_id: str,
     last_frame_path: str,
-    shot_index: int,
+    clip_index: int,
     speech_line: str = "",
 ) -> list[str]:
     """After clip N completes: stamp last-frame path + scene chain + speech onto N+1."""
@@ -659,7 +659,7 @@ def stamp_last_frame_onto_next_clips(
         if isinstance(c, dict) and str(c.get("path") or "").strip()
     ]
     this_entry = {
-        "shot_index": int(shot_index or 0),
+        "clip_index": int(clip_index or 0),
         "node_id": str(completed_clip_id or ""),
         "path": frame,
         "action": _short_beat(src_cfg),
@@ -682,11 +682,11 @@ def stamp_last_frame_onto_next_clips(
             node.get("id") or ""
         ).startswith("n_clip_"):
             continue
-        idx = int(cfg.get("shot_index") or 0) or 0
+        idx = int(cfg.get("clip_index") or 0) or 0
         nid = str(node.get("id") or "")
-        if idx == int(shot_index or 0) or nid == completed_clip_id:
+        if idx == int(clip_index or 0) or nid == completed_clip_id:
             continue
-        is_next = idx == int(shot_index or 0) + 1
+        is_next = idx == int(clip_index or 0) + 1
         cont = str(cfg.get("continuity_clip_node_id") or "") == str(completed_clip_id)
         if not (is_next or cont):
             continue

@@ -51,7 +51,7 @@ def contact_anti_penetration_clause(*, for_clip: bool = True) -> str:
         "If posture is seated/kneeling/reclining/leaning: visible contact with the "
         "support surface (seat, floor, edge, rail) — weight rests ON the surface, "
         "not floating and not sunk THROUGH it. "
-        "Solo identity sheets may show standing studio poses; when the shot requires "
+        "Solo character specs may show standing studio poses; when the shot requires "
         "contact with set geometry, REPOSE the body for This shot (do not paste the "
         "standing sheet pose into the room). "
         "Hands/props: grasp exteriors; do not bury limbs inside objects. "
@@ -92,7 +92,7 @@ def wan_reference_media_rules(*, prior_ending_count: int = 0) -> str:
     else:
         lines.append(
             "- First clip of a setting: no prior ending still — play the storyboard shot "
-            "using identity solos + scene specs."
+            "using identity character specs + scene specs."
         )
     return "\n".join(lines)
 

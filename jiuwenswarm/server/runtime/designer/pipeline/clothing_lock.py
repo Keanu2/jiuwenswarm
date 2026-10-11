@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Structured clothing / wardrobe locks for cast consistency across keyframes + clips.
+"""Structured clothing / wardrobe locks for cast consistency across clip specs + clips.
 
 costume_lock must name garment slots (top/shirt, bottom/trousers, footwear, outerwear,
 accessories) with style + color — not a vague one-liner — and the same lock is injected
@@ -256,11 +256,11 @@ def clothing_lock_clause(
     *,
     for_clip: bool = False,
 ) -> str:
-    """Prompt block injected into keyframes and clips."""
+    """Prompt block injected into clip specs and clips."""
     text = re.sub(r"\s+", " ", (costume_lock or "").strip())
     if not text:
         return ""
-    where = "this clip (match Image 1 + identity sheets)" if for_clip else "this keyframe"
+    where = "this clip (match Image 1 + character specs)" if for_clip else "this clip spec"
     return (
         f"CLOTHING LOCK ({where}): {text[:720]}\n"
         + clothing_hold_rule()

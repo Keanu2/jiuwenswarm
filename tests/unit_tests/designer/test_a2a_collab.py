@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.common.schema.designer_graph import (
-    NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CHARACTER,
     NODE_ROLE_SCENE,
     NODE_TYPE_IMAGE,
     SCHEMA_VERSION,
@@ -40,7 +40,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_bus_records_a2a_shape() -> None:
     bus = DesignerA2ABus(context_id="run_a2a01")
     sent = bus.send(
-        sender=NODE_ROLE_CHARACTER_DESIGN,
+        sender=NODE_ROLE_CHARACTER,
         recipient=NODE_ROLE_SCENE,
         text="角色穿湿漉漉的皮衣",
         task_id="align_1",
@@ -72,12 +72,12 @@ async def test_align_specialists_writes_cards(
     )
     cards = await align_specialists(
         "火车站晨间",
-        [NODE_ROLE_CHARACTER_DESIGN, NODE_ROLE_SCENE],
+        [NODE_ROLE_CHARACTER, NODE_ROLE_SCENE],
         run_id="run_align01",
     )
-    assert NODE_ROLE_CHARACTER_DESIGN in cards
+    assert NODE_ROLE_CHARACTER in cards
     assert NODE_ROLE_SCENE in cards
-    assert "Constraints after aligning" in cards[NODE_ROLE_CHARACTER_DESIGN]
+    assert "Constraints after aligning" in cards[NODE_ROLE_CHARACTER]
     assert collaboration_card("run_align01", NODE_ROLE_SCENE)
     assert (workspace / "designer_a2a_run_align01_transcript.md").is_file()
     assert any("A2A" in prompt or "colleague" in prompt.lower() for prompt in calls)
@@ -121,7 +121,7 @@ async def test_collaborate_ready_wave_runs_for_character_and_scene(
         }
     )
     cards = await collaborate_ready_wave(graph, run, ["n_character", "n_scene"])
-    assert set(cards) == {NODE_ROLE_CHARACTER_DESIGN, NODE_ROLE_SCENE}
+    assert set(cards) == {NODE_ROLE_CHARACTER, NODE_ROLE_SCENE}
     again = await collaborate_ready_wave(graph, run, ["n_character", "n_scene"])
     assert again[NODE_ROLE_SCENE] == cards[NODE_ROLE_SCENE]
 
@@ -153,7 +153,7 @@ async def test_collaborate_skipped_when_disabled(
                     "id": "n_character",
                     "type": "image",
                     "label": "c",
-                    "config": {"role": NODE_ROLE_CHARACTER_DESIGN, "collaborate": False},
+                    "config": {"role": NODE_ROLE_CHARACTER, "collaborate": False},
                 },
                 {
                     "id": "n_scene",
@@ -187,7 +187,7 @@ async def test_collaborate_skipped_when_disabled(
 async def test_review_storyboard_keeps_table_when_peers_ok(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workspace.joinpath("designer_a2a_run_rev01_character_design.md").write_text(
+    workspace.joinpath("designer_a2a_run_rev01_character.md").write_text(
         "# 角色\n皮衣", encoding="utf-8"
     )
     workspace.joinpath("designer_a2a_run_rev01_scene.md").write_text(

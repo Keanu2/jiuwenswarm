@@ -4,9 +4,9 @@ from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
     handoff_clause_for_prompt,
     stamp_wan_prompt_handoff,
 )
-from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
-    continuity_card_clause,
-    continuity_card_from_prior,
+from jiuwenswarm.server.runtime.designer.pipeline.character_consistency import (
+    character_consistency_clause,
+    character_consistency_from_prior,
     extract_already_done_beats,
 )
 from jiuwenswarm.server.runtime.designer.audio_locks import (
@@ -23,14 +23,14 @@ def test_extract_already_done_forbids_restarting_run():
     assert "run" in joined
 
 
-def test_continuity_card_clause_optional_helper_still_works():
-    card = continuity_card_from_prior(
+def test_character_consistency_clause_optional_helper_still_works():
+    card = character_consistency_from_prior(
         prior_action="woman begins walking away from the altar",
         prior_prompt="HUGE FULL WAN PROMPT " * 80,
-        shot_index=1,
+        clip_index=1,
         node_id="n_clip_1",
     )
-    clause = continuity_card_clause(card)
+    clause = character_consistency_clause(card)
     assert "CHARACTER CONSISTENCY" in clause
     assert "ALREADY_DONE" in clause
 
@@ -41,12 +41,12 @@ def test_stamp_handoff_saves_own_prompt_and_does_not_stamp_next_clip():
             {
                 "id": "n_clip_1",
                 "type": "video",
-                "config": {"role": "clip", "shot_index": 1, "shot_action": "man starts running"},
+                "config": {"role": "clip", "clip_index": 1, "clip_action": "man starts running"},
             },
             {
                 "id": "n_clip_2",
                 "type": "video",
-                "config": {"role": "clip", "shot_index": 2, "continuity_clip_node_id": "n_clip_1"},
+                "config": {"role": "clip", "clip_index": 2, "continuity_clip_node_id": "n_clip_1"},
             },
         ],
         "metadata": {},
@@ -54,7 +54,7 @@ def test_stamp_handoff_saves_own_prompt_and_does_not_stamp_next_clip():
     big = "SHOT1_ONLY_IDENTITY_MARKER " + ("style lock dump " * 40)
     notes = stamp_wan_prompt_handoff(
         graph,
-        shot_index=1,
+        clip_index=1,
         prompt=big,
         node_id="n_clip_1",
         shot_action="man starts running",
@@ -70,13 +70,13 @@ def test_stamp_handoff_saves_own_prompt_and_does_not_stamp_next_clip():
     clause = handoff_clause_for_prompt(
         [
             {
-                "shot_index": 1,
+                "clip_index": 1,
                 "node_id": "n_clip_1",
-                "shot_action": "man starts running",
+                "clip_action": "man starts running",
                 "wan_prompt": big,
             }
         ],
-        this_shot_index=2,
+        this_clip_index=2,
         this_action="man enters the hallway",
     )
     assert "PREVIOUS CLIP HAD" in clause

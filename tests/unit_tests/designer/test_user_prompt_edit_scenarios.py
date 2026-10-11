@@ -104,7 +104,7 @@ def _film_shot(*, cast: str, prop: str, action: str, camera: str, index: int) ->
         f"Film shot {(index % 6) + 1} only. Camera {camera} the {prop}, moving gently. "
         f"Action: The family {prop} {action} a scenic road. {cast} drives. "
         f"Focus cast on screen: {cast}. Must differ from sibling shots. "
-        f"CLOTHING LOCK: {cast}: grey coat. STRATEGY=compose_from_solo_refs setting=set_1. "
+        f"CLOTHING LOCK: {cast}: grey coat. STRATEGY=compose_from_character_specs setting=set_1. "
         "SCENE SPECS: scene=None; lighting=motivated; views=['front', 'left', 'right', 'side', 't"
     )
 
@@ -117,7 +117,7 @@ def _cfg(
     stale_prop: str,
 ) -> dict:
     return {
-        "shot_action": f"{cast} uses a {stale_prop} near the window",
+        "clip_action": f"{cast} uses a {stale_prop} near the window",
         "camera": f"wide with {stale_prop}",
         "cast_names": [cast],
         "on_screen": [cast],
@@ -169,7 +169,7 @@ def _assert_pipeline_edit(index: int) -> None:
         f"agent narrates a {stale} instead",
         cfg=cfg,
         graph={},
-        shot_index=1 + (index % 4),
+        clip_index=1 + (index % 4),
     )
     assert prop in approved, f"index={index} prop={prop!r} approved={approved[:240]!r}"
     assert stale not in approved or prop in approved
@@ -180,7 +180,7 @@ def _assert_pipeline_edit(index: int) -> None:
     assert (cfg.get("generate") or {}).get("prompt_origin") == "user"
     # Second regen still sees user Film-shot authority (packet not poisoned).
     cfg2 = dict(cfg)
-    again = apply_wan_call_locks("agent again", cfg=cfg2, graph={}, shot_index=1)
+    again = apply_wan_call_locks("agent again", cfg=cfg2, graph={}, clip_index=1)
     assert prop in again
 
 

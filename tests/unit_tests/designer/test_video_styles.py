@@ -11,7 +11,7 @@ from jiuwenswarm.server.runtime.designer.video_styles import (
     VIDEO_STYLE_DEFAULT_CINEMATIC,
     VIDEO_STYLE_FINAL_FRAME_REVERSE,
     detect_video_style,
-    enforce_style_shot_floor,
+    enforce_style_clip_floor,
     list_video_styles,
     resolve_video_style,
     stamp_video_style_on_graph,
@@ -55,7 +55,7 @@ def test_attach_skills_stamps_video_style():
         "description": "经典名画定格，倒推出形成之前的最后几秒",
         "metadata": {"scenario": "video"},
         "nodes": [
-            {"id": "n_clip_1", "type": "video", "config": {"pipeline": "clip", "shot_index": 1}},
+            {"id": "n_clip_1", "type": "video", "config": {"pipeline": "clip", "clip_index": 1}},
             {"id": "n_storyboard", "type": "table", "config": {"pipeline": "storyboard"}},
         ],
     }
@@ -98,28 +98,28 @@ def test_painting_remake_activates_style():
 def test_style_floor_grows_single_shot_analysis():
     analysis = {
         "source": "llm",
-        "target_shot_count": 1,
-        "shots": [{"shot_index": 1, "action": "奶破龙骑马指向前方", "character_ids": ["char_1"]}],
+        "target_clip_count": 1,
+        "clips": [{"clip_index": 1, "action": "奶破龙骑马指向前方", "character_ids": ["char_1"]}],
     }
-    out = enforce_style_shot_floor(analysis, PAINTING_REMAKE)
-    assert len(out["shots"]) == video_style_min_shots(VIDEO_STYLE_FINAL_FRAME_REVERSE) >= 4
-    assert out["target_shot_count"] == len(out["shots"])
+    out = enforce_style_clip_floor(analysis, PAINTING_REMAKE)
+    assert len(out["clips"]) == video_style_min_shots(VIDEO_STYLE_FINAL_FRAME_REVERSE) >= 4
+    assert out["target_clip_count"] == len(out["clips"])
     # Original beat survives as the opening shot.
-    assert "奶破龙骑马指向前方" in str(out["shots"][0]["action"])
-    assert out["shots"][-1]["style_beat_role"]
+    assert "奶破龙骑马指向前方" in str(out["clips"][0]["action"])
+    assert out["clips"][-1]["style_beat_role"]
 
 
 def test_style_floor_respects_explicit_shot_count():
-    analysis = {"source": "llm", "target_shot_count": 1, "shots": [{"shot_index": 1}]}
-    out = enforce_style_shot_floor(analysis, PAINTING_REMAKE + " 只要1个分镜。")
-    assert len(out["shots"]) == 1
+    analysis = {"source": "llm", "target_clip_count": 1, "clips": [{"clip_index": 1}]}
+    out = enforce_style_clip_floor(analysis, PAINTING_REMAKE + " 只要1个分镜。")
+    assert len(out["clips"]) == 1
 
 
 def test_style_floor_lifts_shot_budget():
-    analysis = {"source": "llm", "target_shot_count": 1, "shots": [{"shot_index": 1}]}
+    analysis = {"source": "llm", "target_clip_count": 1, "clips": [{"clip_index": 1}]}
     assert infer_shot_budget(PAINTING_REMAKE, analysis) >= 4
 
 
 def test_default_style_keeps_llm_shot_count():
-    analysis = {"source": "llm", "target_shot_count": 1, "shots": [{"shot_index": 1}]}
+    analysis = {"source": "llm", "target_clip_count": 1, "clips": [{"clip_index": 1}]}
     assert infer_shot_budget("两个人在咖啡店对话的短片", analysis) == 1

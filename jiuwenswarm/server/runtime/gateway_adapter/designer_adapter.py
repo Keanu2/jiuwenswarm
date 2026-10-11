@@ -968,7 +968,7 @@ def _bootstrap_graph(
     # Enter already authored Brief→Storyboard→Graph — skip Play redesign.
     meta["director_composed_on_bootstrap"] = True
     # Keep the shot set built above. Storyboard completion must not replace nodes.
-    meta["freeze_shot_topology"] = True
+    meta["freeze_clip_topology"] = True
     if isinstance(analysis.get("scene_locks"), dict) and analysis["scene_locks"]:
         meta["scene_locks"] = analysis["scene_locks"]
     graph["metadata"] = meta
@@ -1468,7 +1468,7 @@ async def _bootstrap_graph_with_director_impl(
         if callable(on_progress):
             on_progress(
                 "stage",
-                f"Director · Approved — {cast_n} solo cards",
+                f"Director · Approved — {cast_n} character specs",
             )
         saved = _store.save_graph(graph)
         payload = dict(payload)

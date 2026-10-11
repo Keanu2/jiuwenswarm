@@ -76,9 +76,11 @@ _REGISTRY: tuple[tuple[str, str, int, str, str], ...] = (
     ("image", r"(?i)recraft|imagen|gemini.*image|nano-?banana|seedream", 4000, "chars", "common hosted image APIs"),
     ("image", r"(?i)midjourney", 2000, "chars", "Midjourney prompt practice"),
     # —— Video ——
-    ("video", r"(?i)minimax-h3|hailuo-?h3|h3-max|video.?generation.?v2", 7000, "chars", "MiniMax H3 / video-generation v2"),
-    ("video", r"(?i)minimax|hailuo|t2v-01|i2v-01|video-01", 2000, "chars", "MiniMax Hailuo T2V/I2V (pre-H3)"),
+    # Wan before MiniMax i2v-01: model ids like wan2.2-i2v must not hit the MiniMax row
+    # when VIDEO_GEN_API_BASE from another test still mentions i2v-01 / hailuo.
     ("video", r"(?i)wan2\.|wan3\.|wan-?video|wanx|tongyi.*wan", 20000, "chars", "Wan / DashScope video common max"),
+    ("video", r"(?i)minimax-h3|hailuo-?h3|h3-max|video.?generation.?v2", 7000, "chars", "MiniMax H3 / video-generation v2"),
+    ("video", r"(?i)minimax|hailuo|\bt2v-01\b|\bi2v-01\b|\bvideo-01\b", 2000, "chars", "MiniMax Hailuo T2V/I2V (pre-H3)"),
     ("video", r"(?i)seedance.?2\.5|seedance@2\.5", 10000, "chars", "Seedance 2.5 API max"),
     ("video", r"(?i)seedance|doubao.*video|bytedance.*video", 5000, "chars", "Seedance / ByteDance video common"),
     ("video", r"(?i)\bkling\b|kwai.*video", 2500, "chars", "Kling API common practice"),

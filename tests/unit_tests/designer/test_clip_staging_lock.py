@@ -5,11 +5,11 @@ from jiuwenswarm.common.schema.designer_graph import (
     is_compose_sink_node,
     is_soft_artifact_dependency,
 )
-from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
+from jiuwenswarm.server.runtime.designer.pipeline.clip_staging_lock import (
     build_action_lock,
     build_positioning_lock,
     build_relationship_lock,
-    enrich_shot_staging,
+    enrich_clip_staging,
     staging_lock_clause,
 )
 
@@ -20,7 +20,7 @@ def test_positioning_action_relationship_locks_from_shot():
         {"id": "char_2", "name": "Bob"},
     ]
     shot = {
-        "shot_index": 2,
+        "clip_index": 2,
         "setting_id": "set_1",
         "camera": "medium front view",
         "view_key": "front",
@@ -63,12 +63,12 @@ def test_positioning_action_relationship_locks_from_shot():
     assert "talks_to" in rel or "speaks" in rel
     assert "next_to" in rel or "adjacent" in rel
 
-    locks = enrich_shot_staging(shot, characters)
+    locks = enrich_clip_staging(shot, characters)
     clause = staging_lock_clause(
         positioning_lock=locks["positioning_lock"],
         action_lock=locks["action_lock"],
         relationship_lock=locks["relationship_lock"],
-        shot_index=2,
+        clip_index=2,
         setting_id="set_1",
         for_clip=True,
     )
@@ -83,13 +83,13 @@ def test_positioning_action_relationship_locks_from_shot():
 def test_concurrency_soft_clip_hard_compose_unchanged():
     graph = {
         "nodes": [
-            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
+            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1}},
             {
                 "id": "n_clip_2",
                 "type": "video",
                 "config": {
                     "role": "clip",
-                    "shot_index": 2,
+                    "clip_index": 2,
                     "previous_clip_handoff_ready": True,
                     "previous_clip_action": "prior beat",
                 },

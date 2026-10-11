@@ -3,7 +3,7 @@
 """Node handler registry for Designer graph execution.
 
 Dispatch order: user uploads, ComfyUI imports (``config.is_comfyui``), then
-``node.config.pipeline`` (character_design / storyboard / ...), then
+``node.config.pipeline`` (character / storyboard / ...), then
 ``node.type`` (image / video / ...). Canvas role is the MiniMax modality.
 """
 
@@ -13,10 +13,9 @@ from typing import Protocol
 
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CHARACTER,
     NODE_ROLE_CLIP,
     NODE_ROLE_COMPOSE,
-    NODE_ROLE_FRAME,
     NODE_ROLE_MUSIC,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
@@ -99,10 +98,9 @@ HANDLER_KEY_COMFYUI_VIDEO = "comfyui_video"
 
 NODE_HANDLERS: dict[str, NodeHandler] = {
     NODE_ROLE_BRIEF: BriefNodeHandler(),
-    NODE_ROLE_CHARACTER_DESIGN: CharacterDesignNodeHandler(),
+    NODE_ROLE_CHARACTER: CharacterDesignNodeHandler(),
     NODE_ROLE_SCENE: SceneNodeHandler(),
     NODE_ROLE_STORYBOARD: StoryboardNodeHandler(),
-    NODE_ROLE_FRAME: FrameNodeHandler(),
     NODE_ROLE_CLIP: ClipNodeHandler(),
     NODE_ROLE_COMPOSE: ComposeNodeHandler(),
     NODE_ROLE_MUSIC: MusicNodeHandler(),

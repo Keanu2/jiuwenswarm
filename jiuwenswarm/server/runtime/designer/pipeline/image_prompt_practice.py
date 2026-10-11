@@ -295,7 +295,7 @@ def ensure_still_tool_prompt(
     if role_l in {"scene"} or "scene" in role_l:
         if looks_like_lock_essay(text) or not text:
             text = compose_scene_specs_prompt(cfg=cfg, graph=graph, seed="")
-            notes.append("still_rewrote_scene_plate")
+            notes.append("still_rewrote_scene_specs")
         else:
             # Soft fill missing ToD / style as positive prose.
             pl = text.lower()
@@ -308,7 +308,7 @@ def ensure_still_tool_prompt(
             if look and not _style_is_covered(text, look):
                 text = (text.rstrip(".") + f". {look}.").strip()
                 notes.append("still_cover_style")
-    elif role_l in {"character", "character_design"} or "character" in role_l:
+    elif role_l in {"character", "character"} or "character" in role_l:
         if looks_like_lock_essay(text) or not text:
             text = compose_character_sheet_prompt(cfg=cfg, graph=graph, seed="")
             notes.append("still_rewrote_character_sheet")

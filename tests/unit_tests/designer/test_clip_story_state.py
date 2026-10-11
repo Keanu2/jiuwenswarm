@@ -31,7 +31,7 @@ def test_child_walk_away_is_finished_event_not_replayed() -> None:
         "Dad sits by the window. Child walked away from the table.",
         characters=chars,
         on_screen=["char_child", "char_dad"],
-        shot_index=1,
+        clip_index=1,
     )
     kinds = {e["type"] for e in events}
     assert "exit" in kinds
@@ -74,7 +74,7 @@ def test_seat_hold_and_exit_stamp_onto_next_clip() -> None:
         from_cfg=src,
         from_prompt="character1 Dad sits at the window. Child walked away from the table.",
         from_action="Dad reads; child walks away",
-        from_shot_index=1,
+        from_clip_index=1,
         graph=graph,
         characters=chars,
     )
@@ -104,8 +104,8 @@ def test_wan_api_clause_does_not_paste_prior_prompt_marker() -> None:
                 "type": "video",
                 "config": {
                     "role": "clip",
-                    "shot_index": 1,
-                    "shot_action": "child walked away",
+                    "clip_index": 1,
+                    "clip_action": "child walked away",
                     "on_screen": ["char_child"],
                 },
             },
@@ -114,7 +114,7 @@ def test_wan_api_clause_does_not_paste_prior_prompt_marker() -> None:
                 "type": "video",
                 "config": {
                     "role": "clip",
-                    "shot_index": 2,
+                    "clip_index": 2,
                     "scene_node_id": "n_scene_1",
                     "on_screen": ["char_dad"],
                     "setting_id": "set_1",
@@ -125,7 +125,7 @@ def test_wan_api_clause_does_not_paste_prior_prompt_marker() -> None:
     }
     stamp_wan_prompt_handoff(
         graph,
-        shot_index=1,
+        clip_index=1,
         prompt=f"{marker} STYLE LOCK dump " + ("lock " * 20) + " Child walked away from the table.",
         node_id="n_clip_1",
         shot_action="child walked away",
@@ -139,7 +139,7 @@ def test_wan_api_clause_does_not_paste_prior_prompt_marker() -> None:
         "character1 sits with the family at the table in the last reference.",
         cfg=c2,
         graph=graph,
-        shot_index=2,
+        clip_index=2,
     )
     assert marker not in wan
     assert "from Image" in wan or "from image" in wan.lower() or "Image 1 is" in wan
@@ -149,8 +149,8 @@ def test_wan_api_clause_does_not_paste_prior_prompt_marker() -> None:
     bind = build_wan_reference_binding(cfg=c2, graph=graph, prior_last_frame=True, prior_last_frame_count=1)
     assert "NOT attached" in bind or "not attached" in bind.lower()
     clause = handoff_clause_for_prompt(
-        [{"shot_index": 1, "shot_action": "child walked away", "wan_prompt": marker * 8}],
-        this_shot_index=2,
+        [{"clip_index": 1, "clip_action": "child walked away", "wan_prompt": marker * 8}],
+        this_clip_index=2,
         this_action="family sits together",
     )
     assert marker not in clause
@@ -185,7 +185,7 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from jiuwenswarm.common.schema.designer_graph import (
-        NODE_ROLE_CHARACTER_DESIGN,
+        NODE_ROLE_CHARACTER,
         NODE_ROLE_SCENE,
         NODE_TYPE_IMAGE,
         NODE_TYPE_VIDEO,
@@ -196,11 +196,11 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
     from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 
-    solo = tmp_path / "dad.png"
+    character_spec = tmp_path / "dad.png"
     scene = tmp_path / "room.png"
     last = tmp_path / "shot1_lastframe.jpg"
     video = tmp_path / "out.mp4"
-    solo.write_bytes(b"png-dad")
+    character_spec.write_bytes(b"png-dad")
     scene.write_bytes(b"png-room")
     last.write_bytes(b"jpg-last")
     video.write_bytes(b"fake-mp4")
@@ -215,7 +215,7 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
                     "id": "n_character",
                     "type": NODE_TYPE_IMAGE,
                     "config": {
-                        "role": NODE_ROLE_CHARACTER_DESIGN,
+                        "role": NODE_ROLE_CHARACTER,
                         "character_ids": ["char_dad"],
                     },
                 },
@@ -229,13 +229,13 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
                     "type": NODE_TYPE_VIDEO,
                     "config": {
                         "role": "clip",
-                        "shot_index": 2,
+                        "clip_index": 2,
                         "first_of_setting": False,
                         "scene_node_id": "n_scene_1",
                         "character_node_ids": ["n_character"],
                         "on_screen": ["char_dad"],
                         "setting_id": "set_1",
-                        "shot_action": "Dad stays seated by the window",
+                        "clip_action": "Dad stays seated by the window",
                         "use_prior_last_frame": True,
                         "previous_clip_last_frame": str(last),
                         "previous_clip_action": "Child walks away from the table",
@@ -246,7 +246,7 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
                             "shot 1: Child already left — do not show walking away"
                         ],
                         "scene_last_frame_chain": [
-                            {"path": str(last), "shot_index": 1, "action": "dad close-up"}
+                            {"path": str(last), "clip_index": 1, "action": "dad close-up"}
                         ],
                     },
                 },
@@ -262,7 +262,7 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
             "node_states": {
                 "n_character": {
                     "status": "completed",
-                    "output_ref": file_output_ref(solo, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
+                    "output_ref": file_output_ref(character_spec, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
                 },
                 "n_scene_1": {
                     "status": "completed",
@@ -297,7 +297,7 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
     await ClipNodeHandler().execute(clip, ctx)
     refs = [Path(x).resolve() for x in (seen.get("reference_images") or [])]
     assert last.resolve() not in refs
-    assert solo.resolve() in refs
+    assert character_spec.resolve() in refs
     assert scene.resolve() in refs
     assert seen.get("first_frame") in (None, "")
     prompt = str(seen.get("prompt") or "")
@@ -309,11 +309,11 @@ async def test_clip_execute_does_not_attach_prior_last_frame(
 
 
 @pytest.mark.asyncio
-async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
+async def test_first_clip_uses_character_specs_and_scene_spec_not_first_frame(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from jiuwenswarm.common.schema.designer_graph import (
-        NODE_ROLE_CHARACTER_DESIGN,
+        NODE_ROLE_CHARACTER,
         NODE_ROLE_SCENE,
         NODE_TYPE_IMAGE,
         NODE_TYPE_VIDEO,
@@ -324,10 +324,10 @@ async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
     from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 
-    solo = tmp_path / "dad.png"
+    character_spec = tmp_path / "dad.png"
     scene = tmp_path / "composed.png"
     video = tmp_path / "out.mp4"
-    solo.write_bytes(b"png-dad")
+    character_spec.write_bytes(b"png-dad")
     scene.write_bytes(b"png-scene")
     video.write_bytes(b"fake-mp4")
     graph = normalize_execution_graph(
@@ -341,7 +341,7 @@ async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
                     "id": "n_character",
                     "type": NODE_TYPE_IMAGE,
                     "config": {
-                        "role": NODE_ROLE_CHARACTER_DESIGN,
+                        "role": NODE_ROLE_CHARACTER,
                         "character_ids": ["char_dad"],
                     },
                 },
@@ -355,7 +355,7 @@ async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
                     "type": NODE_TYPE_VIDEO,
                     "config": {
                         "role": "clip",
-                        "shot_index": 1,
+                        "clip_index": 1,
                         "first_of_setting": True,
                         "scene_node_id": "n_scene_1",
                         "character_node_ids": ["n_character"],
@@ -375,7 +375,7 @@ async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
             "node_states": {
                 "n_character": {
                     "status": "completed",
-                    "output_ref": file_output_ref(solo, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
+                    "output_ref": file_output_ref(character_spec, kind=NODE_TYPE_IMAGE, mime_type="image/png"),
                 },
                 "n_scene_1": {
                     "status": "completed",
@@ -411,7 +411,7 @@ async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
     await ClipNodeHandler().execute(clip, ctx)
     refs = [Path(x).resolve() for x in (seen.get("reference_images") or [])]
     assert seen.get("first_frame") in (None, "")
-    assert solo.resolve() in refs
+    assert character_spec.resolve() in refs
     assert scene.resolve() in refs
     assert seen.get("force_reference_mode") is True
     prompt = str(seen.get("prompt") or "")
@@ -423,7 +423,7 @@ async def test_first_clip_uses_solos_and_empty_scene_not_first_frame(
 
 def test_smart_graph_scene_card_is_empty_plate() -> None:
     from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
-    from jiuwenswarm.server.runtime.designer.pipeline.production_bible import build_production_bible
+    from jiuwenswarm.server.runtime.designer.pipeline.production_specs import build_production_specs
 
     graph = build_smart_video_graph(
         project_id="p_first",
@@ -441,9 +441,9 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
                     "description": "window, tea table, and door",
                 }
             ],
-            "shots": [
+            "clips": [
                 {
-                    "shot_index": 1,
+                    "clip_index": 1,
                     "setting_id": "set_1",
                     "action": "Dad sits by the window, Mum pours tea",
                     "on_screen": ["char_dad", "char_mum", "char_child"],
@@ -451,7 +451,7 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
                     "timeline": "0-5s",
                 },
                 {
-                    "shot_index": 2,
+                    "clip_index": 2,
                     "setting_id": "set_1",
                     "action": "Child walks to the door",
                     "on_screen": ["char_dad", "char_mum"],
@@ -488,11 +488,11 @@ def test_smart_graph_scene_card_is_empty_plate() -> None:
     assert "do not show" not in clip2_prompt.lower()
     assert "do not redo" not in clip2_prompt.lower()
     assert "do not restart" not in clip2_prompt.lower()
-    assert graph["metadata"].get("freeze_shot_topology") is True
+    assert graph["metadata"].get("freeze_clip_topology") is True
     brief = next(n for n in graph["nodes"] if n.get("id") == "n_brief")
     assert "prewritten" not in (brief.get("config") or {})
     assert "draft_prewritten" not in (brief.get("config") or {})
-    bible = build_production_bible(
+    bible = build_production_specs(
         graph.get("metadata", {}).get("script_analysis") or {},
         user_prompt=str(graph.get("description") or graph.get("prompt") or ""),
     )
@@ -531,7 +531,7 @@ def test_regenerate_packet_keeps_prompt_and_upstream_image(tmp_path: Path) -> No
         "id": "n_clip_1",
         "config": {
             "prompt": "Dad reads at the table.",
-            "shot_action": "Dad reads",
+            "clip_action": "Dad reads",
             "style_lock": {"look": "watercolor", "medium": "stylized_animation"},
             "speech_line": "Good evening",
             "character_node_ids": ["n_character"],
@@ -576,7 +576,7 @@ def test_director_rewrites_lock_essay_into_image_binding() -> None:
         "cast_names": ["Mother", "Young Child"],
         "on_screen": ["Mother", "Young Child"],
         "offscreen": ["Father", "Teenage Son"],
-        "shot_action": "The Mother nods once while the Young Child leans forward.",
+        "clip_action": "The Mother nods once while the Young Child leans forward.",
         "camera": "slow pan right",
         "costume_lock": "Mother: dusty rose blouse; Young Child: pale yellow sweater",
         "speech_by_character": {
@@ -638,7 +638,7 @@ def test_compose_weaves_language_and_time_of_day() -> None:
     cfg = {
         "cast_names": ["Alex"],
         "on_screen": ["Alex"],
-        "shot_action": "Alex speaks to the camera.",
+        "clip_action": "Alex speaks to the camera.",
         "speech_line": "We keep going.",
         "language_lock": "en",
         "costume_lock": "Alex: grey coat",
@@ -649,7 +649,7 @@ def test_compose_weaves_language_and_time_of_day() -> None:
         "scene_specs": {"scene_name": "empty room", "objects": ["lamp"]},
         "style_lock": {"look": "photoreal cinematic"},
     }
-    text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["shot_action"])
+    text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["clip_action"])
     low = text.lower()
     assert "spoken dialogue is in english" in low
     assert "night" in low
@@ -676,7 +676,7 @@ def test_compose_keeps_prior_prompt_continuity() -> None:
     cfg = {
         "cast_names": ["Dad", "Mum"],
         "offscreen": ["Child"],
-        "shot_action": "Dad and Mum sit quietly.",
+        "clip_action": "Dad and Mum sit quietly.",
         "camera": "slow push in",
         "costume_lock": "Dad: navy sweater; Mum: red dress",
         "previous_clip_wan_prompt": (
@@ -693,7 +693,7 @@ def test_compose_keeps_prior_prompt_continuity() -> None:
         },
         "style_lock": {"look": "photoreal cinematic"},
     }
-    text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["shot_action"], camera="slow push in")
+    text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["clip_action"], camera="slow push in")
     low = text.lower()
     assert "dad from image 1" in low or "from image 1" in low
     assert "scene is as in" in low or "in the scene from" in low
@@ -717,7 +717,7 @@ def test_exited_cast_omitted_until_returned() -> None:
         "cast_names": ["Mum"],
         "on_screen": ["Mum"],
         "exited_ids": ["char_child"],
-        "shot_action": "Mum pours tea.",
+        "clip_action": "Mum pours tea.",
         "costume_lock": "Mum: red dress",
         "scene_specs": {"scene_name": "kitchen", "lighting": "soft light"},
         "style_lock": {"look": "photoreal cinematic"},
@@ -732,7 +732,7 @@ def test_exited_cast_omitted_until_returned() -> None:
             }
         }
     }
-    text = compose_practice_prompt(cfg=cfg, graph=graph, action=cfg["shot_action"])
+    text = compose_practice_prompt(cfg=cfg, graph=graph, action=cfg["clip_action"])
     assert "Mum" in text
     assert "Child" not in text
     assert "do not" not in text.lower()
@@ -748,17 +748,17 @@ def test_prior_clip_story_pull_does_not_copy_prior_wan_prompt() -> None:
                 "id": "n_clip_1",
                 "config": {
                     "role": "clip",
-                    "shot_index": 1,
+                    "clip_index": 1,
                     "setting_id": "set_dining",
                     "last_wan_prompt": "Image 1 is Father.\nFather sits at the table.",
-                    "shot_action": "Father sits at the table",
+                    "clip_action": "Father sits at the table",
                 },
             },
             {
                 "id": "n_clip_2",
                 "config": {
                     "role": "clip",
-                    "shot_index": 2,
+                    "clip_index": 2,
                     "setting_id": "set_dining",
                     "continuity_clip_node_id": "n_clip_1",
                 },

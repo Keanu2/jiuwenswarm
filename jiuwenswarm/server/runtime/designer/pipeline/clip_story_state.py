@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 _LOCK_MARKERS = (
-    "PRIOR KEYFRAME PROMPT",
+    "PRIOR CLIP PROMPT",
     "PRIOR SHOT CONSISTENCY",
     "PREVIOUS CLIP HAD",
     "YOUR ASSIGNMENT",
@@ -34,7 +34,7 @@ _LOCK_MARKERS = (
     "WAN R2V PROMPT FORMULA",
     "WAN REFERENCE MEDIA RULES",
     "[WAN REFERENCE MODE",
-    "KEYFRAME CAST LOCK",
+    "CLIP CAST LOCK",
     "R2V CAST LOCK",
     "CHARACTER CONSISTENCY",
     "SAME-SCENE CONSISTENCY GATE",
@@ -73,7 +73,7 @@ def extract_finished_events(
     *,
     characters: list[dict[str, Any]] | None = None,
     on_screen: list[str] | None = None,
-    shot_index: int | None = None,
+    clip_index: int | None = None,
 ) -> list[dict[str, str]]:
     """Typed already-done events from prior Wan/storyboard text (domain-agnostic).
 
@@ -85,7 +85,7 @@ def extract_finished_events(
         return []
     names = character_name_map(characters)
     present = [str(x) for x in (on_screen or []) if str(x).strip()] or list(names)
-    prefix = f"shot {shot_index}: " if shot_index else ""
+    prefix = f"shot {clip_index}: " if clip_index else ""
     events: list[dict[str, str]] = []
 
     def add(kind: str, note: str, cid: str = "") -> None:
@@ -326,7 +326,7 @@ def agent_prior_story_block(cfg: dict[str, Any] | None) -> str:
     mining only; leaf context uses storyboard-derived end_state fields.
     """
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.shot_consistency_contract import (
             agent_structured_continuity_block,
         )
 
@@ -336,7 +336,7 @@ def agent_prior_story_block(cfg: dict[str, Any] | None) -> str:
         action = str(cfg.get("previous_clip_action") or "").strip()
         if not action:
             return ""
-        idx = cfg.get("previous_clip_shot_index") or ""
+        idx = cfg.get("previous_clip_clip_index") or ""
         return (
             f"CONTINUITY STATE (prior shot {idx} finished — structured only):\n"
             f"- Prior action finished: {action[:220]}"
@@ -367,7 +367,7 @@ def apply_story_state_to_next_cfg(
     from_cfg: dict[str, Any] | None = None,
     from_prompt: str = "",
     from_action: str = "",
-    from_shot_index: int = 0,
+    from_clip_index: int = 0,
     graph: dict[str, Any] | None = None,
     characters: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -393,14 +393,14 @@ def apply_story_state_to_next_cfg(
     except Exception:  # noqa: BLE001
         pass
     narrative = narrative_from_wan_prompt(from_prompt, limit=2500)
-    action = str(from_action or src.get("shot_action") or "").strip()
+    action = str(from_action or src.get("clip_action") or "").strip()
     seed = " ".join(x for x in (action, narrative) if x)
     src_on = on_screen_ids(src)
     events = extract_finished_events(
         seed,
         characters=characters,
         on_screen=src_on,
-        shot_index=from_shot_index,
+        clip_index=from_clip_index,
     )
     done = [str(x).strip() for x in (cfg.get("already_done") or []) if str(x).strip()]
     for item in events:
@@ -417,8 +417,8 @@ def apply_story_state_to_next_cfg(
         cfg["previous_clip_wan_prompt"] = action[:2500]
     if action:
         cfg["previous_clip_action"] = action[:220]
-    if from_shot_index:
-        cfg["previous_clip_shot_index"] = int(from_shot_index)
+    if from_clip_index:
+        cfg["previous_clip_clip_index"] = int(from_clip_index)
 
     cfg = stamp_continuity_story_fields(
         cfg,
@@ -664,7 +664,7 @@ def stamp_continuity_story_fields(
 
 
 def cap_r2v_reference_paths(paths: list[Path], *, max_refs: int = 5) -> list[Path]:
-    """Keep on-screen solos + last scene specs within Wan's 5-ref cap."""
+    """Keep on-screen character specs + last scene specs within Wan's 5-ref cap."""
     unique: list[Path] = []
     seen: set[str] = set()
     for path in paths or []:

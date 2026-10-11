@@ -48,7 +48,7 @@ def test_apply_node_activity_keeps_structured_agent_progress() -> None:
     state = apply_node_activity(
         {"status": NODE_STATUS_RUNNING},
         kind=ACTIVITY_KIND_THINKING,
-        text="planning the keyframe",
+        text="planning the clip",
         at=1,
     )
     state = apply_node_activity(
@@ -63,7 +63,7 @@ def test_apply_node_activity_keeps_structured_agent_progress() -> None:
     assert normalized["activity_log"] == [
         {
             "kind": ACTIVITY_KIND_THINKING,
-            "text": "planning the keyframe",
+            "text": "planning the clip",
             "at": 1,
         },
         {
@@ -119,7 +119,7 @@ def _sample_graph() -> dict:
                 "id": "n_character",
                 "type": "image",
                 "label": "Image 1",
-                "config": {"role": "image", "pipeline": "character_design", "prompt": "officer"},
+                "config": {"role": "image", "pipeline": "character", "prompt": "officer"},
                 "layout": {"x": 400, "y": 40, "width": 280, "height": 160},
             },
             {
@@ -154,7 +154,7 @@ def test_apply_leader_plan_refine_selected_node() -> None:
                     "id": "n_character",
                     "type": "image",
                     "label": "Character",
-                    "config": {"role": "character_design", "prompt": "把角色改得更赛博"},
+                    "config": {"role": "character", "prompt": "把角色改得更赛博"},
                 }
             ]
         },
@@ -183,9 +183,9 @@ def test_apply_leader_plan_stamps_type_for_inserted_scene_and_clip() -> None:
                 {
                     "id": "n_clip_4",
                     "config": {
-                        "shot_index": 2,
+                        "clip_index": 2,
                         "timeline": "5-8s",
-                        "shot_action": "咖啡豆静置，画面中无人物",
+                        "clip_action": "咖啡豆静置，画面中无人物",
                         "prompt": "咖啡豆特写",
                     },
                 },

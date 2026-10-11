@@ -188,16 +188,16 @@ def test_smart_graph_rejects_missing_llm_analysis_sections() -> None:
         "source": "llm",
         "characters": [{"id": "char_1", "name": "Lead"}],
         "scenes": [{"id": "set_1", "name": "Room"}],
-        "shots": [
+        "clips": [
             {
-                "shot_index": 1,
+                "clip_index": 1,
                 "setting_id": "set_1",
                 "action": "Lead opens the door.",
                 "character_ids": ["char_1"],
             }
         ],
     }
-    for missing in ("characters", "scenes", "shots"):
+    for missing in ("characters", "scenes", "clips"):
         analysis = {key: value for key, value in complete.items() if key != missing}
         with pytest.raises(DesignerLlmError, match=missing):
             build_smart_video_graph(
@@ -225,7 +225,7 @@ async def test_director_graph_design_rejects_empty_model_text(
                 "source": "llm",
                 "characters": [{"id": "char_1", "name": "Lead"}],
                 "scenes": [{"id": "set_1", "name": "Room"}],
-                "shots": [{"shot_index": 1, "setting_id": "set_1", "action": "Open door"}],
+                "clips": [{"clip_index": 1, "setting_id": "set_1", "action": "Open door"}],
             }
         },
     }
@@ -261,7 +261,7 @@ async def test_director_reviews_reject_nonthrowing_model_failures(
         "nodes": [],
         "metadata": {
             "script_analysis": {
-                "shots": [{"shot_index": 1, "action": "Lead opens the door."}]
+                "clips": [{"clip_index": 1, "action": "Lead opens the door."}]
             }
         },
     }

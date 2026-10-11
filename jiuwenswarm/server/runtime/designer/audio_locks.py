@@ -343,7 +343,7 @@ def ensure_audio_locks_on_analysis(
     characters = [c for c in (out.get("characters") or []) if isinstance(c, dict)]
     shots = []
     any_speech = False
-    for shot in out.get("shots") or []:
+    for shot in out.get("clips") or []:
         if not isinstance(shot, dict):
             continue
         s = dict(shot)
@@ -358,7 +358,7 @@ def ensure_audio_locks_on_analysis(
         s["language_lock"] = str(s.get("language_lock") or lang)
         shots.append(s)
     if shots:
-        out["shots"] = shots
+        out["clips"] = shots
     if (
         any_speech
         and audio.get("policy") != "silent"

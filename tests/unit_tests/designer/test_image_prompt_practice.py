@@ -17,7 +17,7 @@ def test_looks_like_lock_essay() -> None:
     )
 
 
-def test_compose_scene_plate_positive() -> None:
+def test_compose_scene_spec_positive() -> None:
     from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
         compose_scene_specs_prompt,
     )
@@ -47,7 +47,7 @@ def test_compose_scene_plate_positive() -> None:
     assert "forbid" not in low
 
 
-def test_scene_plate_skips_ids_placeholders_and_planner_rules() -> None:
+def test_scene_spec_skips_ids_placeholders_and_planner_rules() -> None:
     from jiuwenswarm.server.runtime.designer.pipeline.image_prompt_practice import (
         compose_scene_specs_prompt,
     )
@@ -141,7 +141,7 @@ def test_ensure_rewrites_lock_essay_character() -> None:
 
     essay = "ONE person. CLOTHING LOCK: red dress. No room, no furniture."
     cfg = {
-        "role": "character_design",
+        "role": "character",
         "character_name": "Sam",
         "costume_lock": "red dress",
         "style_lock": {"look": "photoreal cinematic"},
@@ -166,7 +166,7 @@ def test_continue_line_does_not_paste_prior_wan() -> None:
     cfg = {
         "cast_names": ["Mother"],
         "on_screen": ["Mother"],
-        "shot_action": "Mother nods once.",
+        "clip_action": "Mother nods once.",
         "costume_lock": "Mother: dusty rose blouse",
         "previous_clip_wan_prompt": prior,
         "previous_clip_action": "Mother listens",
@@ -178,7 +178,7 @@ def test_continue_line_does_not_paste_prior_wan() -> None:
     assert cue
     assert "listening carefully" not in cue.lower()
     assert "continue after:" not in cue.lower()
-    text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["shot_action"])
+    text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["clip_action"])
     assert "listening carefully" not in text.lower()
     assert "same setting" in text.lower() or "same placement" in text.lower()
     assert "STYLE LOCK" not in text

@@ -12,7 +12,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_TYPE_TEXT,
     NODE_TYPE_VIDEO,
     PIPELINE_BRIEF,
-    PIPELINE_CHARACTER_DESIGN,
+    PIPELINE_CHARACTER,
     PIPELINE_CLIP,
     PIPELINE_COMPOSE,
     PIPELINE_SCENE,
@@ -56,7 +56,7 @@ def make_pipeline_graph(
             "label": "Image 1",
             "config": {
                 "role": NODE_TYPE_IMAGE,
-                "pipeline": PIPELINE_CHARACTER_DESIGN,
+                "pipeline": PIPELINE_CHARACTER,
                 "inputs": ["n_brief"],
             },
             "layout": {"x": 400, "y": 40, "width": 280, "height": 160},
@@ -90,7 +90,7 @@ def make_pipeline_graph(
             "config": {
                 "role": NODE_TYPE_VIDEO,
                 "pipeline": PIPELINE_CLIP,
-                "shot_index": 1,
+                "clip_index": 1,
                 "inputs": ["n_character", "n_scene", "n_storyboard"],
             },
             "layout": {"x": 1120, "y": 240, "width": 280, "height": 160},
@@ -127,7 +127,7 @@ def make_pipeline_graph(
         "nodes": nodes,
         "edges": edges,
         "metadata": {
-            "scene_continuity_mode": "scene_card_plus_clip_shots",
+            "scene_consistency_mode": "scene_specs_plus_clips",
         },
         "created_at": now,
         "updated_at": now,

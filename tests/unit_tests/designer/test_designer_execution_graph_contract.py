@@ -24,10 +24,9 @@ from jiuwenswarm.common.schema.designer_graph import (
     EDGE_KIND_DATA,
     EDGE_KINDS,
     NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CHARACTER,
     NODE_ROLE_CLIP,
     NODE_ROLE_COMPOSE,
-    NODE_ROLE_FRAME,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
     NODE_ROLE_IMAGE,
@@ -94,10 +93,10 @@ def _extract_ts_const_array(path: Path, name: str) -> list[str]:
         (NODE_TYPE_VIDEO, "DESIGNER_NODE_TYPE_VIDEO"),
         (NODE_TYPE_AUDIO, "DESIGNER_NODE_TYPE_AUDIO"),
         (NODE_ROLE_BRIEF, "DESIGNER_NODE_ROLE_BRIEF"),
-        (NODE_ROLE_CHARACTER_DESIGN, "DESIGNER_NODE_ROLE_CHARACTER_DESIGN"),
+        (NODE_ROLE_CHARACTER, "DESIGNER_NODE_ROLE_CHARACTER"),
         (NODE_ROLE_SCENE, "DESIGNER_NODE_ROLE_SCENE"),
         (NODE_ROLE_STORYBOARD, "DESIGNER_NODE_ROLE_STORYBOARD"),
-        (NODE_ROLE_FRAME, "DESIGNER_NODE_ROLE_FRAME"),
+        # (NODE_ROLE_CLIP, "DESIGNER_NODE_ROLE_FRAME"),  # frame removed,
         (NODE_ROLE_CLIP, "DESIGNER_NODE_ROLE_CLIP"),
         (NODE_ROLE_COMPOSE, "DESIGNER_NODE_ROLE_COMPOSE"),
         (NODE_ROLE_IMAGE, "DESIGNER_NODE_ROLE_IMAGE"),
@@ -160,12 +159,12 @@ def test_legacy_pipeline_role_maps_to_modality() -> None:
             "id": "n_character",
             "type": NODE_TYPE_IMAGE,
             "label": "Character",
-            "config": {"role": NODE_ROLE_CHARACTER_DESIGN},
+            "config": {"role": NODE_ROLE_CHARACTER},
             "layout": {"x": 0, "y": 0, "width": 280, "height": 160},
         }
     )
     assert node["type"] == "image"
     assert node["config"]["role"] == "image"
-    assert node["config"]["pipeline"] == NODE_ROLE_CHARACTER_DESIGN
+    assert node["config"]["pipeline"] == NODE_ROLE_CHARACTER
     assert node["label"] == "Image"
-    assert node_pipeline(node) == NODE_ROLE_CHARACTER_DESIGN
+    assert node_pipeline(node) == NODE_ROLE_CHARACTER

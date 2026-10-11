@@ -183,7 +183,7 @@ def _shots(cast_ids: list[str], index: int, *, include_set: bool) -> list[dict]:
     shots = []
     for shot in range(shot_count):
         row = {
-            "shot_index": shot + 1,
+            "clip_index": shot + 1,
             "action": f"action-{index}-{shot}",
             "end_state": f"end-{index}-{shot}",
             "camera": "medium",

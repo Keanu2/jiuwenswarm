@@ -29,7 +29,7 @@ def test_onboard_does_not_rewire_successor_connected_image(
             {
                 "id": "n_character",
                 "type": "image",
-                "config": {"pipeline": "character_design"},
+                "config": {"pipeline": "character"},
             },
             {
                 "id": "n_clip_1",
@@ -89,7 +89,7 @@ def test_onboard_does_not_rewire_successor_connected_video(
     graph = {
         "nodes": [
             {
-                "id": "n_frame_1",
+                "id": "n_clip_ua1",
                 "type": "image",
                 "config": {"pipeline": "frame"},
             },
@@ -101,13 +101,13 @@ def test_onboard_does_not_rewire_successor_connected_video(
             {
                 "id": "n_video_user",
                 "type": "video",
-                "config": {"role": "video", "user_added": True, "inputs": ["n_frame_1"]},
+                "config": {"role": "video", "user_added": True, "inputs": ["n_clip_ua1"]},
             },
         ],
         "edges": [
             {
                 "id": "e_frame_user",
-                "source": "n_frame_1",
+                "source": "n_clip_ua1",
                 "target": "n_video_user",
                 "kind": "data",
             },
@@ -115,7 +115,7 @@ def test_onboard_does_not_rewire_successor_connected_video(
     }
     Director().onboard_user_added_nodes(graph)
     pairs = _pairs(graph)
-    assert ("n_frame_1", "n_video_user") in pairs
+    assert ("n_clip_ua1", "n_video_user") in pairs
     assert ("n_video_user", "n_compose") not in pairs
 
 

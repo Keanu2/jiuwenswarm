@@ -127,7 +127,7 @@
       "generate": "Generate",
       "material": "Asset",
       "removeMaterial": "Remove asset",
-      "promptPlaceholder": "This shot's prompt; sent to the model with the reference images above",
+      "promptPlaceholder": "This clip's prompt; sent to the model with the reference images above",
       "editPlaceholder": "Edit text content…",
       "aspectRatio": "Aspect ratio",
       "resolution": "Resolution",
@@ -198,7 +198,7 @@
       "delete": "Delete connection"
     },
     "recentGraphs": "Recent graphs",
-    "hasVideo": "Has shot",
+    "hasVideo": "Has finished clip",
     "revision": {
       "title": "Choose which version to keep",
       "hint": "{{label}} was regenerated. The original is still here — pick which one to keep.",

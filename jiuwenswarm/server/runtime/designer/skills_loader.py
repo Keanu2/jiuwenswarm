@@ -17,11 +17,8 @@ logger = logging.getLogger(__name__)
 _ROLE_ALIASES: dict[str, str] = {
     "brief": "brief",
     "character": "character",
-    "character_design": "character",
     "scene": "scene",
     "storyboard": "storyboard",
-    "frame": "frame",
-    "keyframe": "frame",
     "clip": "clip",
     "compose": "compose",
     "final": "compose",
@@ -227,9 +224,6 @@ def _tool_skills_for_role(role: str) -> str:
     chunks: list[str] = []
     if role_l in {
         "character",
-        "character_design",
-        "frame",
-        "keyframe",
         "scene",
         "image",
     }:
@@ -289,8 +283,6 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
             "clip",
             "storyboard",
             "brief",
-            "frame",
-            "keyframe",
             "compose",
         }:
             style_bit = style_skill
@@ -304,7 +296,7 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
             cfg.pop("skill_excerpt", None)
         # Do not attach subject encyclopedia to every node here.
         cfg.pop("scenario_skill_excerpt", None)
-        # Media playbook for frame/clip agents.
+        # Media playbook for clip agents.
         try:
             from jiuwenswarm.server.runtime.designer.media_model_playbook import (
                 playbook_for_role,

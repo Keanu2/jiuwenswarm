@@ -13,9 +13,9 @@ export function isNewDesignerBrief(text: string): boolean {
   const t = String(text || '').trim();
   if (t.length < 48) return false;
   return (
-    /\b(video|film|story|shot|scene|valentine|create|make|second|vertical|keyframe|cartoon|sequence|storyboard)\b/i.test(
+    /\b(video|film|story|clip|scene|valentine|create|make|second|vertical|cartoon|sequence|storyboard)\b/i.test(
       t,
-    ) || /视频|分镜|短片|情人节|镜头|创作|帮我/.test(t)
+    ) || /视频|分镜|短片|情人节|片段|创作|帮我/.test(t)
   );
 }
 

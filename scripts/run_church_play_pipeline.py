@@ -153,13 +153,13 @@ async def main() -> int:
     print("[church-play] analyze_creative_brief()...", flush=True)
     analysis = await analyze_creative_brief(PROMPT, timeout_sec=60.0)
     # Keep load within image/video quotas: 3 cinematic beats cover the prompt.
-    shots = list(analysis.get("shots") or [])
+    shots = list(analysis.get("clips") or [])
     if len(shots) > 3:
-        analysis["shots"] = shots[:3]
-        for i, shot in enumerate(analysis["shots"], start=1):
+        analysis["clips"] = shots[:3]
+        for i, shot in enumerate(analysis["clips"], start=1):
             if isinstance(shot, dict):
-                shot["shot_index"] = i
-    analysis["target_shot_count"] = len(analysis.get("shots") or [])
+                shot["clip_index"] = i
+    analysis["target_clip_count"] = len(analysis.get("clips") or [])
     # Always audible soundtrack for this narrative (preaching + crowd).
     audio = dict(analysis.get("audio") or {}) if isinstance(analysis.get("audio"), dict) else {}
     audio["include_speech"] = True
@@ -187,10 +187,10 @@ async def main() -> int:
         by_role["preacher"] = str(chars[0].get("id"))
     if len(chars) > 1 and not by_role.get("leaver"):
         by_role["leaver"] = str(chars[1].get("id"))
-    for shot in analysis.get("shots") or []:
+    for shot in analysis.get("clips") or []:
         if not isinstance(shot, dict):
             continue
-        idx = int(shot.get("shot_index") or 0)
+        idx = int(shot.get("clip_index") or 0)
         if idx == 1 and by_role.get("preacher"):
             shot["character_ids"] = [by_role["preacher"]]
             shot["action"] = (
@@ -215,7 +215,7 @@ async def main() -> int:
                 "Do not show a duplicate preacher walking."
             )[:500]
     report["script_analysis_source"] = analysis.get("source")
-    report["shots"] = len(analysis.get("shots") or [])
+    report["clips"] = len(analysis.get("clips") or [])
     report["characters"] = [
         str(c.get("name") or c.get("id")) for c in (analysis.get("characters") or [])
     ]

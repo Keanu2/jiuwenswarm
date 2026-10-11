@@ -41,7 +41,7 @@ Do **not** “override bad `solo_subject`.” **Remove** `solo_subject` / `suppr
 | Verbatim still | `n_ref_*` `force_handler` + card role; no sheet for that id | **Keep** |
 | Companions | `companions = [] if suppress else uncovered` (`1100`) | Always `companions = analysis.characters − covered` |
 | Suppress flags | Absolute wipe via `_suppress_companions` (`879–888`) | **Delete as topology input** — stop reading them in `_job_plan`; stop stamping them onto intent for graph shape; stop asking classify for them (or ignore if present for backward compat) |
-| Scene plates | `needs_set = scene OR (product ∧ scenes ∧ ¬motion)` | Uncovered `analysis.scenes` → always mint plates (incl. character-led jobs) |
+| Scene specss | `needs_set = scene OR (product ∧ scenes ∧ ¬motion)` | Uncovered `analysis.scenes` → always mint plates (incl. character-led jobs) |
 | Motion + plates | Motion forces `plates=False` | Cast companions yes; set plates: open Q (default: no plates on pure I2V unless you decide otherwise) |
 | Image attach cap | `MAX_REFS_BY_KIND[image] = 3` | **5** |
 | Slot ↔ analysis id | Free-form classify ids | Reconcile to analysis `id`/`name`/`match_terms` |
@@ -204,7 +204,7 @@ plate_scenes = uncovered analysis.scenes
 **Priority when >5 Wan refs:** product → user verbatim uploads → on-screen companions → other companions/plates; keep one scene last when possible.
 
 **Acceptance**  
-- 5 character stills → plan all uploads.  
+- 5 character specs → plan all uploads.  
 - 2 uploads + 3 companions + plate → ≤5, uploads kept.
 
 ---

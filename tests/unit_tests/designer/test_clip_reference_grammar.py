@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwenswarm.server.runtime.designer.chat_shot_references import (
+from jiuwenswarm.server.runtime.designer.chat_clip_references import (
     map_shot_references,
     referenced_shot_indices,
 )

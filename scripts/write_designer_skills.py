@@ -30,7 +30,7 @@ Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard
 1. Always keep a Brief agent first.
 2. Character and Scene sheets before Storyboard when subjects/places matter.
 3. Storyboard must emit timed shots with camera, action, and shot prompts.
-4. Each shot is an R2V shot from on-screen solos + scene specs (no per-shot keyframe required).
+4. Each shot is an R2V clip from on-screen character specs + scene specs.
 5. Compose/final stitches clips; honor audio policy from the brief.
 6. Named director styles live in `metadata.video_style` (e.g. `final_frame_reverse` = reference still is the LAST 1s endpoint; reverse-form the action; see `skills/styles/`).
 
@@ -42,7 +42,7 @@ Compose a short cinematic pipeline: Brief → Character → Scene → Storyboard
 
 ## Model capabilities to exploit
 - Image: t2i and i2i/editing (character consistency).
-- Video: reference-to-video (solos + scene specs).
+- Video: reference-to-video (character specs + scene specs).
 - Audio/speech: TTS when speech is requested.
 
 ## Quality bar
@@ -108,7 +108,7 @@ You are the only Designer overseer.
 - Read scenario skill + prior feedback/trajectory.
 - For each node set preferred_model and a concrete task.
 - Enforce audio policy (silent / speech / music).
-- Prefer R2V shots (on-screen solos + scene specs).
+- Prefer R2V clips (on-screen character specs + scene specs).
 
 ## Gates
 - Approve the brief and storyboard before leaves run.
@@ -137,11 +137,8 @@ Establish place, weather, lighting, props. Keep continuity with brief. Provide r
     "storyboard": """# Storyboard Agent Skill
 Emit a timed camera table. Each shot needs: timeline, camera, move, action, scene change, and a clip prompt. Align actions to character sheet and place to scene sheet.
 """,
-    "frame": """# Keyframe / Still Agent Skill
-Optional still for continuity debug. Match storyboard comment + character/scene consistency. Prefer readable silhouette and strong composition.
-""",
     "clip": """# Clip Agent Skill
-Generate shot video via **R2V** (on-screen solos + empty scene). Keep duration short. Honor silent policy (no implied dialogue) or leave room for later speech mix.
+Generate shot video via **R2V** (on-screen character specs + scene specs). Keep duration short. Honor silent policy (no implied dialogue) or leave room for later speech mix.
 When `metadata.video_style=final_frame_reverse`: this shot sits on an arc that ENDS on the user reference / classic still — decisive motion early, settle late, motif-motivated continuity; never turntable a finished pose.
 """,
     "compose": """# Compose / Final Agent Skill
@@ -182,8 +179,8 @@ DesignSwarm 视频生成风格之一（`video_style=final_frame_reverse`）。
 3. 不要围绕已完成的静态画面旋转展示（禁止 turntable / 模型展示感）。
 4. 每次切镜必须有视觉母题转场：烟尘、雨丝、旗布、羽毛、圣光、布料、枪火、人物擦镜、栏杆线条、倒影、云雾等。
 5. 节奏：前段推进冲击与空间穿越；中段关键特写打点；后段减速归位；最后 1 秒定格对齐参考图。
-6. 最后一枚 keyframe + 最后一镜 clip 必须收束到参考构图（姿态、取景、光线）。
-7. 管线用每镜 R2V：角色单人板 + 空场景板；整片弧线的终点才是用户参考定格。
+6. 最后一枚场景规格 + 最后一镜 clip 必须收束到参考构图（姿态、取景、光线）。
+7. 管线用每镜 R2V：角色规格板 + 空场景规格板；整片弧线的终点才是用户参考定格。
 
 ## Brief / Storyboard 写法
 
@@ -208,7 +205,7 @@ SUBJECTS = {
     "human": """# Human Subject Guide
 - Portrait/character sheets: prefer 3:4 or 2:3 vertical; full-body turnaround 9:16 or 2:3.
 - Keep head~1/7–1/8 body for adult; consistent eye line; avoid warped limbs.
-- Costume/materials must persist across keyframes and clips.
+- Costume/materials must persist across character specs and clips.
 """,
     "vehicle": """# Vehicle Subject Guide
 - Side profile ~16:9; 3/4 front hero ~3:2; keep wheel/body proportions realistic.

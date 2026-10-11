@@ -29,7 +29,7 @@ class _FakeCtx:
         self.run = {}
 
 
-def test_contaminated_filter_allows_scene_bible_and_long_text():
+def test_contaminated_filter_allows_scene_specs_and_long_text():
     assert not _looks_like_contaminated_prompt(
         "Film shot 1. Action: pastor speaks. SCENE SPECS scene=church; STAGING LOCK: left."
     )
@@ -52,8 +52,8 @@ def test_storyboard_row_wins_over_stale_shot_action(monkeypatch):
                 "config": {
                     "role": "clip",
                     "pipeline": "clip",
-                    "shot_index": 1,
-                    "shot_action": "STALE unrelated beach sunset",
+                    "clip_index": 1,
+                    "clip_action": "STALE unrelated beach sunset",
                     "generate": {
                         "prompt": (
                             "Film shot 1. Action: STALE unrelated beach sunset. "
@@ -92,19 +92,19 @@ def test_sync_shot_nodes_from_storyboard_markdown():
                 "config": {
                     "role": "clip",
                     "pipeline": "clip",
-                    "shot_index": 1,
-                    "shot_action": "stale",
+                    "clip_index": 1,
+                    "clip_action": "stale",
                     "generate": {"prompt": "old"},
                 },
             },
             {
-                "id": "n_frame_2",
+                "id": "n_clip_2",
                 "type": "image",
                 "config": {
                     "role": "frame",
                     "pipeline": "frame",
-                    "shot_index": 2,
-                    "shot_action": "stale",
+                    "clip_index": 2,
+                    "clip_action": "stale",
                 },
             },
         ]
@@ -113,8 +113,8 @@ def test_sync_shot_nodes_from_storyboard_markdown():
     assert notes
     c1 = graph["nodes"][0]["config"]
     f2 = graph["nodes"][1]["config"]
-    assert "pastor" in c1["shot_action"].lower() or "church" in c1["shot_action"].lower()
-    assert "woman" in f2["shot_action"].lower() or "tear" in f2["shot_action"].lower()
+    assert "pastor" in c1["clip_action"].lower() or "church" in c1["clip_action"].lower()
+    assert "woman" in f2["clip_action"].lower() or "tear" in f2["clip_action"].lower()
     assert "Action:" in (c1.get("generate") or {}).get("prompt", "")
 
 
@@ -125,7 +125,7 @@ def test_parse_hierarchical_smart_graph_storyboard():
     md = _write_storyboard_markdown(
         [
             {
-                "shot_index": 1,
+                "clip_index": 1,
                 "title": "Pulpit",
                 "action": "Pastor speaks from pulpit",
                 "camera": "wide",
@@ -133,7 +133,7 @@ def test_parse_hierarchical_smart_graph_storyboard():
                 "setting_id": "set_1",
             },
             {
-                "shot_index": 2,
+                "clip_index": 2,
                 "title": "Woman",
                 "action": "Woman weeps and nods",
                 "camera": "close-up",
@@ -163,8 +163,8 @@ def test_clip_prompt_leads_with_storyboard_beat(monkeypatch):
                 "config": {
                     "role": "clip",
                     "pipeline": "clip",
-                    "shot_index": 1,
-                    "shot_action": "ignored stale",
+                    "clip_index": 1,
+                    "clip_action": "ignored stale",
                 },
             },
         ],
@@ -194,7 +194,7 @@ def test_last_frame_clause_does_not_override_storyboard_plot():
     text = last_frame_continuity_clause(
         used=True,
         chain=[
-            {"path": "/tmp/a.jpg", "shot_index": 1, "action": "walked to the door"},
+            {"path": "/tmp/a.jpg", "clip_index": 1, "action": "walked to the door"},
         ],
     )
     low = text.lower()

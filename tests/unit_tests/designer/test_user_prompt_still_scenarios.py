@@ -2,7 +2,7 @@
 
 """Still/image user-prompt authority (no hard-coded ensure_still rewrite).
 
-Mirrors the video toolbar authority fix for scene/character/keyframe calls:
+Mirrors the video toolbar authority fix for scene/character/clip calls:
 ``user_edit_prompt`` / packet win; LLM prompt passes through; never rewrite
 into a practice empty-plate when the user or leaf already authored text.
 """
@@ -36,7 +36,7 @@ from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
     resolve_user_origin_prompt,
 )
 from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import (
-    apply_keyframe_call_locks,
+    apply_image_call_locks,
 )
 
 _PIPELINE_N = 40_000
@@ -63,9 +63,9 @@ _DETAILS = (
 _STALE = (
     "One empty setting. The setting is empty. SPATIAL LOCK: setting=set_1; "
     "architecture=keep one coherent place; static_rule=STATIC OBJECTS LOCKED "
-    "Later same-setting keyframes reuse"
+    "Later same-setting clips reuse"
 )
-_ROLES = ("scene", "character", "character_design", "frame", "keyframe")
+_ROLES = ("scene", "character", "character", "clip")
 
 
 def _pick(items: tuple, index: int, salt: int = 0):
@@ -112,7 +112,7 @@ def test_still_user_prompt_pipeline_scenario(index: int) -> None:
     user = _user_plate(detail)
     cfg = _cfg(role=role, user_prompt=user)
     # Leaf narration / stale practice must not win.
-    approved = apply_keyframe_call_locks(
+    approved = apply_image_call_locks(
         "One empty setting. The setting is empty. One clear image.",
         cfg=cfg,
         graph={},
@@ -129,7 +129,7 @@ def test_still_user_prompt_pipeline_scenario(index: int) -> None:
 
     # Second regen: stale generate cannot poison authority.
     cfg["generate"] = {"prompt": _STALE, "prompt_origin": "user"}
-    again = apply_keyframe_call_locks(_STALE, cfg=cfg, graph={})
+    again = apply_image_call_locks(_STALE, cfg=cfg, graph={})
     assert detail in again
     assert cfg.get("user_edit_prompt") == user
 
@@ -144,7 +144,7 @@ def test_still_llm_prompt_passes_without_rewrite() -> None:
         "style_lock": {"look": "cartoonish"},
         "scene_specs": {"setting_id": "set_1"},
     }
-    approved = apply_keyframe_call_locks(llm, cfg=cfg, graph={})
+    approved = apply_image_call_locks(llm, cfg=cfg, graph={})
     assert approved == llm
     assert "red wagon" in approved
     assert "still_llm_authority" in (cfg.get("director_still_prompt_notes") or [])
@@ -159,4 +159,4 @@ def test_still_user_edit_wins_without_origin_flag() -> None:
         "last_approved_prompt": _STALE,
     }
     assert resolve_user_origin_prompt(cfg, "") == user
-    assert "cream-and-teal" in apply_keyframe_call_locks(_STALE, cfg=cfg, graph={})
+    assert "cream-and-teal" in apply_image_call_locks(_STALE, cfg=cfg, graph={})

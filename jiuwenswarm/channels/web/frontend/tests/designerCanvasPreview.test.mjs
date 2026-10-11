@@ -8,7 +8,7 @@ import {
 import {
   EMPTY_STORYBOARD_TABLE,
   parseMarkdownTable,
-  storyboardShotPreviews,
+  storyboardClipPreviews,
 } from '../node_modules/.cache/designer-canvas-preview/designerNodePreview.js';
 import {
   resolveDesignerGraphToLoad,
@@ -36,38 +36,38 @@ test('bootstrap thinking canvas never reuses another project graph', () => {
   assert.equal(next.description, '新的情人节短片');
 });
 
-test('storyboardShotPreviews shows action and picture from the Brief columns', () => {
-  const shots = storyboardShotPreviews(
+test('storyboardClipPreviews shows action and picture from the Brief columns', () => {
+  const clips = storyboardClipPreviews(
     [
-      '| Shot | Timeline | Camera | Move | Character action | Scene change | Comment |',
+      '| Clip | Timeline | Camera | Move | Character action | Scene change | Comment |',
       '| --- | --- | --- | --- | --- | --- | --- |',
       '| 1 | 0.0-2.0s | wide | static | steps off the train | platform morning light | Wide shot of a young man leaving the train |',
       '| 2 | 2.0-5.0s | medium | pan | walks toward the exit | same station | Medium shot walking through the concourse |',
     ].join('\n'),
   );
-  assert.equal(shots.length, 2);
-  assert.equal(shots[0].shotNo, '1');
-  assert.equal(shots[0].action, 'steps off the train');
-  assert.equal(shots[0].picture, 'Wide shot of a young man leaving the train');
-  assert.equal(shots[1].action, 'walks toward the exit');
+  assert.equal(clips.length, 2);
+  assert.equal(clips[0].clipNo, '1');
+  assert.equal(clips[0].action, 'steps off the train');
+  assert.equal(clips[0].picture, 'Wide shot of a young man leaving the train');
+  assert.equal(clips[1].action, 'walks toward the exit');
 });
 
-test('storyboardShotPreviews still lists shots when Comment is empty', () => {
-  const shots = storyboardShotPreviews(
+test('storyboardClipPreviews still lists clips when Comment is empty', () => {
+  const clips = storyboardClipPreviews(
     [
-      '| Shot | Timeline | Camera | Move | Character action | Scene change | Comment |',
+      '| Clip | Timeline | Camera | Move | Character action | Scene change | Comment |',
       '| --- | --- | --- | --- | --- | --- | --- |',
       '| 1 | 0.0-2.0s | wide / eye-level | slow pan | steps off the train | platform morning light | |',
     ].join('\n'),
   );
-  assert.equal(shots.length, 1);
-  assert.equal(shots[0].action, 'steps off the train');
-  assert.equal(shots[0].picture, 'platform morning light');
+  assert.equal(clips.length, 1);
+  assert.equal(clips[0].action, 'steps off the train');
+  assert.equal(clips[0].picture, 'platform morning light');
 });
 
 test('empty storyboard table is a blank seven-column frame', () => {
   assert.deepEqual(EMPTY_STORYBOARD_TABLE.headers, [
-    'Shot',
+    'Clip',
     'Timeline',
     'Camera',
     'Move',
@@ -82,7 +82,7 @@ test('empty storyboard table is a blank seven-column frame', () => {
 test('parseMarkdownTable keeps a table frame from generated markdown', () => {
   const table = parseMarkdownTable(
     [
-      '| Shot | Timeline | Camera | Move | Character action | Scene change | Comment |',
+      '| Clip | Timeline | Camera | Move | Character action | Scene change | Comment |',
       '| --- | --- | --- | --- | --- | --- | --- |',
       '| 1 | 0.0-2.0s | wide | static | steps off the train | platform morning light | Wide shot of a young man leaving the train |',
       '| 2 | 2.0-5.0s | medium | pan | walks toward the exit | same station | Medium shot walking through the concourse |',
@@ -90,7 +90,7 @@ test('parseMarkdownTable keeps a table frame from generated markdown', () => {
   );
   assert.ok(table);
   assert.deepEqual(table.headers, [
-    'Shot',
+    'Clip',
     'Timeline',
     'Camera',
     'Move',
@@ -105,7 +105,7 @@ test('parseMarkdownTable keeps a table frame from generated markdown', () => {
 
 test('parseMarkdownTable keeps every storyboard row', () => {
   const lines = [
-    '| Shot | Timeline | Action |',
+    '| Clip | Timeline | Action |',
     '| --- | --- | --- |',
     ...Array.from({ length: 24 }, (_, index) => `| ${index + 1} | ${index}.0s | beat ${index + 1} |`),
   ];

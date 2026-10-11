@@ -18,10 +18,9 @@ export const DESIGNER_NODE_TYPES = [
 export type DesignerNodeType = (typeof DESIGNER_NODE_TYPES)[number];
 
 export const DESIGNER_NODE_ROLE_BRIEF = 'brief' as const;
-export const DESIGNER_NODE_ROLE_CHARACTER_DESIGN = 'character_design' as const;
+export const DESIGNER_NODE_ROLE_CHARACTER = 'character' as const;
 export const DESIGNER_NODE_ROLE_SCENE = 'scene' as const;
 export const DESIGNER_NODE_ROLE_STORYBOARD = 'storyboard' as const;
-export const DESIGNER_NODE_ROLE_FRAME = 'frame' as const;
 export const DESIGNER_NODE_ROLE_CLIP = 'clip' as const;
 export const DESIGNER_NODE_ROLE_COMPOSE = 'compose' as const;
 export const DESIGNER_NODE_ROLE_MUSIC = 'music' as const;
@@ -58,10 +57,9 @@ export const DESIGNER_AGENT_GROUP_NAME = 'designer' as const;
 
 export const DESIGNER_ROLE_DEFAULT_TEMPLATES = {
   [DESIGNER_NODE_ROLE_BRIEF]: 'designer/leader',
-  [DESIGNER_NODE_ROLE_CHARACTER_DESIGN]: 'designer/character',
+  [DESIGNER_NODE_ROLE_CHARACTER]: 'designer/character',
   [DESIGNER_NODE_ROLE_SCENE]: 'designer/scene',
   [DESIGNER_NODE_ROLE_STORYBOARD]: 'designer/storyboard',
-  [DESIGNER_NODE_ROLE_FRAME]: 'designer/frame',
   [DESIGNER_NODE_ROLE_CLIP]: 'designer/clip',
   [DESIGNER_NODE_ROLE_COMPOSE]: 'designer/clip',
   [DESIGNER_NODE_TYPE_TEXT]: 'designer/leader',
@@ -164,7 +162,7 @@ type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
   edit?: DesignerMediaEditConfig;
   interaction_mode?: 'generate' | 'upload' | 'edit';
   materials?: DesignerMediaMaterialSlot[];
-  shot_index?: number;
+  clip_index?: number;
   /** Canvas-added by the user (Director onboards as LLM agent when available). */
   user_added?: boolean;
   /** User dragged the node resize handle; skip content auto-fit. */
@@ -181,10 +179,9 @@ type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
 
 export type DesignerNodeConfig =
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_BRIEF>
-  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_CHARACTER_DESIGN>
+  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_CHARACTER>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_SCENE>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_STORYBOARD>
-  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_FRAME>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_CLIP>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_COMPOSE>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_MUSIC>
@@ -205,7 +202,7 @@ export type DesignerNodeConfig =
       edit?: DesignerMediaEditConfig;
       interaction_mode?: string;
       materials?: DesignerMediaMaterialSlot[];
-      shot_index?: number;
+      clip_index?: number;
       user_added?: boolean;
       user_resized?: boolean;
       kind?: string;

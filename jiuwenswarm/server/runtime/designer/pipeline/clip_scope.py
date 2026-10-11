@@ -189,10 +189,10 @@ def _duration_only_line(text: str) -> bool:
     return False
 
 
-def window_beat(prompt: str, shot_index: int, shot_count: int) -> str:
-    """Action text for one sequential time window (1-based shot_index)."""
+def window_beat(prompt: str, clip_index: int, shot_count: int) -> str:
+    """Action text for one sequential time window (1-based clip_index)."""
     beats = _beat_list_from_prompt(prompt, max(1, int(shot_count or 1)))
-    i = max(0, int(shot_index or 1) - 1)
+    i = max(0, int(clip_index or 1) - 1)
     if i < len(beats):
         return str(beats[i] or "").strip()
     return str(beats[-1] if beats else "this time window only").strip()
@@ -281,7 +281,7 @@ def trim_restated_action(action: str, user_prompt: str, *, other_actions: list[s
 
 def clip_assignment_text(
     *,
-    shot_index: int,
+    clip_index: int,
     action: str = "",
     camera: str = "",
     speech_line: str = "",
@@ -289,7 +289,7 @@ def clip_assignment_text(
     on_screen: list[str] | None = None,
 ) -> str:
     lines = [
-        f"YOUR ASSIGNMENT (storyboard shot {int(shot_index or 1)} — film ONLY this "
+        f"YOUR ASSIGNMENT (storyboard shot {int(clip_index or 1)} — film ONLY this "
         f"{clamp_clip_duration(duration_sec)}-second window):",
         f"- Action: {str(action or '(this storyboard row only)').strip()[:400]}",
     ]
@@ -308,7 +308,7 @@ def clip_assignment_text(
     return "\n".join(lines)
 
 
-def storyboard_fallback_beat(sb_text: str, shot_index: int = 1) -> str:
+def storyboard_fallback_beat(sb_text: str, clip_index: int = 1) -> str:
     """One short line when the storyboard table did not parse — never the whole board."""
     lines = []
     for raw in str(sb_text or "").splitlines():
@@ -320,7 +320,7 @@ def storyboard_fallback_beat(sb_text: str, shot_index: int = 1) -> str:
         lines.append(line)
     if not lines:
         return ""
-    idx = max(1, int(shot_index or 1)) - 1
+    idx = max(1, int(clip_index or 1)) - 1
     pick = lines[idx] if idx < len(lines) else lines[0]
     return pick[:200]
 
@@ -395,7 +395,7 @@ def apply_shot_scope(
     """Keep each shot's own window. Do not split a long film into ≤15s clips."""
     out = dict(analysis or {})
     prompt = str(user_prompt or out.get("user_prompt") or "").strip()
-    shots = [dict(s) for s in (out.get("shots") or []) if isinstance(s, dict)]
+    shots = [dict(s) for s in (out.get("clips") or []) if isinstance(s, dict)]
     coverage = user_asked_coverage(prompt)
     asked = requested_film_duration_sec(prompt)
     # The old path split any runtime above wan_max into ≤15s clips. That cap is off.
@@ -409,10 +409,10 @@ def apply_shot_scope(
         explicit = 0
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-                _explicit_shot_count_from_prompt,
+                _explicit_clip_count_from_prompt,
             )
 
-            explicit = int(_explicit_shot_count_from_prompt(prompt) or 0)
+            explicit = int(_explicit_clip_count_from_prompt(prompt) or 0)
         except Exception:  # noqa: BLE001
             explicit = 0
         if explicit >= 1 and explicit * int(wan_max) >= int(asked):
@@ -441,7 +441,7 @@ def apply_shot_scope(
             # Keep full per-window detail. Replace only a verbatim full-prompt dump.
             if not action or action_covers_whole_prompt(action, prompt):
                 action = beats[i] if i < len(beats) else first_sentence(prompt, limit=400)
-            shot["shot_index"] = i + 1
+            shot["clip_index"] = i + 1
             shot["action"] = str(action)[:800]
             if not str(shot.get("character_action") or "").strip():
                 shot["character_action"] = shot["action"][:800]
@@ -481,8 +481,8 @@ def apply_shot_scope(
             out["target_duration_sec"] = int(asked)
 
     for i, shot in enumerate(shots, start=1):
-        shot["shot_index"] = i
-    out["shots"] = shots
+        shot["clip_index"] = i
+    out["clips"] = shots
     if shots:
-        out["target_shot_count"] = len(shots)
+        out["target_clip_count"] = len(shots)
     return out

@@ -27,7 +27,7 @@ def _clean_action_snippet(text: str, *, limit: int = 160) -> str:
     raw = re.sub(r"\s+", " ", (text or "").strip())
     # Drop lock banners / prior paste markers if a full prompt was passed by mistake.
     for marker in (
-        "PRIOR KEYFRAME PROMPT",
+        "PRIOR CLIP PROMPT",
         "PRIOR SHOT CONSISTENCY",
         "MASTER SCENE PROMPT",
         "LANGUAGE LOCK",
@@ -56,7 +56,7 @@ def _clean_action_snippet(text: str, *, limit: int = 160) -> str:
 def extract_already_done_beats(
     action_or_prompt: str,
     *,
-    shot_index: int | None = None,
+    clip_index: int | None = None,
     allow_repeat_hints: str = "",
 ) -> list[str]:
     """Turn a prior beat into short ALREADY_DONE bullets (no full prompt paste).
@@ -73,7 +73,7 @@ def extract_already_done_beats(
         return []
     lower = text.lower()
     bullets: list[str] = []
-    prefix = f"shot {shot_index}: " if shot_index else ""
+    prefix = f"shot {clip_index}: " if clip_index else ""
 
     # Starting a motion must not be restaged as a fresh start.
     if re.search(rf"{_START_VERBS}\s+(?:to\s+)?{_MOTION_NOUNS}", lower) or re.search(
@@ -144,11 +144,11 @@ def architecture_clause_from_bible(bible: dict[str, Any] | None) -> str:
     )
 
 
-def continuity_card_from_prior(
+def character_consistency_from_prior(
     *,
     prior_action: str = "",
     prior_prompt: str = "",
-    shot_index: int | None = None,
+    clip_index: int | None = None,
     node_id: str = "",
     speech_line: str = "",
     bible: dict[str, Any] | None = None,
@@ -158,12 +158,12 @@ def continuity_card_from_prior(
     seed = prior_action or _clean_action_snippet(prior_prompt, limit=240)
     done = extract_already_done_beats(
         seed,
-        shot_index=shot_index,
+        clip_index=clip_index,
         allow_repeat_hints=storyboard_hints,
     )
     lock = infer_continuity_lock(seed)
     card = {
-        "from_shot_index": int(shot_index or 0) or None,
+        "from_clip_index": int(clip_index or 0) or None,
         "from_node_id": str(node_id or "") or None,
         "already_done": done,
         "continuity_lock": lock,
@@ -174,14 +174,14 @@ def continuity_card_from_prior(
     return card
 
 
-def continuity_card_clause(card: dict[str, Any] | None) -> str:
+def character_consistency_clause(card: dict[str, Any] | None) -> str:
     """Prompt clause: already-done + forbid — no pasted prior generate/Wan prompt."""
     if not isinstance(card, dict) or not card:
         return ""
     lines: list[str] = [
         "CHARACTER CONSISTENCY (Director): use this to avoid repeats — do NOT copy a prior shot prompt."
     ]
-    src = card.get("from_shot_index") or card.get("from_node_id")
+    src = card.get("from_clip_index") or card.get("from_node_id")
     if src:
         lines.append(f"- Source: {src}")
     summary = str(card.get("prior_action_summary") or "").strip()
@@ -220,7 +220,7 @@ def strip_prior_prompt_pastes(prompt: str) -> str:
     if not text:
         return ""
     patterns = (
-        r"\n*PRIOR KEYFRAME PROMPT \(do not redo the same beat; advance time\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
+        r"\n*PRIOR CLIP PROMPT \(do not redo the same beat; advance time\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
         r"\n*PRIOR SHOT CONSISTENCY \(do NOT redo these beats; continue the film forward\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
         r"\n*MASTER SCENE PROMPT:\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
         r"\n*CHARACTER CONSISTENCY \(Director\):[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",

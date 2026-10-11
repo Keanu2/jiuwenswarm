@@ -1,38 +1,38 @@
-import { parseStoryboardShots } from './storyboardShots';
+import { parseStoryboardClips } from './storyboardClips';
 
 export type MarkdownTablePreview = {
   headers: string[];
   rows: string[][];
 };
 
-export type StoryboardShotPreview = {
-  shotNo: string;
+export type StoryboardClipPreview = {
+  clipNo: string;
   timeline: string;
   action: string;
   picture: string;
 };
 
-export function storyboardShotPreviews(
+export function storyboardClipPreviews(
   text: string,
-  maxShots = 4,
-): StoryboardShotPreview[] {
-  return parseStoryboardShots(text)
-    .slice(0, maxShots)
-    .map((shot) => {
-      const camera = [shot.camera, shot.move].filter((part) => String(part || '').trim()).join(' / ');
+  maxClips = 4,
+): StoryboardClipPreview[] {
+  return parseStoryboardClips(text)
+    .slice(0, maxClips)
+    .map((clip) => {
+      const camera = [clip.camera, clip.move].filter((part) => String(part || '').trim()).join(' / ');
       return {
-        shotNo: String(shot.shot_no || '').trim(),
-        timeline: String(shot.timeline || '').trim(),
-        action: String(shot.character_action || '').trim(),
-        picture: String(shot.comment || shot.scene_change || camera || '').trim(),
+        clipNo: String(clip.clip_no || '').trim(),
+        timeline: String(clip.timeline || '').trim(),
+        action: String(clip.character_action || '').trim(),
+        picture: String(clip.comment || clip.scene_change || camera || '').trim(),
       };
     })
-    .filter((shot) => shot.shotNo || shot.timeline || shot.action || shot.picture);
+    .filter((clip) => clip.clipNo || clip.timeline || clip.action || clip.picture);
 }
 
 export const EMPTY_STORYBOARD_TABLE: MarkdownTablePreview = {
   headers: [
-    'Shot',
+    'Clip',
     'Timeline',
     'Camera',
     'Move',

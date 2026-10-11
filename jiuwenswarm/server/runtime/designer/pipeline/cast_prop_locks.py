@@ -4,7 +4,7 @@
 General rules (no scene-genre branches):
   1. Brand mascots / logos are props — never featured human heroes.
   2. Props appear only as on-device UI (phone/laptop/app), not free-flying bodies.
-  3. setting_id change ⇒ compose_from_solo_refs; same setting ⇒ edit_prior_keyframe.
+  3. setting_id change ⇒ compose_from_character_specs; same setting ⇒ edit_prior_clip.
   4. Within a setting, humans who did not exit stay in occupancy.must_appear.
   5. New setting starts from this shot's storyboard cast (no cross-set occupancy leak).
 """
@@ -212,7 +212,7 @@ def repair_shot_cast(
     notes: list[str] = []
     out = analysis if isinstance(analysis, dict) else {}
     characters = [c for c in (out.get("characters") or []) if isinstance(c, dict)]
-    shots = [s for s in (out.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (out.get("clips") or []) if isinstance(s, dict)]
     stamp_cast_kinds(characters)
     humans = _human_ids(characters)
     props = _prop_ids(characters)
@@ -228,9 +228,9 @@ def repair_shot_cast(
     prev_must: list[str] = []
 
     for shot in shots:
-        idx = int(shot.get("shot_index") or 0) or 0
+        idx = int(shot.get("clip_index") or 0) or 0
         sid = str(shot.get("setting_id") or "set_1").strip() or "set_1"
-        action = str(shot.get("action") or shot.get("keyframe_prompt") or "")
+        action = str(shot.get("action") or shot.get("clip_prompt") or "")
         beat = _beat_text_for_scoring(action)
         old = [str(x) for x in (shot.get("character_ids") or []) if str(x)]
         listed = [c for c in old if c in human_set]
@@ -337,7 +337,7 @@ def repair_shot_cast(
         prev_set = sid
 
     out["characters"] = characters
-    out["shots"] = shots
+    out["clips"] = shots
     out["prop_ids"] = props
     return notes
 
@@ -384,7 +384,7 @@ def _stamp_props_and_occupancy(
         "must_not_appear": sorted(exited),
         "featured": list(shot.get("featured_cast_ids") or shot["character_ids"]),
         "rule": (
-            "Keep every must_appear human from the prior same-setting keyframe unless "
+            "Keep every must_appear human from the prior same-setting clip unless "
             "storyboard marks them exiting. Props/logos stay on-device UI only. "
             "New setting_id does not inherit prior-setting occupancy."
         ),
@@ -394,27 +394,27 @@ def _stamp_props_and_occupancy(
 def enforce_setting_transitions(analysis: dict[str, Any]) -> list[str]:
     """Director cross-check: setting_id change ⇒ new compose, not edit-across-set."""
     notes: list[str] = []
-    shots = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (analysis.get("clips") or []) if isinstance(s, dict)]
     prev_set = ""
     for shot in shots:
         sid = str(shot.get("setting_id") or "set_1").strip() or "set_1"
-        idx = int(shot.get("shot_index") or 0)
+        idx = int(shot.get("clip_index") or 0)
         changed = bool(prev_set) and sid != prev_set
         if not prev_set or changed:
-            if str(shot.get("keyframe_strategy") or "") != "compose_from_solo_refs":
+            if str(shot.get("clip_strategy") or "") != "compose_from_character_specs":
                 notes.append(
-                    f"shot{idx}: setting {sid} first KF forced compose_from_solo_refs"
+                    f"shot{idx}: setting {sid} first KF forced compose_from_character_specs"
                 )
-            shot["keyframe_strategy"] = "compose_from_solo_refs"
+            shot["clip_strategy"] = "compose_from_character_specs"
             shot["same_setting_prior_edit"] = False
             shot["compose_setting_master"] = True
             shot["ensemble_master"] = False
         else:
-            shot["keyframe_strategy"] = "edit_prior_keyframe"
+            shot["clip_strategy"] = "edit_prior_clip"
             shot["same_setting_prior_edit"] = True
             shot["compose_setting_master"] = False
         prev_set = sid
-    analysis["shots"] = shots
+    analysis["clips"] = shots
     return notes
 
 
@@ -436,7 +436,7 @@ def occupancy_clause_for_clip(
     props = str(shot.get("prop_presentation") or "").strip()
     bits = [
         "R2V CAST LOCK: show ONLY people bound as character1, character2, … "
-        "(on-screen solos). Off-screen / already-exited people must not appear. "
+        "(on-screen character specs). Off-screen / already-exited people must not appear. "
         "Do not attach a peopled scene master as the last environment ref. "
         "Place people by STAGING LOCK / SEAT HOLDS / previous Wan story state. "
         "Do not restage finished exits, walk-aways, or onsets. "

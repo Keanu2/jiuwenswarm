@@ -27,7 +27,7 @@ def _practice_prompt(prop_phrase: str) -> str:
 
 def _cfg(*, origin: str, user_prompt: str, stale_action: str = _STALE_ACTION) -> dict:
     return {
-        "shot_action": stale_action,
+        "clip_action": stale_action,
         "camera": "wide establishing with ceramic bowl",
         "cast_names": ["Sam"],
         "on_screen": ["Sam"],
@@ -62,7 +62,7 @@ def test_storyboard_origin_rewrites_toward_stale_beat() -> None:
 def test_apply_wan_call_locks_stamps_sent_prompt_on_caller_cfg() -> None:
     user_prompt = _practice_prompt(f"raises a {_USER_PROP}")
     cfg = _cfg(origin="user", user_prompt=user_prompt)
-    approved = apply_wan_call_locks("agent ignored", cfg=cfg, graph={}, shot_index=2)
+    approved = apply_wan_call_locks("agent ignored", cfg=cfg, graph={}, clip_index=2)
     assert _USER_PROP in approved
     assert cfg.get("last_wan_prompt")
     assert _USER_PROP in str(cfg.get("last_wan_prompt") or "")
@@ -79,7 +79,7 @@ def test_user_origin_lock_essay_seeds_narrative_not_stale_beat() -> None:
     )
     assert _USER_PROP in narrative_seed_from_user_prompt(essay)
     cfg = _cfg(origin="user", user_prompt=essay)
-    approved = apply_wan_call_locks("ignored", cfg=cfg, graph={}, shot_index=1)
+    approved = apply_wan_call_locks("ignored", cfg=cfg, graph={}, clip_index=1)
     assert _USER_PROP in approved
     assert _STALE_PROP not in approved
     assert "FORBID" not in approved
@@ -109,7 +109,7 @@ def test_packet_film_shot_beats_stale_generate_practice() -> None:
     film_shot = (
         f"Film shot 1 only. Camera Wide tracking from outside the {_USER_PROP}. "
         f"Action: {_USER_ACTION}. "
-        "CLOTHING LOCK: Sam: grey coat. STRATEGY=compose_from_solo_refs. "
+        "CLOTHING LOCK: Sam: grey coat. STRATEGY=compose_from_character_specs. "
         "SCENE SPECS: scene=workshop; views=['front', 'left'"
     )
     cfg = _cfg(origin="user", user_prompt=stale_practice)
@@ -117,7 +117,7 @@ def test_packet_film_shot_beats_stale_generate_practice() -> None:
     cfg["prompt"] = film_shot
     cfg["regenerate_packet"] = {"prompt": film_shot}
     cfg["user_edit_prompt"] = film_shot
-    approved = apply_wan_call_locks("agent white narration", cfg=cfg, graph={}, shot_index=1)
+    approved = apply_wan_call_locks("agent white narration", cfg=cfg, graph={}, clip_index=1)
     assert _USER_PROP in approved
     assert _STALE_PROP not in approved
     # Durable user intent survives the stamp; last_wan is the sent body.
@@ -130,7 +130,7 @@ def test_stamp_does_not_poison_packet_with_api_body() -> None:
     user_prompt = _practice_prompt(f"raises a {_USER_PROP}")
     cfg = _cfg(origin="user", user_prompt=user_prompt)
     cfg["user_edit_prompt"] = user_prompt
-    apply_wan_call_locks("ignored", cfg=cfg, graph={}, shot_index=1)
+    apply_wan_call_locks("ignored", cfg=cfg, graph={}, clip_index=1)
     assert (cfg.get("generate") or {}).get("prompt_origin") == "user"
     assert str((cfg.get("regenerate_packet") or {}).get("prompt") or "") == user_prompt
     assert str(cfg.get("user_edit_prompt") or "") == user_prompt

@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlparse
 from jiuwenswarm.common.schema.designer_graph import (
     EDGE_KIND_DATA,
     NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CHARACTER,
     NODE_ROLE_CLIP,
     NODE_ROLE_SCENE,
     AssetRef,
@@ -43,7 +43,7 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
         if node_pipeline(node) == NODE_ROLE_CLIP:
             user = str(graph.get("description") or "")
             try:
-                from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
                     clip_assignment_text,
                     duration_from_timeline,
                     looks_like_full_story_restatement,
@@ -80,8 +80,8 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
                 if duration_from_timeline is not None:
                     dur = duration_from_timeline(str(config.get("timeline") or ""), default=5)
                 assignment = clip_assignment_text(
-                    shot_index=int(config.get("shot_index") or 1),
-                    action=str(config.get("shot_action") or config.get("character_action") or ""),
+                    clip_index=int(config.get("clip_index") or 1),
+                    action=str(config.get("clip_action") or config.get("character_action") or ""),
                     camera=str(config.get("camera") or ""),
                     speech_line=str(config.get("speech_line") or ""),
                     duration_sec=dur,
@@ -98,7 +98,7 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
                     if val:
                         lock_bits.append(f"{label}: {val[:400]}")
                 return "\n".join(lock_bits)
-            return str(config.get("shot_action") or "")[:500] or "this storyboard shot only"
+            return str(config.get("clip_action") or "")[:500] or "this storyboard shot only"
         if node_prompt:
             return node_prompt
         if generate_prompt:
@@ -598,10 +598,10 @@ def node_ids_output_image_paths(ctx: NodeExecutionContext, node_ids: list[str]) 
 
 
 def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
-    """Continuity refs for keyframes: on_screen solo sheets only (+ optional user refs).
+    """Continuity refs for clip stills: on_screen character spec sheets only (+ optional user refs).
 
     A file the user attached on this node replaces those generated stills.
-    Scene consistency comes from scene_specs + prompt handoff text — not prior KF images.
+    Scene consistency comes from scene_specs + prompt handoff text — not prior clip images.
     Never attach scene specs or off-screen cast sheets.
     """
     attached = uploaded_material_image_paths(node)
@@ -627,7 +627,7 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
         )
         if str(x).strip()
     ]
-    # Prefer preferred list when it already matches on_screen; otherwise resolve solos by cid.
+    # Prefer preferred list when it already matches on_screen; otherwise resolve character specs by cid.
     paths = node_ids_output_image_paths(ctx, preferred) if preferred else []
     if on_screen:
         solo_by_cid: dict[str, str] = {}
@@ -635,7 +635,7 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
             if not isinstance(other, dict):
                 continue
             oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-            if node_pipeline(other) != NODE_ROLE_CHARACTER_DESIGN:
+            if node_pipeline(other) != NODE_ROLE_CHARACTER:
                 continue
             if oc.get("combined_cast"):
                 continue
@@ -652,8 +652,8 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
     handoff_id = str(
         identity.get("scene_prompt_handoff_from")
         or cfg.get("scene_prompt_handoff_from")
-        or identity.get("scene_master_frame_id")
-        or cfg.get("scene_master_frame_id")
+        or identity.get("scene_master_node_id")
+        or cfg.get("scene_master_node_id")
         or ""
     ).strip()
     # If master prompt was handed off onto this config, prefer it in the leaf prompt path.
@@ -678,8 +678,8 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
 
     user_paths = user_reference_image_paths(ctx.graph if isinstance(ctx.graph, dict) else None)
 
-    # Do NOT pull empty NODE_ROLE_Scene specs or prior keyframe images into refs.
-    # Continuity is scene_specs + prompt handoff; visual identity is on_screen solos only.
+    # Do NOT pull empty NODE_ROLE_Scene specs or prior clip images into refs.
+    # Continuity is scene_specs + prompt handoff; visual identity is on_screen character specs only.
     ordered = [*user_paths, *paths]
 
     merged: list[Path] = []

@@ -100,9 +100,9 @@ def test_audio_nodes_not_created_when_brief_wants_bgm(monkeypatch) -> None:
             "audio": {"include_speech": True, "include_music": True, "policy": "speech_and_music"},
             "characters": [{"id": "char_1", "name": "年轻人"}],
             "scenes": [{"id": "scene_1", "name": "office"}],
-            "shots": [
+            "clips": [
                 {
-                    "shot_index": 1,
+                    "clip_index": 1,
                     "action": "自白",
                     "speech_line": "糟了，今天是情人节",
                     "character_ids": ["char_1"],
@@ -147,7 +147,7 @@ def test_director_adds_no_audio_nodes_without_music_backend(monkeypatch) -> None
             "audio": {"include_speech": True, "include_music": True, "policy": "speech_and_music"},
             "characters": [{"id": "char_1", "name": "Lead"}],
             "scenes": [{"id": "scene_1", "name": "office"}],
-            "shots": [{"shot_index": 1, "action": "monologue", "character_ids": ["char_1"]}],
+            "clips": [{"clip_index": 1, "action": "monologue", "character_ids": ["char_1"]}],
         },
     )
     assign_audio_node_agents(graph)
@@ -181,9 +181,9 @@ def test_tts_node_is_never_created_even_when_backend_exists(monkeypatch) -> None
             },
             "characters": [{"id": "char_1", "name": "Lead"}],
             "scenes": [{"id": "scene_1", "name": "room"}],
-            "shots": [
+            "clips": [
                 {
-                    "shot_index": 1,
+                    "clip_index": 1,
                     "action": "Lead says hello",
                     "speech_line": "Hello",
                     "character_ids": ["char_1"],

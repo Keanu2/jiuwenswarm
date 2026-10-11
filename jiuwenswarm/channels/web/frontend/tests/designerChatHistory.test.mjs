@@ -32,7 +32,7 @@ test('extractDesignerGraphPrompt prefers Brief config.prompt', () => {
     extractDesignerGraphPrompt({
       description: 'graph description fallback',
       nodes: [
-        { id: 'n_character', type: 'image', label: 'Character', config: { role: 'character_design' } },
+        { id: 'n_character', type: 'image', label: 'Character', config: { role: 'character' } },
         {
           id: 'n_brief',
           type: 'text',

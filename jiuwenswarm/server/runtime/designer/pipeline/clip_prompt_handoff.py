@@ -22,7 +22,7 @@ def _clip_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
             nodes.append(n)
     return sorted(
         nodes,
-        key=lambda n: int((n.get("config") or {}).get("shot_index") or 0) or 99,
+        key=lambda n: int((n.get("config") or {}).get("clip_index") or 0) or 99,
     )
 
 
@@ -42,7 +42,7 @@ def _short_action(text: str, *, limit: int = 220) -> str:
     raw = re.sub(r"\s+", " ", (text or "").strip())
     for marker in (
         "PRIOR CLIP",
-        "PRIOR KEYFRAME",
+        "PRIOR CLIP",
         "YOUR ASSIGNMENT",
         "PREVIOUS CLIP HAD",
         "LANGUAGE LOCK",
@@ -70,7 +70,7 @@ def _action_from_clip_node(node: dict[str, Any] | None) -> str:
     if not isinstance(node, dict):
         return ""
     cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-    for key in ("shot_action", "character_action", "action", "previous_clip_action"):
+    for key in ("clip_action", "character_action", "action", "previous_clip_action"):
         text = str(cfg.get(key) or "").strip()
         if text and key != "previous_clip_action":
             return _short_action(text)
@@ -80,7 +80,7 @@ def _action_from_clip_node(node: dict[str, Any] | None) -> str:
 def collect_prior_clip_prompts(
     graph: dict[str, Any],
     *,
-    shot_index: int,
+    clip_index: int,
     max_chars_each: int = 1600,
     max_clips: int = 6,
 ) -> list[dict[str, Any]]:
@@ -89,8 +89,8 @@ def collect_prior_clip_prompts(
     out: list[dict[str, Any]] = []
     for node in _clip_nodes(graph):
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        idx = int(cfg.get("shot_index") or 0) or 0
-        if idx <= 0 or idx >= int(shot_index or 0):
+        idx = int(cfg.get("clip_index") or 0) or 0
+        if idx <= 0 or idx >= int(clip_index or 0):
             continue
         action = _action_from_clip_node(node)
         prompt = wan_prompt_from_clip_node(node)
@@ -99,9 +99,9 @@ def collect_prior_clip_prompts(
         out.append(
             {
                 "node_id": str(node.get("id") or ""),
-                "shot_index": idx,
+                "clip_index": idx,
                 "wan_prompt": (prompt or "")[:400],  # readiness/debug only
-                "shot_action": (action or "")[:220],
+                "clip_action": (action or "")[:220],
                 "speech_line": str(cfg.get("speech_line") or "")[:200],
                 "camera": str(cfg.get("camera") or "")[:120],
             }
@@ -112,7 +112,7 @@ def collect_prior_clip_prompts(
 def stamp_wan_prompt_handoff(
     graph: dict[str, Any],
     *,
-    shot_index: int,
+    clip_index: int,
     prompt: str,
     node_id: str = "",
     shot_action: str = "",
@@ -128,15 +128,15 @@ def stamp_wan_prompt_handoff(
         return notes
     meta = dict(graph.get("metadata") or {})
     log = dict(meta.get("clip_wan_prompt_log") or {})
-    key = str(node_id or f"n_clip_{shot_index}")
+    key = str(node_id or f"n_clip_{clip_index}")
     src = next((n for n in _clip_nodes(graph) if str(n.get("id") or "") == key), None)
     src_cfg = src.get("config") if isinstance(src, dict) else {}
     action = _short_action(shot_action or _action_from_clip_node(src) or text)
     speech = (speech_line or str((src_cfg or {}).get("speech_line") or "")).strip()
     log[key] = {
-        "shot_index": int(shot_index or 0),
+        "clip_index": int(clip_index or 0),
         "prompt": text[:4000],
-        "shot_action": action[:220],
+        "clip_action": action[:220],
         "speech_line": speech[:200],
     }
     meta["clip_wan_prompt_log"] = log
@@ -144,14 +144,14 @@ def stamp_wan_prompt_handoff(
 
     for node in _clip_nodes(graph):
         cfg = dict(node.get("config") or {})
-        idx = int(cfg.get("shot_index") or 0) or 0
+        idx = int(cfg.get("clip_index") or 0) or 0
         nid = str(node.get("id") or "")
-        if idx == int(shot_index or 0) or nid == key:
+        if idx == int(clip_index or 0) or nid == key:
             if text:
                 cfg["last_wan_prompt"] = text[:4000]
                 cfg["clip_prompt_preview"] = text[:1200]
             if action:
-                cfg["shot_action"] = cfg.get("shot_action") or action[:300]
+                cfg["clip_action"] = cfg.get("clip_action") or action[:300]
             cfg["handoff_artifact_ready"] = True
             # Drop legacy prior-clip schedule wiring if present on older graphs.
             cfg.pop("continuity_clip_node_id", None)
@@ -162,7 +162,7 @@ def stamp_wan_prompt_handoff(
 
 def same_scene_prompt_gate_clause(
     *,
-    shot_index: int = 0,
+    clip_index: int = 0,
     this_action: str = "",
     this_camera: str = "",
     this_speech: str = "",
@@ -172,7 +172,7 @@ def same_scene_prompt_gate_clause(
     """LLM instruction: agree with this storyboard row; continue; do not unasked-repeat."""
     lines = [
         "SAME-SCENE CONSISTENCY GATE (write the Wan prompt to this contract):",
-        f"1) THIS storyboard shot {int(shot_index or 0) or 'N'} is the plot authority "
+        f"1) THIS storyboard shot {int(clip_index or 0) or 'N'} is the plot authority "
         f"— action: {_short_action(this_action) or '(this row)'}"
         + (f"; camera: {str(this_camera).strip()[:120]}" if str(this_camera or "").strip() else "")
         + (f"; speech: {str(this_speech).strip()[:160]}" if str(this_speech or "").strip() else "")
@@ -231,7 +231,7 @@ def _stem_token(token: str) -> str:
 
 def _content_stems(text: str) -> set[str]:
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
             content_tokens,
         )
     except Exception:  # noqa: BLE001
@@ -262,7 +262,7 @@ def agent_replays_finished_events(
     if not body:
         return False
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
             overlap_ratio,
         )
     except Exception:  # noqa: BLE001
@@ -306,15 +306,15 @@ def _same_setting(src: dict[str, Any] | None, dst: dict[str, Any] | None) -> boo
 
 def this_shot_assignment_clause(
     *,
-    shot_index: int,
+    clip_index: int,
     action: str = "",
     camera: str = "",
     speech_line: str = "",
     already_done: list[str] | None = None,
 ) -> str:
     lines = [
-        f"YOUR ASSIGNMENT (storyboard shot {int(shot_index or 0)} — film ONLY this part):",
-        f"- Action: {_short_action(action) or '(follow this shot keyframe + storyboard shot)'}",
+        f"YOUR ASSIGNMENT (storyboard shot {int(clip_index or 0)} — film ONLY this part):",
+        f"- Action: {_short_action(action) or '(follow this shot clip spec + storyboard shot)'}",
     ]
     if str(camera or "").strip():
         lines.append(f"- Camera: {str(camera).strip()[:160]}")
@@ -334,10 +334,10 @@ def previous_clip_had_clause(prior: list[dict[str, Any]] | None) -> str:
     if not items:
         return ""
     latest = items[-1]
-    beat = _short_action(str(latest.get("shot_action") or latest.get("wan_prompt") or ""))
+    beat = _short_action(str(latest.get("clip_action") or latest.get("wan_prompt") or ""))
     lines = [
         "PREVIOUS CLIP HAD THE FOLLOWING (context only — do NOT film / redo this):",
-        f"- Shot {latest.get('shot_index')} ({latest.get('node_id')}): {beat or '(prior beat)'}",
+        f"- Shot {latest.get('clip_index')} ({latest.get('node_id')}): {beat or '(prior beat)'}",
     ]
     if latest.get("speech_line"):
         lines.append(
@@ -350,9 +350,9 @@ def previous_clip_had_clause(prior: list[dict[str, Any]] | None) -> str:
         )
     if len(items) > 1:
         earlier = "; ".join(
-            f"shot {p.get('shot_index')}: {_short_action(str(p.get('shot_action') or ''), limit=80)}"
+            f"shot {p.get('clip_index')}: {_short_action(str(p.get('clip_action') or ''), limit=80)}"
             for p in items[:-1]
-            if p.get("shot_action") or p.get("shot_index")
+            if p.get("clip_action") or p.get("clip_index")
         )
         if earlier:
             lines.append(f"- Earlier clips already covered: {earlier}")
@@ -371,7 +371,7 @@ def previous_clip_had_clause(prior: list[dict[str, Any]] | None) -> str:
 def handoff_clause_for_prompt(
     prior: list[dict[str, Any]] | None,
     *,
-    this_shot_index: int = 0,
+    this_clip_index: int = 0,
     this_action: str = "",
     this_camera: str = "",
     this_speech: str = "",
@@ -382,10 +382,10 @@ def handoff_clause_for_prompt(
     prev = previous_clip_had_clause(prior)
     if prev:
         parts.append(prev)
-    if int(this_shot_index or 0) > 0 or str(this_action or "").strip():
+    if int(this_clip_index or 0) > 0 or str(this_action or "").strip():
         parts.append(
             this_shot_assignment_clause(
-                shot_index=int(this_shot_index or 0),
+                clip_index=int(this_clip_index or 0),
                 action=this_action,
                 camera=this_camera,
                 speech_line=this_speech,
@@ -395,7 +395,7 @@ def handoff_clause_for_prompt(
     if prior:
         parts.append(
             same_scene_prompt_gate_clause(
-                shot_index=int(this_shot_index or 0),
+                clip_index=int(this_clip_index or 0),
                 this_action=this_action,
                 this_camera=this_camera,
                 this_speech=this_speech,
@@ -406,26 +406,26 @@ def handoff_clause_for_prompt(
     return "\n\n".join(parts)
 
 
-def keyframe_continuity_note(
+def clip_continuity_note(
     *,
-    shot_index: int,
+    clip_index: int,
     this_action: str = "",
     this_camera: str = "",
     prior_action: str = "",
-    prior_shot_index: int | None = None,
+    prior_clip_index: int | None = None,
 ) -> str:
-    """Same pattern for keyframes — no full prior generate.prompt paste."""
+    """Continuity note for clips — no full prior generate.prompt paste."""
     parts: list[str] = []
     if prior_action.strip():
-        src = f"shot {prior_shot_index}" if prior_shot_index else "prior keyframe"
+        src = f"shot {prior_clip_index}" if prior_clip_index else "prior clip"
         parts.append(
-            "PREVIOUS KEYFRAME HAD THE FOLLOWING (context only — do NOT redraw that beat):\n"
+            "PREVIOUS CLIP HAD THE FOLLOWING (context only — do NOT redraw that beat):\n"
             f"- {src}: {_short_action(prior_action)}\n"
             "Advance time; do not restart finished onsets unless storyboard asks."
         )
     parts.append(
         this_shot_assignment_clause(
-            shot_index=shot_index,
+            clip_index=clip_index,
             action=this_action,
             camera=this_camera,
         ).replace("film ONLY", "draw ONLY").replace("Film ONLY", "Draw ONLY")

@@ -47,8 +47,8 @@ test('fromReactFlowGraph preserves domain semantics while updating layout', () =
   assert.equal(brief.layout?.y, 200);
   assert.equal(brief.type, 'text');
   assert.equal(
-    merged.edges.find((edge) => edge.id === 'e_frame_1_clip_1')?.source,
-    'n_frame_1',
+    merged.edges.find((edge) => edge.id === 'e_frame_n_clip_1')?.source,
+    'n_clip_1a',
   );
   assert.equal(
     merged.edges.find((edge) => edge.id === 'e_clip_1_final')?.target,

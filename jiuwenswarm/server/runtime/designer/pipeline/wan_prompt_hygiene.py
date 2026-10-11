@@ -110,7 +110,7 @@ def positive_continuity_clause(
             bits.append(str(anchor["pose"]))
         holds.append(" ".join(bits))
     who_now = ", ".join(names.get(c, c) for c in on[:8]) if on else ""
-    action = str(cfg.get("shot_action") or cfg.get("character_action") or "").strip()
+    action = str(cfg.get("clip_action") or cfg.get("character_action") or "").strip()
     camera = str(cfg.get("camera") or "").strip()
     speech = str(cfg.get("speech_line") or "").strip()
     lines = ["CONTINUITY STATE (this clip continues the same film):"]
@@ -223,7 +223,7 @@ def capture_regenerate_packet(
     return {
         "node_id": str(node.get("id") or ""),
         "prompt": stored_prompt[:4000],
-        "shot_action": str(cfg.get("shot_action") or "")[:500],
+        "clip_action": str(cfg.get("clip_action") or "")[:500],
         "speech_line": str(cfg.get("speech_line") or "")[:280],
         "camera": str(cfg.get("camera") or "")[:160],
         "style_lock": cfg.get("style_lock") if isinstance(cfg.get("style_lock"), dict) else None,
@@ -286,7 +286,7 @@ def apply_regenerate_packet(
     if not use_prior or not packet:
         return prompt, list(reference_paths)
     for key in (
-        "shot_action",
+        "clip_action",
         "speech_line",
         "camera",
         "style_lock",

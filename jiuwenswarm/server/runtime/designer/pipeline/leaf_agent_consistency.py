@@ -56,8 +56,8 @@ def hollywood_leaf_instructions(role: str) -> str:
         "brief; the storyboard already carries the shot. Obey style, landmarks, "
         "lighting, crowd, speech_line, on_screen cast, setting_id.\n"
         "2) CAST IDENTITY: one body per character id; match wardrobe/face from the FEW attached "
-        "solo sheets only. Never swap heroes; never clone one face onto two bodies. "
-        "Do not request extra solo sheets for background people.\n"
+        "character specs only. Never swap heroes; never clone one face onto two bodies. "
+        "Do not request extra character specs for background people.\n"
         "3) SET: same setting_id → same architecture, furniture, window/wall layout, light side, "
         "and landmark screen-side (never teleport landmarks).\n"
         "4) STYLE: obey style_lock / LOCK BIBLE for the entire film; "
@@ -68,7 +68,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         "through furniture/props); featured subjects face the landmark/action focus. "
         "Pose/placement come from THIS storyboard row — never invent sit/stand defaults.\n"
         "6) SCREEN AXIS: keep L/R placement stable under pans (180-degree). Do not flip who is left/right.\n"
-        "7) SETTING MASTER: scene specs + identity solos. First clip of the setting "
+        "7) SETTING MASTER: scene specs + identity character specs. First clip of the setting "
         "plays the storyboard open; later same-setting clips continue from structured "
         "continuity (already_done / pose_holds / seat_anchors / forbidden_speech / end_state) "
         "— never from raw prior Wan paragraphs. "
@@ -82,7 +82,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         f"12) {_image_limit_clause()}\n"
         f"13) {_video_limit_clause()}\n"
     )
-    if r in {"character", "character_design"}:
+    if r in {"character", "character"}:
         return (
             shared
             + "ROLE=character sheet. Write ONE positive Qwen-ready studio portrait prompt "
@@ -100,12 +100,6 @@ def hollywood_leaf_instructions(role: str) -> str:
             "No LOCK banners, no forbid lists, no examples. "
             "Then call_image_model with that prompt only. Finish with designer_node_complete "
             "preferring the PNG uri (text notes are optional debug only)."
-        )
-    if r in {"frame", "keyframe"}:
-        return (
-            shared
-            + "ROLE=keyframe still (legacy graphs only). "
-            "Prefer scene-card + clip reference mode when available."
         )
     if r in {"storyboard", "brief"}:
         return (
@@ -192,10 +186,10 @@ def merge_director_task(existing: str, planned: str) -> str:
         "MOVIE CONTINUITY",
         "Image 1",
         "STYLE LOCK",
-        "environment plate",
-        "solo sheet",
+        "scene spec",
+        "character spec",
         "R2V",
-        "keyframe",
+        "clip spec",
     )
     if any(m.lower() in old.lower() for m in markers):
         if new and new not in old and "Execute " in new:

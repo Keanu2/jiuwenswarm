@@ -28,10 +28,10 @@ This document is the reproduce guide after:
 | Intent | Behavior |
 |---|---|
 | Still bound **verbatim** (default) | Handler card (`n_ref_*`). Pixels never image-gen’d. |
-| Still bound **condition** | May regenerate (`identity_sheet` / `medium_change` / scene plate). |
+| Still bound **condition** | May regenerate (`character_specs` / `medium_change` / scene specs). |
 | Uncovered analysis cast/set | Companion sheets/plates under film `style_lock`. |
 | **`video_binding=multi_ref_story`** (default) | **R2V**. Advertise / act / dinner / celebrate / product story. All plan refs sent. |
-| **`video_binding=animate_keyframe`** | True “animate this picture/painting” only. Solo → **I2V**. Extra cast/set → **R2V** with keyframe as Image 1 + companions packed. |
+| **`video_binding=animate_still`** | True “animate this picture/painting” only. Solo → **I2V**. Extra cast/set → **R2V** with keyframe as Image 1 + companions packed. |
 | Wan cap ≤5 | Prefer product / keyframe / uploads; fold leftover non-lead companions into one `combined_cast` card before silent drop. |
 | No phrase regex | Mode from LLM JSON `video_binding` — never slogan keyword banks for I2V. |
 
@@ -71,12 +71,12 @@ flowchart TD
 |---|---|
 | `roles` | What the still *is*: `character_identity`, `scene_source`, `product_hero`, `still_motion_source`, `style_source` |
 | `binding` | `verbatim` (default) or `condition` (restyle) |
-| `video_binding` | How clips call video: `multi_ref_story` \| `animate_keyframe` |
+| `video_binding` | How clips call video: `multi_ref_story` \| `animate_still` |
 
 **Never:** `still_motion_source ∈ roles` ⇒ I2V.  
-**Only:** `video_binding=animate_keyframe` (+ motion slot) selects keyframe path.
+**Only:** `video_binding=animate_still` (+ motion slot) selects keyframe path.
 
-Classify prompt: story verbs (advertise / act / dinner / film) → `multi_ref_story` + character/scene/product roles. Add `still_motion_source` only with `animate_keyframe` when the still is the frame to animate.
+Classify prompt: story verbs (advertise / act / dinner / film) → `multi_ref_story` + character/scene/product roles. Add `still_motion_source` only with `animate_still` when the still is the frame to animate.
 
 ---
 
@@ -86,7 +86,7 @@ Classify prompt: story verbs (advertise / act / dinner / film) → `multi_ref_st
 flowchart TD
   S[slots + analysis] --> VB{video_binding}
   VB -->|multi_ref_story default| R2V[call_mode=r2v]
-  VB -->|animate_keyframe| AK{extra cast/set?}
+  VB -->|animate_still| AK{extra cast/set?}
   AK -->|no| I2V[call_mode=i2v first_frame only]
   AK -->|yes| R2VK[call_mode=r2v keyframe Image1 + companions]
   R2V --> COV[companions = analysis − covered]
@@ -100,13 +100,13 @@ flowchart TD
 
 - Character / motion still covers reconciled `character_id` (id / name / match_terms).  
 - Scene still covers `setting_id`.  
-- Pure animate_keyframe + sole analysis character covers that subject (no redundant sheet).  
+- Pure animate_still + sole analysis character covers that subject (no redundant sheet).  
 - Companions never invented beyond analysis.  
 
 ### Cap partition
 
 `reserved = products + verbatim uploads + locked scenes + (1 if keyframe) + condition sheets + (1 if plate)`.  
-Remaining budget: on-screen companion solos; overflow → one `combined_cast` sheet (`character_ids[]`).
+Remaining budget: on-screen companion character specs; overflow → one `combined_cast` sheet (`character_ids[]`).
 
 ---
 
@@ -115,10 +115,10 @@ Remaining budget: on-screen companion solos; overflow → one `combined_cast` sh
 | Node | When | Notes |
 |---|---|---|
 | `n_ref_*` | Every upload | force_handler; card role when verbatim |
-| `n_character_*` condition | Character `binding=condition` | identity_sheet from upload |
+| `n_character_*` condition | Character `binding=condition` | character_specs from upload |
 | `n_character_*` companion | Uncovered cast | `companion_cast=True` |
 | `n_character_*` combined | Cap overflow | `combined_cast=True`, multi names |
-| `n_restyle_01` | animate_keyframe + motion condition | medium_change → first frame / Image 1 |
+| `n_restyle_01` | animate_still + motion condition | medium_change → first frame / Image 1 |
 | `n_scene_*` | Uncovered sets when plates needed | Under style_lock |
 | `n_clip_*` | Always | `reference_image_plan` + Image-N labels |
 
@@ -152,8 +152,8 @@ Scene jobs also note that the place is the last reference when a scene is attach
 | Advertise product in my photo | multi_ref_story | R2V | Product + cast/set |
 | Make her act with family | multi_ref_story | R2V | Her + family (+ plate) |
 | Dinner story in my scene | multi_ref_story | R2V | Room + cast (not I2V) |
-| Animate my picture | animate_keyframe | I2V | First frame |
-| Animate this photo with family | animate_keyframe | R2V | Keyframe Image 1 + family |
+| Animate my picture | animate_still | I2V | First frame |
+| Animate this photo with family | animate_still | R2V | Keyframe Image 1 + family |
 
 ---
 

@@ -28,13 +28,13 @@ def _graph(nodes, edges):
 def test_config_inputs_count_as_schedule_deps_even_without_edge():
     graph = _graph(
         [
-            {"id": "a", "type": "image", "config": {"role": "frame", "shot_index": 1}},
+            {"id": "a", "type": "image", "config": {"role": "frame", "clip_index": 1}},
             {
                 "id": "b",
                 "type": "image",
                 "config": {
                     "role": "frame",
-                    "shot_index": 2,
+                    "clip_index": 2,
                     "inputs": ["a"],
                     "scene_prompt_handoff_from": "a",
                 },
@@ -57,8 +57,8 @@ def test_config_inputs_count_as_schedule_deps_even_without_edge():
 def test_cycle_breaks_by_shot_priority_so_dependent_waits():
     graph = _graph(
         [
-            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
-            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "shot_index": 2}},
+            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1}},
+            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "clip_index": 2}},
         ],
         [
             {"id": "e12", "source": "n_clip_1", "target": "n_clip_2", "kind": "data"},
@@ -84,9 +84,9 @@ def test_cycle_breaks_by_shot_priority_so_dependent_waits():
 def test_same_level_ready_set_never_starts_dependent_with_peer_pred():
     graph = _graph(
         [
-            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
-            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "shot_index": 2}},
-            {"id": "n_char_1", "type": "image", "config": {"role": "character_design"}},
+            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1}},
+            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "clip_index": 2}},
+            {"id": "n_char_1", "type": "image", "config": {"role": "character"}},
         ],
         [
             {"id": "e12", "source": "n_clip_1", "target": "n_clip_2", "kind": "data"},
@@ -121,10 +121,10 @@ def test_soft_clip_dep_unlocks_when_prior_prompt_artifact_ready():
                 "type": "video",
                 "config": {
                     "role": "clip",
-                    "shot_index": 1,
+                    "clip_index": 1,
                     "handoff_artifact_ready": True,
                     "last_wan_prompt": "shot1 wan prompt already used for tools",
-                    "continuity_card": {
+                    "character_consistency": {
                         "already_done": ["shot 1: onset already happened — do not restart the run"],
                         "prior_action_summary": "man starts running",
                     },
@@ -135,7 +135,7 @@ def test_soft_clip_dep_unlocks_when_prior_prompt_artifact_ready():
                 "type": "video",
                 "config": {
                     "role": "clip",
-                    "shot_index": 2,
+                    "clip_index": 2,
                     "continuity_clip_node_id": "n_clip_1",
                     "previous_clip_wan_prompt": "shot1 wan prompt already used for tools",
                     "previous_clip_handoff_ready": True,
@@ -169,12 +169,12 @@ def test_later_clip_waits_until_prior_wan_prompt_exists():
             {
                 "id": "n_clip_1",
                 "type": "video",
-                "config": {"role": "clip", "shot_index": 1, "shot_action": "father sits down"},
+                "config": {"role": "clip", "clip_index": 1, "clip_action": "father sits down"},
             },
             {
                 "id": "n_clip_2",
                 "type": "video",
-                "config": {"role": "clip", "shot_index": 2, "shot_action": "child answers"},
+                "config": {"role": "clip", "clip_index": 2, "clip_action": "child answers"},
             },
         ],
         [{"id": "e12", "source": "n_clip_1", "target": "n_clip_2", "kind": "data"}],
@@ -210,7 +210,7 @@ def test_clip_starts_while_scene_is_still_running_once_plate_exists():
             {
                 "id": "n_clip_1",
                 "type": "video",
-                "config": {"role": "clip", "shot_index": 1, "inputs": ["n_scene"]},
+                "config": {"role": "clip", "clip_index": 1, "inputs": ["n_scene"]},
             },
         ],
         [{"id": "e", "source": "n_scene", "target": "n_clip_1", "kind": "data"}],
@@ -243,7 +243,7 @@ def test_clip_starts_while_scene_is_still_running_once_plate_exists():
 def test_compose_stays_locked_while_a_clip_is_still_running():
     graph = _graph(
         [
-            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1, "shot_action": "sit"}},
+            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1, "clip_action": "sit"}},
             {
                 "id": "n_compose",
                 "type": "video",
@@ -298,9 +298,9 @@ def test_compose_waits_for_all_clips_not_soft_unlocked(tmp_path):
 
     graph = _graph(
         [
-            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
-            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "shot_index": 2}},
-            {"id": "n_clip_3", "type": "video", "config": {"role": "clip", "shot_index": 3}},
+            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1}},
+            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "clip_index": 2}},
+            {"id": "n_clip_3", "type": "video", "config": {"role": "clip", "clip_index": 3}},
             {
                 "id": "n_compose",
                 "type": "video",
@@ -368,12 +368,12 @@ async def test_compose_handler_refuses_while_clip_still_running(
                 {
                     "id": "n_clip_1",
                     "type": NODE_TYPE_VIDEO,
-                    "config": {"role": NODE_ROLE_CLIP, "shot_index": 1},
+                    "config": {"role": NODE_ROLE_CLIP, "clip_index": 1},
                 },
                 {
                     "id": "n_clip_2",
                     "type": NODE_TYPE_VIDEO,
-                    "config": {"role": NODE_ROLE_CLIP, "shot_index": 2},
+                    "config": {"role": NODE_ROLE_CLIP, "clip_index": 2},
                 },
                 {
                     "id": "n_compose",
@@ -442,7 +442,7 @@ def test_compose_also_waits_for_connected_audio_nodes(tmp_path):
 
     graph = _graph(
         [
-            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
+            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1}},
             {"id": "n_speech", "type": "audio", "config": {"role": "speech"}},
             {"id": "n_music", "type": "audio", "config": {"role": "music"}},
             {"id": "n_music_unused", "type": "audio", "config": {"role": "music"}},
@@ -480,25 +480,25 @@ def test_compose_also_waits_for_connected_audio_nodes(tmp_path):
     assert not _is_ready("n_compose", run, preds, graph)
 
 
-def test_hard_keyframe_dep_still_blocks_until_complete():
+def test_hard_clip_still_dep_blocks_until_complete():
     from jiuwenswarm.common.schema.designer_graph import NODE_STATUS_PENDING, NODE_STATUS_RUNNING
     from jiuwenswarm.server.runtime.designer.executor import _is_ready
 
     graph = _graph(
         [
-            {"id": "n_frame_1", "type": "image", "config": {"role": "frame", "shot_index": 1}},
+            {"id": "n_clip_1a", "type": "image", "config": {"role": "clip", "clip_index": 1}},
             {
                 "id": "n_clip_1",
                 "type": "video",
-                "config": {"role": "clip", "shot_index": 1, "inputs": ["n_frame_1"]},
+                "config": {"role": "clip", "clip_index": 1, "inputs": ["n_clip_1a"]},
             },
         ],
-        [{"id": "e", "source": "n_frame_1", "target": "n_clip_1", "kind": "data"}],
+        [{"id": "e", "source": "n_clip_1a", "target": "n_clip_1", "kind": "data"}],
     )
     preds = execution_predecessors(graph)
     run = {
         "node_states": {
-            "n_frame_1": {"status": NODE_STATUS_RUNNING},
+            "n_clip_1a": {"status": NODE_STATUS_RUNNING},
             "n_clip_1": {"status": NODE_STATUS_PENDING},
         }
     }

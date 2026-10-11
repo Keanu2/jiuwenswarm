@@ -2,7 +2,7 @@
 
 """Generic image / video / audio handlers for canvas media nodes.
 
-Pipeline recipes (character_design, clip, …) keep specialized handlers via
+Pipeline recipes (character, clip, …) keep specialized handlers via
 ``config.pipeline``. These run when the node is a plain image / video / audio.
 """
 

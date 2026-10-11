@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
     apply_shot_scope,
     looks_like_full_story_restatement,
     needs_duration_slicing,
@@ -53,30 +53,30 @@ def test_infer_budget_does_not_slice_short_films() -> None:
 
 def test_apply_shot_scope_keeps_a_long_runtime_in_one_clip() -> None:
     out = apply_shot_scope(
-        {"shots": [{"shot_index": 1, "action": LONG_STORY, "shot_relation": "angle_variant"}]},
+        {"clips": [{"clip_index": 1, "action": LONG_STORY, "shot_relation": "angle_variant"}]},
         "5 minute video. " + LONG_STORY,
     )
     assert out["duration_slicing"] is False
-    assert len(out["shots"]) == 1
+    assert len(out["clips"]) == 1
     assert out["target_duration_sec"] == 300
-    assert out["shots"][0]["shot_relation"] != "angle_variant"
+    assert out["clips"][0]["shot_relation"] != "angle_variant"
 
 
 def test_apply_shot_scope_preserves_richer_authored_plan_for_30_seconds() -> None:
     shots = [
-        {"shot_index": 1, "action": "A wrapped box lands beneath the tree."},
-        {"shot_index": 2, "action": "Family members follow a trail of glowing ornaments."},
-        {"shot_index": 3, "action": "They discover the product inside and try it together."},
-        {"shot_index": 4, "action": "The room opens into a joyful celebration and brand payoff."},
+        {"clip_index": 1, "action": "A wrapped box lands beneath the tree."},
+        {"clip_index": 2, "action": "Family members follow a trail of glowing ornaments."},
+        {"clip_index": 3, "action": "They discover the product inside and try it together."},
+        {"clip_index": 4, "action": "The room opens into a joyful celebration and brand payoff."},
     ]
     out = apply_shot_scope(
-        {"shots": shots},
+        {"clips": shots},
         "Create a 30 second video for a Christmas product celebration.",
     )
 
     assert out["duration_slicing"] is False
-    assert len(out["shots"]) == 4
-    assert [shot["action"] for shot in out["shots"]] == [
+    assert len(out["clips"]) == 4
+    assert [shot["action"] for shot in out["clips"]] == [
         shot["action"] for shot in shots
     ]
     assert out["target_duration_sec"] == 30
@@ -84,13 +84,13 @@ def test_apply_shot_scope_preserves_richer_authored_plan_for_30_seconds() -> Non
 
 def test_apply_shot_scope_skips_c_when_under_wan_max() -> None:
     shots = [
-        {"shot_index": 1, "action": "Dad sits by the window", "shot_relation": "hard_cut"},
-        {"shot_index": 2, "action": "Child walks to the door", "shot_relation": "angle_variant"},
+        {"clip_index": 1, "action": "Dad sits by the window", "shot_relation": "hard_cut"},
+        {"clip_index": 2, "action": "Child walks to the door", "shot_relation": "angle_variant"},
     ]
-    out = apply_shot_scope({"shots": shots}, "10-second scene. Dad sits. Child walks to the door.")
+    out = apply_shot_scope({"clips": shots}, "10-second scene. Dad sits. Child walks to the door.")
     assert out.get("duration_slicing") is False
-    assert len(out["shots"]) == 2
-    assert out["shots"][1]["shot_relation"] == "continuation"
+    assert len(out["clips"]) == 2
+    assert out["clips"][1]["shot_relation"] == "continuation"
 
 
 def test_restatement_detector() -> None:
@@ -118,8 +118,8 @@ def test_build_clip_prompt_omits_full_user_story() -> None:
                 "type": "video",
                 "config": {
                     "role": "clip",
-                    "shot_index": 2,
-                    "shot_action": "Child walks to the door",
+                    "clip_index": 2,
+                    "clip_action": "Child walks to the door",
                     "camera": "medium",
                     "cast_names": ["Child"],
                 },
@@ -137,7 +137,7 @@ def test_graph_prompt_clip_does_not_fall_back_to_brief() -> None:
     node = {
         "id": "n_clip_1",
         "type": "video",
-        "config": {"role": "clip", "shot_index": 1, "shot_action": "Dad sits by the window"},
+        "config": {"role": "clip", "clip_index": 1, "clip_action": "Dad sits by the window"},
     }
     graph = {
         "description": LONG_STORY,
@@ -158,11 +158,11 @@ def test_detailed_beat_is_not_full_story_restatement() -> None:
     )
     assert looks_like_full_story_restatement(beat, LONG_STORY) is False
     out = apply_shot_scope(
-        {"shots": [{"shot_index": 1, "action": beat}, {"shot_index": 2, "action": "Child walks to the door"}]},
+        {"clips": [{"clip_index": 1, "action": beat}, {"clip_index": 2, "action": "Child walks to the door"}]},
         LONG_STORY,
     )
-    assert "navy sweater" in out["shots"][0]["action"]
-    assert "Child walks to the door" in out["shots"][1]["action"]
+    assert "navy sweater" in out["clips"][0]["action"]
+    assert "Child walks to the door" in out["clips"][1]["action"]
 
 
 def test_same_scene_gate_in_handoff_and_graph_prompt_keeps_locks() -> None:
@@ -172,8 +172,8 @@ def test_same_scene_gate_in_handoff_and_graph_prompt_keeps_locks() -> None:
     )
 
     clause = handoff_clause_for_prompt(
-        [{"shot_index": 1, "shot_action": "child walked away", "speech_line": "bye"}],
-        this_shot_index=2,
+        [{"clip_index": 1, "clip_action": "child walked away", "speech_line": "bye"}],
+        this_clip_index=2,
         this_action="family sits together",
     )
     assert "SAME-SCENE CONSISTENCY GATE" in clause
@@ -199,8 +199,8 @@ def test_same_scene_gate_in_handoff_and_graph_prompt_keeps_locks() -> None:
         "type": "video",
         "config": {
             "role": "clip",
-            "shot_index": 1,
-            "shot_action": "Dad sits by the window",
+            "clip_index": 1,
+            "clip_action": "Dad sits by the window",
             "costume_lock": "navy sweater",
             "language_lock": "en",
         },
@@ -225,15 +225,15 @@ def test_empty_actions_are_time_windows_not_angle_restages() -> None:
     )
     out = apply_shot_scope(
         {
-            "shots": [
+            "clips": [
                 {
-                    "shot_index": 1,
+                    "clip_index": 1,
                     "action": "",
                     "view_key": "front",
                     "shot_relation": "hard_cut",
                 },
                 {
-                    "shot_index": 2,
+                    "clip_index": 2,
                     "action": "",
                     "view_key": "left",
                     "shot_relation": "angle_variant",
@@ -243,8 +243,8 @@ def test_empty_actions_are_time_windows_not_angle_restages() -> None:
         prompt,
     )
     assert out.get("duration_slicing") is False
-    actions = [str(s.get("action") or "").strip() for s in out["shots"]]
+    actions = [str(s.get("action") or "").strip() for s in out["clips"]]
     assert all(actions)
     assert actions[0][:48] != actions[1][:48]
-    assert all(str(s.get("view_key") or "") == "" for s in out["shots"])
-    assert out["shots"][1]["shot_relation"] == "continuation"
+    assert all(str(s.get("view_key") or "") == "" for s in out["clips"])
+    assert out["clips"][1]["shot_relation"] == "continuation"

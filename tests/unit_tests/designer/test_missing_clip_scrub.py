@@ -12,7 +12,7 @@ from jiuwenswarm.server.runtime.designer.chat_document_sync import (
     ChatDocument,
     prepare_document_update,
 )
-from jiuwenswarm.server.runtime.designer.chat_shot_references import (
+from jiuwenswarm.server.runtime.designer.chat_clip_references import (
     referenced_shot_indices,
     scrub_missing_shot_references,
 )
@@ -65,8 +65,8 @@ def test_prepare_document_update_scrubs_stale_shot_and_duration_fp() -> None:
     before = {
         "nodes": [
             {"id": "n_brief", "type": "text", "config": {"role": "brief", "prompt": brief}},
-            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
-            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "shot_index": 2}},
+            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1}},
+            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "clip_index": 2}},
         ],
         "edges": [],
         "metadata": {},
@@ -99,14 +99,14 @@ def test_duration_only_brief_does_not_fail_validate(duration_n: int) -> None:
     before = {
         "nodes": [
             {"id": "n_brief", "type": "text", "config": {"role": "brief", "prompt": brief}},
-            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
-            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "shot_index": 2}},
+            {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1}},
+            {"id": "n_clip_2", "type": "video", "config": {"role": "clip", "clip_index": 2}},
         ],
         "edges": [],
         "metadata": {},
     }
     candidate = deepcopy(before)
-    candidate["nodes"][2]["config"]["shot_action"] = "lean in"
+    candidate["nodes"][2]["config"]["clip_action"] = "lean in"
     docs = {"n_brief": ChatDocument("n_brief", "brief", brief, None)}
     edits = [
         {"node_id": "n_brief", "replacements": [{"old": "medium", "new": "tight medium"}]}

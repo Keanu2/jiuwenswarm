@@ -62,7 +62,7 @@ def test_build_clip_prompt_uses_brief_then_graph_text() -> None:
     # Design clips always use R2V story-form (Image-N binding), not long lock essays.
     assert "Image" in prompt or "image" in prompt.lower() or "scene" in prompt.lower()
 
-    clip["config"] = {"role": NODE_ROLE_CLIP, "prompt": "只拍站台", "shot_action": "只拍站台"}
+    clip["config"] = {"role": NODE_ROLE_CLIP, "prompt": "只拍站台", "clip_action": "只拍站台"}
     out = build_clip_prompt(graph, clip)
     assert "USER PROMPT (authoritative story" not in out
     assert "Image" in out or "只拍站台" in out
@@ -91,7 +91,7 @@ def test_build_clip_prompt_reads_upstream_brief_and_storyboard(tmp_path: Path) -
             "config": {"role": NODE_ROLE_STORYBOARD},
         },
     )
-    graph["nodes"][-1]["config"]["shot_action"] = "缓推进站"
+    graph["nodes"][-1]["config"]["clip_action"] = "缓推进站"
     graph["nodes"][-1]["config"]["camera"] = "中景/平视"
     ctx = NodeExecutionContext(
         graph=graph,
@@ -116,7 +116,7 @@ def test_build_clip_prompt_reads_upstream_brief_and_storyboard(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_clip_handler_sends_scene_plate_and_storyboard_as_multimodal(
+async def test_clip_handler_sends_scene_spec_and_storyboard_as_multimodal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from jiuwenswarm.common.schema.designer_graph import (
@@ -215,13 +215,12 @@ async def test_clip_handler_sends_scene_plate_and_storyboard_as_multimodal(
 
 
 @pytest.mark.asyncio
-async def test_clip_handler_sends_character_and_keyframe_as_references(
+async def test_clip_handler_sends_character_and_scene_as_references(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from jiuwenswarm.common.schema.designer_graph import (
-        NODE_ROLE_CHARACTER_DESIGN,
-        NODE_ROLE_FRAME,
-        NODE_ROLE_SCENE,
+        NODE_ROLE_CHARACTER,
+            NODE_ROLE_SCENE,
         NODE_ROLE_STORYBOARD,
         NODE_TYPE_IMAGE,
         NODE_TYPE_TABLE,
@@ -231,7 +230,7 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
     )
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
 
-    frame = tmp_path / "keyframe.png"
+    frame = tmp_path / "clip_still.png"
     character = tmp_path / "character.png"
     scene = tmp_path / "scene.png"
     story = tmp_path / "storyboard.md"
@@ -252,7 +251,7 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
             "id": "n_character",
             "type": NODE_TYPE_IMAGE,
             "label": "character",
-            "config": {"role": NODE_ROLE_CHARACTER_DESIGN},
+            "config": {"role": NODE_ROLE_CHARACTER},
         },
         {
             "id": "n_scene",
@@ -270,7 +269,7 @@ async def test_clip_handler_sends_character_and_keyframe_as_references(
             "id": "n_frame",
             "type": NODE_TYPE_IMAGE,
             "label": "frame",
-            "config": {"role": NODE_ROLE_FRAME},
+            "config": {"role": NODE_ROLE_CLIP},
         },
     ]
     ctx = NodeExecutionContext(
@@ -399,8 +398,7 @@ async def test_clip_handler_allows_text_only_when_notes_replace_stills(
 ) -> None:
     """Notes-only frame outputs are not image refs; tools fall through to text-only."""
     from jiuwenswarm.common.schema.designer_graph import (
-        NODE_ROLE_FRAME,
-        NODE_ROLE_STORYBOARD,
+            NODE_ROLE_STORYBOARD,
         NODE_TYPE_IMAGE,
         NODE_TYPE_TABLE,
     )
@@ -424,7 +422,7 @@ async def test_clip_handler_allows_text_only_when_notes_replace_stills(
             "id": "n_frame",
             "type": NODE_TYPE_IMAGE,
             "label": "frame",
-            "config": {"role": NODE_ROLE_FRAME},
+            "config": {"role": NODE_ROLE_CLIP},
         },
     ]
     ctx = NodeExecutionContext(
@@ -474,7 +472,7 @@ async def test_clip_handler_allows_text_only_when_notes_replace_stills(
 
 
 @pytest.mark.asyncio
-async def test_clip_handler_uses_scene_plate_and_storyboard_duration_for_shot(
+async def test_clip_handler_uses_scene_spec_and_storyboard_duration_for_shot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from jiuwenswarm.common.schema.designer_graph import (
@@ -485,12 +483,17 @@ async def test_clip_handler_uses_scene_plate_and_storyboard_duration_for_shot(
     )
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
 
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.pipeline.model_capacity.configured_video_model_id",
+        lambda: "wan3.0-video",
+    )
     scene = tmp_path / "scene.png"
     story = tmp_path / "storyboard.md"
     scene.write_bytes(b"png-scene")
     story.write_text(
         "## 分镜表\n"
         "| 镜号 | 时间轴 | 镜头视角 | 运镜 | 人物变化 | 场景变化 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
         "| 1 | 0.0-2.0s | 全景/平视 | 缓摇 | 未入画 | 站台 |\n"
         "| 2 | 2.0-5.0s | 中景/平视 | 跟移 | 主体入画 | 出站 |\n",
         encoding="utf-8",
@@ -504,7 +507,7 @@ async def test_clip_handler_uses_scene_plate_and_storyboard_duration_for_shot(
         "label": "clip 2",
         "config": {
             "role": NODE_ROLE_CLIP,
-            "shot_index": 2,
+            "clip_index": 2,
             "scene_node_id": "n_scene",
         },
     }
@@ -597,13 +600,13 @@ async def test_compose_handler_merges_clips_in_shot_order(
                     "id": "n_clip_1",
                     "type": NODE_TYPE_VIDEO,
                     "label": "clip 1",
-                    "config": {"role": NODE_ROLE_CLIP, "shot_index": 1},
+                    "config": {"role": NODE_ROLE_CLIP, "clip_index": 1},
                 },
                 {
                     "id": "n_clip_2",
                     "type": NODE_TYPE_VIDEO,
                     "label": "clip 2",
-                    "config": {"role": NODE_ROLE_CLIP, "shot_index": 2},
+                    "config": {"role": NODE_ROLE_CLIP, "clip_index": 2},
                 },
                 {
                     "id": "n_compose",

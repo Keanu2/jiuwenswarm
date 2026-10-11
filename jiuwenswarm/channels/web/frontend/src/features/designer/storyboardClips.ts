@@ -5,8 +5,8 @@ import {
   type DesignerExecutionRun,
 } from './executionGraphTypes';
 
-export type StoryboardShot = {
-  shot_no: string;
+export type StoryboardClip = {
+  clip_no: string;
   timeline: string;
   camera: string;
   move: string;
@@ -15,8 +15,8 @@ export type StoryboardShot = {
   comment: string;
 };
 
-const FIELD_ALIASES: Record<keyof StoryboardShot, string[]> = {
-  shot_no: ['Shot', '镜号'],
+const FIELD_ALIASES: Record<keyof StoryboardClip, string[]> = {
+  clip_no: ['Clip', 'Shot', '镜号'],
   timeline: ['Timeline', '时间轴'],
   camera: ['Camera', '镜头视角', '景别'],
   move: ['Move', '运镜'],
@@ -25,8 +25,8 @@ const FIELD_ALIASES: Record<keyof StoryboardShot, string[]> = {
   comment: ['Comment', 'Notes', '注释', '备注', '画面描述', '提示词'],
 };
 
-const POSITIONAL_FIELDS: Array<keyof StoryboardShot> = [
-  'shot_no',
+const POSITIONAL_FIELDS: Array<keyof StoryboardClip> = [
+  'clip_no',
   'timeline',
   'camera',
   'move',
@@ -35,9 +35,9 @@ const POSITIONAL_FIELDS: Array<keyof StoryboardShot> = [
   'comment',
 ];
 
-function emptyShot(): StoryboardShot {
+function emptyClip(): StoryboardClip {
   return {
-    shot_no: '',
+    clip_no: '',
     timeline: '',
     camera: '',
     move: '',
@@ -58,70 +58,70 @@ function isSeparator(cells: string[]): boolean {
   return cells.every((cell) => !cell || /^:?-{3,}:?$/.test(cell));
 }
 
-function headerFieldMap(cells: string[]): Map<number, keyof StoryboardShot> | null {
-  const mapping = new Map<number, keyof StoryboardShot>();
+function headerFieldMap(cells: string[]): Map<number, keyof StoryboardClip> | null {
+  const mapping = new Map<number, keyof StoryboardClip>();
   cells.forEach((cell, index) => {
     const name = cell.trim();
     if (!name) return;
-    (Object.keys(FIELD_ALIASES) as Array<keyof StoryboardShot>).some((field) => {
+    (Object.keys(FIELD_ALIASES) as Array<keyof StoryboardClip>).some((field) => {
       const matched = FIELD_ALIASES[field].some((alias) => name === alias || name.includes(alias));
       if (matched) mapping.set(index, field);
       return matched;
     });
   });
   const values = [...mapping.values()];
-  if (values.includes('shot_no') || values.includes('timeline')) return mapping;
+  if (values.includes('clip_no') || values.includes('timeline')) return mapping;
   return null;
 }
 
-export function parseStoryboardShots(text: string): StoryboardShot[] {
-  const shots: StoryboardShot[] = [];
+export function parseStoryboardClips(text: string): StoryboardClip[] {
+  const clips: StoryboardClip[] = [];
   let headerSeen = false;
-  let fieldMap: Map<number, keyof StoryboardShot> | null = null;
+  let fieldMap: Map<number, keyof StoryboardClip> | null = null;
   for (const line of (text || '').split(/\r?\n/)) {
     if (!line.includes('|')) continue;
     const cells = splitMarkdownRow(line);
     if (!cells.some(Boolean)) continue;
     if (isSeparator(cells)) continue;
     const joined = cells.join('');
-    if (!headerSeen && /shot|timeline|镜号|时间轴/i.test(joined)) {
+    if (!headerSeen && /clip|shot|timeline|镜号|时间轴/i.test(joined)) {
       headerSeen = true;
       fieldMap = headerFieldMap(cells);
       continue;
     }
     if (!headerSeen) continue;
-    const shot = emptyShot();
+    const clip = emptyClip();
     if (fieldMap) {
       fieldMap.forEach((field, index) => {
-        if (index < cells.length) shot[field] = cells[index];
+        if (index < cells.length) clip[field] = cells[index];
       });
     } else {
       POSITIONAL_FIELDS.forEach((field, index) => {
-        if (index < cells.length) shot[field] = cells[index];
+        if (index < cells.length) clip[field] = cells[index];
       });
     }
-    if (!shot.shot_no) shot.shot_no = String(shots.length + 1);
-    if (!/^\d/.test(shot.shot_no) && cells.length < 4) continue;
-    shots.push(shot);
-    if (shots.length >= 6) break;
+    if (!clip.clip_no) clip.clip_no = String(clips.length + 1);
+    if (!/^\d/.test(clip.clip_no) && cells.length < 4) continue;
+    clips.push(clip);
+    if (clips.length >= 6) break;
   }
-  return shots;
+  return clips;
 }
 
-export function shotGeneratePrompt(shot: StoryboardShot): string {
-  const comment = (shot.comment || '').trim();
+export function clipGeneratePrompt(clip: StoryboardClip): string {
+  const comment = (clip.comment || '').trim();
   if (comment) return comment;
   const parts: string[] = [];
-  const timeline = (shot.timeline || '').trim();
+  const timeline = (clip.timeline || '').trim();
   if (timeline) parts.push(`Timeline ${timeline}`);
-  const fields: Array<[string, keyof StoryboardShot]> = [
+  const fields: Array<[string, keyof StoryboardClip]> = [
     ['Camera', 'camera'],
     ['Camera move', 'move'],
     ['Character action', 'character_action'],
     ['Scene change', 'scene_change'],
   ];
   fields.forEach(([label, key]) => {
-    const value = (shot[key] || '').trim();
+    const value = (clip[key] || '').trim();
     if (value) parts.push(`${label} ${value}`);
   });
   return parts.join('; ');

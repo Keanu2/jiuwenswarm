@@ -19,9 +19,9 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphNode,
     DesignerNodeState,
     NODE_ROLE_BRIEF,
+    NODE_ROLE_CHARACTER,
     NODE_ROLE_CLIP,
     NODE_ROLE_COMPOSE,
-    NODE_ROLE_FRAME,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
     NODE_STATUS_CANCELLED,
@@ -44,7 +44,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     clip_node_id,
     execution_predecessors,
     filter_ready_by_dependency_order,
-    frame_node_id,
     initial_node_states,
     is_comfyui_node,
     is_soft_artifact_dependency,
@@ -185,7 +184,7 @@ class GraphExecutor:
         if not text:
             return
         role = node_pipeline(node)
-        shot_index = int(cfg.get("shot_index") or 0)
+        clip_index = int(cfg.get("clip_index") or 0)
         live = self._require_graph(str(run.get("graph_id") or graph.get("graph_id") or ""))
         for n in live.get("nodes") or []:
             if str(n.get("id") or "") != node_id:
@@ -196,8 +195,8 @@ class GraphExecutor:
             if role in {NODE_ROLE_CLIP, "clip", "video"}:
                 c["last_wan_prompt"] = text[:4000]
                 c["clip_prompt_preview"] = text[:1200]
-            if role in {NODE_ROLE_FRAME, "frame", "keyframe"} and bool(c.get("is_scene_master")):
-                from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
+            if role in {NODE_ROLE_CLIP} and bool(c.get("is_scene_master")):
+                from jiuwenswarm.server.runtime.designer.pipeline.character_consistency import (
                     architecture_clause_from_bible,
                 )
 
@@ -208,7 +207,7 @@ class GraphExecutor:
             if role in {NODE_ROLE_SCENE, "scene"} or (
                 node_id.startswith("n_scene_") and bool(c.get("is_scene_master"))
             ):
-                from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
+                from jiuwenswarm.server.runtime.designer.pipeline.character_consistency import (
                     architecture_clause_from_bible,
                 )
 
@@ -220,21 +219,21 @@ class GraphExecutor:
             n["config"] = c
             node = n
             break
-        if role in {NODE_ROLE_CLIP, "clip", "video"} and shot_index >= 1:
+        if role in {NODE_ROLE_CLIP, "clip", "video"} and clip_index >= 1:
             from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                 stamp_wan_prompt_handoff,
             )
 
             stamp_wan_prompt_handoff(
                 live,
-                shot_index=shot_index,
+                clip_index=clip_index,
                 prompt=text,
                 node_id=node_id,
-                shot_action=str(cfg.get("shot_action") or ""),
+                shot_action=str(cfg.get("clip_action") or ""),
                 speech_line=str(cfg.get("speech_line") or ""),
             )
-        if role in {NODE_ROLE_FRAME, "frame", "keyframe"} and shot_index >= 1:
-            from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
+        if role in {NODE_ROLE_CLIP} and clip_index >= 1:
+            from jiuwenswarm.server.runtime.designer.pipeline.character_consistency import (
                 architecture_clause_from_bible,
             )
 
@@ -246,7 +245,7 @@ class GraphExecutor:
                 if sid and isinstance(locks0.get(sid), dict):
                     specs = locks0[sid]
             arch = architecture_clause_from_bible(specs)
-            next_ids = {f"n_frame_{shot_index + 1}", f"n_clip_{shot_index + 1}"}
+            next_ids = {f"n_clip_{clip_index + 1}"}
             for n in live.get("nodes") or []:
                 if not isinstance(n, dict):
                     continue
@@ -256,8 +255,6 @@ class GraphExecutor:
                 c = dict(n.get("config") or {})
                 needs = {
                     str(c.get("scene_prompt_handoff_from") or "").strip(),
-                    str(c.get("scene_master_frame_id") or "").strip(),
-                    str(c.get("continuity_frame_node_id") or "").strip(),
                 }
                 if node_id not in needs and nid not in next_ids:
                     continue
@@ -268,17 +265,17 @@ class GraphExecutor:
                 if node_id in needs and arch and not str(c.get("scene_master_prompt") or "").strip():
                     c["scene_master_prompt"] = arch[:900]
                     changed = True
-                # Consecutive prior stamp — always overwrite for N→N+1 (fixes parallel KF race).
-                if nid in next_ids or str(c.get("continuity_frame_node_id") or "") == node_id:
+                # Consecutive prior stamp — always overwrite for N→N+1 (fixes parallel clip race).
+                if nid in next_ids:
                     action_snip = str(
-                        cfg.get("shot_action") or cfg.get("character_action") or ""
+                        cfg.get("clip_action") or cfg.get("character_action") or ""
                     ).strip()
                     if not action_snip:
                         action_snip = text[:220]
-                    c["previous_keyframe_action"] = action_snip[:300]
-                    c["previous_keyframe_node_id"] = node_id
+                    c["previous_clip_action"] = action_snip[:300]
+                    c["previous_clip_node_id"] = node_id
                     # Soft-dep readiness; keep short so handlers don't dump full prior.
-                    c["previous_keyframe_prompt"] = text[:800]
+                    c["previous_clip_prompt"] = text[:800]
                     changed = True
                 if changed:
                     n["config"] = c
@@ -540,7 +537,7 @@ class GraphExecutor:
             meta = dict(graph.get("metadata") or {})
             # Lock before nodes run so a saved graph with the lock off cannot
             # drop image nodes when the storyboard finishes.
-            meta["freeze_shot_topology"] = True
+            meta["freeze_clip_topology"] = True
             graph["metadata"] = meta
             self._store.save_graph(graph)
         run["status"] = RUN_STATUS_RUNNING
@@ -736,7 +733,7 @@ class GraphExecutor:
         ):
             raise ValueError("Graph edits are unavailable during single-node generation")
         meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-        locked = bool(meta.get("freeze_shot_topology"))
+        locked = bool(meta.get("freeze_clip_topology"))
         failed = False
         for run in self._live_runs.values():
             if str(run.get("graph_id") or "") != str(graph_id):
@@ -1237,19 +1234,14 @@ class GraphExecutor:
             def _maybe_adjust_shots() -> None:
                 nonlocal graph
                 meta_live = dict(graph.get("metadata") or {})
-                if meta_live.get("shots_adjusted_after_keyframes"):
+                if meta_live.get("clips_adjusted_after_scenes"):
                     return
-                frame_nodes = [
-                    n
-                    for n in (graph.get("nodes") or [])
-                    if node_pipeline(n) == NODE_ROLE_FRAME
-                ]
                 scene_nodes = [
                     n
                     for n in (graph.get("nodes") or [])
                     if node_pipeline(n) == NODE_ROLE_SCENE
                 ]
-                shot_pending = [
+                clips_pending = [
                     n
                     for n in (graph.get("nodes") or [])
                     if node_pipeline(n) == NODE_ROLE_CLIP
@@ -1258,51 +1250,41 @@ class GraphExecutor:
                     )
                     not in _TERMINAL_NODE_STATUSES
                 ]
-                frames_done = bool(frame_nodes) and all(
-                    (run.get("node_states") or {}).get(str(n.get("id") or ""), {}).get("status")
-                    in _TERMINAL_NODE_STATUSES
-                    for n in frame_nodes
-                )
                 scenes_done = bool(scene_nodes) and all(
                     (run.get("node_states") or {}).get(str(n.get("id") or ""), {}).get("status")
                     in _TERMINAL_NODE_STATUSES
                     for n in scene_nodes
                 )
-                # Scene-specs path: adjust once all scene specs finish (no n_frame_*).
-                # Legacy path: adjust once all keyframes finish.
-                ready_gate = (
-                    (scenes_done and not frame_nodes)
-                    or frames_done
-                )
-                if not (ready_gate and shot_pending):
+                # Adjust clip briefs once all scene specs finish.
+                if not (scenes_done and clips_pending):
                     return
                 with traj.span(
                     agent_id="director",
-                    action="adjust_after_keyframes",
+                    action="adjust_after_scenes",
                     phase="orchestration",
                     role="director",
                     tool="structural",
                 ):
-                    adj_notes = Director().adjust_clips_after_keyframes(
+                    adj_notes = Director().adjust_clips_after_scenes(
                         graph,
                         node_states=run.get("node_states"),
                         agent_feedback=agent_feedback,
                     )
                     traj.record(
                         agent_id="director",
-                        action="adjust_after_keyframes_result",
+                        action="adjust_after_scenes_result",
                         phase="orchestration",
                         role="director",
                         detail={"notes": adj_notes[:20], "rating_modality": "text_only"},
                     )
                 with traj.span(
                     agent_id="director",
-                    action="ack_keyframe_adjustment",
+                    action="ack_scene_adjustment",
                     phase="orchestration",
                     role="director",
                     tool="structural",
                 ):
-                    Director().ack_keyframe_adjustment(graph, adj_notes)
+                    Director().ack_scene_adjustment(graph, adj_notes)
                 graph = self._store.save_graph(graph)
 
             async def _maybe_review_storyboard() -> None:
@@ -1606,7 +1588,7 @@ class GraphExecutor:
             self._cleanup_run(run_id)
 
     def reconcile_loaded_graph(self, graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
-        """Expand per-shot keyframe nodes when a completed storyboard already exists."""
+        """Expand per-shot clip nodes when a completed storyboard already exists."""
         graph_id = str(graph.get("graph_id") or "")
         run = None
         for live in self._live_runs.values():
@@ -1653,29 +1635,28 @@ class GraphExecutor:
         # nodes, rebuild from analysis (do NOT use expand_shot_nodes — that dumps
         # all cast into every frame and breaks identity wiring).
         meta = graph.get("metadata") or {}
-        current_frame_ids = {
+        current_clip_ids = {
             str(node.get("id") or "")
             for node in graph.get("nodes") or []
-            if str(node.get("id") or "").startswith("n_frame_")
-            or node_pipeline(node) == NODE_ROLE_FRAME
+            if node_pipeline(node) == NODE_ROLE_CLIP
         }
-        uses_scene_card_plus_clip_shots = (
-            str(meta.get("scene_continuity_mode") or "") == "scene_card_plus_clip_shots"
+        uses_scene_specs_plus_clips = (
+            str(meta.get("scene_consistency_mode") or "") == "scene_specs_plus_clips"
         )
-        if uses_scene_card_plus_clip_shots and not current_frame_ids:
+        if uses_scene_specs_plus_clips and not current_clip_ids:
             meta = dict(meta)
-            meta["freeze_shot_topology"] = True
+            meta["freeze_clip_topology"] = True
             graph["metadata"] = meta
-        if len(current_frame_ids) != shot_count and not bool(meta.get("freeze_shot_topology")):
+        if len(current_clip_ids) != shot_count and not bool(meta.get("freeze_clip_topology")):
             from jiuwenswarm.server.runtime.designer.smart_graph import (
                 apply_runtime_delegate,
                 build_smart_video_graph,
             )
 
             analysis = dict(meta.get("script_analysis") or {})
-            analysis["shots"] = [
+            analysis["clips"] = [
                 {
-                    "shot_index": i,
+                    "clip_index": i,
                     "timeline": getattr(row, "timeline", None)
                     or (row.get("timeline") if isinstance(row, dict) else "")
                     or f"{(i - 1) * 5:.1f}-{i * 5:.1f}s",
@@ -1691,15 +1672,48 @@ class GraphExecutor:
                         or (row.get("character_ids") if isinstance(row, dict) else [])
                         or []
                     ),
-                    "keyframe_prompt": getattr(row, "keyframe_prompt", None)
-                    or (row.get("keyframe_prompt") if isinstance(row, dict) else "")
+                    "clip_prompt": getattr(row, "clip_prompt", None)
+                    or (row.get("clip_prompt") if isinstance(row, dict) else "")
                     or "",
                     "setting_id": (row.get("setting_id") if isinstance(row, dict) else None)
                     or "set_1",
                 }
                 for i, row in enumerate(shot_rows, start=1)
             ]
-            analysis["target_shot_count"] = shot_count
+            analysis["target_clip_count"] = shot_count
+            # Storyboard-driven rebuild must keep cast/set from the live graph when
+            # analysis was never LLM-filled (handler graphs / tests).
+            if not any(isinstance(c, dict) for c in (analysis.get("characters") or [])):
+                analysis["characters"] = [
+                    {
+                        "id": str(node.get("id") or f"char_{i}"),
+                        "name": str(node.get("label") or f"Character {i}"),
+                    }
+                    for i, node in enumerate(
+                        (
+                            n
+                            for n in (graph.get("nodes") or [])
+                            if node_pipeline(n) == NODE_ROLE_CHARACTER
+                        ),
+                        start=1,
+                    )
+                ] or [{"id": "char_1", "name": "Lead"}]
+            if not any(isinstance(s, dict) for s in (analysis.get("scenes") or [])):
+                analysis["scenes"] = [
+                    {
+                        "id": str(node.get("id") or f"set_{i}"),
+                        "setting_id": str(node.get("id") or f"set_{i}"),
+                        "name": str(node.get("label") or f"Scene {i}"),
+                    }
+                    for i, node in enumerate(
+                        (
+                            n
+                            for n in (graph.get("nodes") or [])
+                            if node_pipeline(n) == NODE_ROLE_SCENE
+                        ),
+                        start=1,
+                    )
+                ] or [{"id": "set_1", "setting_id": "set_1", "name": "Scene"}]
             rebuilt = build_smart_video_graph(
                 project_id=str(graph.get("project_id") or "project"),
                 prompt=str(graph.get("description") or ""),
@@ -1717,7 +1731,7 @@ class GraphExecutor:
             ):
                 if key in meta and meta.get(key) is not None:
                     rmeta[key] = meta.get(key)
-            rmeta["freeze_shot_topology"] = True
+            rmeta["freeze_clip_topology"] = True
             rmeta["script_analysis"] = analysis
             rebuilt["metadata"] = rmeta
             carry_user_references(meta, rebuilt)
@@ -1739,7 +1753,7 @@ class GraphExecutor:
                 callback(deepcopy(saved))
             return saved, remaining, execution_predecessors(saved)
 
-        if bool(meta.get("freeze_shot_topology")):
+        if bool(meta.get("freeze_clip_topology")):
             synced = apply_shot_generate_prompts(graph, prompts)
             if synced is graph:
                 return graph, remaining, execution_predecessors(graph)
@@ -1756,10 +1770,10 @@ class GraphExecutor:
         current_frame_ids = {
             str(node.get("id") or "")
             for node in graph.get("nodes") or []
-            if node_pipeline(node) == NODE_ROLE_FRAME
+            if node_pipeline(node) == NODE_ROLE_CLIP
         }
         wanted_shot_ids = {clip_node_id(index) for index in range(1, shot_count + 1)}
-        wanted_frame_ids = {frame_node_id(index) for index in range(1, shot_count + 1)}
+        wanted_clip_ids = {clip_node_id(index) for index in range(1, shot_count + 1)}
         has_compose = any(
             node_pipeline(node) == NODE_ROLE_COMPOSE or str(node.get("id") or "") == "n_compose"
             for node in graph.get("nodes") or []
@@ -1790,7 +1804,7 @@ class GraphExecutor:
         )
 
         analysis = dict(meta.get("script_analysis") or {})
-        analysis["target_shot_count"] = shot_count
+        analysis["target_clip_count"] = shot_count
         rebuilt = build_smart_video_graph(
             project_id=str(graph.get("project_id") or "project"),
             prompt=str(graph.get("description") or ""),
@@ -1808,7 +1822,7 @@ class GraphExecutor:
         ):
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)
-        rmeta["freeze_shot_topology"] = True
+        rmeta["freeze_clip_topology"] = True
         rebuilt["metadata"] = rmeta
         carry_user_references(meta, rebuilt)
         saved = self._store.save_graph(
@@ -1818,7 +1832,6 @@ class GraphExecutor:
         states = run.setdefault("node_states", {})
         for node_id in live_ids:
             states.setdefault(node_id, {"status": NODE_STATUS_PENDING})
-        redistribute_frame_node_states(run, shot_count)
         remaining = {
             node_id
             for node_id in live_ids
@@ -1849,11 +1862,11 @@ class GraphExecutor:
             return
         role = node_pipeline(src)
         is_scene = role == NODE_ROLE_SCENE or src_id.startswith("n_scene_")
-        is_frame = role == NODE_ROLE_FRAME
-        if not is_scene and not is_frame:
+        is_clip = role == NODE_ROLE_CLIP
+        if not is_scene and not is_clip:
             return
         scfg = src.get("config") if isinstance(src.get("config"), dict) else {}
-        if is_frame and not bool(scfg.get("is_scene_master")):
+        if is_clip and not bool(scfg.get("is_scene_master")):
             return
         setting_id = str(scfg.get("setting_id") or "").strip()
         if not setting_id:
@@ -1865,7 +1878,7 @@ class GraphExecutor:
             maybe = locks.get(setting_id) if isinstance(locks, dict) else None
             if isinstance(maybe, dict):
                 specs = maybe
-        from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
+        from jiuwenswarm.server.runtime.designer.pipeline.character_consistency import (
             architecture_clause_from_bible,
         )
 
@@ -1877,7 +1890,7 @@ class GraphExecutor:
         if not arch and not specs and not master_prompt:
             return
         changed = False
-        target_role = NODE_ROLE_CLIP if is_scene else NODE_ROLE_FRAME
+        target_role = NODE_ROLE_CLIP
         for node in graph.get("nodes") or []:
             if not isinstance(node, dict):
                 continue
@@ -1887,7 +1900,7 @@ class GraphExecutor:
             cfg = dict(node.get("config") or {})
             if str(cfg.get("setting_id") or "").strip() != setting_id:
                 continue
-            if target_role == NODE_ROLE_FRAME and bool(cfg.get("is_scene_master")):
+            if target_role == NODE_ROLE_CLIP and bool(cfg.get("is_scene_master")):
                 continue
             cfg["scene_prompt_handoff_from"] = src_id
             if is_scene:
@@ -1917,8 +1930,8 @@ class GraphExecutor:
                 if specs:
                     irefs["scene_specs"] = dict(specs)
             else:
-                irefs["keyframe_strategy"] = "compose_from_solo_refs"
-                cfg["keyframe_strategy"] = "compose_from_solo_refs"
+                irefs["clip_strategy"] = "compose_from_character_specs"
+                cfg["clip_strategy"] = "compose_from_character_specs"
             cfg["identity_refs"] = irefs
             node["config"] = cfg
             changed = True
@@ -2064,7 +2077,7 @@ class GraphExecutor:
                 cfg["skill_excerpt"] = skill
                 node["config"] = cfg
         # Optional tiny subject hint for character/scene only (not full encyclopedia).
-        if role in {"character", "character_design", "scene"}:
+        if role in {"character", "character", "scene"}:
             subjects = list((graph.get("metadata") or {}).get("subject_keys") or [])[:1]
             if subjects:
                 bit = load_subject_skill(subjects[0])
@@ -2090,18 +2103,15 @@ class GraphExecutor:
                 cfg["rerun_suggestion"] = prior_plan[:1500]
             node["config"] = cfg
 
-        # Director leaf prompt gate + prior-shot handoff for frame/shot media.
+        # Director leaf prompt gate + prior-clip handoff for clip/character media.
         role_for_gate = str(
             _node_pipeline_fn(node)
             or (node.get("config") or {}).get("role")
             or ""
         ).lower()
         if not is_comfyui_node(node) and role_for_gate in {
-            "frame",
-            "keyframe",
             "clip",
             "character",
-            "character_design",
             "scene",
         }:
             from jiuwenswarm.server.runtime.designer.orchestration import Director
@@ -2283,7 +2293,7 @@ class GraphExecutor:
                     seen.add(uri)
                     deduped.append(ref)
                 refs = deduped
-            if node_pipeline(node) == NODE_ROLE_FRAME:
+            if node_pipeline(node) == NODE_ROLE_CLIP:
                 image_refs = [ref for ref in refs if _ref_kind(ref) == "image"]
                 if image_refs:
                     primary = image_refs[0]
@@ -2336,7 +2346,7 @@ class GraphExecutor:
                     logger.debug("storyboard→shot sync failed", exc_info=True)
                 self._expand_shots_if_needed(live_graph, run, set(), on_update=on_update)
             # Stamp prior-shot prompt handoff after frame/shot media completes.
-            if node_pipeline(node) in {NODE_ROLE_FRAME, NODE_ROLE_CLIP}:
+            if node_pipeline(node) == NODE_ROLE_CLIP:
                 live_graph = self._require_graph(
                     str(run.get("graph_id") or graph.get("graph_id") or "")
                 )
@@ -2350,7 +2360,7 @@ class GraphExecutor:
                     or (cfg_done.get("generate") or {}).get("prompt")
                     or ""
                 ).strip()
-                shot_index = int(cfg_done.get("shot_index") or 0)
+                clip_index = int(cfg_done.get("clip_index") or 0)
                 if approved:
                     for n in live_graph.get("nodes") or []:
                         if str(n.get("id") or "") != node_id:
@@ -2362,32 +2372,31 @@ class GraphExecutor:
                             c["clip_prompt_preview"] = approved[:1200]
                         n["config"] = c
                         break
-                    if node_pipeline(node) == NODE_ROLE_FRAME and shot_index >= 1:
-                        next_frame = f"n_frame_{shot_index + 1}"
-                        next_shot = f"n_clip_{shot_index + 1}"
+                    if node_pipeline(node) == NODE_ROLE_CLIP and clip_index >= 1:
+                        next_clip = f"n_clip_{clip_index + 1}"
                         action_snip = str(
-                            cfg_done.get("shot_action")
+                            cfg_done.get("clip_action")
                             or cfg_done.get("character_action")
                             or ""
                         ).strip() or approved[:220]
                         for n in live_graph.get("nodes") or []:
                             nid = str(n.get("id") or "")
-                            if nid not in {next_frame, next_shot}:
+                            if nid != next_clip:
                                 continue
                             c = dict(n.get("config") or {})
-                            # Always overwrite consecutive stamp (parallel KF race fix).
-                            c["previous_keyframe_action"] = action_snip[:300]
-                            c["previous_keyframe_prompt"] = approved[:800]
-                            c["previous_keyframe_node_id"] = node_id
+                            # Always overwrite consecutive stamp (parallel clip race fix).
+                            c["previous_clip_action"] = action_snip[:300]
+                            c["previous_clip_prompt"] = approved[:800]
+                            c["previous_clip_node_id"] = node_id
                             n["config"] = c
-                    if node_pipeline(node) == NODE_ROLE_CLIP and shot_index >= 1:
+                    if node_pipeline(node) == NODE_ROLE_CLIP and clip_index >= 1:
                         from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                             stamp_wan_prompt_handoff,
                         )
 
                         stamp_wan_prompt_handoff(
                             live_graph,
-                            shot_index=shot_index,
+                            clip_index=clip_index,
                             prompt=approved,
                             node_id=node_id,
                         )
@@ -2543,38 +2552,6 @@ def _image_output_refs(state: dict[str, Any]) -> list[dict[str, Any]]:
         seen.add(uri)
         refs.append(ref)
     return refs
-
-
-def redistribute_frame_node_states(run: DesignerExecutionRun, shot_count: int) -> None:
-    """Split a bundled keyframe node (many PNGs) into one image per n_frame_i."""
-    count = max(1, int(shot_count or 1))
-    states = run.setdefault("node_states", {})
-    bundled: list[dict[str, Any]] = []
-    source_status = NODE_STATUS_PENDING
-    for node_id in ("n_frame", *[frame_node_id(index) for index in range(1, count + 1)]):
-        state = states.get(node_id) or {}
-        images = _image_output_refs(state)
-        if len(images) > len(bundled):
-            bundled = images
-            source_status = str(state.get("status") or NODE_STATUS_PENDING)
-    for index in range(1, count + 1):
-        node_id = frame_node_id(index)
-        state = dict(states.get(node_id) or {"status": NODE_STATUS_PENDING})
-        images = _image_output_refs(state)
-        if index <= len(bundled):
-            ref = bundled[index - 1]
-            state["output_ref"] = ref
-            state["output_refs"] = [ref]
-            if source_status == NODE_STATUS_COMPLETED and state.get("status") == NODE_STATUS_PENDING:
-                state["status"] = NODE_STATUS_COMPLETED
-                state["error"] = None
-        elif len(images) > 1:
-            state["output_ref"] = images[0]
-            state["output_refs"] = [images[0]]
-        elif images:
-            state["output_ref"] = images[0]
-            state["output_refs"] = [images[0]]
-        states[node_id] = state
 
 
 def _reject_pending_audio_generation(
@@ -2780,7 +2757,7 @@ def _node_execute_timeout_sec(node: DesignerGraphNode) -> float:
         return max(1800.0, video_tool_timeout_seconds())
     if pipeline == NODE_ROLE_COMPOSE:
         return 1800.0
-    if pipeline in {NODE_ROLE_FRAME, "character", "character_design", "scene"}:
+    if pipeline in {NODE_ROLE_CLIP, "character", "scene"}:
         return 1200.0
     if pipeline in {"speech", "music"}:
         return 1200.0

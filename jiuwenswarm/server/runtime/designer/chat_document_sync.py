@@ -23,11 +23,11 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphValidationError,
     node_config,
     node_pipeline,
-    node_shot_index,
+    node_clip_index,
     utc_now_ms,
 )
 from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
-from jiuwenswarm.server.runtime.designer.chat_shot_references import (
+from jiuwenswarm.server.runtime.designer.chat_clip_references import (
     NODE_PROSE_FIELDS,
     map_shot_references,
     node_prose_config,
@@ -183,7 +183,7 @@ def validate_shot_topology(graph: DesignerExecutionGraph) -> dict[int, list[Desi
         pipeline = node_pipeline(node)
         if pipeline not in {"frame", "clip"}:
             continue
-        raw_index = node_config(node).get("shot_index", node_shot_index(node))
+        raw_index = node_config(node).get("clip_index", node_clip_index(node))
         if isinstance(raw_index, bool) or not re.fullmatch(r"[1-9]\d*", str(raw_index).strip()):
             raise DesignerGraphValidationError(f"Invalid shot index on node {node['id']}")
         index = int(raw_index)
@@ -236,26 +236,26 @@ def _sync_shots(
     rows: list[dict[str, Any]], before: DesignerExecutionGraph, graph: DesignerExecutionGraph
 ) -> list[dict[str, Any]]:
     old_nodes = {node["id"]: node for node in before.get("nodes", [])}
-    old_rows = {int(row.get("shot_index") or i): row for i, row in enumerate(rows, 1)}
+    old_rows = {int(row.get("clip_index") or i): row for i, row in enumerate(rows, 1)}
     # Prefer clip configuration when both frame and clip describe a shot.
-    shots = {node_shot_index(node): node for role in ("frame", "clip")
+    clips_by_index = {node_clip_index(node): node for role in ("clip",)
              for node in graph.get("nodes", []) if node_pipeline(node) == role}
     synced = []
-    for index, node in sorted(shots.items()):
+    for index, node in sorted(clips_by_index.items()):
         old = old_nodes.get(node["id"])
-        row = deepcopy(old_rows.get(node_shot_index(old), {})) if old else {}
+        row = deepcopy(old_rows.get(node_clip_index(old), {})) if old else {}
         cfg = node_config(node)
         row.update({key: deepcopy(value) for key, value in cfg.items()
                     if key in row or key in {"timeline", "camera", "setting_id", "character_ids", "on_screen", "offscreen", "speech_line"}})
-        row["shot_index"] = index
-        for source, targets in {"shot_action": ("action", "character_action"), "shot_title": ("title",)}.items():
+        row["clip_index"] = index
+        for source, targets in {"clip_action": ("action", "character_action"), "shot_title": ("title",)}.items():
             if source in cfg:
                 for target in targets:
                     row[target] = cfg[source]
-        if old is None or cfg.get("shot_action") != node_config(old).get("shot_action"):
-            row["keyframe_prompt"] = cfg.get("prompt") or cfg.get("shot_action", "")
+        if old is None or cfg.get("clip_action") != node_config(old).get("clip_action"):
+            row["clip_prompt"] = cfg.get("prompt") or cfg.get("clip_action", "")
         elif cfg.get("prompt") != node_config(old).get("prompt"):
-            row["keyframe_prompt"] = cfg.get("prompt", "")
+            row["clip_prompt"] = cfg.get("prompt", "")
         synced.append(row)
     return synced
 
@@ -264,7 +264,7 @@ def _sync_entity_records(before: DesignerExecutionGraph, graph: DesignerExecutio
     analysis = graph.get("metadata", {}).get("script_analysis")
     if not isinstance(analysis, dict):
         return
-    for pipeline, collection, id_key in (("character_design", "characters", "character_id"), ("scene", "scenes", "setting_id")):
+    for pipeline, collection, id_key in (("character", "characters", "character_id"), ("scene", "scenes", "setting_id")):
         if collection not in analysis:
             continue
         old = {node_config(n).get(id_key): n for n in before.get("nodes", [])
@@ -289,17 +289,17 @@ def _sync_entity_records(before: DesignerExecutionGraph, graph: DesignerExecutio
 
 _DEPENDENCY_LISTS = ("inputs", "character_node_ids")
 _DEPENDENCY_IDS = (
-    "scene_node_id", "master_scene_node_id", "continuity_frame_node_id",
-    "prior_keyframe_node_id", "continuity_clip_node_id", "previous_clip_node_id",
+    "scene_node_id", "master_scene_node_id",
+    "prior_clip_node_id", "continuity_clip_node_id", "previous_clip_node_id",
 )
 _GENERATION_CACHE = ("regenerate_packet", "last_wan_prompt", "last_approved_prompt")
 
 
 def _refresh_generation_details(before: DesignerExecutionGraph, graph: DesignerExecutionGraph) -> None:
     """Refresh derived copies from the edited semantic config, retaining custom locks."""
-    from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import architecture_clause_from_bible
-    from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import build_action_lock, build_positioning_lock
-    from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import stamp_shot_states_on_clip_cfg
+    from jiuwenswarm.server.runtime.designer.pipeline.character_consistency import architecture_clause_from_bible
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_staging_lock import build_action_lock, build_positioning_lock
+    from jiuwenswarm.server.runtime.designer.pipeline.storyboard_clip_state import stamp_shot_states_on_clip_cfg
 
     old_nodes = {node["id"]: node for node in before.get("nodes", [])}
     characters = (graph.get("metadata", {}).get("script_analysis") or {}).get("characters", [])
@@ -314,7 +314,7 @@ def _refresh_generation_details(before: DesignerExecutionGraph, graph: DesignerE
             for source, target in (("cast_actions", "cast_actions"), ("on_screen", "must_appear"), ("offscreen", "offscreen")):
                 if source in changed:
                     occupancy[target] = deepcopy(cfg.get(source, {} if source == "cast_actions" else []))
-        if changed & {"shot_action", "cast_actions", "blocking", "camera", "on_screen", "setting_id"}:
+        if changed & {"clip_action", "cast_actions", "blocking", "camera", "on_screen", "setting_id"}:
             source = {key: value for key, value in cfg.items() if key not in {"positioning_lock", "action_lock"}}
             if "positioning_lock" in cfg:
                 cfg["positioning_lock"] = build_positioning_lock(source, characters)
@@ -403,15 +403,15 @@ def prepare_document_update(
         if not required <= edited:
             raise DesignerGraphValidationError("Content edits require text_edits for the current brief and storyboard")
     if content_changed or texts_changed:
-        old_targets = {node_shot_index(node): node["id"] for node in before.get("nodes", []) if node_pipeline(node) == "clip"}
-        new_targets = {node_shot_index(node): node["id"] for node in nodes.values() if node_pipeline(node) == "clip"}
+        old_targets = {node_clip_index(node): node["id"] for node in before.get("nodes", []) if node_pipeline(node) == "clip"}
+        new_targets = {node_clip_index(node): node["id"] for node in nodes.values() if node_pipeline(node) == "clip"}
         removed_targets = set(old_targets.values()) - set(new_targets.values())
         if removed_targets:
             for edit in text_edits:
                 for replacement in edit["replacements"]:
                     if redirects_removed_continuity(replacement["old"], replacement["new"], old_targets, new_targets):
                         raise DesignerGraphValidationError("Remove continuity claims about deleted shots instead of redirecting them to unrelated shots")
-        shot_indices = {node_shot_index(node) for node in nodes.values() if node_pipeline(node) in {"frame", "clip"}}
+        shot_indices = {node_clip_index(node) for node in nodes.values() if node_pipeline(node) in {"frame", "clip"}}
         for key, doc in remaining.items():
             # Deterministic scrub of prior-canvas / stale missing-shot prose before validate.
             texts[key] = scrub_missing_shot_references(texts[key], shot_indices)
@@ -453,17 +453,17 @@ def prepare_document_update(
                         )
         meta = graph.setdefault("metadata", {})
         if set(nodes) != {node["id"] for node in before.get("nodes", [])}:
-            meta.update(user_topology_edit=True, freeze_shot_topology=True)
+            meta.update(user_topology_edit=True, freeze_clip_topology=True)
         analysis = meta.get("script_analysis")
-        if isinstance(analysis, dict) and "shots" in analysis:
-            analysis["shots"] = _sync_shots(analysis["shots"], before, graph)
-            if "target_shot_count" in analysis:
-                analysis["target_shot_count"] = len(analysis["shots"])
+        if isinstance(analysis, dict) and "clips" in analysis:
+            analysis["clips"] = _sync_shots(analysis["clips"], before, graph)
+            if "target_clip_count" in analysis:
+                analysis["target_clip_count"] = len(analysis["clips"])
             if "target_duration_sec" in analysis:
-                durations = [timeline_seconds(row["timeline"]) for row in analysis["shots"]]
+                durations = [timeline_seconds(row["timeline"]) for row in analysis["clips"]]
                 analysis["target_duration_sec"] = float(sum(end - start for start, end in durations))
-        if "target_shot_count" in meta:
-            meta["target_shot_count"] = len({node_shot_index(n) for n in nodes.values() if node_pipeline(n) in {"frame", "clip"}})
+        if "target_clip_count" in meta:
+            meta["target_clip_count"] = len({node_clip_index(n) for n in nodes.values() if node_pipeline(n) in {"frame", "clip"}})
         _sync_entity_records(before, graph)
         for node in nodes.values():
             cfg = node_config(node)

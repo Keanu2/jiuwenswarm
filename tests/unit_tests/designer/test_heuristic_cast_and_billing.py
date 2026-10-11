@@ -1,4 +1,4 @@
-"""Cast aliases, solo sheets, time-window clips, and chat 402 demotion."""
+"""Cast aliases, character specs, time-window clips, and chat 402 demotion."""
 
 from __future__ import annotations
 
@@ -32,9 +32,9 @@ DINNER_ANALYSIS = {
         {"id": "char_3", "name": "Young child", "description": "yellow t-shirt, blue shorts"},
     ],
     "scenes": [{"id": "set_1", "name": "living room", "description": "dinner table at dusk"}],
-    "shots": [
+    "clips": [
         {
-            "shot_index": 1,
+            "clip_index": 1,
             "action": "The father reads a letter while the mother and child watch.",
             "camera": "close-up",
             "character_ids": ["char_1", "char_2", "char_3"],
@@ -111,23 +111,23 @@ def test_long_film_clips_use_time_windows_not_angles() -> None:
             {"id": "char_3", "name": "Mother", "description": "green cardigan"},
         ],
         "scenes": [{"id": "set_1", "name": "dining room", "description": "table and door"}],
-        "shots": [
+        "clips": [
             {
-                "shot_index": 1,
+                "clip_index": 1,
                 "action": "Father reads a letter at the table.",
                 "character_ids": ["char_1"],
                 "setting_id": "set_1",
                 "timeline": "0-10s",
             },
             {
-                "shot_index": 2,
+                "clip_index": 2,
                 "action": "The child stands and walks to the door.",
                 "character_ids": ["char_2"],
                 "setting_id": "set_1",
                 "timeline": "10-20s",
             },
             {
-                "shot_index": 3,
+                "clip_index": 3,
                 "action": "The mother speaks to the father.",
                 "character_ids": ["char_1", "char_3"],
                 "setting_id": "set_1",
@@ -143,7 +143,7 @@ def test_long_film_clips_use_time_windows_not_angles() -> None:
     )
     clips = [n for n in graph["nodes"] if str(n.get("id") or "").startswith("n_clip")]
     assert len(clips) >= 2
-    actions = [str((n.get("config") or {}).get("shot_action") or "").strip() for n in clips]
+    actions = [str((n.get("config") or {}).get("clip_action") or "").strip() for n in clips]
     assert all(actions)
     assert len({a[:40] for a in actions}) >= 2
     for node in clips:

@@ -69,7 +69,7 @@ def _speech_table(shots: list[dict[str, Any]], characters: list[dict[str, Any]])
     for sh in shots:
         if not isinstance(sh, dict):
             continue
-        idx = int(sh.get("shot_index") or 0) or "?"
+        idx = int(sh.get("clip_index") or 0) or "?"
         on = [str(x) for x in (sh.get("on_camera_cast_ids") or sh.get("character_ids") or []) if str(x)]
         names = ", ".join(by_id.get(c, c) for c in on) or "—"
         speech = str(sh.get("speech_line") or "").strip() or "(silent)"
@@ -78,7 +78,7 @@ def _speech_table(shots: list[dict[str, Any]], characters: list[dict[str, Any]])
     return "LANGUAGE / SPEECH LOCK (use these exact lines at leaf nodes):\n" + "\n".join(rows)
 
 
-def build_production_bible(
+def build_production_specs(
     analysis: dict[str, Any] | None,
     *,
     user_prompt: str = "",
@@ -90,7 +90,7 @@ def build_production_bible(
     spatial = a.get("spatial_lock") if isinstance(a.get("spatial_lock"), dict) else {}
     axis = a.get("axis_lock") if isinstance(a.get("axis_lock"), dict) else {}
     aspect = a.get("aspect_lock") if isinstance(a.get("aspect_lock"), dict) else {}
-    shots = [s for s in (a.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (a.get("clips") or []) if isinstance(s, dict)]
     characters = [c for c in (a.get("characters") or []) if isinstance(c, dict)]
 
     cast_lines: list[str] = []
@@ -138,7 +138,7 @@ def build_production_bible(
         _spatial_block(spatial),
         _speech_table(shots, characters),
         "LANDMARK RULE: named landmarks keep the SAME screen-side "
-        "and place vs the scene specs across all same-setting keyframes and clips — "
+        "and place vs the scene specs across all same-setting clip specs and clips — "
         "never teleport a landmark mid-film.",
         "CROWD RULE: if extras exist, keep the SAME silhouette layout across "
         "same-setting shots (do not empty then reinvent a new crowd).",
@@ -156,7 +156,7 @@ def build_production_bible(
 def leaf_lock_packet(
     *,
     role: str,
-    shot_index: int = 0,
+    clip_index: int = 0,
     analysis: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -174,19 +174,19 @@ def leaf_lock_packet(
         else m.get("spatial_lock") if isinstance(m.get("spatial_lock"), dict) else {}
     )
     shots = {
-        int(s.get("shot_index") or 0): s
-        for s in (a.get("shots") or [])
+        int(s.get("clip_index") or 0): s
+        for s in (a.get("clips") or [])
         if isinstance(s, dict)
     }
-    shot = shots.get(int(shot_index or 0)) if shot_index else None
+    shot = shots.get(int(clip_index or 0)) if clip_index else None
     shot = shot if isinstance(shot, dict) else {}
-    bible = str(m.get("production_bible") or a.get("production_bible") or "").strip()
+    bible = str(m.get("production_specs") or a.get("production_specs") or "").strip()
     if not bible:
-        bible = build_production_bible(a, user_prompt=str(m.get("user_prompt") or ""))
+        bible = build_production_specs(a, user_prompt=str(m.get("user_prompt") or ""))
     return {
         "must_read_before_tools": True,
         "role": str(role or ""),
-        "shot_index": int(shot_index or 0) or None,
+        "clip_index": int(clip_index or 0) or None,
         "style_lock": style,
         "spatial_lock": {
             k: v
@@ -211,11 +211,11 @@ def leaf_lock_packet(
         "on_camera_cast_ids": list(shot.get("on_camera_cast_ids") or shot.get("character_ids") or []),
         "off_camera_cast_ids": list(shot.get("off_camera_cast_ids") or []),
         "blocking": shot.get("blocking") if isinstance(shot.get("blocking"), dict) else {},
-        "production_bible_excerpt": bible[:2800],
+        "production_specs_excerpt": bible[:2800],
     }
 
 
-def append_bible_to_markdown(md: str, bible: str) -> str:
+def append_specs_to_markdown(md: str, bible: str) -> str:
     body = (md or "").rstrip()
     b = (bible or "").strip()
     if not b:
@@ -322,5 +322,5 @@ def landmark_clause_from_analysis(
     return (
         "LANDMARK LOCK: "
         + "; ".join(bits)
-        + " — do not move/resize/teleport these across same-setting keyframes/clips."
+        + " — do not move/resize/teleport these across same-setting clip specs/clips."
     )

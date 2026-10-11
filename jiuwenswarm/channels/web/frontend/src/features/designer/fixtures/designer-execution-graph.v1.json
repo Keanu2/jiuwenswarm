@@ -21,7 +21,7 @@
       "type": "image",
       "label": "Character",
       "config": {
-        "role": "character_design",
+        "role": "character",
         "inputs": ["n_brief"]
       },
       "layout": { "x": 400, "y": 140, "width": 280, "height": 160 }
@@ -39,7 +39,7 @@
     {
       "id": "n_scene",
       "type": "image",
-      "label": "Scene 1: Place",
+      "label": "Scene 1",
       "config": {
         "role": "scene",
         "inputs": ["n_brief", "n_storyboard"]
@@ -52,7 +52,7 @@
       "label": "Clip 1",
       "config": {
         "role": "clip",
-        "shot_index": 1,
+        "clip_index": 1,
         "inputs": ["n_character", "n_scene", "n_storyboard"]
       },
       "layout": { "x": 1120, "y": 240, "width": 280, "height": 160 }
@@ -118,7 +118,7 @@
     }
   ],
   "metadata": {
-    "scene_continuity_mode": "scene_card_plus_clip_shots"
+    "scene_continuity_mode": "scene_specs_plus_clips"
   },
   "created_at": 1700000000000,
   "updated_at": 1700000000000

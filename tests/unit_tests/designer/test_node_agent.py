@@ -244,7 +244,7 @@ async def test_agent_patch_cannot_add_nodes_to_frozen_topology(
     assert spawned == ["node not found: n_extra"]
     patched = designer_store.get_graph(graph["graph_id"])
     assert patched is not None
-    assert (patched.get("metadata") or {}).get("freeze_shot_topology") is True
+    assert (patched.get("metadata") or {}).get("freeze_clip_topology") is True
     assert not any(node["id"] == "n_extra" for node in patched["nodes"])
 
 
@@ -448,7 +448,7 @@ async def test_call_image_model_uses_designer_helper_not_localfunction(
         "id": "n_character_1",
         "type": "image",
         "label": "character",
-        "config": {"pipeline": "character_design", "prompt": "a hero"},
+        "config": {"pipeline": "character", "prompt": "a hero"},
     }
     ctx = NodeExecutionContext(
         graph={"nodes": [node]},
@@ -492,7 +492,7 @@ async def test_call_image_model_attaches_scene_character_sheets(
         "type": "image",
         "label": "character: young",
         "config": {
-            "pipeline": "character_design",
+            "pipeline": "character",
             "character_ids": ["char_1"],
             "character_name": "young",
         },
@@ -502,7 +502,7 @@ async def test_call_image_model_attaches_scene_character_sheets(
         "type": "image",
         "label": "character: partner",
         "config": {
-            "pipeline": "character_design",
+            "pipeline": "character",
             "character_ids": ["char_2"],
             "character_name": "partner",
         },

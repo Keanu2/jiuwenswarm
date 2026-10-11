@@ -6,8 +6,8 @@ Fixes observed offline failures without prompt-specific hardcodes:
   - cast dedupe (Name / Name 2)
   - identity micro-attrs (facial hair, glasses) locked across shots
   - setting_type taxonomy + cross-setting bleed forbids
-  - same-setting prior-keyframe continuity (style/set carry)
-  - plain portrait solo sheets (no infographic cards)
+  - same-setting prior-clip continuity (style/set carry)
+  - plain portrait character spec sheets (no infographic cards)
   - architecture-first scene imaging (materials/light; less narrative bleed)
 """
 
@@ -252,7 +252,7 @@ def assign_shot_settings(
         blob = " ".join(
             [
                 str(shot.get("action") or ""),
-                str(shot.get("keyframe_prompt") or ""),
+                str(shot.get("clip_prompt") or ""),
                 str(shot.get("title") or ""),
             ]
         )
@@ -458,7 +458,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     """Apply v2 locks on top of an existing Plan A director analysis."""
     out = deepcopy(analysis)
     characters = [c for c in (out.get("characters") or []) if isinstance(c, dict)]
-    shots = [s for s in (out.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (out.get("clips") or []) if isinstance(s, dict)]
     scenes = [s for s in (out.get("scenes") or []) if isinstance(s, dict)]
 
     characters, alias = dedupe_characters(characters)
@@ -491,7 +491,7 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         for shot in shots:
             if not isinstance(shot, dict):
                 continue
-            raw_action = str(shot.get("action") or shot.get("keyframe_prompt") or "")
+            raw_action = str(shot.get("action") or shot.get("clip_prompt") or "")
             # Strip appended BLOCKING / IDENTITY LOCK suffixes for the meta check.
             core = re.split(
                 r"\s(?:BLOCKING:|IDENTITY LOCK:|FORBIDDEN BLEED:)",
@@ -509,15 +509,15 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     assign_shot_settings(prompt, shots, scenes)
 
     for i, shot in enumerate(shots, start=1):
-        shot["shot_index"] = i
+        shot["clip_index"] = i
         align_blocking_to_on_screen(shot, characters)
 
     out["characters"] = characters
-    out["shots"] = shots
+    out["clips"] = shots
     out["experiment_plan"] = "A"
     out["plan_a_version"] = "v12"
     out["skip_domain_role_locks"] = True
-    out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
+    out["scene_consistency_mode"] = "scene_specs_plus_clips"
     # Repair cast/props BEFORE compose policy so human leads stay heroes
     # and brand mascots stay on-device UI (not free-flying characters).
     try:
@@ -527,19 +527,19 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
 
         out = apply_cast_prop_and_setting_locks(out, user_prompt=prompt)
         characters = [c for c in (out.get("characters") or []) if isinstance(c, dict)]
-        shots = [s for s in (out.get("shots") or []) if isinstance(s, dict)]
+        shots = [s for s in (out.get("clips") or []) if isinstance(s, dict)]
         # Recompute settings after cast/action repair (planned destination ≠ presence).
         assign_shot_settings(prompt, shots, scenes)
-        out["shots"] = shots
+        out["clips"] = shots
     except Exception:  # noqa: BLE001
         pass
-    # Per setting: compose ALL human cast solos into the scene specs, then edit-prior.
+    # Per setting: compose ALL human cast character specs into the scene specs, then edit-prior.
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.keyframe_policy import (
-            apply_compose_solos_setting_policy,
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_policy import (
+            apply_compose_character_specs_setting_policy,
         )
 
-        out = apply_compose_solos_setting_policy(out)
+        out = apply_compose_character_specs_setting_policy(out)
         # One-pass setting lock only (cast already repaired above — do not re-repair).
         from jiuwenswarm.server.runtime.designer.pipeline.cast_prop_locks import (
             enforce_setting_transitions,
@@ -547,12 +547,12 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
 
         enforce_setting_transitions(out)
     except Exception:  # noqa: BLE001
-        out["keyframe_policy"] = "scene_card_plus_clip_shots"
-        out["scene_continuity_mode"] = "scene_card_plus_clip_shots"
+        out["clip_policy"] = "scene_specs_plus_clips"
+        out["scene_consistency_mode"] = "scene_specs_plus_clips"
 
     # Identity / bleed clauses on featured (camera-focus) cast after ensemble stamp.
     by_id = {str(c.get("id")): c for c in characters}
-    for shot in out.get("shots") or []:
+    for shot in out.get("clips") or []:
         if not isinstance(shot, dict):
             continue
         focus = [
@@ -570,9 +570,9 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
             action = str(shot.get("action") or "")
             if "IDENTITY LOCK:" not in action:
                 shot["action"] = (action + clause)[:650]
-            kp = str(shot.get("keyframe_prompt") or action)
+            kp = str(shot.get("clip_prompt") or action)
             if "IDENTITY LOCK:" not in kp:
-                shot["keyframe_prompt"] = (kp + clause)[:650]
+                shot["clip_prompt"] = (kp + clause)[:650]
         bleed = str(shot.get("forbid_bleed") or spatial.get("forbid_bleed") or "")
         if bleed and "FORBIDDEN BLEED" not in str(shot.get("action") or ""):
             shot["action"] = (str(shot.get("action") or "") + " " + bleed)[:700]
@@ -588,32 +588,32 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         out.setdefault("aspect_lock", {})
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.director_shot_sheet import (
-            stamp_director_shot_sheets,
+        from jiuwenswarm.server.runtime.designer.pipeline.director_clip_sheet import (
+            stamp_director_clip_sheets,
         )
 
-        out = stamp_director_shot_sheets(out, prompt=prompt)
+        out = stamp_director_clip_sheets(out, prompt=prompt)
     except Exception:  # noqa: BLE001
         pass
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.movie_continuity_guide import (
-            continuity_guide_clause,
+        from jiuwenswarm.server.runtime.designer.pipeline.movie_consistency_guide import (
+            consistency_guide_clause,
         )
 
-        out["continuity_guide"] = continuity_guide_clause(out)
+        out["continuity_guide"] = consistency_guide_clause(out)
     except Exception:  # noqa: BLE001
         out["continuity_guide"] = ""
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
-            build_production_bible,
+        from jiuwenswarm.server.runtime.designer.pipeline.production_specs import (
+            build_production_specs,
         )
 
-        out["production_bible"] = build_production_bible(out, user_prompt=prompt)
+        out["production_specs"] = build_production_specs(out, user_prompt=prompt)
     except Exception:  # noqa: BLE001
-        out.setdefault("production_bible", "")
+        out.setdefault("production_specs", "")
     out["director_contract"] = {
         **(out.get("director_contract") if isinstance(out.get("director_contract"), dict) else {}),
-        "version": "plan_a.v2.compose_solos_setting.v12_cast_prop_locks",
+        "version": "plan_a.v2.compose_character_specs_setting.v12_cast_prop_locks",
         "style_look": style_lock.get("look"),
         "style_medium": style_lock.get("medium"),
         "setting_type": spatial.get("setting_type"),
@@ -621,8 +621,8 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         "has_continuity_guide": bool(out.get("continuity_guide")),
         "aspect": (out.get("aspect_lock") or {}).get("ratio"),
         "has_axis_lock": bool(out.get("axis_lock")),
-        "keyframe_policy": out.get("keyframe_policy"),
-        "has_production_bible": bool(out.get("production_bible")),
+        "clip_policy": out.get("clip_policy"),
+        "has_production_specs": bool(out.get("production_specs")),
         "cast_prop_repair": list(
             (out.get("director_contract") or {}).get("cast_prop_repair") or []
         )[:20],

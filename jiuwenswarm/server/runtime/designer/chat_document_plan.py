@@ -17,7 +17,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerGraphValidationError,
     node_config,
     node_pipeline,
-    node_shot_index,
+    node_clip_index,
 )
 from jiuwenswarm.server.runtime.designer.chat_document_sync import (
     ChatDocument,
@@ -29,7 +29,7 @@ from jiuwenswarm.server.runtime.designer.chat_document_sections import (
     shot_sections,
     validate_shot_sections,
 )
-from jiuwenswarm.server.runtime.designer.chat_shot_references import (
+from jiuwenswarm.server.runtime.designer.chat_clip_references import (
     apply_node_reference_edits,
     map_shot_references,
     missing_shot_tombstones,
@@ -57,7 +57,7 @@ The server has already removed whole blocks headed solely by a deleted shot. The
 are listed in removed_shot_blocks for context; do not return them. Review every remaining
 block, including mixed tables and surviving shots' continuity claims.
 Insert new paragraphs/shot sections INSIDE an adjacent existing key's text, separated
-by blank lines. For example, an old shot section's value can become "old section\\n\\nnew section".
+by blank lines. For example, an old clip section's value can become "old section\\n\\nnew section".
 Insert new table rows into that table's existing value. Return complete tables with ALL
 retained rows. Compare ALL sentences/cells in every block with the request and facts.
 
@@ -90,7 +90,7 @@ When inserting a shot, preserve every existing shot section with its supplied NE
 and original events/details. Insert the new shot section alongside an existing one inside
 that value. Never shift original content between block keys or replace it with a new shot.
 Each document's shot_sections lists REQUIRED coverage for existing per-shot sections.
-For EACH listed section, return exactly one entry for EVERY required_shot_index in order,
+For EACH listed section, return exactly one entry for EVERY required_clip_index in order,
 including newly inserted shots. Each entry must contain all required_fields with complete
 content. Keep the heading_path unchanged. Existing shots ALREADY have their own source
 blocks: edit each entry IN ITS ORIGINAL BLOCK only, never copy it into another block.
@@ -127,7 +127,7 @@ def document_blocks(text: str) -> list[DocumentBlock]:
     """Keep blank-line separators untouched; no Markdown parsing or format migration."""
     blocks = []
     start = 0
-    for index, part in enumerate(re.split(r"(\n[ \t]*\n)", text)):
+    for index, part in enumerate(re.split(r"(\n[ \s]*\n)", text)):
         if index % 2 == 0 and part:
             key = hashlib.sha256(f"{start}:{part}".encode()).hexdigest()[:12]
             blocks.append(DocumentBlock(key, start, part))
@@ -212,7 +212,7 @@ class ShotPosition(TypedDict):
 
 def _shot_positions(graph: DesignerExecutionGraph) -> dict[str, ShotPosition]:
     return {
-        node["id"]: {"index": node_shot_index(node), "timeline": node_config(node)["timeline"]}
+        node["id"]: {"index": node_clip_index(node), "timeline": node_config(node)["timeline"]}
         for node in graph["nodes"]
         if node_pipeline(node) in {"frame", "clip"}
     }
@@ -231,7 +231,7 @@ def _shot_totals(positions: dict[str, ShotPosition]) -> dict[str, Any]:
 def _prose_node(node: DesignerGraphNode, reviewed_fields: set[str]) -> dict[str, Any]:
     config = node_config(node)
     fields = {
-        "shot_index", "shot_action", "shot_title", "timeline", "camera", "character_id",
+        "clip_index", "clip_action", "shot_title", "timeline", "camera", "character_id",
         "character_ids", "setting_id", "on_screen", "offscreen", "speech_line",
     }
     view: dict[str, Any] = {
@@ -253,7 +253,7 @@ def document_edit_context(
     """Supply stable identities and deterministic totals instead of asking the model to infer them."""
     old_positions, new_positions = _shot_positions(before), _shot_positions(candidate)
     targets = {
-        node_shot_index(node): node["id"]
+        node_clip_index(node): node["id"]
         for role in ("frame", "clip")
         for node in before["nodes"] if node_pipeline(node) == role
     }

@@ -34,7 +34,7 @@ def _wan_body(model: str, *, file_url: str | None = None, **fields: Any) -> dict
     return {"model": body["model"], **body["input"], **body["parameters"]}
 
 
-def test_local_keyframe_becomes_data_uri(tmp_path: Path) -> None:
+def test_local_still_becomes_data_uri(tmp_path: Path) -> None:
     url = mg.image_uri(_png(tmp_path / "shot1.png"))
     assert url is not None and url.startswith("data:image/png;base64,")
     assert mg.image_uri(str(tmp_path / "missing.png")) is None
@@ -67,7 +67,7 @@ def test_wan3_img_url_uses_requested_resolution(tmp_path: Path) -> None:
 
 
 def test_wan3_uses_media_for_character_scene_and_storyboard(tmp_path: Path) -> None:
-    refs = [_png(tmp_path / f"{name}.png", name.encode()) for name in ("keyframe", "character", "scene")]
+    refs = [_png(tmp_path / f"{name}.png", name.encode()) for name in ("clip_still", "character", "scene")]
     params = _wan_body("wan3.0-video", reference_images=refs, file_url="oss://bucket/storyboard.md")
     assert "img_url" not in params and "reference_urls" not in params and "shot_type" not in params
     assert params["audio"] is False
@@ -77,8 +77,8 @@ def test_wan3_uses_media_for_character_scene_and_storyboard(tmp_path: Path) -> N
     assert media[-1]["url"] == "oss://bucket/storyboard.md"
 
 
-def test_wan3_storyboard_with_keyframe_reference_is_not_img_url(tmp_path: Path) -> None:
-    frame = _png(tmp_path / "keyframe.png")
+def test_wan3_storyboard_with_still_reference_is_not_img_url(tmp_path: Path) -> None:
+    frame = _png(tmp_path / "clip_still.png")
     params = _wan_body(
         "wan3.0-video", first_frame=frame, reference_images=[frame], file_url="oss://bucket/storyboard.md"
     )

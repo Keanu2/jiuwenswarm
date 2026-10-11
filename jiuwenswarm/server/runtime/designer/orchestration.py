@@ -35,11 +35,9 @@ logger = logging.getLogger(__name__)
 _ROLE_TOOLS: dict[str, list[str]] = {
     "brief": ["call_model", "read_upstream"],
     "character": ["call_model", "read_upstream", "call_image_model"],
-    "character_design": ["call_model", "read_upstream", "call_image_model"],
+    "character": ["call_model", "read_upstream", "call_image_model"],
     "scene": ["call_model", "read_upstream", "call_image_model"],
     "storyboard": ["call_model", "read_upstream"],
-    "frame": ["call_model", "read_upstream", "call_image_model"],
-    "keyframe": ["call_model", "read_upstream", "call_image_model"],
     "clip": ["call_model", "read_upstream", "call_video_model"],
     "speech": ["call_model", "read_upstream", "call_speech_model"],
     "music": ["call_model", "read_upstream", "call_music_model"],
@@ -80,22 +78,22 @@ def _tools_for_node(node: DesignerGraphNode) -> list[str]:
 
 
 def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
-    """Director gate: stamp consistency locks so keyframe/shot prompts share blocking."""
+    """Director gate: stamp consistency locks so clip/shot prompts share blocking."""
     notes: list[str] = []
     meta = dict(graph.get("metadata") or {})
     analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
     shot_locks: dict[int, dict[str, str]] = {}
 
-    for shot in analysis.get("shots") or []:
+    for shot in analysis.get("clips") or []:
         if not isinstance(shot, dict):
             continue
         try:
-            idx = int(shot.get("shot_index") or 0)
+            idx = int(shot.get("clip_index") or 0)
         except (TypeError, ValueError):
             idx = 0
         if idx < 1:
             continue
-        action = str(shot.get("action") or shot.get("keyframe_prompt") or "")
+        action = str(shot.get("action") or shot.get("clip_prompt") or "")
         carried = shot.get("continuity_lock") if isinstance(shot.get("continuity_lock"), dict) else {}
         lock = merge_lock_with_previous(
             _infer_continuity_lock(action), shot_locks.get(idx - 1)
@@ -107,22 +105,22 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
         shot["continuity_lock"] = lock
         shot_locks[idx] = lock
         clause = _continuity_prompt_clause(lock)
-        kf = str(shot.get("keyframe_prompt") or action)
+        kf = str(shot.get("clip_prompt") or action)
         if clause and "CONSISTENCY LOCK" not in kf:
-            shot["keyframe_prompt"] = (kf[:500] + clause)[:700]
+            shot["clip_prompt"] = (kf[:500] + clause)[:700]
             notes.append(f"analysis shot {idx}: consistency lock stamped")
 
-    if analysis.get("shots"):
+    if analysis.get("clips"):
         meta["script_analysis"] = analysis
         graph["metadata"] = meta
 
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
         role = _role_key(node)
-        if role not in {"frame", "clip", "keyframe", "storyboard"}:
+        if role not in {"clip", "storyboard"}:
             continue
-        idx = int(cfg.get("shot_index") or 0) or 0
-        action = str(cfg.get("shot_action") or "")
+        idx = int(cfg.get("clip_index") or 0) or 0
+        action = str(cfg.get("clip_action") or "")
         lock = dict(cfg.get("continuity_lock") or {}) if isinstance(cfg.get("continuity_lock"), dict) else {}
         if idx and idx in shot_locks:
             lock = shot_locks[idx]
@@ -147,7 +145,7 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
 
     # Keep the storyboard agent's structured shot plan current.
     if shot_locks:
-        shots = list(analysis.get("shots") or [])
+        shots = list(analysis.get("clips") or [])
         if shots:
             for node in graph.get("nodes") or []:
                 cfg = dict(node.get("config") or {})
@@ -181,7 +179,7 @@ def _spatial_geography_lock_patch(graph: DesignerExecutionGraph) -> list[str]:
                 "light direction must match the master scene specs — only camera may change."
             ),
             "crowd_rule": (
-                "Empty environment plates; keyframes keep the SAME extras layout "
+                "Scene specs define environment; clips keep the SAME extras layout "
                 "across shots; never clone a featured person into two places at once."
             ),
         }
@@ -217,7 +215,7 @@ def _spatial_geography_lock_patch(graph: DesignerExecutionGraph) -> list[str]:
         cfg = dict(node.get("config") or {})
         role = _role_key(node)
         nid = str(node.get("id") or "")
-        if role not in {"scene", "frame", "clip", "keyframe", "brief", "storyboard"}:
+        if role not in {"scene", "clip", "brief", "storyboard"}:
             continue
         cfg["spatial_lock"] = lock
         if (
@@ -231,7 +229,7 @@ def _spatial_geography_lock_patch(graph: DesignerExecutionGraph) -> list[str]:
             notes.append(f"{nid}: master_scene_node_id=n_scene")
         # Keep spatial_lock as structured cfg only. Do not append SPATIAL LOCK
         # essays onto prompts (truncates mid-sentence and poisons the toolbar).
-        if role in {"frame", "clip", "keyframe", "scene"} and lock:
+        if role in {"clip", "scene"} and lock:
             notes.append(f"{nid}: spatial_lock cfg only")
         node["config"] = cfg
     return notes
@@ -260,7 +258,7 @@ def _director_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
         if not nid:
             continue
         if cfg.get("combined_cast") and not any(
-            str(t).startswith("n_frame") or str(t).startswith("n_clip") or t == "n_compose"
+            str(t).startswith("n_clip") or t == "n_compose"
             for t in (outs.get(nid) or [])
         ):
             drop.append(nid)
@@ -316,8 +314,8 @@ def _director_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
                     edge_pairs.add((master_id, nid))
                     notes.append(f"cohere_edge:{master_id}->{nid}")
                 n["config"] = cfg
-            elif role in {"frame", "keyframe", "clip"}:
-                shot_idx = int(cfg.get("shot_index") or 0)
+            elif role in {"clip"}:
+                shot_idx = int(cfg.get("clip_index") or 0)
                 shot_scene = f"n_scene_{shot_idx}" if shot_idx >= 1 else ""
                 inputs = [str(x) for x in (cfg.get("inputs") or []) if str(x)]
                 changed = False
@@ -375,41 +373,41 @@ def _director_reedit_artifacts_after_prune(
         cfg = n.get("config") if isinstance(n.get("config"), dict) else {}
         role = _role_key(n)
         nid = str(n.get("id") or "")
-        if role in {"frame", "keyframe", "clip"} or nid.startswith("n_frame_") or nid.startswith("n_clip_"):
-            idx = int(cfg.get("shot_index") or 0)
+        if role in {"clip"} or nid.startswith("n_clip_"):
+            idx = int(cfg.get("clip_index") or 0)
             if idx >= 1 and idx not in kept_shot_idxs:
                 kept_shot_idxs.append(idx)
     kept_shot_idxs.sort()
-    shots = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (analysis.get("clips") or []) if isinstance(s, dict)]
     if kept_shot_idxs and shots:
         kept = {
-            int(s.get("shot_index") or 0)
+            int(s.get("clip_index") or 0)
             for s in shots
-            if int(s.get("shot_index") or 0) in set(kept_shot_idxs)
+            if int(s.get("clip_index") or 0) in set(kept_shot_idxs)
         }
-        if kept and kept != {int(s.get("shot_index") or 0) for s in shots}:
-            analysis["shots"] = [
-                s for s in shots if int(s.get("shot_index") or 0) in kept
+        if kept and kept != {int(s.get("clip_index") or 0) for s in shots}:
+            analysis["clips"] = [
+                s for s in shots if int(s.get("clip_index") or 0) in kept
             ]
             notes.append(f"reedit_shots_keep:{sorted(kept)}")
         # Rebuild already_done chains per setting (never leak office beats into a new room).
         already_by_setting: dict[str, list[str]] = {}
         exited_by_setting: dict[str, set[str]] = {}
         revised: list[dict[str, Any]] = []
-        for s in analysis.get("shots") or []:
+        for s in analysis.get("clips") or []:
             if not isinstance(s, dict):
                 continue
             shot = dict(s)
             sid = str(shot.get("setting_id") or "set_1").strip() or "set_1"
             already = list(already_by_setting.get(sid) or [])
             shot["already_done"] = list(already)
-            action = str(shot.get("action") or shot.get("keyframe_prompt") or "").strip()
+            action = str(shot.get("action") or shot.get("clip_prompt") or "").strip()
             exits = [
                 str(x)
                 for x in (shot.get("exiting_character_ids") or shot.get("exiting") or [])
                 if str(x)
             ]
-            idx = int(shot.get("shot_index") or 0)
+            idx = int(shot.get("clip_index") or 0)
             if action:
                 already.append(f"shot{idx}: {action[:120]}")
             carried = set(exited_by_setting.get(sid) or ())
@@ -474,23 +472,23 @@ def _director_reedit_artifacts_after_prune(
             shot["occupancy"] = occ
             already_by_setting[sid] = already
             revised.append(shot)
-        analysis["shots"] = revised
+        analysis["clips"] = revised
         meta["script_analysis"] = analysis
         notes.append("reedit_already_done_occupancy")
 
     # Sync storyboard markdown + approved_storyboard from surviving shots.
     chars = [c for c in (analysis.get("characters") or []) if isinstance(c, dict)]
-    surviving = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
+    surviving = [s for s in (analysis.get("clips") or []) if isinstance(s, dict)]
     if surviving:
         lines = ["# Storyboard Scenario", ""]
         for s in surviving:
-            idx = int(s.get("shot_index") or 0)
+            idx = int(s.get("clip_index") or 0)
             lines.append(
                 f"### Shot {idx} — {s.get('title') or s.get('camera') or 'beat'}"
             )
             lines.append(f"- Setting: {s.get('setting_id') or 'set_1'}")
             lines.append(f"- Timeline: {s.get('timeline') or f'{(idx-1)*5}-{idx*5}s'}")
-            lines.append(f"- Action: {s.get('action') or s.get('keyframe_prompt') or ''}")
+            lines.append(f"- Action: {s.get('action') or s.get('clip_prompt') or ''}")
             lines.append(f"- Camera: {s.get('camera') or ''}")
             if s.get("speech_line"):
                 lines.append(f"- Speech: {s.get('speech_line')}")
@@ -531,18 +529,18 @@ def _director_reedit_artifacts_after_prune(
 
     # Stamp occupancy / already_done onto surviving frame+shot nodes.
     by_idx = {
-        int(s.get("shot_index") or 0): s
-        for s in (analysis.get("shots") or [])
-        if isinstance(s, dict) and int(s.get("shot_index") or 0) >= 1
+        int(s.get("clip_index") or 0): s
+        for s in (analysis.get("clips") or [])
+        if isinstance(s, dict) and int(s.get("clip_index") or 0) >= 1
     }
     for n in graph.get("nodes") or []:
         if not isinstance(n, dict):
             continue
         cfg = dict(n.get("config") or {})
         role = _role_key(n)
-        if role not in {"frame", "keyframe", "clip"}:
+        if role not in {"clip"}:
             continue
-        idx = int(cfg.get("shot_index") or 0)
+        idx = int(cfg.get("clip_index") or 0)
         shot = by_idx.get(idx)
         if not shot:
             continue
@@ -620,12 +618,12 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
                     if isinstance(meta.get("script_analysis"), dict)
                     else {}
                 )
-                idx = int(cfg.get("shot_index") or 0)
+                idx = int(cfg.get("clip_index") or 0)
                 shot_row = next(
                     (
                         s
-                        for s in (analysis.get("shots") or [])
-                        if isinstance(s, dict) and int(s.get("shot_index") or 0) == idx
+                        for s in (analysis.get("clips") or [])
+                        if isinstance(s, dict) and int(s.get("clip_index") or 0) == idx
                     ),
                     {},
                 )
@@ -827,7 +825,7 @@ def validate_plan_occupancy(analysis: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
     characters = [c for c in (analysis.get("characters") or []) if isinstance(c, dict)]
-    shots = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (analysis.get("clips") or []) if isinstance(s, dict)]
     scenes = [s for s in (analysis.get("scenes") or []) if isinstance(s, dict)]
     scene_locks = (
         analysis.get("scene_locks")
@@ -840,7 +838,7 @@ def validate_plan_occupancy(analysis: dict[str, Any]) -> dict[str, Any]:
     if not shots:
         errors.append("no_shots")
     for i, shot in enumerate(shots, start=1):
-        idx = int(shot.get("shot_index") or i)
+        idx = int(shot.get("clip_index") or i)
         sid = str(shot.get("setting_id") or shot.get("scene_id") or "").strip()
         if not sid:
             errors.append(f"shot{idx}_missing_setting_id")
@@ -1021,11 +1019,9 @@ class Director:
             ):
                 continue
             if _role_key(node) not in {
-                "frame",
-                "keyframe",
                 "clip",
                 "character",
-                "character_design",
+                "character",
                 "scene",
                 "image",
                 "video",
@@ -1071,20 +1067,20 @@ class Director:
         graph["metadata"] = meta
         return result
 
-    def adjust_clips_after_keyframes(
+    def adjust_clips_after_scenes(
         self,
         graph: DesignerExecutionGraph,
         *,
         node_states: dict[str, Any] | None,
         agent_feedback: dict[str, dict[str, Any]] | None = None,
     ) -> list[str]:
-        """After scene specs (or legacy keyframes) complete: refresh pending shot briefs."""
+        """After scene specs complete: refresh pending clip briefs."""
         notes = _shot_distinctness_patch(graph)
         feedback = agent_feedback or {}
         states = node_states or {}
         meta0 = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
         scene_specs_mode = (
-            str(meta0.get("scene_continuity_mode") or "") == "scene_card_plus_clip_shots"
+            str(meta0.get("scene_consistency_mode") or "") == "scene_specs_plus_clips"
         )
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
@@ -1096,8 +1092,8 @@ class Director:
                 "skipped",
             }:
                 continue
-            idx = int(cfg.get("shot_index") or 0) or 1
-            action = str(cfg.get("shot_action") or "").strip()
+            idx = int(cfg.get("clip_index") or 0) or 1
+            action = str(cfg.get("clip_action") or "").strip()
             camera = str(cfg.get("camera") or "medium / eye-level")
             gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             lock = cfg.get("continuity_lock") if isinstance(cfg.get("continuity_lock"), dict) else {}
@@ -1106,15 +1102,15 @@ class Director:
             if scene_specs_mode:
                 scene_nid = str(cfg.get("scene_node_id") or "").strip()
                 scene_msg = str((feedback.get(scene_nid) or {}).get("message") or "") if scene_nid else ""
-                solos = [str(x) for x in (cfg.get("character_node_ids") or []) if str(x).strip()]
+                char_spec_refs = [str(x) for x in (cfg.get("character_node_ids") or []) if str(x).strip()]
                 who = cfg.get("cast_actions") if isinstance(cfg.get("cast_actions"), dict) else {}
                 who_line = "; ".join(f"{k}: {v}" for k, v in who.items() if v) if who else ""
                 # Preserve locks already stamped on generate.prompt — append beat only if empty.
                 existing = str(gen.get("prompt") or "").strip()
                 if not existing or "FIRST FRAME" not in existing:
                     gen["prompt"] = (
-                        f"Film shot {idx} from scene specs {scene_nid or 'n_scene'} + solo refs "
-                        f"{', '.join(solos) or 'cast'}. Camera {camera}. Action: {shot_line}. "
+                        f"Film shot {idx} from scene specs {scene_nid or 'n_scene'} + character refs "
+                        f"{', '.join(char_spec_refs) or 'cast'}. Camera {camera}. Action: {shot_line}. "
                         + (f"WHO DOES WHAT: {who_line}. " if who_line else "")
                         + (f"Scene note: {scene_msg[:180]}. " if scene_msg else "")
                         + "Do not repeat other shots."
@@ -1122,32 +1118,14 @@ class Director:
                     )
                 cfg["generate"] = gen
                 if action:
-                    cfg["shot_action"] = action[:500]
+                    cfg["clip_action"] = action[:500]
                 cfg["max_video_calls"] = 1
                 cfg.pop("continuity_clip_node_id", None)
                 node["config"] = cfg
-                notes.append(f"{node.get('id')}: post-scene-specs shot brief updated")
-                continue
-            frame_id = f"n_frame_{idx}"
-            frame_msg = str((feedback.get(frame_id) or {}).get("message") or "")
-            gen["prompt"] = (
-                f"Film shot {idx} only from its keyframe. Camera {camera}. "
-                f"Action: {beat}. "
-                + (f"Keyframe note: {frame_msg[:180]}. " if frame_msg else "")
-                + "Do not repeat other shots."
-                f"{clause}"
-            )
-            cfg["generate"] = gen
-            if action:
-                cfg["shot_action"] = action[:500]
-            cfg["max_video_calls"] = 1
-            if idx > 1:
-                cfg["continuity_frame_node_id"] = cfg.get("continuity_frame_node_id") or f"n_frame_{idx - 1}"
-            node["config"] = cfg
-            notes.append(f"{node.get('id')}: post-keyframe shot brief updated")
+                notes.append(f"{node.get('id')}: post-scene-specs clip brief updated")
         meta = dict(graph.get("metadata") or {})
-        meta["shots_adjusted_after_keyframes"] = True
-        meta["director_keyframe_adjust"] = {"notes": notes[:40], "rating_modality": "text_only"}
+        meta["clips_adjusted_after_scenes"] = True
+        meta["director_scene_adjust"] = {"notes": notes[:40], "rating_modality": "text_only"}
         graph["metadata"] = meta
         return notes
 
@@ -1348,7 +1326,7 @@ class Director:
                         "user_prompt": user_prompt,
                         "characters": characters,
                         "scenes": scenes,
-                        "shots": analysis.get("shots"),
+                        "clips": analysis.get("clips"),
                         "style_lock": analysis.get("style_lock"),
                         "audio": audio,
                         "spatial_lock": meta.get("spatial_lock"),
@@ -1434,7 +1412,7 @@ class Director:
             else {}
         )
         characters = list(analysis.get("characters") or [])
-        shots = list(analysis.get("shots") or [])
+        shots = list(analysis.get("clips") or [])
         user_prompt = str(graph.get("description") or "")
         # Keep the enriched timed shot and speech sections available to storyboard authoring.
         approved_brief = str(meta.get("approved_brief") or "")[:12000]
@@ -1444,7 +1422,7 @@ class Director:
         try:
             system = (
                 "You are the Designer Director. Author a hierarchical "
-                "storyboard: Scene (setting_id) → Keyframes/shots. FIRST list every "
+                "storyboard: Scene (setting_id) → Clips/shots. FIRST list every "
                 "on-screen human as characters[] (id, name, description) — one identity card "
                 "each, including unnamed groups that share one look. Put that id in on_screen "
                 "on every shot where they are visible. NOT every character appears in every scene. "
@@ -1480,9 +1458,9 @@ class Director:
                 "for no dialogue. The human-readable storyboard_markdown must show each exact "
                 "spoken line or voiceover, with its speaker, in its timed shot. "
                 "First shot of each setting: "
-                "keyframe_strategy=compose_from_solo_refs — composer places ONLY "
+                "clip_strategy=compose_from_character_specs — composer places ONLY "
                 "on_screen cast with cast_actions (who is doing what). "
-                "Later same setting: edit_prior_keyframe (architecture locked); "
+                "Later same setting: edit_prior_clip (architecture locked); "
                 "storyboard updates on_screen / offscreen / cast_actions. "
                 "offscreen = in this scene but not in frame; never draw them. "
                 "Cast absent from a setting must not appear there. "
@@ -1491,7 +1469,7 @@ class Director:
                 "on_screen, offscreen, cast_actions, featured_cast_ids, setting_id, "
                 "start_state {pose,seats,facing,on_screen,offscreen}, "
                 "end_state {pose,seats,facing,exited,speech_done,on_screen}, "
-                "continuity_lock, keyframe_prompt, exiting_character_ids, "
+                "continuity_lock, clip_prompt, exiting_character_ids, "
                 "speech_by_character (map character_id→exact spoken line for this shot; "
                 "empty {} only when nobody speaks in this window), speech_line (joined fallback). "
                 "Same setting_id: next shot start_state MUST match prior end_state. "
@@ -1506,22 +1484,22 @@ class Director:
                 "Respond JSON only: "
                 '{"style_lock":{"look":"...","medium":"..."},'
                 '"characters":[{"id":"char_1","name":"...","description":"..."}],'
-                '"shots":[{"shot_index":1,"timeline":"<copy this shot timeline from the approved brief>",'
+                '"clips":[{"clip_index":1,"timeline":"<copy this shot timeline from the approved brief>",'
                 '"camera":"...",'
                 '"action":"...","on_screen":["char_1"],"offscreen":["char_2"],'
                 '"featured_cast_ids":["char_1"],"cast_actions":{"char_1":"preaching"},'
                 '"ensemble_cast_ids":["char_1","char_2"],"setting_id":"set_1",'
-                '"keyframe_strategy":"compose_from_solo_refs",'
+                '"clip_strategy":"compose_from_character_specs",'
                 '"start_state":{"pose":"...","seats":{},"facing":"..."},'
                 '"end_state":{"pose":"...","exited":[],"speech_done":"..."},'
-                '"continuity_lock":{"forbid":"..."},"keyframe_prompt":"...",'
+                '"continuity_lock":{"forbid":"..."},"clip_prompt":"...",'
                 '"exiting_character_ids":[],'
                 '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
                 '"language_lock":"en",'
                 '"bgm_lock":{"mood":"...","style":"...","instruments":"...",'
                 '"continuity":"same bed","rule":"non-vocal underscore"},'
                 '"include_speech":true,"include_music":true,'
-                '"storyboard_markdown":"...","notes":"...","target_shot_count":N}'
+                '"storyboard_markdown":"...","notes":"...","target_clip_count":N}'
             )
             result = await call_model_tool(
                 prompt=json.dumps(
@@ -1530,7 +1508,7 @@ class Director:
                         "approved_brief": approved_brief,
                         "style_lock": analysis.get("style_lock"),
                         "characters": characters,
-                        "shots": shots,
+                        "clips": shots,
                         "spatial_lock": meta.get("spatial_lock"),
                         "rule": (
                             "Multi-shot storyboard required when multiple beats exist. "
@@ -1564,14 +1542,14 @@ class Director:
                     characters = cleaned_chars
                     analysis["characters"] = characters
                     notes = "Director LLM authored cast + storyboard."
-            llm_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else []
+            llm_shots = parsed.get("clips") if isinstance(parsed.get("clips"), list) else []
             if llm_shots:
                 cleaned: list[dict[str, Any]] = []
                 for i, raw in enumerate(llm_shots, start=1):
                     if not isinstance(raw, dict):
                         continue
                     shot = dict(raw)
-                    shot["shot_index"] = int(shot.get("shot_index") or i)
+                    shot["clip_index"] = int(shot.get("clip_index") or i)
                     if not str(shot.get("timeline") or "").strip():
                         shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
                     if isinstance(shot.get("continuity_lock"), dict):
@@ -1593,7 +1571,7 @@ class Director:
                     cleaned.append(shot)
                 if cleaned:
                     shots = cleaned
-                    analysis["shots"] = cleaned
+                    analysis["clips"] = cleaned
                     source = "llm"
                     analysis["source"] = "llm"
                     notes = str(parsed.get("notes") or "Director LLM authored storyboard.")[
@@ -1644,11 +1622,11 @@ class Director:
             is_spoken_line,
             user_declined_speech,
         )
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import apply_shot_scope
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import apply_shot_scope
 
         analysis = ensure_audio_locks_on_analysis(analysis, user_prompt)
         analysis = apply_shot_scope(analysis, user_prompt)
-        shots = list(analysis.get("shots") or shots)
+        shots = list(analysis.get("clips") or shots)
         if shots and not user_declined_speech(user_prompt):
             has_line = any(
                 is_spoken_line(str(s.get("speech_line") or ""))
@@ -1665,13 +1643,13 @@ class Director:
                     code=LLM_API_ERROR,
                 )
         try:
-            from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
-                ensure_shot_start_end_states,
+            from jiuwenswarm.server.runtime.designer.pipeline.storyboard_clip_state import (
+                ensure_clip_start_end_states,
                 validate_storyboard_state_chain,
             )
 
-            shots = ensure_shot_start_end_states(shots)
-            analysis["shots"] = shots
+            shots = ensure_clip_start_end_states(shots)
+            analysis["clips"] = shots
             chain_notes = validate_storyboard_state_chain(shots)
             if chain_notes:
                 meta["storyboard_state_notes"] = chain_notes[:20]
@@ -1683,7 +1661,7 @@ class Director:
             meta["bgm_lock"] = analysis["bgm_lock"]
 
         if shots:
-            analysis["shots"] = shots
+            analysis["clips"] = shots
             meta["script_analysis"] = analysis
         if not sb_md:
             if source != "llm" or not shots:
@@ -1725,21 +1703,21 @@ class Director:
             stamped = True
             break
         if shots:
-            analysis["target_shot_count"] = len(shots)
+            analysis["target_clip_count"] = len(shots)
             meta["script_analysis"] = analysis
         # Propagate timelines/consistency/audio locks into frame/shot configs once.
         from jiuwenswarm.server.runtime.designer.audio_locks import stamp_audio_fields_on_clip_config
 
         for node in graph.get("nodes") or []:
             cfg = dict(node.get("config") or {})
-            if _role_key(node) not in {"frame", "clip", "keyframe"}:
+            if _role_key(node) not in {"clip"}:
                 continue
-            idx = int(cfg.get("shot_index") or 0)
+            idx = int(cfg.get("clip_index") or 0)
             for shot in shots:
-                if int(shot.get("shot_index") or 0) != idx:
+                if int(shot.get("clip_index") or 0) != idx:
                     continue
                 if shot.get("action"):
-                    cfg["shot_action"] = str(shot["action"])[:500]
+                    cfg["clip_action"] = str(shot["action"])[:500]
                 if shot.get("camera"):
                     cfg["camera"] = str(shot["camera"])[:120]
                 if shot.get("timeline"):
@@ -1799,8 +1777,8 @@ class Director:
         graph: DesignerExecutionGraph) -> dict[str, Any]:
         """Director owns flexible multi-shot topology from Brief+Storyboard.
 
-        Not a frozen single-keyframe template: LLM expands shots from the locked
-        storyboard, then materializes one frame+shot agent per shot.
+        Not a frozen single-clip template: LLM expands shots from the locked
+        storyboard, then materializes one clip agent per shot.
         """
         from jiuwenswarm.server.runtime.designer.smart_graph import (
             apply_runtime_delegate,
@@ -1818,7 +1796,7 @@ class Director:
             if isinstance(meta.get("script_analysis"), dict)
             else {}
         )
-        shots = [s for s in (analysis.get("shots") or []) if isinstance(s, dict)]
+        shots = [s for s in (analysis.get("clips") or []) if isinstance(s, dict)]
         characters = list(analysis.get("characters") or [])
         user_prompt = str(graph.get("description") or meta.get("user_prompt") or "")
         from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
@@ -1845,7 +1823,7 @@ class Director:
                 "You are the Designer Director. Design the execution graph "
                 "from the approved Brief + Storyboard. Return JSON only. "
                 "Preserve the provided style_lock exactly; it is the approved visual "
-                "medium for every character, scene, keyframe, and clip. "
+                "medium for every character, scene, and clip. "
                 "MUST include characters[] — every on-screen human gets one identity "
                 "card (id, name, description), including unnamed groups that share one look. "
                 "List that id in on_screen wherever they are visible. "
@@ -1864,27 +1842,27 @@ class Director:
                 "wardrobe, place names, and continuity notes. Retain every storyboard "
                 "clip that provides distinct content. "
                 "Keep every distinct shot. Do not drop shots to fit a fixed count. "
-                "One clip = one continuous shot of that window's length. New KF on hard cut, new setting, "
+                "One clip = one continuous shot of that window's length. New clip on hard cut, new setting, "
                 "wardrobe/prop change, or on-screen cast change. "
-                "Qwen KF: lock identity+wardrobe for every visible person, including a "
-                "shared-look group as one reference. One variable per new KF. "
+                "Qwen image: lock identity+wardrobe for every visible person, including a "
+                "shared-look group as one reference. One variable per new clip. "
                 "Honor explicit N-shot / N分镜 as a HARD ceiling. "
-                "First KF of each setting: compose_from_solo_refs with on_screen + "
+                "First clip of each setting: compose_from_character_specs with on_screen + "
                 "cast_actions (composer decides who appears and what they are doing). "
-                "Later same setting: edit_prior_keyframe (architecture locked). "
+                "Later same setting: edit_prior_clip (architecture locked). "
                 "offscreen stay out of frame. "
                 "Scene specs ARE required — environment-only Qwen stills. "
-                "Each shot: shot_index, timeline, camera, action, on_screen, offscreen, "
+                "Each shot: clip_index, timeline, camera, action, on_screen, offscreen, "
                 "cast_actions, featured_cast_ids, ensemble_cast_ids, setting_id, "
-                "keyframe_prompt, exiting_character_ids, keyframe_strategy, "
+                "clip_prompt, exiting_character_ids, clip_strategy, "
                 "speech_by_character, speech_line. "
                 "Schema: "
                 '{"style_lock":{"look":"...","medium":"..."},'
                 '"characters":[{"id":"char_1","name":"...","description":"..."}],'
-                '"shots":[{"shot_index":1,"timeline":"<copy this shot timeline from the approved brief>",'
+                '"clips":[{"clip_index":1,"timeline":"<copy this shot timeline from the approved brief>",'
                 '"action":"...",'
                 '"speech_by_character":{"char_1":"exact line"},"speech_line":"..."}],'
-                '"target_shot_count":N,"include_speech":bool,'
+                '"target_clip_count":N,"include_speech":bool,'
                 '"include_music":bool,"notes":"..."}'
             )
             from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
@@ -1901,15 +1879,15 @@ class Director:
                         "style_lock": analysis.get("style_lock"),
                         "characters": characters,
                         "current_shots": shots,
-                        "target_shot_count": shot_ceiling or analysis.get("target_shot_count"),
+                        "target_clip_count": shot_ceiling or analysis.get("target_clip_count"),
                         "rule": (
                             "Keep every distinct shot from the approved storyboard. "
                             "Do not drop shots to fit a fixed count. Explicit N-shot / "
-                            "N分镜 from the user is the only ceiling. All solo cast "
-                            "cards before keyframes; compose first KF per setting_id; "
+                            "N分镜 from the user is the only ceiling. All character spec "
+                            "cards before clips; compose first clip per setting_id; "
                             "edit_prior only within the same setting_id. Per-shot "
                             "on_screen is authoritative for who appears — not every "
-                            "solo in every frame."
+                            "character spec in every clip."
                         ),
                     },
                     ensure_ascii=False,
@@ -1948,13 +1926,13 @@ class Director:
             analysis["characters"] = characters
             analysis["source"] = "llm"
             source = "llm"
-            llm_shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else []
+            llm_shots = parsed.get("clips") if isinstance(parsed.get("clips"), list) else []
             cleaned: list[dict[str, Any]] = []
             for i, raw in enumerate(llm_shots, start=1):
                 if not isinstance(raw, dict):
                     continue
                 shot = dict(raw)
-                shot["shot_index"] = int(shot.get("shot_index") or i)
+                shot["clip_index"] = int(shot.get("clip_index") or i)
                 if not str(shot.get("timeline") or "").strip():
                     shot["timeline"] = f"{(i - 1) * 5:.1f}-{i * 5:.1f}s"
                 cleaned.append(shot)
@@ -1969,16 +1947,16 @@ class Director:
             analysis["source"] = "llm"
             notes = str(parsed.get("notes") or "")[:1000]
             from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-                _explicit_shot_count_from_prompt,
+                _explicit_clip_count_from_prompt,
             )
 
-            explicit_n = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
+            explicit_n = int(_explicit_clip_count_from_prompt(user_prompt) or 0)
             # The user's "N shots" is the only ceiling. Otherwise keep every shot.
             if explicit_n >= 1 and len(shots) > explicit_n:
                 shots = shots[:explicit_n]
             for i, sh in enumerate(shots, start=1):
-                sh["shot_index"] = i
-            analysis["target_shot_count"] = len(shots)
+                sh["clip_index"] = i
+            analysis["target_clip_count"] = len(shots)
             audio = dict(analysis.get("audio") or {})
             if "include_speech" in parsed:
                 audio["include_speech"] = bool(parsed.get("include_speech"))
@@ -1992,7 +1970,7 @@ class Director:
 
             audio = apply_default_speech_policy(audio, user_prompt)
             analysis["audio"] = audio
-            analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
+            analysis["scene_consistency_mode"] = "scene_specs_plus_clips"
         except DesignerLlmError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -2005,15 +1983,15 @@ class Director:
         # Only an explicit user shot count may shorten the list.
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-                _explicit_shot_count_from_prompt,
+                _explicit_clip_count_from_prompt,
             )
 
-            explicit_n = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
+            explicit_n = int(_explicit_clip_count_from_prompt(user_prompt) or 0)
             if explicit_n >= 1 and len(shots) > explicit_n:
                 shots = shots[:explicit_n]
                 for i, sh in enumerate(shots, start=1):
                     if isinstance(sh, dict):
-                        sh["shot_index"] = i
+                        sh["clip_index"] = i
         except Exception:  # noqa: BLE001
             pass
         if not shots:
@@ -2027,22 +2005,22 @@ class Director:
                 "the execution graph.",
                 code=LLM_API_ERROR,
             )
-        analysis["shots"] = shots
+        analysis["clips"] = shots
         try:
-            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
                 apply_shot_scope,
             )
 
             analysis = apply_shot_scope(analysis, user_prompt)
-            shots = list(analysis.get("shots") or shots)
-            analysis["shots"] = shots
+            shots = list(analysis.get("clips") or shots)
+            analysis["clips"] = shots
         except Exception:  # noqa: BLE001
             pass
-        analysis["target_shot_count"] = len(shots)
+        analysis["target_clip_count"] = len(shots)
         meta["script_analysis"] = analysis
 
-        # Cast shrink guard: never replace a richer solo cast with a thinner redesign.
-        old_solos = sum(
+        # Cast shrink guard: never replace a richer character spec cast with a thinner redesign.
+        old_char_specs = sum(
             1
             for n in (graph.get("nodes") or [])
             if str(n.get("id") or "").startswith("n_character")
@@ -2055,17 +2033,17 @@ class Director:
             and not c.get("is_prop")
             and str(c.get("cast_kind") or "") not in {"brand_mascot", "prop"}
         ]
-        if old_solos > 1 and len(new_humans) < old_solos:
+        if old_char_specs > 1 and len(new_humans) < old_char_specs:
             logger.info(
                 "design_execution_graph rejected cast shrink %s → %s; keeping current graph",
-                old_solos,
+                old_char_specs,
                 len(new_humans),
             )
             meta["director_composed_on_bootstrap"] = True
             meta["director_graph_ack"] = {
                 "ok": True,
                 "source": "kept_prior_cast",
-                "notes": "Rejected redesign that would shrink solo cast.",
+                "notes": "Rejected redesign that would shrink character cast.",
                 "shot_count": len(shots),
             }
             graph["metadata"] = meta
@@ -2103,17 +2081,12 @@ class Director:
                 rmeta[key] = meta.get(key)
         rmeta["script_analysis"] = analysis
         # This replacement is the final workflow. Later storyboard passes stay locked.
-        rmeta["freeze_shot_topology"] = True
+        rmeta["freeze_clip_topology"] = True
         rmeta["director_graph_ack"] = {
             "ok": True,
             "source": source,
             "notes": notes,
             "shot_count": len(shots),
-            "frame_nodes": sum(
-                1
-                for n in (rebuilt.get("nodes") or [])
-                if str(n.get("id") or "").startswith("n_frame_")
-            ),
         }
         rebuilt["metadata"] = rmeta
         carry_user_references(meta, rebuilt)
@@ -2150,16 +2123,16 @@ class Director:
         from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
             collect_prior_clip_prompts,
         )
-        from jiuwenswarm.server.runtime.designer.pipeline.continuity_card import (
+        from jiuwenswarm.server.runtime.designer.pipeline.character_consistency import (
             architecture_clause_from_bible,
             strip_prior_prompt_pastes,
         )
 
         cfg = dict(node.get("config") or {})
         role = _role_key(node)
-        if role not in {"frame", "keyframe", "clip", "character", "character_design", "scene"}:
+        if role not in {"clip", "character", "scene"}:
             return {"patched": False, "notes": "skip_non_media"}
-        shot_index = int(cfg.get("shot_index") or 0)
+        clip_index = int(cfg.get("clip_index") or 0)
         gen = dict(cfg.get("generate") or {})
         prompt = strip_prior_prompt_pastes(str(gen.get("prompt") or cfg.get("prompt") or "").strip())
         notes: list[str] = []
@@ -2170,8 +2143,8 @@ class Director:
 
         setting_id = str(cfg.get("setting_id") or "set_1").strip() or "set_1"
         strategy = str(
-            cfg.get("keyframe_strategy")
-            or (cfg.get("identity_refs") or {}).get("keyframe_strategy")
+            cfg.get("clip_strategy")
+            or (cfg.get("identity_refs") or {}).get("clip_strategy")
             or ""
         ).strip()
         identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
@@ -2180,7 +2153,7 @@ class Director:
         if not spatial:
             meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             spatial = meta.get("spatial_lock") if isinstance(meta.get("spatial_lock"), dict) else {}
-        solo_ids = [
+        character_spec_ids = [
             str(x)
             for x in (
                 identity.get("character_node_ids")
@@ -2189,81 +2162,10 @@ class Director:
             )
             if str(x)
         ]
-        prior_kf_id = str(
-            cfg.get("prior_keyframe_node_id") or identity.get("prior_keyframe_node_id") or ""
+        prior_clip_id = str(
+            cfg.get("prior_clip_node_id") or identity.get("prior_clip_node_id") or ""
         ).strip()
 
-        # Enforce setting-locked compose + scene specs before any media tool call.
-        if role in {"frame", "keyframe"}:
-            strategy = "compose_from_solo_refs"
-            cfg["keyframe_strategy"] = strategy
-            specs = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
-            if not specs:
-                meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-                locks = meta.get("scene_locks") if isinstance(meta.get("scene_locks"), dict) else {}
-                if isinstance(locks.get(setting_id), dict):
-                    specs = dict(locks[setting_id])
-                    cfg["scene_specs"] = specs
-            handoff = str(
-                cfg.get("scene_prompt_handoff_from")
-                or identity.get("scene_prompt_handoff_from")
-                or prior_kf_id
-                or ""
-            ).strip()
-            if "compose" not in prompt.lower() and "STRATEGY=compose_from_solo_refs" not in prompt:
-                prompt = (
-                    prompt
-                    + f"\nLOCK: STRATEGY=compose_from_solo_refs setting={setting_id}. "
-                    f"Compose solo sheets {', '.join(solo_ids) or 'all cast solos'} "
-                    "INTO the locked scene specs — keep architecture across views."
-                )
-                notes.append("enforce_compose_solos_lock")
-                changed = True
-            if specs and "SCENE SPECS" not in prompt:
-                prompt = (
-                    prompt
-                    + f"\nSCENE SPECS: scene={specs.get('scene_name') or specs.get('place')}; lighting={specs.get('lighting')}; "
-                    f"objects={', '.join(str(x) for x in (specs.get('objects') or [])[:6])}; "
-                    f"crowd={specs.get('crowd')}; coherence={specs.get('coherence_rule')}; "
-                    f"active_view={cfg.get('view_key') or specs.get('active_view')}."
-                )
-                notes.append("enforce_scene_specs")
-                changed = True
-            if handoff and "SCENE PROMPT HANDOFF" not in prompt:
-                arch = str(cfg.get("scene_architecture_clause") or "").strip() or architecture_clause_from_bible(specs)
-                prompt = (
-                    prompt
-                    + f"\nSCENE PROMPT HANDOFF from {handoff}: "
-                    + (arch or "reuse scene architecture only")
-                    + " — change only camera view + on_screen cast/actions."
-                )
-                notes.append("enforce_scene_prompt_handoff")
-                changed = True
-            # Architecture only — never paste full master action prompt.
-            arch = str(cfg.get("scene_architecture_clause") or "").strip()
-            if not arch:
-                arch = architecture_clause_from_bible(specs)
-            master_prompt = str(cfg.get("scene_master_prompt") or "").strip()
-            if master_prompt and (
-                "Primary action" in master_prompt
-                or "PRIOR KEYFRAME" in master_prompt
-                or len(master_prompt) > 900
-            ):
-                # Contaminated full prompt — replace with architecture.
-                master_prompt = arch
-                cfg["scene_master_prompt"] = arch[:900] if arch else ""
-                notes.append("slim_contaminated_scene_master_prompt")
-                changed = True
-            if arch and "SCENE ARCHITECTURE LOCK" not in prompt and "MASTER SCENE PROMPT" not in prompt:
-                prompt = prompt + "\n" + arch
-                notes.append("inject_scene_architecture")
-                changed = True
-            elif master_prompt and "SCENE ARCHITECTURE LOCK" not in prompt and "MASTER SCENE PROMPT" not in prompt:
-                # Only allow if it already looks like an architecture clause.
-                if master_prompt.startswith("SCENE ARCHITECTURE") or "scene=" in master_prompt[:80]:
-                    prompt = prompt + "\n" + master_prompt[:900]
-                    notes.append("inject_scene_architecture_from_master")
-                    changed = True
 
         if costume_lock and "Costume lock" not in prompt and "costume lock" not in prompt.lower():
             prompt = prompt + f"\nCostume lock (must keep): {costume_lock}"
@@ -2302,22 +2204,22 @@ class Director:
             changed = True
             cfg["spatial_lock"] = spatial
 
-        if solo_ids and "IDENTITY" not in prompt and "solo" not in prompt.lower():
-            prompt = prompt + f"\nIDENTITY solo sheets (do not invent faces): {', '.join(solo_ids)}"
-            notes.append("inject_identity_solos")
+        if character_spec_ids and "IDENTITY" not in prompt and "character spec" not in prompt.lower():
+            prompt = prompt + f"\nIDENTITY character specs (do not invent faces): {', '.join(character_spec_ids)}"
+            notes.append("inject_identity_character_specs")
             changed = True
 
-        # Prior keyframe: short consistency note only (never paste full prior generate.prompt).
-        prior_kf_action = str(cfg.get("previous_keyframe_action") or "").strip()
-        prior_kf_prompt = str(cfg.get("previous_keyframe_prompt") or "").strip()
-        if not prior_kf_action and shot_index > 1:
-            prev_id = prior_kf_id or f"n_frame_{shot_index - 1}"
+        # Prior clip: short consistency note only (never paste full prior generate.prompt).
+        prior_clip_action = str(cfg.get("previous_clip_action") or "").strip()
+        prior_kf_prompt = str(cfg.get("previous_clip_prompt") or "").strip()
+        if not prior_clip_action and clip_index > 1:
+            prev_id = prior_clip_id or f"n_clip_{clip_index - 1}"
             for n in graph.get("nodes") or []:
                 if str(n.get("id") or "") != prev_id:
                     continue
                 pcfg = n.get("config") if isinstance(n.get("config"), dict) else {}
-                prior_kf_action = str(
-                    pcfg.get("shot_action")
+                prior_clip_action = str(
+                    pcfg.get("clip_action")
                     or pcfg.get("character_action")
                     or ""
                 ).strip()
@@ -2326,42 +2228,42 @@ class Director:
                     or (pcfg.get("generate") or {}).get("prompt")
                     or ""
                 ).strip()
-                if prior_kf_action or prior_kf_prompt:
-                    if prior_kf_action:
-                        cfg["previous_keyframe_action"] = prior_kf_action[:300]
+                if prior_clip_action or prior_kf_prompt:
+                    if prior_clip_action:
+                        cfg["previous_clip_action"] = prior_clip_action[:300]
                     # Soft-dep readiness marker — do not inject full text into prompt.
-                    if prior_kf_prompt and not str(cfg.get("previous_keyframe_prompt") or "").strip():
-                        cfg["previous_keyframe_prompt"] = prior_kf_prompt[:800]
-                    cfg["previous_keyframe_node_id"] = prev_id
-                    notes.append("pull_prior_keyframe_action")
+                    if prior_kf_prompt and not str(cfg.get("previous_clip_prompt") or "").strip():
+                        cfg["previous_clip_prompt"] = prior_kf_prompt[:800]
+                    cfg["previous_clip_node_id"] = prev_id
+                    notes.append("pull_prior_clip_action")
                     changed = True
                 break
         if (
-            (prior_kf_action or prior_kf_prompt)
-            and "PREVIOUS KEYFRAME HAD" not in prompt
-            and "PRIOR KEYFRAME PROMPT" not in prompt
+            (prior_clip_action or prior_kf_prompt)
+            and "PREVIOUS CLIP HAD" not in prompt
+            and "PRIOR CLIP PROMPT" not in prompt
         ):
             from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
-                keyframe_continuity_note,
+                clip_continuity_note,
             )
 
-            kf_note = keyframe_continuity_note(
-                shot_index=shot_index,
-                this_action=str(cfg.get("shot_action") or cfg.get("character_action") or ""),
+            kf_note = clip_continuity_note(
+                clip_index=clip_index,
+                this_action=str(cfg.get("clip_action") or cfg.get("character_action") or ""),
                 this_camera=str(cfg.get("camera") or ""),
-                prior_action=prior_kf_action or prior_kf_prompt[:220],
-                prior_shot_index=shot_index - 1 if shot_index > 1 else None,
+                prior_action=prior_clip_action or prior_kf_prompt[:220],
+                prior_clip_index=clip_index - 1 if clip_index > 1 else None,
             )
             if kf_note:
                 prompt = prompt + "\n\n" + kf_note
-                notes.append("inject_prior_keyframe_note")
+                notes.append("inject_prior_clip_note")
                 changed = True
 
         already_done = [str(x) for x in (cfg.get("already_done") or []) if str(x)]
         if not already_done:
             analysis = (graph.get("metadata") or {}).get("script_analysis") or {}
-            for s in analysis.get("shots") or []:
-                if isinstance(s, dict) and int(s.get("shot_index") or 0) == shot_index:
+            for s in analysis.get("clips") or []:
+                if isinstance(s, dict) and int(s.get("clip_index") or 0) == clip_index:
                     already_done = [str(x) for x in (s.get("already_done") or []) if str(x)]
                     cfg["already_done"] = already_done
                     break
@@ -2391,7 +2293,7 @@ class Director:
             notes.append("inject_occupancy")
             changed = True
         # Reject/rewrite when prompt names cast outside config on_screen.
-        if role in {"frame", "keyframe", "clip"} and config_on_screen:
+        if role in {"clip"} and config_on_screen:
             analysis_cast = (
                 (graph.get("metadata") or {}).get("script_analysis") or {}
             )
@@ -2420,30 +2322,30 @@ class Director:
                 )
                 notes.append(f"reject_offscreen_in_prompt:{','.join(leaked[:6])}")
                 changed = True
-            # Keep solo_ids aligned to on_screen only.
-            solo_by_cid = {
+            # Keep character_spec_ids aligned to on_screen only.
+            spec_by_cid = {
                 str(c): sid
                 for c, sid in zip(
                     cfg.get("character_ids") or [],
-                    solo_ids,
+                    character_spec_ids,
                 )
                 if str(c)
             }
-            # Prefer resolving from graph solos when available.
+            # Prefer resolving from graph character spec nodes when available.
             for other in graph.get("nodes") or []:
                 if not isinstance(other, dict):
                     continue
                 oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-                if _role_key(other) not in {"character", "character_design"}:
+                if _role_key(other) not in {"character", "character"}:
                     continue
                 if oc.get("combined_cast"):
                     continue
                 cids = [str(x) for x in (oc.get("character_ids") or []) if str(x)]
                 if len(cids) == 1:
-                    solo_by_cid[cids[0]] = str(other.get("id") or "")
-            aligned = [solo_by_cid[c] for c in config_on_screen if c in solo_by_cid]
-            if aligned and aligned != solo_ids:
-                solo_ids = aligned
+                    spec_by_cid[cids[0]] = str(other.get("id") or "")
+            aligned = [spec_by_cid[c] for c in config_on_screen if c in spec_by_cid]
+            if aligned and aligned != character_spec_ids:
+                character_spec_ids = aligned
                 cfg["character_node_ids"] = list(aligned)
                 if isinstance(identity, dict):
                     identity = dict(identity)
@@ -2463,8 +2365,8 @@ class Director:
                 if isinstance(meta0.get("script_analysis"), dict)
                 else {}
             )
-            for s in analysis0.get("shots") or []:
-                if isinstance(s, dict) and int(s.get("shot_index") or 0) == shot_index:
+            for s in analysis0.get("clips") or []:
+                if isinstance(s, dict) and int(s.get("clip_index") or 0) == clip_index:
                     crowd = s.get("crowd_lock") if isinstance(s.get("crowd_lock"), dict) else {}
                     if crowd:
                         cfg["crowd_lock"] = crowd
@@ -2511,7 +2413,7 @@ class Director:
 
         # Per-shot staging locks (positioning / action / relationships) — equal to clothing.
         try:
-            from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_staging_lock import (
                 ensure_cfg_staging_locks,
             )
 
@@ -2523,10 +2425,10 @@ class Director:
                 (
                     s
                     for s in (
-                        ((graph.get("metadata") or {}).get("script_analysis") or {}).get("shots")
+                        ((graph.get("metadata") or {}).get("script_analysis") or {}).get("clips")
                         or []
                     )
-                    if isinstance(s, dict) and int(s.get("shot_index") or 0) == shot_index
+                    if isinstance(s, dict) and int(s.get("clip_index") or 0) == clip_index
                 ),
                 None,
             )
@@ -2569,7 +2471,7 @@ class Director:
 
         if aspect:
             cfg["aspect_lock"] = aspect
-            if role in {"frame", "keyframe", "character", "character_design", "scene"}:
+            if role in {"character", "character", "scene"}:
                 img_size = str(aspect.get("image_size") or cfg.get("image_size") or "1K").strip()
                 if str(cfg.get("image_size") or "") != img_size:
                     cfg["image_size"] = img_size
@@ -2639,7 +2541,7 @@ class Director:
         # here instead of silently becoming a model-specific default.
 
         if role == "clip":
-            # Scene specs + setting isolation for shots (same locks as keyframes).
+            # Scene specs + setting isolation for shots (same locks as other clips).
             specs = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
             if not specs:
                 meta_b = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
@@ -2672,7 +2574,7 @@ class Director:
             if setting_id and f"setting={setting_id}" not in prompt.lower() and "Setting lock" not in prompt:
                 prompt = (
                     prompt
-                    + f"\nSETTING LOCK: animate only `{setting_id}` from THIS shot's keyframe; "
+                    + f"\nSETTING LOCK: animate only `{setting_id}` from THIS shot's scene spec; "
                     "do not import architecture or cast from another scene."
                 )
                 notes.append("enforce_setting_lock_shot")
@@ -2712,25 +2614,25 @@ class Director:
                 pass
             # Character consistency / costume still injected below for the leaf;
             # the video API body is rewritten by director_prepare_video_prompt.
-            prior_shots = collect_prior_clip_prompts(graph, shot_index=shot_index)
+            prior_shots = collect_prior_clip_prompts(graph, clip_index=clip_index)
             if not prior_shots and str(cfg.get("previous_clip_action") or "").strip():
                 prior_shots = [
                     {
                         "node_id": str(cfg.get("previous_clip_node_id") or ""),
-                        "shot_index": int(
-                            cfg.get("previous_clip_shot_index") or max(1, shot_index - 1)
+                        "clip_index": int(
+                            cfg.get("previous_clip_clip_index") or max(1, clip_index - 1)
                         ),
-                        "shot_action": str(cfg.get("previous_clip_action") or ""),
+                        "clip_action": str(cfg.get("previous_clip_action") or ""),
                         "speech_line": str(cfg.get("previous_clip_speech") or ""),
                     }
                 ]
             try:
-                from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
-                    apply_continuity_contract,
-                    prompt_violates_continuity,
+                from jiuwenswarm.server.runtime.designer.pipeline.shot_consistency_contract import (
+                    apply_consistency_contract,
+                    prompt_violates_consistency,
                 )
 
-                cfg, prompt, cont_notes = apply_continuity_contract(
+                cfg, prompt, cont_notes = apply_consistency_contract(
                     cfg,
                     graph=graph if isinstance(graph, dict) else {},
                     prompt=prompt,
@@ -2741,7 +2643,7 @@ class Director:
                         changed = True
                 # Hard reject: blank contaminated draft so director rewrite uses
                 # this storyboard row + structured holds (not prior Wan prose).
-                if prompt_violates_continuity(prompt, cfg=cfg):
+                if prompt_violates_consistency(prompt, cfg=cfg):
                     prompt = ""
                     notes.append("reject_continuity_violation_blank_prompt")
                     changed = True
@@ -2751,8 +2653,8 @@ class Director:
             if prior_shots:
                 cfg["prior_storyboard_shots"] = [
                     {
-                        "shot_index": p.get("shot_index"),
-                        "shot_action": p.get("shot_action"),
+                        "clip_index": p.get("clip_index"),
+                        "clip_action": p.get("clip_action"),
                         "speech_line": p.get("speech_line"),
                         "camera": p.get("camera"),
                     }
@@ -2785,14 +2687,14 @@ class Director:
             )
             if "CHARACTER CONSISTENCY" not in prompt:
                 from jiuwenswarm.server.runtime.designer.pipeline.wan_reference_binding import (
-                    clip_uses_scene_card,
+                    clip_uses_scene_specs,
                 )
 
-                if clip_uses_scene_card(cfg, graph if isinstance(graph, dict) else {}):
+                if clip_uses_scene_specs(cfg, graph if isinstance(graph, dict) else {}):
                     prompt = (
                         prompt
                         + "\nCHARACTER CONSISTENCY LOCK: animate ONLY on-screen people from "
-                        "solo sheets bound as character1/character2… (attach order). "
+                        "character specs bound as character1/character2… (attach order). "
                         "The LAST reference is the Scene specs (environment) — not a person. "
                         f"Keep faces, body types, ages, and costumes"
                         f"{(' for ' + cast_who) if cast_who else ''}. "
@@ -2802,10 +2704,10 @@ class Director:
                     prompt = (
                         prompt
                         + "\nCHARACTER CONSISTENCY LOCK: animate ONLY people already in Image 1 "
-                        "(this shot's keyframe); keep the same faces, body types, ages, and "
+                        "(this shot's scene spec); keep the same faces, body types, ages, and "
                         f"costumes{(' for ' + cast_who) if cast_who else ''}. "
                         "Do not recast, redesign wardrobe, or invent a different hero. "
-                        "IDENTITY solo sheets remain the face authority."
+                        "IDENTITY character specs remain the face authority."
                     )
                 notes.append("inject_clip_character_consistency")
                 changed = True
@@ -2824,9 +2726,9 @@ class Director:
                     notes.append("inject_shot_clothing_lock")
                     changed = True
             # Storyboard shot for THIS shot only (avoid full-board mix).
-            action = str(cfg.get("shot_action") or "").strip()
-            if action and f"Primary action for shot {shot_index}" not in prompt:
-                prompt = prompt + f"\nPrimary action for shot {shot_index}: {action}"
+            action = str(cfg.get("clip_action") or "").strip()
+            if action and f"Primary action for shot {clip_index}" not in prompt:
+                prompt = prompt + f"\nPrimary action for shot {clip_index}: {action}"
                 notes.append("inject_this_shot_action")
                 changed = True
 
@@ -2845,8 +2747,8 @@ class Director:
             shot_row = next(
                 (
                     s
-                    for s in (analysis_a.get("shots") or [])
-                    if isinstance(s, dict) and int(s.get("shot_index") or 0) == shot_index
+                    for s in (analysis_a.get("clips") or [])
+                    if isinstance(s, dict) and int(s.get("clip_index") or 0) == clip_index
                 ),
                 {},
             )
@@ -2864,7 +2766,7 @@ class Director:
             )
             # stamp_audio re-copies storyboard speech — re-enforce uniqueness after.
             try:
-                from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
+                from jiuwenswarm.server.runtime.designer.pipeline.shot_consistency_contract import (
                     enforce_speech_uniqueness,
                 )
 
@@ -2949,16 +2851,16 @@ class Director:
                         str(graph.get("description") or meta_tod.get("user_prompt") or ""),
                         str(
                             (cfg.get("scene_specs") or {}).get("scene_name") or (cfg.get("scene_specs") or {}).get("place")
-                            or cfg.get("shot_action")
+                            or cfg.get("clip_action")
                             or ""
                         ),
                     )
                     shot_tod = next(
                         (
                             s.get("time_of_day_lock")
-                            for s in (analysis_tod.get("shots") or [])
+                            for s in (analysis_tod.get("clips") or [])
                             if isinstance(s, dict)
-                            and int(s.get("shot_index") or 0) == shot_index
+                            and int(s.get("clip_index") or 0) == clip_index
                             and isinstance(s.get("time_of_day_lock"), dict)
                         ),
                         None,
@@ -2994,8 +2896,8 @@ class Director:
                 prompt,
                 cfg=cfg,
                 graph=graph if isinstance(graph, dict) else {},
-                shot_index=shot_index,
-                action=str(cfg.get("shot_action") or ""),
+                clip_index=clip_index,
+                action=str(cfg.get("clip_action") or ""),
                 camera=str(cfg.get("camera") or ""),
             )
             if approved != str(prompt or "").strip():
@@ -3019,7 +2921,7 @@ class Director:
 
         # Always stamp Director lock gate; patched=True when prompt text changed.
         # Stills + shots: positive practice prompts only (no LOCK essays on tool body).
-        if role in {"scene", "frame", "keyframe", "character", "character_design"}:
+        if role in {"scene", "character", "character"}:
             meta_l = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             analysis_l = (
                 meta_l.get("script_analysis")
@@ -3031,9 +2933,9 @@ class Director:
                 shot_tod = next(
                     (
                         s.get("time_of_day_lock")
-                        for s in (analysis_l.get("shots") or [])
+                        for s in (analysis_l.get("clips") or [])
                         if isinstance(s, dict)
-                        and int(s.get("shot_index") or 0) == shot_index
+                        and int(s.get("clip_index") or 0) == clip_index
                         and isinstance(s.get("time_of_day_lock"), dict)
                     ),
                     None,
@@ -3051,7 +2953,7 @@ class Director:
 
                     tod = infer_time_of_day_lock(
                         str(graph.get("description") or meta_l.get("user_prompt") or ""),
-                        str((cfg.get("scene_specs") or {}).get("scene_name") or (cfg.get("scene_specs") or {}).get("place") or cfg.get("shot_action") or ""),
+                        str((cfg.get("scene_specs") or {}).get("scene_name") or (cfg.get("scene_specs") or {}).get("place") or cfg.get("clip_action") or ""),
                     )
                 except Exception:  # noqa: BLE001
                     tod = {}
@@ -3115,7 +3017,7 @@ class Director:
         cfg["director_prompt_reviewed"] = True
         cfg["director_lock_gate"] = {
             "setting_id": setting_id,
-            "keyframe_strategy": strategy or cfg.get("keyframe_strategy"),
+            "clip_strategy": strategy or cfg.get("clip_strategy"),
             "costume_lock": bool(costume_lock),
             "spatial_lock": bool(spatial),
             "aspect_lock": bool(aspect),
@@ -3124,8 +3026,8 @@ class Director:
             "image_size": cfg.get("image_size"),
             "video_size": cfg.get("video_size"),
             "video_resolution": cfg.get("video_resolution"),
-            "solo_ids": solo_ids,
-            "prior_keyframe_node_id": prior_kf_id or None,
+            "character_spec_ids": character_spec_ids,
+            "prior_clip_node_id": prior_clip_id or None,
             "language_lock": cfg.get("language_lock") or meta.get("language_lock"),
             "speech_lock": bool(cfg.get("speech_line") or cfg.get("speech_by_character")),
             "bgm_lock": bool(cfg.get("bgm_lock") or meta.get("bgm_lock")),
@@ -3146,7 +3048,7 @@ class Director:
         cfg["generate"] = gen
         # Character/scene leaves read cfg.prompt; keep both in sync after Director gate.
         store_cap = max(6000, int(cfg.get("prompt_char_limit") or 6000))
-        if role in {"character", "character_design", "scene"} or not str(cfg.get("prompt") or "").strip():
+        if role in {"character", "character", "scene"} or not str(cfg.get("prompt") or "").strip():
             cfg["prompt"] = prompt.strip()[:store_cap]
         approved_cap = max(4000, int(cfg.get("prompt_char_limit") or 4000))
         if changed:
@@ -3162,7 +3064,7 @@ class Director:
         return {
             "patched": changed,
             "notes": notes,
-            "shot_index": shot_index,
+            "clip_index": clip_index,
             "lock_gate": cfg.get("director_lock_gate"),
         }
 
@@ -3478,7 +3380,7 @@ class Director:
                         "user_prompt": user_prompt,
                         "brief": brief[:12000],
                         "characters": characters,
-                        "shots": analysis.get("shots"),
+                        "clips": analysis.get("clips"),
                     },
                     ensure_ascii=False,
                 ),
@@ -3557,7 +3459,7 @@ class Director:
         if meta.get("storyboard_reviewed"):
             return dict(meta.get("director_storyboard_ack") or {"ok": True, "skipped": True})
         analysis = dict(meta.get("script_analysis") or {}) if isinstance(meta.get("script_analysis"), dict) else {}
-        shots = list(analysis.get("shots") or [])
+        shots = list(analysis.get("clips") or [])
         user_prompt = str(graph.get("description") or "")
         ack: dict[str, Any] = {
             "ok": True,
@@ -3569,13 +3471,13 @@ class Director:
         leave_markers = ("leave", "leaves", "stood", "stands up", "gets up", "rising")
         left_chars: list[str] = []
         for shot in shots:
-            action = str(shot.get("action") or shot.get("keyframe_prompt") or "").lower()
+            action = str(shot.get("action") or shot.get("clip_prompt") or "").lower()
             if any(m in action for m in leave_markers):
                 left_chars.extend([str(x) for x in (shot.get("character_ids") or [])])
         left_chars = list(dict.fromkeys(left_chars))
         patched: list[str] = []
         for shot in shots:
-            idx = int(shot.get("shot_index") or 0)
+            idx = int(shot.get("clip_index") or 0)
             timeline = str(shot.get("timeline") or "").strip()
             if not timeline:
                 shot["timeline"] = f"{(idx - 1) * 5:.1f}-{idx * 5:.1f}s"
@@ -3616,7 +3518,7 @@ class Director:
                 "speech), per-shot speech_by_character (exact lines for every speaking shot; "
                 "{} only when that shot has no speaker or the user asked for mime or no dialogue), and "
                 "film-wide bgm_lock. Respond JSON only: "
-                '{"ok":true,"shot_fixes":[{"shot_index":1,"action":"...","camera":"...",'
+                '{"ok":true,"shot_fixes":[{"clip_index":1,"action":"...","camera":"...",'
                 '"timeline":"<copy this shot timeline from the approved brief>",'
                 '"continuity_lock":{"forbid":"..."},'
                 '"character_ids":["char_1"],'
@@ -3633,7 +3535,7 @@ class Director:
                         "approved_storyboard": str(
                             meta.get("approved_storyboard") or ""
                         )[:16000],
-                        "shots": shots,
+                        "clips": shots,
                         "brief_hint": meta.get("director_brief_notes") or "",
                     },
                     ensure_ascii=False,
@@ -3652,13 +3554,13 @@ class Director:
                 if not isinstance(fix, dict):
                     continue
                 try:
-                    idx = int(fix.get("shot_index") or 0)
+                    idx = int(fix.get("clip_index") or 0)
                 except (TypeError, ValueError):
                     continue
                 for shot in shots:
-                    if int(shot.get("shot_index") or 0) != idx:
+                    if int(shot.get("clip_index") or 0) != idx:
                         continue
-                    for key in ("action", "camera", "timeline", "keyframe_prompt", "speech_line"):
+                    for key in ("action", "camera", "timeline", "clip_prompt", "speech_line"):
                         if fix.get(key):
                             shot[key] = str(fix[key])[:600]
                     if isinstance(fix.get("continuity_lock"), dict):
@@ -3704,18 +3606,18 @@ class Director:
             ) from exc
 
         from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import apply_shot_scope
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import apply_shot_scope
 
         analysis = ensure_audio_locks_on_analysis(analysis, user_prompt)
         analysis = apply_shot_scope(analysis, user_prompt)
-        shots = list(analysis.get("shots") or shots)
+        shots = list(analysis.get("clips") or shots)
         meta["language_lock"] = str(analysis.get("language_lock") or meta.get("language_lock") or "en")
         if isinstance(analysis.get("bgm_lock"), dict):
             meta["bgm_lock"] = analysis["bgm_lock"]
         patched.append("audio_locks_approved")
 
         if shots:
-            analysis["shots"] = shots
+            analysis["clips"] = shots
             meta["script_analysis"] = analysis
             from jiuwenswarm.server.runtime.designer.smart_graph import (
                 _write_storyboard_markdown,
@@ -3743,14 +3645,14 @@ class Director:
                         cfg["planned_shots"] = shots
                         node["config"] = cfg
                         continue
-                    if role not in {"frame", "clip", "keyframe"}:
+                    if role not in {"clip"}:
                         continue
-                    idx = int(cfg.get("shot_index") or 0)
+                    idx = int(cfg.get("clip_index") or 0)
                     for shot in shots:
-                        if int(shot.get("shot_index") or 0) != idx:
+                        if int(shot.get("clip_index") or 0) != idx:
                             continue
                         if shot.get("action"):
-                            cfg["shot_action"] = str(shot["action"])[:500]
+                            cfg["clip_action"] = str(shot["action"])[:500]
                         if shot.get("camera"):
                             cfg["camera"] = str(shot["camera"])[:120]
                         if shot.get("timeline"):
@@ -3830,18 +3732,18 @@ class Director:
             "(1) each shot's character_ids match that shot's focus subjects, "
             "(2) later shots do not reuse the wrong earlier cast, "
             "(3) enough shots cover every major character and prompt shot, "
-            "(4) brief/storyboard are comprehensive enough for keyframe and shot prompting, "
+            "(4) brief/storyboard are comprehensive enough for clip and shot prompting, "
             "(5) SPATIAL CONSISTENCY: motion + geography — landmarks/layout/light must "
             "match the master scene specs across shot views (edit/ref, not new buildings), "
-            "(6) IDENTITY CONSISTENCY: every frame/shot must reference canonical SOLO character "
-            "sheets (identity_refs.character_node_ids), not reinvent costumes, "
+            "(6) IDENTITY CONSISTENCY: every clip/shot must reference canonical character "
+            "specs (identity_refs.character_node_ids), not reinvent costumes, "
             "(7) GRAPH USEFULNESS: every node must be useful for the final compose shot — "
             "list prune_ids for unused/orphan nodes; after prune the remaining graph must stay "
             "coherent (master scene → shot views → frames → shots → compose). "
             "Respond JSON only: "
             '{"ok":true|false,"issues":["..."],"prune_ids":["n_unused"],'
             '"spatial_lock":{"landmarks":"...","layout":"...","light":"...","static_rule":"..."},'
-            '"shot_fixes":[{"shot_index":1,"character_ids":["char_1"],'
+            '"shot_fixes":[{"clip_index":1,"character_ids":["char_1"],'
             '"action":"...","continuity_lock":{"motion":"...","facing":"...","forbid":"..."},'
             '"costume_lock":"...","camera":"..."}],"notes":"..."}'
         )
@@ -3864,7 +3766,7 @@ class Director:
                         "role": _role_key(n),
                         "character_ids": (n.get("config") or {}).get("character_ids"),
                         "cast_names": (n.get("config") or {}).get("cast_names"),
-                        "shot_action": (n.get("config") or {}).get("shot_action"),
+                        "clip_action": (n.get("config") or {}).get("clip_action"),
                         "camera": (n.get("config") or {}).get("camera"),
                         "continuity_lock": (n.get("config") or {}).get("continuity_lock"),
                         "spatial_lock": (n.get("config") or {}).get("spatial_lock"),
@@ -3906,7 +3808,7 @@ class Director:
         fixes = parsed.get("shot_fixes") if isinstance(parsed.get("shot_fixes"), list) else []
         applied: list[str] = []
         analysis = dict(analysis) if isinstance(analysis, dict) else {}
-        shots = list(analysis.get("shots") or [])
+        shots = list(analysis.get("clips") or [])
         id_to_name = {
             str(c.get("id")): str(c.get("name") or c.get("id"))
             for c in (analysis.get("characters") or [])
@@ -3916,7 +3818,7 @@ class Director:
             if not isinstance(fix, dict):
                 continue
             try:
-                idx = int(fix.get("shot_index") or 0)
+                idx = int(fix.get("clip_index") or 0)
             except (TypeError, ValueError):
                 continue
             if idx < 1:
@@ -3927,19 +3829,19 @@ class Director:
             camera = str(fix.get("camera") or "").strip()
             costume = str(fix.get("costume_lock") or "").strip()
             for shot in shots:
-                if int(shot.get("shot_index") or 0) != idx:
+                if int(shot.get("clip_index") or 0) != idx:
                     continue
                 if cids:
                     shot["character_ids"] = cids
                 if action:
                     shot["action"] = action[:500]
-                    shot["keyframe_prompt"] = action[:600]
+                    shot["clip_prompt"] = action[:600]
                 if lock:
                     shot["continuity_lock"] = {str(k): str(v) for k, v in lock.items()}
                     clause = _continuity_prompt_clause(shot["continuity_lock"])
-                    kf = str(shot.get("keyframe_prompt") or "")
+                    kf = str(shot.get("clip_prompt") or "")
                     if clause and "CONSISTENCY LOCK" not in kf:
-                        shot["keyframe_prompt"] = (kf + clause)[:700]
+                        shot["clip_prompt"] = (kf + clause)[:700]
                 if camera:
                     shot["camera"] = camera[:120]
                 if costume:
@@ -3947,15 +3849,15 @@ class Director:
                 applied.append(f"shot {idx} llm-fix")
             for node in graph.get("nodes") or []:
                 cfg = dict(node.get("config") or {})
-                if _role_key(node) not in {"frame", "clip", "keyframe"}:
+                if _role_key(node) not in {"clip"}:
                     continue
-                if int(cfg.get("shot_index") or 0) != idx:
+                if int(cfg.get("clip_index") or 0) != idx:
                     continue
                 if cids:
                     cfg["character_ids"] = cids
                     cfg["cast_names"] = [id_to_name.get(cid, cid) for cid in cids]
                 if action:
-                    cfg["shot_action"] = action[:500]
+                    cfg["clip_action"] = action[:500]
                 if camera:
                     cfg["camera"] = camera[:120]
                 if costume:
@@ -3963,14 +3865,14 @@ class Director:
                 if lock:
                     cfg["continuity_lock"] = {str(k): str(v) for k, v in lock.items()}
                     gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
-                    prompt = str(gen.get("prompt") or cfg.get("shot_action") or "")
+                    prompt = str(gen.get("prompt") or cfg.get("clip_action") or "")
                     clause = _continuity_prompt_clause(cfg["continuity_lock"])
                     if clause and "CONSISTENCY LOCK" not in prompt:
                         gen["prompt"] = (prompt + clause)[:1200]
                         cfg["generate"] = gen
                 node["config"] = cfg
         if shots:
-            analysis["shots"] = shots
+            analysis["clips"] = shots
             meta = dict(graph.get("metadata") or {})
             meta["script_analysis"] = analysis
             graph["metadata"] = meta
@@ -4004,7 +3906,7 @@ class Director:
                 or str(n.get("id") or "").startswith("n_frame")
                 or str(n.get("id") or "") in {"n_scene", "n_compose", "n_speech", "n_music"}
                 or _role_key(n)
-                in {"clip", "frame", "keyframe", "compose", "speech", "music"}
+                in {"clip", "compose", "speech", "music"}
             )
         }
         from jiuwenswarm.server.runtime.designer.user_references import (
@@ -4074,19 +3976,19 @@ class Director:
         graph["metadata"] = meta
         return ack
 
-    def ack_keyframe_adjustment(
+    def ack_scene_adjustment(
         self, graph: DesignerExecutionGraph, director_notes: list[str]
     ) -> dict[str, Any]:
         ack = {
             "ok": True,
             "director_notes": director_notes[:20],
-            "notes": "Director accepted post-keyframe shot adjustments (once).",
+            "notes": "Director accepted post-scene-specs clip adjustments (once).",
             "rating_modality": str(
                 (graph.get("metadata") or {}).get("rating_modality") or "text_only"
             ),
         }
         meta = dict(graph.get("metadata") or {})
-        meta["director_keyframe_ack"] = ack
+        meta["director_scene_ack"] = ack
         graph["metadata"] = meta
         return ack
 
@@ -4342,7 +4244,7 @@ class Director:
 
             for nid, path in collect_rateable_image_paths(graph, node_states, limit=3):
                 q = (
-                    "Does this image match a usable cinematic reference/keyframe for a short film? "
+                    "Does this image match a usable cinematic reference for a short film? "
                     "Two short sentences; include match/mismatch/clear/blank if relevant."
                 )
                 ans = await inspect_image_for_rating(path, q)
@@ -4456,10 +4358,10 @@ def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
         role = _role_key(node)
-        if role not in {"frame", "clip", "keyframe"}:
+        if role not in {"clip"}:
             continue
-        idx = int(cfg.get("shot_index") or 0) or 1
-        action = str(cfg.get("shot_action") or "").strip()
+        idx = int(cfg.get("clip_index") or 0) or 1
+        action = str(cfg.get("clip_action") or "").strip()
         camera = str(cfg.get("camera") or "").strip() or camera_cycle[(idx - 1) % len(camera_cycle)]
         cfg["camera"] = camera
         if not action:
@@ -4468,7 +4370,7 @@ def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
                 f"Film only the {timeline or f'shot {idx}'} time window. "
                 "Do not restage another window from a new camera angle."
             )
-            cfg["shot_action"] = action
+            cfg["clip_action"] = action
             notes.append(f"{node.get('id')}: filled missing shot_action from time window")
         gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
         prompt = str(gen.get("prompt") or "").strip()
@@ -4495,11 +4397,6 @@ def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
             notes.append(f"{node.get('id')}: appended consistency lock")
         if role == "clip":
             cfg["max_video_calls"] = 1
-            if idx > 1 and not cfg.get("continuity_frame_node_id"):
-                cfg["continuity_frame_node_id"] = f"n_frame_{idx - 1}"
-                notes.append(f"{node.get('id')}: linked consistency from prior keyframe")
-        if role in {"frame", "keyframe"}:
-            cfg["max_image_calls"] = 1
         node["config"] = cfg
     return notes
 
@@ -4529,10 +4426,10 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
     }
     # Refresh analysis shots if present. Do not expand a tight focus into a
     # full-cast keyword match (floods reference images → DashScope fails).
-    for shot in analysis.get("shots") or []:
+    for shot in analysis.get("clips") or []:
         if not isinstance(shot, dict):
             continue
-        blob = f"{shot.get('action') or ''} {shot.get('keyframe_prompt') or ''}"
+        blob = f"{shot.get('action') or ''} {shot.get('clip_prompt') or ''}"
         focus = _focus_character_ids(blob, characters)
         old = [str(x) for x in (shot.get("character_ids") or []) if str(x)]
         if focus and focus != old:
@@ -4540,7 +4437,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
             if old and old_set.issubset(new_set) and len(new_set) > len(old_set):
                 continue
             notes.append(
-                f"analysis shot {shot.get('shot_index')}: "
+                f"analysis shot {shot.get('clip_index')}: "
                 f"{shot.get('character_ids')} -> {focus}"
             )
             shot["character_ids"] = focus
@@ -4550,7 +4447,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
     try:
         from jiuwenswarm.server.runtime.designer.smart_graph import _write_storyboard_markdown
 
-        planned = list(analysis.get("shots") or [])
+        planned = list(analysis.get("clips") or [])
         if planned:
             sb_md = _write_storyboard_markdown(
                 planned,
@@ -4576,9 +4473,9 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
     for node in graph.get("nodes") or []:
         cfg = dict(node.get("config") or {})
         role = _role_key(node)
-        if role not in {"frame", "clip", "keyframe"}:
+        if role not in {"clip"}:
             continue
-        blob = f"{cfg.get('shot_action') or ''} {(cfg.get('generate') or {}).get('prompt') or ''}"
+        blob = f"{cfg.get('clip_action') or ''} {(cfg.get('generate') or {}).get('prompt') or ''}"
         focus = _focus_character_ids(blob, characters)
         if not focus:
             continue
@@ -4591,14 +4488,14 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
             cfg["character_ids"] = focus
             cfg["cast_names"] = [id_to_name.get(cid, cid) for cid in focus]
             notes.append(f"{node.get('id')}: cast focus {old} -> {focus}")
-            # Prefer SOLO identity sheets (one character_id) over combined compose aids.
+            # Prefer SOLO character specs (one character_id) over combined compose aids.
             solo_nodes: list[str] = []
             for cid in focus:
                 for other in graph.get("nodes") or []:
                     if not isinstance(other, dict):
                         continue
                     oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-                    if _role_key(other) != "character_design":
+                    if _role_key(other) != "character":
                         continue
                     if oc.get("combined_cast"):
                         continue
@@ -4616,7 +4513,7 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
                     if not isinstance(other, dict):
                         continue
                     oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-                    if _role_key(other) != "character_design":
+                    if _role_key(other) != "character":
                         continue
                     if oc.get("combined_cast"):
                         continue
@@ -4656,8 +4553,8 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
                 "cast_names": list(cfg.get("cast_names") or []),
                 "costume_lock": costume_lock,
                 "scene_node_id": "n_scene",
-                "prior_keyframe_node_id": cfg.get("prior_keyframe_node_id"),
-                "keyframe_strategy": cfg.get("keyframe_strategy") or "compose_from_solo_refs",
+                "prior_clip_node_id": cfg.get("prior_clip_node_id"),
+                "clip_strategy": cfg.get("clip_strategy") or "compose_from_character_specs",
             }
             cfg["identity_refs"] = identity_refs
             cfg["costume_lock"] = costume_lock
@@ -4671,21 +4568,21 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
     return notes
 
 
-def _ensure_all_solos_precede_keyframes(graph: DesignerExecutionGraph) -> list[str]:
-    """Every identity solo sheet is a data predecessor of every keyframe node.
+def _ensure_all_character_specs_precede_clips(graph: DesignerExecutionGraph) -> list[str]:
+    """Every character spec node is a data predecessor of every clip node.
 
-    Guarantees all character specs finish before any compose/edit keyframe runs.
+    Guarantees all character specs finish before any compose/edit clip runs.
     """
     notes: list[str] = []
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
     by_id = {str(n.get("id") or ""): n for n in nodes if n.get("id")}
-    solo_ids = [
+    character_spec_node_ids = [
         nid
         for nid, node in by_id.items()
-        if _role_key(node) == "character_design"
+        if _role_key(node) == "character"
         and not bool((node.get("config") or {}).get("combined_cast"))
     ]
-    if not solo_ids:
+    if not character_spec_node_ids:
         return notes
     edge_pairs = {
         (str(e.get("source") or ""), str(e.get("target") or ""))
@@ -4693,7 +4590,7 @@ def _ensure_all_solos_precede_keyframes(graph: DesignerExecutionGraph) -> list[s
         if isinstance(e, dict)
     }
     for node in nodes:
-        if _role_key(node) not in {"frame", "keyframe"}:
+        if _role_key(node) not in {"clip"}:
             continue
         fid = str(node.get("id") or "")
         if not fid:
@@ -4701,22 +4598,22 @@ def _ensure_all_solos_precede_keyframes(graph: DesignerExecutionGraph) -> list[s
         cfg = dict(node.get("config") or {})
         inputs = [str(x) for x in (cfg.get("inputs") or []) if str(x)]
         changed = False
-        for sid in solo_ids:
+        for sid in character_spec_node_ids:
             if sid not in inputs:
                 inputs.append(sid)
                 changed = True
             if (sid, fid) not in edge_pairs:
                 graph.setdefault("edges", []).append(
                     {
-                        "id": f"e_solo_{sid}_{fid}",
+                        "id": f"e_char_{sid}_{fid}",
                         "source": sid,
                         "target": fid,
                         "kind": "data",
-                        "label": "identity_solo",
+                        "label": "identity_character_spec",
                     }
                 )
                 edge_pairs.add((sid, fid))
-                notes.append(f"{fid}: solo_gate <- {sid}")
+                notes.append(f"{fid}: character_spec_gate <- {sid}")
                 changed = True
         if changed:
             cfg["inputs"] = list(dict.fromkeys(inputs))
@@ -4725,27 +4622,27 @@ def _ensure_all_solos_precede_keyframes(graph: DesignerExecutionGraph) -> list[s
 
 
 def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
-    """Director gate: solos first; every KF composes; same-setting prompt handoff."""
+    """Director gate: character specs first; every clip composes; same-setting prompt handoff."""
     notes: list[str] = []
-    solo_by_cid: dict[str, str] = {}
+    spec_by_cid: dict[str, str] = {}
     costume_by_cid: dict[str, str] = {}
-    all_solo_ids: list[str] = []
+    all_character_spec_ids: list[str] = []
     for node in graph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        if _role_key(node) != "character_design":
+        if _role_key(node) != "character":
             continue
         if cfg.get("combined_cast"):
             continue
         nid = str(node.get("id") or "")
         if nid:
-            all_solo_ids.append(nid)
+            all_character_spec_ids.append(nid)
         oids = [str(x) for x in (cfg.get("character_ids") or []) if str(x)]
         if not oids and cfg.get("character_id"):
             oids = [str(cfg.get("character_id"))]
         if len(oids) == 1:
-            solo_by_cid[oids[0]] = nid
+            spec_by_cid[oids[0]] = nid
             costume_by_cid[oids[0]] = str(cfg.get("costume_lock") or cfg.get("prompt") or "")[:200]
 
     meta = dict(graph.get("metadata") or {})
@@ -4766,15 +4663,15 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         )
     )
 
-    notes.extend(_ensure_all_solos_precede_keyframes(graph))
+    notes.extend(_ensure_all_character_specs_precede_clips(graph))
 
     frame_nodes = sorted(
         [
             n
             for n in (graph.get("nodes") or [])
-            if isinstance(n, dict) and _role_key(n) in {"frame", "keyframe"}
+            if isinstance(n, dict) and _role_key(n) in {"clip"}
         ],
-        key=lambda n: int((n.get("config") or {}).get("shot_index") or 0),
+        key=lambda n: int((n.get("config") or {}).get("clip_index") or 0),
     )
 
     prev_frame_by_setting: dict[str, str] = {}
@@ -4804,10 +4701,10 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         cfg = dict(node.get("config") or {})
         role = _role_key(node)
         cids = [str(x) for x in (cfg.get("character_ids") or []) if str(x)]
-        solo_nodes = [solo_by_cid[cid] for cid in cids if cid in solo_by_cid]
-        if solo_nodes and list(cfg.get("character_node_ids") or []) != solo_nodes:
-            cfg["character_node_ids"] = solo_nodes
-            notes.append(f"{node.get('id')}: identity_refs -> solo sheets {solo_nodes}")
+        spec_nodes = [spec_by_cid[cid] for cid in cids if cid in spec_by_cid]
+        if spec_nodes and list(cfg.get("character_node_ids") or []) != spec_nodes:
+            cfg["character_node_ids"] = spec_nodes
+            notes.append(f"{node.get('id')}: identity_refs -> character specs {spec_nodes}")
         names = [id_to_name.get(cid, cid) for cid in cids]
         from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
             costume_lock_for_ids,
@@ -4844,18 +4741,18 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
 
         setting_id = str(cfg.get("setting_id") or "set_1").strip() or "set_1"
         cfg["setting_id"] = setting_id
-        strategy = "compose_from_solo_refs"
+        strategy = "compose_from_character_specs"
         is_master = False
         handoff_from = None
-        if assign_strategy and role in {"frame", "keyframe"}:
+        if assign_strategy and role in {"clip"}:
             prior_in_set = prev_frame_by_setting.get(setting_id)
             if prior_in_set:
                 is_master = False
                 handoff_from = scene_master_by_setting.get(setting_id) or prior_in_set
                 cfg["scene_prompt_handoff_from"] = handoff_from
                 cfg["is_scene_master"] = False
-                cfg["scene_master_frame_id"] = handoff_from
-                cfg.pop("prior_keyframe_node_id", None)
+                cfg["scene_master_node_id"] = handoff_from
+                cfg.pop("prior_clip_node_id", None)
                 inputs = list(cfg.get("inputs") or [])
                 if handoff_from and handoff_from not in inputs:
                     inputs.append(handoff_from)
@@ -4866,14 +4763,14 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
                 )
             else:
                 is_master = True
-                cfg.pop("prior_keyframe_node_id", None)
+                cfg.pop("prior_clip_node_id", None)
                 cfg.pop("scene_prompt_handoff_from", None)
                 cfg["is_scene_master"] = True
-                cfg["scene_master_frame_id"] = str(node.get("id") or "")
+                cfg["scene_master_node_id"] = str(node.get("id") or "")
                 notes.append(
                     f"{node.get('id')}: SCENE MASTER compose for setting {setting_id}"
                 )
-            cfg["keyframe_strategy"] = strategy
+            cfg["clip_strategy"] = strategy
             nid = str(node.get("id") or "")
             if is_master and nid:
                 scene_master_by_setting[setting_id] = nid
@@ -4896,7 +4793,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             cfg["spatial_lock"] = dict(spatial_meta)
 
         master_frame = str(
-            cfg.get("scene_master_frame_id")
+            cfg.get("scene_master_node_id")
             or scene_master_by_setting.get(setting_id)
             or ""
         ).strip() or None
@@ -4907,29 +4804,28 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             "costume_lock": costume_lock,
             "scene_node_id": None,
             "master_scene_node_id": None,
-            "scene_master_frame_id": master_frame,
+            "scene_master_node_id": master_frame,
             "is_scene_master": bool(cfg.get("is_scene_master")),
-            "prior_keyframe_node_id": None,
+            "prior_clip_node_id": None,
             "scene_prompt_handoff_from": cfg.get("scene_prompt_handoff_from") or handoff_from,
-            "keyframe_strategy": "compose_from_solo_refs",
+            "clip_strategy": "compose_from_character_specs",
             "setting_id": setting_id,
             "view_key": cfg.get("view_key"),
             "spatial_lock": cfg.get("spatial_lock") if isinstance(cfg.get("spatial_lock"), dict) else None,
             "occupancy": cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else None,
-            "scene_continuity_mode": "scene_card_plus_clip_shots",
+            "scene_consistency_mode": "scene_specs_plus_clips",
             "scene_specs": specs,
-            "all_solo_node_ids": list(all_solo_ids),
+            "all_character_spec_node_ids": list(all_character_spec_ids),
         }
         cfg["identity_refs"] = identity_refs
         if names:
             cfg["cast_names"] = identity_refs["cast_names"]
-        # Sensible LLM-style node names (Brief: … / Scene N: Shot M: …).
+        # Sensible LLM-style node names (Brief: … / Scene N: Clip M: …).
         from jiuwenswarm.server.runtime.designer.node_labels import (
-            derive_shot_name,
+            derive_clip_name,
             derive_story_name,
             label_character,
             label_clip,
-            label_shot,
         )
 
         story_name = derive_story_name(
@@ -4938,45 +4834,39 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             graph_title=str(graph.get("title") or ""),
         )
         scene_n = setting_num.get(setting_id, 1)
-        shot_i = int(cfg.get("shot_index") or 0)
+        shot_i = int(cfg.get("clip_index") or 0)
         # Per-setting shot ordinal from film order.
         shot_n = 0
         for fn in frame_nodes:
             fsid = str((fn.get("config") or {}).get("setting_id") or "set_1").strip() or "set_1"
-            fi = int((fn.get("config") or {}).get("shot_index") or 0)
+            fi = int((fn.get("config") or {}).get("clip_index") or 0)
             if fsid != setting_id:
                 continue
             if fi <= shot_i:
                 shot_n += 1
         shot_n = max(1, shot_n or shot_i or 1)
-        shot_name = derive_shot_name(
+        clip_name = derive_clip_name(
             {
                 "title": cfg.get("shot_title"),
-                "action": cfg.get("shot_action"),
-                "keyframe_prompt": (cfg.get("generate") or {}).get("prompt")
+                "action": cfg.get("clip_action"),
+                "clip_prompt": (cfg.get("generate") or {}).get("prompt")
                 if isinstance(cfg.get("generate"), dict)
                 else "",
             },
             fallback_index=shot_n,
         )
-        if role in {"frame", "keyframe"} and shot_i:
-            label = label_shot(
-                scene_number=scene_n, shot_number=shot_n, shot_name=shot_name
-            )
-            node["label"] = label
-            cfg["agent_name"] = label
-        elif role == "clip" and shot_i:
+        if role == "clip" and shot_i:
             label = label_clip(
-                scene_number=scene_n, clip_number=shot_n, clip_name=shot_name
+                scene_number=scene_n, clip_number=shot_n, clip_name=clip_name
             )
             node["label"] = label
             cfg["agent_name"] = label
         cfg["director_task"] = (
-            f"LOCKS: solo sheets {identity_refs['character_node_ids']} "
-            f"(all solos ready: {all_solo_ids}). Costume lock: {costume_lock}. "
-            f"Strategy=compose_from_solo_refs for setting {setting_id}. "
+            f"LOCKS: character specs {identity_refs['character_node_ids']} "
+            f"(all character specs ready: {all_character_spec_ids}). Costume lock: {costume_lock}. "
+            f"Strategy=compose_from_character_specs for setting {setting_id}. "
             f"Scene master/handoff={master_frame}. "
-            "Respect scene_specs hierarchical views; no empty plates; no cross-setting."
+            "Respect scene_specs hierarchical views; keep scene specs; no cross-setting."
         )
         gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
         prompt = str(gen.get("prompt") or "")
@@ -4987,7 +4877,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
                 f"CLOTHING LOCK: {costume_lock}."
             )
         if "STRATEGY=" not in prompt:
-            lock_bits.append(f"STRATEGY=compose_from_solo_refs setting={setting_id}.")
+            lock_bits.append(f"STRATEGY=compose_from_character_specs setting={setting_id}.")
         if specs and "SCENE SPECS" not in prompt:
             lock_bits.append(
                 f"SCENE SPECS: scene={specs.get('scene_name') or specs.get('place')}; lighting={specs.get('lighting')}; "
@@ -5048,7 +4938,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             cfg["agent_name"] = node["label"]
             node["config"] = cfg
             continue
-        if role != "character_design":
+        if role != "character":
             continue
         char_i += 1
         name = str(
@@ -5061,7 +4951,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         cfg["agent_name"] = label
         node["config"] = cfg
 
-    meta["scene_continuity_mode"] = "scene_card_plus_clip_shots"
+    meta["scene_consistency_mode"] = "scene_specs_plus_clips"
     meta["scene_masters"] = dict(scene_master_by_setting)
     meta["scene_locks"] = dict(scene_locks)
     graph["metadata"] = meta

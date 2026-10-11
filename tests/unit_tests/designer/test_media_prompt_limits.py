@@ -56,10 +56,22 @@ def test_resolves_wan_and_seedance(monkeypatch) -> None:
         resolve_prompt_limit,
     )
 
-    monkeypatch.delenv("VIDEO_GEN_PROMPT_MAX_CHARS", raising=False)
-    wan = resolve_prompt_limit("video", model="wan2.2-i2v", provider="dashscope")
+    for key in (
+        "VIDEO_GEN_PROMPT_MAX_CHARS",
+        "VIDEO_PROMPT_MAX_CHARS",
+        "VIDEO_GEN_API_BASE",
+        "VIDEO_GEN_PROTOCOL",
+        "VIDEO_GEN_MODEL_NAME",
+        "VIDEO_GEN_PROVIDER",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    wan = resolve_prompt_limit(
+        "video", model="wan2.2-i2v", provider="dashscope", api_base=""
+    )
     assert wan.known and wan.max_chars == 20000
-    seed = resolve_prompt_limit("video", model="seedance-2.5", provider="bytedance")
+    seed = resolve_prompt_limit(
+        "video", model="seedance-2.5", provider="bytedance", api_base=""
+    )
     assert seed.known and seed.max_chars == 10000
 
 

@@ -32,9 +32,9 @@ async def test_script_analysis_prompt_develops_sparse_requests(
                             ),
                         }
                     ],
-                    "shots": [
+                    "clips": [
                         {
-                            "shot_index": 1,
+                            "clip_index": 1,
                             "action": "A mysterious gift arrives beneath the tree.",
                             "camera": "wide",
                             "on_screen": ["char_1"],
@@ -44,7 +44,7 @@ async def test_script_analysis_prompt_develops_sparse_requests(
                         }
                     ],
                     "target_duration_sec": 30,
-                    "target_shot_count": 4,
+                    "target_clip_count": 4,
                 }
             ),
         }
@@ -90,7 +90,7 @@ async def test_director_brief_prompt_requires_visible_story_and_script_plan(
             "script_analysis": {
                 "characters": [{"id": "char_1", "name": "Celebrant"}],
                 "scenes": [{"id": "set_1", "name": "Living room"}],
-                "shots": [{"shot_index": 1, "action": "A gift arrives."}],
+                "clips": [{"clip_index": 1, "action": "A gift arrives."}],
             }
         },
     }
@@ -140,7 +140,7 @@ async def test_brief_review_preserves_approved_enrichment(
             ),
             "script_analysis": {
                 "characters": [{"id": "char_1", "name": "Celebrant"}],
-                "shots": [{"shot_index": 1, "action": "A gift arrives."}],
+                "clips": [{"clip_index": 1, "action": "A gift arrives."}],
             },
         },
     }
@@ -160,7 +160,7 @@ async def test_director_storyboard_materializes_enriched_speech_into_clip_config
     captured: dict[str, str] = {}
     shots = [
         {
-            "shot_index": 1,
+            "clip_index": 1,
             "timeline": "0-7s",
             "camera": "wide / slow push",
             "action": "A wrapped product lands beneath the tree as the family notices.",
@@ -173,7 +173,7 @@ async def test_director_storyboard_materializes_enriched_speech_into_clip_config
             "speech_line": "",
         },
         {
-            "shot_index": 2,
+            "clip_index": 2,
             "timeline": "7-14s",
             "camera": "medium / dolly",
             "action": "The celebrant unwraps the product and reveals its key feature.",
@@ -186,7 +186,7 @@ async def test_director_storyboard_materializes_enriched_speech_into_clip_config
             "speech_line": "This brings everyone together.",
         },
         {
-            "shot_index": 3,
+            "clip_index": 3,
             "timeline": "14-22s",
             "camera": "close-up / static",
             "action": "The product triggers a warm shared-memory display.",
@@ -199,7 +199,7 @@ async def test_director_storyboard_materializes_enriched_speech_into_clip_config
             "speech_line": "",
         },
         {
-            "shot_index": 4,
+            "clip_index": 4,
             "timeline": "22-30s",
             "camera": "wide / crane out",
             "action": "The family celebrates around the product for the final payoff.",
@@ -226,7 +226,7 @@ async def test_director_storyboard_materializes_enriched_speech_into_clip_config
                             "description": "red sweater; dark trousers; black boots",
                         }
                     ],
-                    "shots": shots,
+                    "clips": shots,
                     "language_lock": "en",
                     "include_speech": True,
                     "include_music": True,
@@ -248,7 +248,7 @@ async def test_director_storyboard_materializes_enriched_speech_into_clip_config
             {"id": "n_storyboard", "config": {"role": "storyboard"}},
             {
                 "id": "n_clip_2",
-                "config": {"role": "clip", "shot_index": 2},
+                "config": {"role": "clip", "clip_index": 2},
             },
         ],
         "metadata": {
@@ -260,7 +260,7 @@ async def test_director_storyboard_materializes_enriched_speech_into_clip_config
                 "source": "llm",
                 "characters": [{"id": "char_1", "name": "Celebrant"}],
                 "scenes": [{"id": "set_1", "name": "Living room"}],
-                "shots": [shots[0]],
+                "clips": [shots[0]],
                 "audio": {},
             },
         },
@@ -274,7 +274,7 @@ async def test_director_storyboard_materializes_enriched_speech_into_clip_config
     assert "speech_by_character and speech_line" in system
     assert "later clips can speak them" in system
     analysis = graph["metadata"]["script_analysis"]
-    assert len(analysis["shots"]) == 4
+    assert len(analysis["clips"]) == 4
     assert graph["nodes"][1]["config"]["speech_line"] == (
         "char_1: This brings everyone together."
     )

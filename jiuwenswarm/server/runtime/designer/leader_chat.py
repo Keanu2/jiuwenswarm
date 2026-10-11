@@ -24,7 +24,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     apply_graph_patch,
     infer_pipeline_from_id,
     node_pipeline,
-    node_shot_index,
+    node_clip_index,
     utc_now_ms,
 )
 
@@ -63,7 +63,7 @@ _VIDEO_HINT = re.compile(r"(视频|镜头|clip|video)", re.I)
 
 _LEADER_SYSTEM = """You are the invisible Designer Leader. Reply with a JSON object only.
 Canvas node type and config.role must be one of: text, table, image, video, audio.
-Character/Scene/Keyframe/Clip/Film are pipelines, never node kinds.
+Character/Scene/Clip/Film are pipelines, never node kinds.
 Do not rebuild the whole graph. Patch only what the user asked.
 Do not create audio nodes. Audio generation is not implemented; users add and upload audio on the canvas.
 Do not wire a new node into clip/compose unless the user asked to connect it.
@@ -98,7 +98,7 @@ Rules:
 - Input and output use the SAME config paths. The effective generation prompt is config.prompt;
   update it there. The server also updates the execution prompt from that value. pipeline and
   review_fields_if_action_changes describe the input; do not copy them into the output node.
-- Preserve existing node IDs and unrelated content. Renumber shot_index consecutively after inserting/deleting a shot, including its frame/clip; update each affected timeline, action, camera and prompt.
+- Preserve existing node IDs and unrelated content. Renumber clip_index consecutively after inserting/deleting a shot, including its frame/clip; update each affected timeline, action, camera and prompt.
 - Set edit_documents=true for content edits, including requests that only change prose. A separate document editor will receive the original documents and the applied graph changes. Do not return text replacements in this plan.
 - Resolve the requested object before editing. Singular referents and background collections are distinct: e.g. changing one bicycle does not change other parked bicycles of the same color. Do not globally substitute color/material words in a sentence or record. In thinking, identify specific similar objects/details you will preserve.
 - For deleting an ENTIRE SHOT, put an existing clip/frame ID in remove_shot_ids. Use the
@@ -126,13 +126,13 @@ _ACTION_DEPENDENT_FIELDS = (
 )
 
 _LEADER_CONFIG_FIELDS = {
-    "prompt", "shot_index", "shot_action", "camera", "timeline", "shot_title",
+    "prompt", "clip_index", "clip_action", "camera", "timeline", "shot_title",
     "character_id", "character_ids", "setting_id", "on_screen", "offscreen",
     "cast_actions", "scene_specs", "speech_line", "continuity_lock",
     "blocking", "start_state", "end_state", "pose_holds", "spatial_lock",
     "costume_lock", "relationship_lock", "director_task",
     "inputs", "character_node_ids", "scene_node_id", "identity_refs",
-    "continuity_clip_node_id", "previous_clip_node_id", "continuity_frame_node_id",
+    "continuity_clip_node_id", "previous_clip_node_id",
 }
 
 
@@ -287,7 +287,7 @@ def _merge_prompt_updates(graph: DesignerExecutionGraph, plan: dict[str, Any]) -
         node_id = update.get("node_id")
         if node_id not in existing and not any(n.get("id") == node_id for n in upserts):
             raise DesignerGraphValidationError(f"Unknown prompt update node: {node_id}")
-        config = {key: update[key] for key in ("prompt", "shot_index", "shot_action", "camera", "timeline") if key in update}
+        config = {key: update[key] for key in ("prompt", "clip_index", "clip_action", "camera", "timeline") if key in update}
         upserts.append({"id": node_id, "config": config})
     merged: dict[str, Any] = {}
     supplied: dict[str, set[str]] = {}
@@ -310,7 +310,7 @@ def _merge_prompt_updates(graph: DesignerExecutionGraph, plan: dict[str, Any]) -
         old_cfg = existing.get(node_id, {}).get("config") or {}
         cfg = node["config"]
         required = set()
-        if cfg.get("shot_action") != old_cfg.get("shot_action"):
+        if cfg.get("clip_action") != old_cfg.get("clip_action"):
             required.update(_action_review_fields(old_cfg))
         if node_pipeline(node) == "scene" and any(
             cfg.get(key) != old_cfg.get(key) for key in ("prompt", "scene_specs")
@@ -325,7 +325,7 @@ def _merge_prompt_updates(graph: DesignerExecutionGraph, plan: dict[str, Any]) -
 
 def _shot_removal_patch(graph: DesignerExecutionGraph, patch: dict[str, Any], shot_ids: list[str]) -> dict[str, Any]:
     """Expand explicit whole-shot targets using the original stable identities."""
-    shots = {node["id"]: node_shot_index(node) for node in graph["nodes"]
+    shots = {node["id"]: node_clip_index(node) for node in graph["nodes"]
              if node_pipeline(node) in {"frame", "clip"}}
     unknown = set(shot_ids) - shots.keys()
     if unknown:
@@ -414,10 +414,10 @@ async def _llm_leader_plan(
         "user_canvas_edits": list(meta.get("user_canvas_edits") or [])[-20:],
         "description": graph.get("description", ""),
         "documents": [{"node_id": doc.node_id, "pipeline": doc.pipeline, "text": doc.text} for doc in documents.values()],
-        "shots": [
+        "clips": [
             {"index": index, "node_ids": [node["id"] for node in graph["nodes"]
-                                        if node_pipeline(node) in {"frame", "clip"} and node_shot_index(node) == index]}
-            for index in sorted({node_shot_index(node) for node in graph["nodes"]
+                                        if node_pipeline(node) in {"frame", "clip"} and node_clip_index(node) == index]}
+            for index in sorted({node_clip_index(node) for node in graph["nodes"]
                                  if node_pipeline(node) in {"frame", "clip"}})
         ],
         "nodes": [_leader_node_context(node) for node in graph["nodes"]],

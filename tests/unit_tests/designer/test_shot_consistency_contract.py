@@ -12,8 +12,8 @@ def _two_clip_graph() -> dict:
                 "config": {
                     "role": "clip",
                     "setting_id": "set_a",
-                    "shot_index": 1,
-                    "shot_action": "Alex turns to look at the calendar",
+                    "clip_index": 1,
+                    "clip_action": "Alex turns to look at the calendar",
                     "speech_line": "Oh no, it's Valentine's Day!",
                     "camera": "medium shot",
                     "on_screen": ["char_alex"],
@@ -24,8 +24,8 @@ def _two_clip_graph() -> dict:
                 "config": {
                     "role": "clip",
                     "setting_id": "set_a",
-                    "shot_index": 2,
-                    "shot_action": "Alex walks to the window",
+                    "clip_index": 2,
+                    "clip_action": "Alex walks to the window",
                     "speech_line": "Oh no, it's Valentine's Day!",
                     "camera": "tracking shot",
                     "on_screen": ["char_alex"],
@@ -41,7 +41,7 @@ def test_agent_prior_story_block_has_no_raw_wan_dump() -> None:
     )
 
     cfg = {
-        "previous_clip_shot_index": 1,
+        "previous_clip_clip_index": 1,
         "previous_clip_action": "Alex turns to look at the calendar",
         "previous_clip_speech": "Oh no!",
         "previous_clip_wan_prompt": (
@@ -51,7 +51,7 @@ def test_agent_prior_story_block_has_no_raw_wan_dump() -> None:
         "already_done": ["shot 1 already filmed: Alex turns to look at the calendar"],
         "pose_holds": ["Already past: Alex turns to look at the calendar."],
         "forbidden_speech": ["Oh no!"],
-        "shot_action": "Alex walks to the window",
+        "clip_action": "Alex walks to the window",
         "speech_line": "",
     }
     block = agent_prior_story_block(cfg)
@@ -62,14 +62,14 @@ def test_agent_prior_story_block_has_no_raw_wan_dump() -> None:
 
 
 def test_enforce_speech_uniqueness_clears_duplicate() -> None:
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
+    from jiuwenswarm.server.runtime.designer.pipeline.shot_consistency_contract import (
         enforce_speech_uniqueness,
-        merge_storyboard_continuity,
+        merge_storyboard_consistency,
     )
 
     graph = _two_clip_graph()
     cfg = dict(graph["nodes"][1]["config"])
-    out, notes = merge_storyboard_continuity(cfg, graph=graph)
+    out, notes = merge_storyboard_consistency(cfg, graph=graph)
     assert "cleared_duplicate_speech" in notes or not str(out.get("speech_line") or "").strip()
     assert not str(out.get("speech_line") or "").strip()
     assert out.get("forbidden_speech")
@@ -86,12 +86,12 @@ def test_enforce_speech_uniqueness_clears_duplicate() -> None:
 
 
 def test_prompt_violates_restated_speech_and_prior_action() -> None:
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
-        prompt_violates_continuity,
+    from jiuwenswarm.server.runtime.designer.pipeline.shot_consistency_contract import (
+        prompt_violates_consistency,
     )
 
     cfg = {
-        "shot_action": "Alex walks to the window",
+        "clip_action": "Alex walks to the window",
         "previous_clip_action": "Alex turns to look at the calendar",
         "already_done": ["shot 1 already filmed: Alex turns to look at the calendar"],
         "forbidden_speech": ["Oh no, it's Valentine's Day!"],
@@ -100,7 +100,7 @@ def test_prompt_violates_restated_speech_and_prior_action() -> None:
     bad = (
         'Alex turns to look at the calendar. Alex says: "Oh no, it\'s Valentine\'s Day!"'
     )
-    reasons = prompt_violates_continuity(bad, cfg=cfg)
+    reasons = prompt_violates_consistency(bad, cfg=cfg)
     assert reasons
     assert (
         "restates_forbidden_speech" in reasons
@@ -109,17 +109,17 @@ def test_prompt_violates_restated_speech_and_prior_action() -> None:
     )
 
     good = "Alex walks to the window and looks outside quietly."
-    assert not prompt_violates_continuity(good, cfg=cfg)
+    assert not prompt_violates_consistency(good, cfg=cfg)
 
 
 def test_cross_setting_does_not_carry_speech() -> None:
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
-        merge_storyboard_continuity,
+    from jiuwenswarm.server.runtime.designer.pipeline.shot_consistency_contract import (
+        merge_storyboard_consistency,
     )
 
     graph = _two_clip_graph()
     graph["nodes"][1]["config"]["setting_id"] = "set_b"
     cfg = dict(graph["nodes"][1]["config"])
-    out, _notes = merge_storyboard_continuity(cfg, graph=graph)
+    out, _notes = merge_storyboard_consistency(cfg, graph=graph)
     # Different setting: speech uniqueness should not clear from set_a.
     assert str(out.get("speech_line") or "") == "Oh no, it's Valentine's Day!"

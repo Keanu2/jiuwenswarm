@@ -246,7 +246,7 @@ def stamp_axis_locks(analysis: dict[str, Any]) -> dict[str, Any]:
     """Heuristic 180-degree + occupancy + landmark floor on analysis (mutates copy)."""
     out = analysis if isinstance(analysis, dict) else {}
     characters = [c for c in (out.get("characters") or []) if isinstance(c, dict)]
-    shots = [s for s in (out.get("shots") or []) if isinstance(s, dict)]
+    shots = [s for s in (out.get("clips") or []) if isinstance(s, dict)]
     by_id = {str(c.get("id")): c for c in characters if c.get("id")}
 
     for ch in characters:
@@ -314,7 +314,7 @@ def stamp_axis_locks(analysis: dict[str, Any]) -> dict[str, Any]:
             "rule": (
                 "OCCUPANCY: must_appear / on_screen are drawn; offscreen stay out of frame; "
                 "cast from other scenes (must_not_appear) never appear. Same setting_id keeps "
-                "architecture from the compose keyframe; only camera + cast_actions change."
+                "architecture from the compose scene spec; only camera + cast_actions change."
             ),
         }
         already_gone.update(exiting_now)
@@ -358,7 +358,7 @@ def stamp_axis_locks(analysis: dict[str, Any]) -> dict[str, Any]:
         ),
     }
     out["characters"] = characters
-    out["shots"] = shots
+    out["clips"] = shots
     return out
 
 
@@ -426,7 +426,7 @@ def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | N
         )
     bits.append(
         "OCCLUSION: a partly hidden person is still the same identity "
-        "(sex/age/hair/wardrobe) as the solo sheet — never recast."
+        "(sex/age/hair/wardrobe) as the character specs — never recast."
     )
     tod = (
         shot.get("time_of_day_lock")
@@ -448,7 +448,7 @@ def apply_aspect_to_node_config(cfg: dict[str, Any], aspect: dict[str, Any] | No
     if not isinstance(cfg, dict) or not isinstance(aspect, dict):
         return
     role = str(cfg.get("role") or "")
-    if role in {"character", "character_design", "scene", "frame", "keyframe"}:
+    if role in {"character", "character", "scene"}:
         if aspect.get("image_size"):
             cfg["image_size"] = aspect["image_size"]
     if role == "clip":
@@ -490,8 +490,8 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
         except Exception:  # noqa: BLE001
             style = {}
     shots = {
-        int(s.get("shot_index") or 0): s
-        for s in (analysis.get("shots") or [])
+        int(s.get("clip_index") or 0): s
+        for s in (analysis.get("clips") or [])
         if isinstance(s, dict)
     }
     clause_global = format_axis_clause({}, analysis)
@@ -506,22 +506,19 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
             or ""
         ).lower()
         # Normalize role aliases used by graph builders.
-        if "frame" in role or "keyframe" in role:
-            cfg.setdefault("role", "keyframe" if "keyframe" in role else "frame")
-            role = str(cfg.get("role") or role)
-        elif "clip" in role or role == "video":
+        if "clip" in role or role == "video":
             cfg.setdefault("role", "clip")
             role = "clip"
         elif "character" in role:
-            cfg.setdefault("role", "character_design")
-            role = "character_design"
+            cfg.setdefault("role", "character")
+            role = "character"
         elif "scene" in role:
             cfg.setdefault("role", "scene")
             role = "scene"
         apply_aspect_to_node_config(cfg, aspect)
-        idx = int(cfg.get("shot_index") or 0)
+        idx = int(cfg.get("clip_index") or 0)
         clause = format_axis_clause(shots.get(idx), analysis) if idx else clause_global
-        if role in {"scene", "frame", "keyframe", "clip", "character", "character_design"} and clause:
+        if role in {"scene", "clip", "character", "character"} and clause:
             gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             prev = str(gen.get("prompt") or cfg.get("prompt") or "")
             needs = (
@@ -531,7 +528,7 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
             )
             if needs and ("ASPECT LOCK" not in prev or "STYLE LOCK" not in prev):
                 stamped = (prev + "\n" + clause).strip()[:6000]
-                if role in {"frame", "keyframe", "clip"}:
+                if role in {"clip"}:
                     gen["prompt"] = stamped
                     cfg["generate"] = gen
                 else:
@@ -555,7 +552,7 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
         if tod_node:
             cfg["time_of_day_lock"] = tod_node
             bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else None
-            if bible is not None and role in {"scene", "clip", "frame", "keyframe"}:
+            if bible is not None and role in {"scene", "clip"}:
                 bible = dict(bible)
                 bible.setdefault("time_of_day", tod_node.get("time_of_day"))
                 if tod_node.get("lighting") and (

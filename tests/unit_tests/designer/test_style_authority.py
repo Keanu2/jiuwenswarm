@@ -20,16 +20,16 @@ def _analysis() -> dict:
                 "description": "柔和晨光下的森林空地",
             }
         ],
-        "shots": [
+        "clips": [
             {
-                "shot_index": 1,
+                "clip_index": 1,
                 "title": "挥手",
                 "action": "小熊在森林空地挥手。",
                 "camera": "medium / eye-level",
                 "character_ids": ["char_1"],
                 "on_screen": ["char_1"],
                 "setting_id": "set_1",
-                "keyframe_prompt": "小熊在森林空地挥手。",
+                "clip_prompt": "小熊在森林空地挥手。",
                 "timeline": "0-5s",
             }
         ],
@@ -80,7 +80,7 @@ def test_chinese_cartoon_style_survives_graph_and_media_prompts(
     media_nodes = [
         node
         for node in graph["nodes"]
-        if node_pipeline(node) in {"character_design", "scene", "clip"}
+        if node_pipeline(node) in {"character", "scene", "clip"}
     ]
     assert media_nodes
     for node in media_nodes:
@@ -93,7 +93,7 @@ def test_chinese_cartoon_style_survives_graph_and_media_prompts(
     video_prompt = compose_practice_prompt(
         cfg=clip["config"],
         graph=graph,
-        action=str(clip["config"].get("shot_action") or ""),
+        action=str(clip["config"].get("clip_action") or ""),
     )
     assert "cartoonish animated feature look" in video_prompt
     assert "photoreal" not in video_prompt.lower()
@@ -162,7 +162,7 @@ def test_leaf_prompt_helpers_do_not_invent_a_medium() -> None:
         cfg={
             "cast_names": ["Alex"],
             "on_screen": ["Alex"],
-            "shot_action": "Alex waves.",
+            "clip_action": "Alex waves.",
             "scene_specs": {"scene_name": "a park"},
         },
         graph={},
@@ -180,7 +180,7 @@ def test_generated_storyboard_visibly_carries_style_authority() -> None:
     )
 
     markdown = _write_storyboard_markdown(
-        _analysis()["shots"],
+        _analysis()["clips"],
         _analysis()["characters"],
         style_lock={
             "look": "cartoonish animation with flat shapes and rounded forms",

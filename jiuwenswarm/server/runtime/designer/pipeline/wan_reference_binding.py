@@ -1,11 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Wan reference-mode binding labels (scene specs + character solos).
+"""Wan reference-mode binding labels (scene specs + character specs).
 
 Alibaba Wan R2V maps ``reference_urls`` order → ``character1``, ``character2``, …
 (each person ref = one subject). Every clip, including the first of a setting:
 
-  On-screen solo sheets first (character1…), then the scene specs last
-  as the room. No composed still and no keyframe as first_frame.
+  On-screen character spec sheets first (character1…), then the scene specs last
+  as the room. No composed still and no scene-spec as first_frame.
   Prior-clip last frames are not attached.
 """
 
@@ -102,7 +102,7 @@ def build_wan_reference_binding(
 
     lines = [
         "[REFERENCE MODE — character sheets, then empty scene]:",
-        "Attach order: on-screen solo sheets as character1, character2, … "
+        "Attach order: on-screen character specs as character1, character2, … "
         "then the scene specs last as the room.",
         "The scene specs has no people. Place character1… into that room for this shot. "
         "Match faces, wardrobe, and the film STYLE LOCK.",
@@ -121,7 +121,7 @@ def build_wan_reference_binding(
             action = str(cast_actions.get(char_ids[i - 1]) or "").strip()
         who = f"character{i}"
         bit = (
-            f"- reference {ref_i} / {who}: {name} — solo identity sheet "
+            f"- reference {ref_i} / {who}: {name} — character specs "
             "(face + wardrobe). One instance."
         )
         if action:
@@ -131,7 +131,7 @@ def build_wan_reference_binding(
 
     if not names:
         lines.append(
-            f"- reference {ref_i}+ : on-screen character solo sheets "
+            f"- reference {ref_i}+ : on-screen character character specs "
             "(bind as character1, character2, …)."
         )
         ref_i += 1
@@ -163,7 +163,7 @@ def clip_is_first_of_setting(
     cfg: dict[str, Any] | None,
     graph: dict[str, Any] | None = None,
 ) -> bool:
-    """True for the first clip of this setting_id (scene specs + solos)."""
+    """True for the first clip of this setting_id (scene specs + character specs)."""
     cfg = cfg if isinstance(cfg, dict) else {}
     graph = graph if isinstance(graph, dict) else {}
     flag = cfg.get("first_of_setting")
@@ -172,14 +172,14 @@ def clip_is_first_of_setting(
     if flag is False:
         return False
     meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-    scene_card = (
-        str(meta.get("scene_continuity_mode") or "") == "scene_card_plus_clip_shots"
+    has_scene_specs = (
+        str(meta.get("scene_consistency_mode") or "") == "scene_specs_plus_clips"
         or bool(str(cfg.get("scene_node_id") or "").strip())
     )
-    if not scene_card:
+    if not has_scene_specs:
         return False
     sid = str(cfg.get("setting_id") or "").strip()
-    idx = int(cfg.get("shot_index") or 0) or 0
+    idx = int(cfg.get("clip_index") or 0) or 0
     earlier_same = False
     any_earlier_clip = False
     for node in graph.get("nodes") or []:
@@ -188,7 +188,7 @@ def clip_is_first_of_setting(
         oc = node.get("config") if isinstance(node.get("config"), dict) else {}
         if str(oc.get("role") or "") != "clip":
             continue
-        other_idx = int(oc.get("shot_index") or 0) or 0
+        other_idx = int(oc.get("clip_index") or 0) or 0
         if other_idx <= 0 or (idx and other_idx >= idx):
             continue
         any_earlier_clip = True
@@ -205,17 +205,17 @@ def clip_is_first_of_setting(
     return True
 
 
-def clip_uses_scene_card(cfg: dict[str, Any] | None, graph: dict[str, Any] | None = None) -> bool:
+def clip_uses_scene_specs(cfg: dict[str, Any] | None, graph: dict[str, Any] | None = None) -> bool:
     cfg = cfg if isinstance(cfg, dict) else {}
     graph = graph if isinstance(graph, dict) else {}
     meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-    if str(meta.get("scene_continuity_mode") or "") == "scene_card_plus_clip_shots":
+    if str(meta.get("scene_consistency_mode") or "") == "scene_specs_plus_clips":
         return True
     strategy = str(
-        cfg.get("keyframe_strategy")
+        cfg.get("clip_strategy")
         or ((cfg.get("identity_refs") or {}) if isinstance(cfg.get("identity_refs"), dict) else {}).get(
-            "keyframe_strategy"
+            "clip_strategy"
         )
         or ""
     )
-    return strategy == "clip_from_scene_and_solos" or bool(str(cfg.get("scene_node_id") or "").strip())
+    return strategy == "clip_from_scene_and_character_specs" or bool(str(cfg.get("scene_node_id") or "").strip())

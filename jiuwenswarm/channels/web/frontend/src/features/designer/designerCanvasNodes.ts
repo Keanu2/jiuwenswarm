@@ -310,18 +310,16 @@ const AUTO_LAYOUT_RANK: Record<string, number> = {
   brief: 0,
   text: 1,
   character: 2,
-  character_design: 2,
   scene: 3,
   storyboard: 4,
   table: 5,
-  frame: 6,
-  image: 7,
-  clip: 8,
-  video: 9,
-  compose: 10,
-  music: 11,
-  speech: 12,
-  audio: 13,
+  image: 6,
+  clip: 7,
+  video: 8,
+  compose: 9,
+  music: 10,
+  speech: 11,
+  audio: 12,
 };
 
 function nodeLayoutKey(node: DesignerGraphNode): string {
@@ -338,21 +336,17 @@ function nodeColumnKind(node: DesignerGraphNode): 'scene' | 'clip' | null {
   const pipeline = String(config.pipeline ?? '');
   const role = String(config.role ?? '');
   const label = String(node.label ?? '');
-  const shotLabel = /\b(clip|shot)\b/i.test(label);
+  const clipLabel = /\bclip\b/i.test(label);
   if (
     pipeline === 'clip' ||
-    pipeline === 'shot' ||
     role === 'clip' ||
-    role === 'shot' ||
-    (node.type === 'video' && shotLabel && pipeline !== 'compose' && role !== 'compose')
+    (node.type === 'video' && clipLabel && pipeline !== 'compose' && role !== 'compose')
   ) {
     return 'clip';
   }
   if (
     pipeline === 'scene' ||
-    pipeline === 'frame' ||
     role === 'scene' ||
-    role === 'frame' ||
     (node.type === 'image' && /scene/i.test(label) && !/clip/i.test(label))
   ) {
     return 'scene';
@@ -364,8 +358,8 @@ function sortAutoLayoutColumn(members: DesignerGraphNode[]): DesignerGraphNode[]
   return [...members].sort((left, right) => {
     const rank = nodeAutoLayoutRank(left) - nodeAutoLayoutRank(right);
     if (rank !== 0) return rank;
-    const shot = nodeShotIndex(left) - nodeShotIndex(right);
-    if (shot !== 0) return shot;
+    const clipOrder = nodeClipIndex(left) - nodeClipIndex(right);
+    if (clipOrder !== 0) return clipOrder;
     const y = (left.layout?.y ?? 0) - (right.layout?.y ?? 0);
     if (y !== 0) return y;
     return left.id.localeCompare(right.id);
@@ -442,8 +436,8 @@ function autoLayoutColumnPlan(
   return columns;
 }
 
-function nodeShotIndex(node: DesignerGraphNode): number {
-  const raw = (node.config as Record<string, unknown> | undefined)?.shot_index;
+function nodeClipIndex(node: DesignerGraphNode): number {
+  const raw = (node.config as Record<string, unknown> | undefined)?.clip_index;
   const value = typeof raw === 'number' ? raw : Number(raw);
   if (Number.isFinite(value) && value > 0) return value;
   const fromLabel = String(node.label ?? '').match(/(\d+)\s*$/);
@@ -497,7 +491,7 @@ function assignAutoLayoutLayers(
   return layer;
 }
 
-/** Layer nodes left-to-right by connections; Scene/Frame share one column, Clips the next. */
+/** Layer nodes left-to-right by connections; Scene specs share one column, Clips the next. */
 export function autoLayoutDesignerNodes(
   nodes: DesignerGraphNode[],
   edges: DesignerGraphEdge[] = [],

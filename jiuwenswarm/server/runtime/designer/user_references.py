@@ -21,7 +21,7 @@ from urllib.parse import unquote, urlparse
 
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CHARACTER,
     NODE_ROLE_CLIP,
     NODE_ROLE_SCENE,
     NODE_TYPE_AUDIO,
@@ -255,7 +255,7 @@ async def classify_reference_images(
         "request, and judge what the user wants done with that exact still. "
         "DEFAULT for every role is use-as-is: binding='verbatim'. Only choose "
         "binding='condition' when the user clearly asks to restyle, redraw, "
-        "decompose, or generate a new identity sheet / set plate from the still. "
+        "decompose, or generate a new character specs / set plate from the still. "
         "Output ONLY one JSON object: "
         '{"reference_reads":[{"slot":1,"subject":"object","roles":["product_hero"],'
         '"binding":"verbatim","video_binding":"multi_ref_story",'
@@ -265,7 +265,7 @@ async def classify_reference_images(
         "One read per image; slot numbers follow the roster order. "
         "roles is a list. Use character_identity for a person who will perform, "
         "scene_source for a place, product_hero for an item that must stay as itself, "
-        "still_motion_source only when this image is the opening keyframe for a "
+        "still_motion_source only when this image is the opening still for a "
         "true animate-this-frame job, style_source when only the medium and palette "
         "should be copied. subject remains character, scene, or object for compatibility.\n"
         "Decide these fields from the user's intent and wording in ANY language — "
@@ -274,15 +274,15 @@ async def classify_reference_images(
         "'multi_ref_story' (DEFAULT) for advertise / act / film / dinner / celebrate / "
         "product shot / story with identity or set references — clips use R2V and keep "
         "all uploads + generated cast/set as reference images. "
-        "'animate_keyframe' ONLY when the user wants that still itself animated as the "
+        "'animate_still' ONLY when the user wants that still itself animated as the "
         "video's opening frame (e.g. animate this picture / painting / photo as the clip). "
-        "Story verbs alone must NOT select animate_keyframe.\n"
+        "Story verbs alone must NOT select animate_still (use multi_ref_story instead).\n"
         "- binding: prefer 'verbatim' (file itself is the reference card; no "
         "image-gen pass). Use 'condition' ONLY for an explicit restyle / redraw / "
         "new sheet / new plate request. Advertise / act / dinner / product shot while "
         "keeping the look = character_identity|scene_source|product_hero + verbatim + "
         "video_binding=multi_ref_story. Add still_motion_source only together with "
-        "video_binding=animate_keyframe when the still IS the frame to animate.\n"
+        "video_binding=animate_still when the still IS the image to animate.\n"
         "- set_lock: true when this still must stay the exact environment geometry of "
         "the film (the user is staging the story or ad inside this place). For a "
         "scene used as-is this is usually true.\n"
@@ -543,7 +543,7 @@ def attach_user_reference_nodes(graph: dict[str, Any]) -> list[str]:
     cast_nodes = [
         n
         for n in nodes
-        if node_pipeline(n) == NODE_ROLE_CHARACTER_DESIGN and str(n.get("id") or "")
+        if node_pipeline(n) == NODE_ROLE_CHARACTER and str(n.get("id") or "")
     ]
     scene_nodes = [
         n

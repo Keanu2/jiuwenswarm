@@ -3,7 +3,7 @@
 
 Clothing locks alone can dominate prompts and wash out where people stand, how they
 pose, who they look at, and who talks to whom. These locks are shot-local (and
-setting-aware) and must be injected into BOTH keyframes and clips at equal
+setting-aware) and must be injected into BOTH clip specs and clips at equal
 priority with clothing — without changing soft clip concurrency or hard compose waits.
 """
 
@@ -92,7 +92,7 @@ def build_positioning_lock(
     if existing and len(bits) < 2:
         return existing[:720]
     if not bits:
-        action = str(shot.get("action") or shot.get("shot_action") or "")[:160]
+        action = str(shot.get("action") or shot.get("clip_action") or "")[:160]
         return (
             f"place cast for this shot only"
             + (f" — {action}" if action else "")
@@ -127,7 +127,7 @@ def build_action_lock(
         if doing:
             bits.append(f"{_who(cid, names)}: {doing[:180]}")
     beat = str(
-        shot.get("shot_action")
+        shot.get("clip_action")
         or shot.get("character_action")
         or shot.get("action")
         or ""
@@ -255,7 +255,7 @@ def build_relationship_lock(
     return "; ".join(uniq)[:720]
 
 
-def enrich_shot_staging(
+def enrich_clip_staging(
     shot: dict[str, Any],
     characters: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
@@ -288,13 +288,13 @@ def staging_lock_clause(
     positioning_lock: str = "",
     action_lock: str = "",
     relationship_lock: str = "",
-    shot_index: int = 0,
+    clip_index: int = 0,
     setting_id: str = "",
     for_clip: bool = False,
 ) -> str:
-    """Prompt block for keyframes and clips."""
-    where = "this clip (match storyboard contact poses — solos are identity only)" if for_clip else "this keyframe"
-    scope = f"shot {shot_index}" if shot_index else "this shot"
+    """Prompt block for clip specs and clips."""
+    where = "this clip (match storyboard contact poses — character specs are identity only)" if for_clip else "this clip spec"
+    scope = f"shot {clip_index}" if clip_index else "this shot"
     if setting_id:
         scope += f" / setting `{setting_id}`"
     lines = [f"STAGING LOCK ({where}, {scope}):"]
@@ -338,7 +338,7 @@ def ensure_cfg_staging_locks(
         "occupancy",
         "camera",
         "view_key",
-        "shot_action",
+        "clip_action",
         "action",
         "speech_line",
         "speaker",
@@ -357,7 +357,7 @@ def ensure_cfg_staging_locks(
     ):
         if key not in source and cfg.get(key) is not None:
             source[key] = cfg.get(key)
-    locks = enrich_shot_staging(source, characters)
+    locks = enrich_clip_staging(source, characters)
     cfg["positioning_lock"] = locks["positioning_lock"]
     cfg["action_lock"] = locks["action_lock"]
     cfg["relationship_lock"] = locks["relationship_lock"]
@@ -369,7 +369,7 @@ def ensure_cfg_staging_locks(
         positioning_lock=locks["positioning_lock"],
         action_lock=locks["action_lock"],
         relationship_lock=locks["relationship_lock"],
-        shot_index=int(cfg.get("shot_index") or shot.get("shot_index") or 0),
+        clip_index=int(cfg.get("clip_index") or shot.get("clip_index") or 0),
         setting_id=str(cfg.get("setting_id") or shot.get("setting_id") or ""),
         for_clip=str(cfg.get("role") or "").lower() == "clip",
     )
@@ -381,7 +381,7 @@ def staging_locks_from_cfg(cfg: dict[str, Any] | None, *, for_clip: bool = False
         positioning_lock=str(cfg.get("positioning_lock") or ""),
         action_lock=str(cfg.get("action_lock") or ""),
         relationship_lock=str(cfg.get("relationship_lock") or ""),
-        shot_index=int(cfg.get("shot_index") or 0),
+        clip_index=int(cfg.get("clip_index") or 0),
         setting_id=str(cfg.get("setting_id") or ""),
         for_clip=for_clip,
     )

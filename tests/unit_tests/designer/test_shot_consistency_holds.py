@@ -17,7 +17,7 @@ def test_extract_finished_events_catches_turn_and_crowd_exit() -> None:
         text,
         characters=[{"id": "char_alex", "name": "Alex"}],
         on_screen=["char_alex"],
-        shot_index=1,
+        clip_index=1,
     )
     kinds = {e["type"] for e in events}
     assert "beat" in kinds
@@ -32,9 +32,9 @@ def test_pose_holds_and_crowd_state_stamped() -> None:
     prior = {
         "role": "clip",
         "setting_id": "set_office",
-        "shot_index": 1,
+        "clip_index": 1,
         "on_screen": ["char_alex"],
-        "shot_action": "Alex turns to look at the calendar",
+        "clip_action": "Alex turns to look at the calendar",
         "last_wan_prompt": (
             "Alex from Image 1 turns from his desk to look at the wall calendar. "
             "Colleagues leave through the door."
@@ -43,9 +43,9 @@ def test_pose_holds_and_crowd_state_stamped() -> None:
     nxt = {
         "role": "clip",
         "setting_id": "set_office",
-        "shot_index": 2,
+        "clip_index": 2,
         "on_screen": ["char_alex"],
-        "shot_action": "Alex says he forgot Valentine's Day",
+        "clip_action": "Alex says he forgot Valentine's Day",
         "speech_line": "Oh no, it's Valentine's Day!",
         "crowd_lock": {"present": False, "density": "none", "rule": "office cleared"},
     }
@@ -53,8 +53,8 @@ def test_pose_holds_and_crowd_state_stamped() -> None:
         nxt,
         from_cfg=prior,
         from_prompt=prior["last_wan_prompt"],
-        from_action=prior["shot_action"],
-        from_shot_index=1,
+        from_action=prior["clip_action"],
+        from_clip_index=1,
         characters=[{"id": "char_alex", "name": "Alex"}],
     )
     assert out.get("pose_holds") or out.get("beat_done")
@@ -72,7 +72,7 @@ def test_compose_weaves_holds_and_crowd_not_lock_banner() -> None:
     cfg = {
         "cast_names": ["Alex"],
         "on_screen": ["Alex"],
-        "shot_action": "Alex speaks about Valentine's Day.",
+        "clip_action": "Alex speaks about Valentine's Day.",
         "speech_line": "Oh no!",
         "costume_lock": "Alex: grey shirt",
         "previous_clip_wan_prompt": "Alex turns to look at the calendar.",
@@ -87,7 +87,7 @@ def test_compose_weaves_holds_and_crowd_not_lock_banner() -> None:
         "scene_specs": {"scene_name": "open office", "lighting": "evening light"},
         "style_lock": {"look": "photoreal cinematic"},
     }
-    text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["shot_action"])
+    text = compose_practice_prompt(cfg=cfg, graph={}, action=cfg["clip_action"])
     low = text.lower()
     assert "already" in low or "looking at the wall calendar" in low
     assert "clear of the earlier crowd" in low or "already left" in low

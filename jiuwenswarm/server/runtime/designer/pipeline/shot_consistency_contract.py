@@ -25,7 +25,7 @@ def _clip_nodes(graph: dict[str, Any] | None) -> list[dict[str, Any]]:
             nodes.append(n)
     return sorted(
         nodes,
-        key=lambda n: int((n.get("config") or {}).get("shot_index") or 0) or 99,
+        key=lambda n: int((n.get("config") or {}).get("clip_index") or 0) or 99,
     )
 
 
@@ -40,10 +40,10 @@ def _short(text: str, *, limit: int = 180) -> str:
     return raw[:limit]
 
 
-def collect_same_setting_prior_beats(
+def collect_same_setting_prior_clips(
     graph: dict[str, Any] | None,
     *,
-    shot_index: int,
+    clip_index: int,
     setting_id: str = "",
     this_cfg: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -52,15 +52,15 @@ def collect_same_setting_prior_beats(
     sid = str(setting_id or (this_cfg or {}).get("setting_id") or "").strip()
     for node in _clip_nodes(graph):
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        idx = int(cfg.get("shot_index") or 0) or 0
-        if idx <= 0 or idx >= int(shot_index or 0):
+        idx = int(cfg.get("clip_index") or 0) or 0
+        if idx <= 0 or idx >= int(clip_index or 0):
             continue
         if sid and str(cfg.get("setting_id") or "").strip() != sid:
             continue
         if this_cfg is not None and sid and not _same_setting(cfg, this_cfg):
             continue
         action = str(
-            cfg.get("shot_action") or cfg.get("character_action") or cfg.get("action") or ""
+            cfg.get("clip_action") or cfg.get("character_action") or cfg.get("action") or ""
         ).strip()
         speech = str(cfg.get("speech_line") or "").strip()
         by_char = cfg.get("speech_by_character") if isinstance(cfg.get("speech_by_character"), dict) else {}
@@ -72,8 +72,8 @@ def collect_same_setting_prior_beats(
         out.append(
             {
                 "node_id": str(node.get("id") or ""),
-                "shot_index": idx,
-                "shot_action": _short(action, limit=220),
+                "clip_index": idx,
+                "clip_action": _short(action, limit=220),
                 "speech_line": _short(speech, limit=200),
                 "camera": _short(camera, limit=120),
                 "setting_id": str(cfg.get("setting_id") or "").strip(),
@@ -88,8 +88,8 @@ def storyboard_already_done_notes(priors: list[dict[str, Any]] | None) -> list[s
     for p in priors or []:
         if not isinstance(p, dict):
             continue
-        idx = int(p.get("shot_index") or 0) or "?"
-        action = _short(str(p.get("shot_action") or ""), limit=120)
+        idx = int(p.get("clip_index") or 0) or "?"
+        action = _short(str(p.get("clip_action") or ""), limit=120)
         speech = _short(str(p.get("speech_line") or ""), limit=100)
         if action:
             note = f"shot {idx} already filmed: {action}"
@@ -140,10 +140,10 @@ def enforce_speech_uniqueness(
 
     out = dict(cfg or {})
     notes: list[str] = []
-    shot_index = int(out.get("shot_index") or 0) or 0
-    priors = collect_same_setting_prior_beats(
+    clip_index = int(out.get("clip_index") or 0) or 0
+    priors = collect_same_setting_prior_clips(
         graph,
-        shot_index=shot_index,
+        clip_index=clip_index,
         setting_id=str(out.get("setting_id") or ""),
         this_cfg=out,
     )
@@ -190,7 +190,7 @@ def enforce_speech_uniqueness(
     return out, notes
 
 
-def merge_storyboard_continuity(
+def merge_storyboard_consistency(
     cfg: dict[str, Any],
     *,
     graph: dict[str, Any] | None = None,
@@ -198,12 +198,12 @@ def merge_storyboard_continuity(
     """Stamp already_done / forbidden_speech / end_state from prior storyboard rows."""
     out = dict(cfg or {})
     notes: list[str] = []
-    shot_index = int(out.get("shot_index") or 0) or 0
-    if shot_index <= 0:
+    clip_index = int(out.get("clip_index") or 0) or 0
+    if clip_index <= 0:
         return out, notes
-    priors = collect_same_setting_prior_beats(
+    priors = collect_same_setting_prior_clips(
         graph,
-        shot_index=shot_index,
+        clip_index=clip_index,
         setting_id=str(out.get("setting_id") or ""),
         this_cfg=out,
     )
@@ -222,10 +222,10 @@ def merge_storyboard_continuity(
     beat_done = [str(x).strip() for x in (out.get("beat_done") or []) if str(x).strip()]
     holds = [str(x).strip() for x in (out.get("pose_holds") or []) if str(x).strip()]
     for p in priors:
-        action = _short(str(p.get("shot_action") or ""), limit=140)
+        action = _short(str(p.get("clip_action") or ""), limit=140)
         if not action:
             continue
-        beat_note = f"shot {p.get('shot_index')}: {action}"
+        beat_note = f"shot {p.get('clip_index')}: {action}"
         if beat_note not in beat_done:
             beat_done.append(beat_note)
         # The previous action stays on already_done for the continuity check.
@@ -235,18 +235,18 @@ def merge_storyboard_continuity(
 
     latest = priors[-1]
     out["previous_clip_action"] = str(
-        out.get("previous_clip_action") or latest.get("shot_action") or ""
+        out.get("previous_clip_action") or latest.get("clip_action") or ""
     )[:220]
     if latest.get("speech_line") and not str(out.get("previous_clip_speech") or "").strip():
         out["previous_clip_speech"] = str(latest.get("speech_line"))[:200]
-    if not out.get("previous_clip_shot_index"):
-        out["previous_clip_shot_index"] = int(latest.get("shot_index") or 0)
+    if not out.get("previous_clip_clip_index"):
+        out["previous_clip_clip_index"] = int(latest.get("clip_index") or 0)
     out["previous_clip_handoff_ready"] = True
 
     # Structured end_state for leaf/Director — never the full prior Wan body.
     out["end_state"] = {
-        "from_shot_index": int(latest.get("shot_index") or 0),
-        "action_done": _short(str(latest.get("shot_action") or ""), limit=160),
+        "from_clip_index": int(latest.get("clip_index") or 0),
+        "action_done": _short(str(latest.get("clip_action") or ""), limit=160),
         "speech_done": _short(str(latest.get("speech_line") or ""), limit=120),
         "camera_was": _short(str(latest.get("camera") or ""), limit=100),
         "already_done": list(out.get("already_done") or [])[:12],
@@ -269,7 +269,7 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
     cfg = cfg if isinstance(cfg, dict) else {}
     lines: list[str] = []
     end = cfg.get("end_state") if isinstance(cfg.get("end_state"), dict) else {}
-    idx = end.get("from_shot_index") or cfg.get("previous_clip_shot_index") or ""
+    idx = end.get("from_clip_index") or cfg.get("previous_clip_clip_index") or ""
     action_done = str(
         end.get("action_done") or cfg.get("previous_clip_action") or ""
     ).strip()
@@ -329,7 +329,7 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
             "- Forbidden speech (do not restate): "
             + "; ".join(f'"{x[:80]}"' for x in forbid[:4])
         )
-    this_action = str(cfg.get("shot_action") or "").strip()
+    this_action = str(cfg.get("clip_action") or "").strip()
     this_cam = str(cfg.get("camera") or "").strip()
     this_speech = str(cfg.get("speech_line") or "").strip()
     if this_action or this_cam or this_speech:
@@ -378,7 +378,7 @@ def prompt_restates_forbidden_speech(prompt: str, cfg: dict[str, Any] | None) ->
     return False
 
 
-def prompt_violates_continuity(
+def prompt_violates_consistency(
     prompt: str,
     *,
     cfg: dict[str, Any] | None = None,
@@ -396,12 +396,12 @@ def prompt_violates_continuity(
 
     prior_bias = False
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
             overlap_ratio,
         )
 
         prior_act = str(cfg.get("previous_clip_action") or "").strip()
-        this_act = str(cfg.get("shot_action") or "").strip()
+        this_act = str(cfg.get("clip_action") or "").strip()
         if (
             prior_act
             and this_act
@@ -424,7 +424,7 @@ def prompt_violates_continuity(
         if agent_replays_finished_events(
             body,
             already_done=[str(x) for x in (cfg.get("already_done") or []) if str(x)],
-            this_action=str(cfg.get("shot_action") or ""),
+            this_action=str(cfg.get("clip_action") or ""),
         ) and (speech_bad or prior_bias):
             reasons.append("replays_finished_events")
     except Exception:  # noqa: BLE001
@@ -432,15 +432,15 @@ def prompt_violates_continuity(
     return reasons
 
 
-def apply_continuity_contract(
+def apply_consistency_contract(
     cfg: dict[str, Any],
     *,
     graph: dict[str, Any] | None = None,
     prompt: str = "",
 ) -> tuple[dict[str, Any], str, list[str]]:
     """Full Director gate: merge storyboard continuity, scrub speech, flag prompt."""
-    out, notes = merge_storyboard_continuity(cfg, graph=graph)
-    reasons = prompt_violates_continuity(prompt, cfg=out) if prompt else []
+    out, notes = merge_storyboard_consistency(cfg, graph=graph)
+    reasons = prompt_violates_consistency(prompt, cfg=out) if prompt else []
     if reasons:
         notes.extend(f"reject:{r}" for r in reasons)
     return out, prompt, notes

@@ -75,7 +75,7 @@ VIDEO_STYLES: dict[str, dict[str, Any]] = {
         "min_shots": 0,
         "summary": (
             "Standard storyboarded cinematic short: beat-driven shots, "
-            "continuity locks, R2V shots from on-screen solos + scene specs."
+            "continuity locks, R2V clips from on-screen character specs + scene specs."
         ),
         "cues": (),
     },
@@ -203,7 +203,7 @@ def video_style_min_shots(style_id: str) -> int:
         return 0
 
 
-def enforce_style_shot_floor(
+def enforce_style_clip_floor(
     analysis: dict[str, Any], prompt: str = "", *, style_id: str = ""
 ) -> dict[str, Any]:
     """Grow a below-floor shot list to the style's canonical beats.
@@ -219,14 +219,14 @@ def enforce_style_shot_floor(
         return data
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-            _explicit_shot_count_from_prompt,
+            _explicit_clip_count_from_prompt,
         )
 
-        if int(_explicit_shot_count_from_prompt(text) or 0) >= 1:
+        if int(_explicit_clip_count_from_prompt(text) or 0) >= 1:
             return data
     except Exception:  # noqa: BLE001
         pass
-    shots = [dict(s) for s in (data.get("shots") or []) if isinstance(s, dict)]
+    shots = [dict(s) for s in (data.get("clips") or []) if isinstance(s, dict)]
     if len(shots) >= floor:
         return data
     base = shots[0] if shots else {}
@@ -237,21 +237,21 @@ def enforce_style_shot_floor(
     for i, (title, camera, intent) in enumerate(FINAL_FRAME_REVERSE_BEATS[:floor], start=1):
         existing = shots[i - 1] if i <= len(shots) else {}
         shot = dict(existing)
-        shot["shot_index"] = i
+        shot["clip_index"] = i
         shot.setdefault("title", title)
         shot["camera"] = str(existing.get("camera") or camera)[:120]
         shot["action"] = str(existing.get("action") or f"{intent} 画面内容：{keep}")[:800]
-        shot["keyframe_prompt"] = str(
-            existing.get("keyframe_prompt") or shot["action"]
+        shot["clip_prompt"] = str(
+            existing.get("clip_prompt") or shot["action"]
         )[:1200]
         shot.setdefault("character_ids", list(cast))
         shot.setdefault("on_screen", list(cast))
         shot.setdefault("setting_id", setting)
         shot["style_beat_role"] = title
         grown.append(shot)
-    data["shots"] = grown
-    data["target_shot_count"] = len(grown)
-    data["style_shot_floor"] = floor
+    data["clips"] = grown
+    data["target_clip_count"] = len(grown)
+    data["style_clip_floor"] = floor
     return data
 
 
@@ -273,7 +273,7 @@ Rules:
 3. Every cut needs a visual carrier (smoke, rain, cloth, feather, light shaft, muzzle flash,
    wipe-by body, rail line, reflection, fog) — never an unmotivated hard cut list.
 4. Rhythm: early speed/impact/travel → mid close-up hits → late decelerate/settle → final 1s freeze.
-5. Last keyframe + last clip beat MUST match the reference composition (pose, framing, light).
+5. Last scene spec + last clip beat MUST match the reference composition (pose, framing, light).
 6. Prompt structure for storyboard/clips: overall intent → action chain → timed beats →
    per-beat (frame content, camera move, cast action, transition motive, emotion) →
    negative prompts → one execution principle.

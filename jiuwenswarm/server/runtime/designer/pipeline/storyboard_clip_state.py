@@ -140,7 +140,7 @@ def _hold_state(state: dict[str, Any], *actions: str) -> dict[str, Any]:
 
 
 def _infer_end_from_shot(shot: dict[str, Any]) -> dict[str, Any]:
-    action = _short(str(shot.get("action") or shot.get("keyframe_prompt") or ""), limit=220)
+    action = _short(str(shot.get("action") or shot.get("clip_prompt") or ""), limit=220)
     result = _short(str(shot.get("irreversible") or ""), limit=160)
     speech = _short(str(shot.get("speech_line") or ""), limit=160)
     exiting = [
@@ -338,7 +338,7 @@ def apply_story_curve(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return shots
 
 
-def ensure_shot_start_end_states(
+def ensure_clip_start_end_states(
     shots: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     """Fill start_state/end_state and chain same-setting start from prior end."""
@@ -350,7 +350,7 @@ def ensure_shot_start_end_states(
             continue
         shot = dict(raw)
         sid = str(shot.get("setting_id") or "set_1").strip() or "set_1"
-        action = str(shot.get("action") or shot.get("keyframe_prompt") or "")
+        action = str(shot.get("action") or shot.get("clip_prompt") or "")
         start = normalize_shot_state(shot.get("start_state"))
         end = normalize_shot_state(shot.get("end_state"))
         if not start:
@@ -393,7 +393,7 @@ def validate_storyboard_state_chain(
     for shot in shots or []:
         if not isinstance(shot, dict):
             continue
-        idx = int(shot.get("shot_index") or 0) or "?"
+        idx = int(shot.get("clip_index") or 0) or "?"
         sid = str(shot.get("setting_id") or "").strip() or "set_1"
         start = normalize_shot_state(shot.get("start_state"))
         end = normalize_shot_state(shot.get("end_state"))
@@ -482,7 +482,7 @@ def start_end_story_lines(cfg: dict[str, Any] | None) -> list[str]:
     """Opening placement from start_state. Finished action poses stay off the video body."""
     cfg = cfg if isinstance(cfg, dict) else {}
     lines: list[str] = []
-    action = str(cfg.get("shot_action") or cfg.get("action") or "")
+    action = str(cfg.get("clip_action") or cfg.get("action") or "")
     prior_action = str(cfg.get("previous_clip_action") or "")
     start = normalize_shot_state(cfg.get("start_state"))
     end = normalize_shot_state(cfg.get("end_state"))

@@ -39,13 +39,8 @@ let saveSeq = 0;
 let loadSeq = 0;
 const deletedNodeIds = new Set<string>();
 
-function isShotPipelineNodeId(nodeId: string): boolean {
-  return (
-    nodeId === 'n_frame' ||
-    nodeId === 'n_clip' ||
-    nodeId.startsWith('n_frame_') ||
-    nodeId.startsWith('n_clip_')
-  );
+function isClipPipelineNodeId(nodeId: string): boolean {
+  return nodeId === 'n_clip' || nodeId.startsWith('n_clip_');
 }
 
 function rememberDeletedNodeIds(nodeIds: Iterable<string>): void {
@@ -499,7 +494,7 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
     const removed = new Set(nodeIds.map((id) => String(id || '').trim()).filter(Boolean));
     rememberDeletedNodeIds(removed);
     const selectedNodeId = get().selectedNodeId;
-    const removedShot = [...removed].some(isShotPipelineNodeId);
+    const removedClip = [...removed].some(isClipPipelineNodeId);
     let metadata = graph.metadata;
     for (const node of graph.nodes) {
       if (!removed.has(node.id)) continue;
@@ -519,7 +514,7 @@ export const useDesignerStore = create<DesignerStore>((set, get) => ({
         updated_at: Date.now(),
         metadata: {
           ...metadata,
-          ...(removedShot ? { freeze_shot_topology: true } : {}),
+          ...(removedClip ? { freeze_clip_topology: true } : {}),
         },
       },
       selectedNodeId:

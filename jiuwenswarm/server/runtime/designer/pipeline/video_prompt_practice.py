@@ -131,7 +131,7 @@ def _doing_line(cfg: dict[str, Any], graph: dict[str, Any] | None, action: str) 
     if len(bits) == 1:
         text = bits[0]
         return text if text.endswith(".") else text + "."
-    beat = str(action or cfg.get("shot_action") or cfg.get("character_action") or "").strip()
+    beat = str(action or cfg.get("clip_action") or cfg.get("character_action") or "").strip()
     if not beat or _BAD_DIRECTIVE.search(beat):
         return ""
     return beat if beat.endswith(".") else beat + "."
@@ -544,7 +544,7 @@ def _cast_presence_lines(cfg: dict[str, Any], graph: dict[str, Any] | None, name
     return lines
 
 
-def _scene_bible_lines(cfg: dict[str, Any]) -> list[str]:
+def _scene_specs_lines(cfg: dict[str, Any]) -> list[str]:
     """Positive room details from the scene specs — no lock banner."""
     bible = cfg.get("scene_specs") if isinstance(cfg.get("scene_specs"), dict) else {}
     if not bible:
@@ -605,7 +605,7 @@ def _continuity_story_lines(cfg: dict[str, Any]) -> list[str]:
     """Opening holds from storyboard start_state + crowd + continue cue."""
     lines: list[str] = []
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_clip_state import (
             start_end_story_lines,
         )
 
@@ -638,9 +638,9 @@ def _continuity_story_lines(cfg: dict[str, Any]) -> list[str]:
         except Exception:  # noqa: BLE001
             holds = []
     prior_action = str(cfg.get("previous_clip_action") or "")
-    this_action = str(cfg.get("shot_action") or cfg.get("action") or "")
+    this_action = str(cfg.get("clip_action") or cfg.get("action") or "")
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_clip_state import (
             _is_action_restatement,
         )
     except Exception:  # noqa: BLE001
@@ -769,7 +769,7 @@ def _action_for(token: str, cfg: dict[str, Any], graph: dict[str, Any] | None, f
     if len({u.casefold() for u in unique}) == 1:
         return unique[0]
     # Prefer this character's clause inside a shared "A … while B …" beat.
-    beat = str(fallback or cfg.get("shot_action") or "").strip().rstrip(".")
+    beat = str(fallback or cfg.get("clip_action") or "").strip().rstrip(".")
     if beat and name and " while " in beat.lower():
         for part in re.split(r"(?i)\s+while\s+", beat):
             if name.casefold() in part.casefold():
@@ -979,7 +979,7 @@ def compose_practice_prompt(
         sentences.append(f"{look}.")
 
     text = " ".join(s for s in sentences if s and not _BAD_DIRECTIVE.search(s))
-    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"[ \s]+", " ", text)
     text = re.sub(r"\s+\.", ".", text)
     # Final safety: strip any exited names that leaked via speech/continue text.
     for gone_name in exited_names(cfg, graph):
@@ -1097,7 +1097,7 @@ def narrative_seed_from_user_prompt(prompt: str) -> str:
 def _compose_cfg_for_user_origin(cfg: dict[str, Any], *, camera: str) -> dict[str, Any]:
     """Compose without re-seeding from stale storyboard beats/camera/cast_actions."""
     out = dict(cfg)
-    out["shot_action"] = ""
+    out["clip_action"] = ""
     out["character_action"] = ""
     out["cast_actions"] = {}
     out["camera"] = str(camera or "")
@@ -1166,7 +1166,7 @@ def prompt_respects_practice(
             reasons.append("missing_prior_continue")
     # Toolbar user edits are authoritative for beat fidelity; do not force stale shot_action.
     if not honor_user_origin:
-        action = str(cfg.get("shot_action") or "").strip()
+        action = str(cfg.get("clip_action") or "").strip()
         if action and not _covers_beat(text, action):
             reasons.append("misses_storyboard_beat")
         if action and not _story_leads_prompt(text, action):
@@ -1237,14 +1237,14 @@ def director_prepare_video_prompt(
     *,
     cfg: dict[str, Any] | None,
     graph: dict[str, Any] | None = None,
-    shot_index: int = 0,
+    clip_index: int = 0,
     model: str | None = None,
     action: str = "",
     camera: str = "",
     extra_image_labels: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     """Keep a concise faithful story-form prompt; otherwise rewrite locks into narrative."""
-    del shot_index
+    del clip_index
     cfg = cfg if isinstance(cfg, dict) else {}
     user_text = resolve_user_origin_prompt(cfg, prompt)
     honor_user = bool(user_text)
@@ -1266,11 +1266,11 @@ def director_prepare_video_prompt(
         prompt, cfg=cfg, graph=graph, honor_user_origin=honor_user,
     )
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
-            prompt_violates_continuity,
+        from jiuwenswarm.server.runtime.designer.pipeline.shot_consistency_contract import (
+            prompt_violates_consistency,
         )
 
-        for r in prompt_violates_continuity(prompt, cfg=cfg):
+        for r in prompt_violates_consistency(prompt, cfg=cfg):
             if r not in reasons:
                 reasons.append(r)
     except Exception:  # noqa: BLE001
@@ -1306,7 +1306,7 @@ def director_prepare_video_prompt(
     else:
         mined_action = (
             action
-            or str(cfg.get("shot_action") or "")
+            or str(cfg.get("clip_action") or "")
             or _pull_labeled(prompt, ("primary action", "character action", "storyboard shot", "storyboard beat", "action"))
         )
         move = _pull_labeled(prompt, ("camera move",))
@@ -1338,7 +1338,7 @@ def director_approve_video_prompt(
     *,
     cfg: dict[str, Any] | None,
     graph: dict[str, Any] | None = None,
-    shot_index: int = 0,
+    clip_index: int = 0,
     model: str | None = None,
     action: str = "",
     camera: str = "",
@@ -1369,7 +1369,7 @@ def director_approve_video_prompt(
     else:
         beat = (
             action
-            or str(cfg.get("shot_action") or "")
+            or str(cfg.get("clip_action") or "")
             or _pull_labeled(prompt, ("primary action", "character action", "storyboard shot", "storyboard beat", "action"))
         )
         cam = (
@@ -1381,7 +1381,7 @@ def director_approve_video_prompt(
         prompt,
         cfg=cfg,
         graph=graph,
-        shot_index=shot_index,
+        clip_index=clip_index,
         model=model,
         action=beat,
         camera=cam,

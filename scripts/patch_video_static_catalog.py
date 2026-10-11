@@ -15,9 +15,6 @@ VIDEO_TEMPLATE = [
     "n_brief",
     "n_character",
     "n_storyboard",
-    "n_frame_1",
-    "n_frame_2",
-    "n_frame_3",
     "n_clip_1",
     "n_clip_2",
     "n_clip_3",
@@ -28,12 +25,6 @@ STATIC = [
     ("n_brief", "项目 brief", "text", "Project brief agent", [], ["text"]),
     ("n_character", "角色图", "image", "Character still agent", ["n_brief"], ["image"]),
     ("n_storyboard", "分镜表", "table", "Storyboard table agent", ["n_brief"], ["table"]),
-    ("n_frame_1", "视频片段1首帧", "image", "Shot-1 keyframe agent", ["n_character", "n_storyboard"], ["image"]),
-    ("n_frame_2", "视频片段2首帧", "image", "Shot-2 keyframe agent", ["n_character", "n_storyboard"], ["image"]),
-    ("n_frame_3", "视频片段3首帧", "image", "Shot-3 keyframe agent", ["n_character", "n_storyboard"], ["image"]),
-    ("n_clip_1", "视频片段1", "video", "Shot-1 clip agent", ["n_frame_1"], ["video"]),
-    ("n_clip_2", "视频片段2", "video", "Shot-2 clip agent", ["n_frame_2"], ["video"]),
-    ("n_clip_3", "视频片段3", "video", "Shot-3 clip agent", ["n_frame_3"], ["video"]),
     ("n_final", "最终视频", "video", "Final assembly agent", ["n_clip_1", "n_clip_2", "n_clip_3"], ["video"]),
 ]
 

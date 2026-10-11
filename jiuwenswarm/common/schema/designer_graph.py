@@ -55,21 +55,19 @@ NODE_ROLES: frozenset[str] = frozenset(NODE_TYPES)
 # Internal generation recipes. Not a canvas node kind — MiniMax keeps Character /
 # Storyboard / Clip in Plan docs and filenames, not in node.type.
 PIPELINE_BRIEF = "brief"
-PIPELINE_CHARACTER_DESIGN = "character_design"
+PIPELINE_CHARACTER = "character"
 PIPELINE_SCENE = "scene"
 PIPELINE_STORYBOARD = "storyboard"
-PIPELINE_FRAME = "frame"
 PIPELINE_CLIP = "clip"
 PIPELINE_COMPOSE = "compose"
 PIPELINE_MUSIC = "music"
 PIPELINE_SPEECH = "speech"
 
-# Back-compat aliases used by handlers / tests for pipeline identity.
+# Role aliases used by handlers / tests for pipeline identity.
 NODE_ROLE_BRIEF = PIPELINE_BRIEF
-NODE_ROLE_CHARACTER_DESIGN = PIPELINE_CHARACTER_DESIGN
+NODE_ROLE_CHARACTER = PIPELINE_CHARACTER
 NODE_ROLE_SCENE = PIPELINE_SCENE
 NODE_ROLE_STORYBOARD = PIPELINE_STORYBOARD
-NODE_ROLE_FRAME = PIPELINE_FRAME
 NODE_ROLE_CLIP = PIPELINE_CLIP
 NODE_ROLE_COMPOSE = PIPELINE_COMPOSE
 NODE_ROLE_MUSIC = PIPELINE_MUSIC
@@ -78,10 +76,9 @@ NODE_ROLE_SPEECH = PIPELINE_SPEECH
 PIPELINES: frozenset[str] = frozenset(
     {
         PIPELINE_BRIEF,
-        PIPELINE_CHARACTER_DESIGN,
+        PIPELINE_CHARACTER,
         PIPELINE_SCENE,
         PIPELINE_STORYBOARD,
-        PIPELINE_FRAME,
         PIPELINE_CLIP,
         PIPELINE_COMPOSE,
         PIPELINE_MUSIC,
@@ -91,10 +88,9 @@ PIPELINES: frozenset[str] = frozenset(
 
 PIPELINE_TO_TYPE: dict[str, str] = {
     PIPELINE_BRIEF: NODE_TYPE_TEXT,
-    PIPELINE_CHARACTER_DESIGN: NODE_TYPE_IMAGE,
+    PIPELINE_CHARACTER: NODE_TYPE_IMAGE,
     PIPELINE_SCENE: NODE_TYPE_IMAGE,
     PIPELINE_STORYBOARD: NODE_TYPE_TABLE,
-    PIPELINE_FRAME: NODE_TYPE_IMAGE,
     PIPELINE_CLIP: NODE_TYPE_VIDEO,
     PIPELINE_COMPOSE: NODE_TYPE_VIDEO,
     PIPELINE_MUSIC: NODE_TYPE_AUDIO,
@@ -134,7 +130,7 @@ _LEGACY_PIPELINE_TITLES = frozenset(
     }
 )
 _INDEXED_LABEL_RE = re.compile(
-    r"^(?:关键帧|视频片段|Keyframe|Clip)(?:\s*(\d+))?(?:首帧)?$",
+    r"^(?:关键帧|视频片段|Clip)(?:\s*(\d+))?(?:首帧)?$",
     re.IGNORECASE,
 )
 
@@ -149,20 +145,20 @@ def modality_node_label(node_type: str, index: int = 0) -> str:
     return base
 
 
-def pipeline_node_label(role: str, shot_index: int = 1) -> str:
+def pipeline_node_label(role: str, clip_index: int = 1) -> str:
     """Canvas title for a role or pipeline id — always a modality name."""
-    del shot_index
+    del clip_index
     modality = PIPELINE_TO_TYPE.get(role, role)
     return modality_node_label(modality)
 
 
-def english_pipeline_label(label: str, role: str, shot_index: int = 1) -> str:
+def english_pipeline_label(label: str, role: str, clip_index: int = 1) -> str:
     """Rewrite known pipeline titles to modality names; leave semantic / custom names alone."""
     text = (label or "").strip()
     if not text:
-        desired = pipeline_node_label(role, shot_index)
+        desired = pipeline_node_label(role, clip_index)
         return desired or text
-    # Designer semantic scheme (Brief: … / Character N: … / Scene N: Shot …) must survive.
+    # Designer semantic scheme (Brief: … / Character N: … / Scene N: Clip …) must survive.
     try:
         from jiuwenswarm.server.runtime.designer.node_labels import is_semantic_canvas_label
 
@@ -173,7 +169,7 @@ def english_pipeline_label(label: str, role: str, shot_index: int = 1) -> str:
     # Any label with a descriptive suffix after ":" is author/LLM-owned.
     if ":" in text and not _INDEXED_LABEL_RE.match(text):
         return text
-    desired = pipeline_node_label(role, shot_index)
+    desired = pipeline_node_label(role, clip_index)
     if not desired:
         return text
     if text in _LEGACY_PIPELINE_TITLES or text.casefold() in {
@@ -192,7 +188,7 @@ def infer_pipeline_from_id(node_id: str) -> str:
     if value == "n_brief":
         return PIPELINE_BRIEF
     if value == "n_character" or value.startswith("n_character_"):
-        return PIPELINE_CHARACTER_DESIGN
+        return PIPELINE_CHARACTER
     if value == "n_scene" or value.startswith("n_scene_"):
         return PIPELINE_SCENE
     if value == "n_storyboard":
@@ -203,8 +199,6 @@ def infer_pipeline_from_id(node_id: str) -> str:
         return PIPELINE_SPEECH
     if value == "n_music":
         return PIPELINE_MUSIC
-    if value == "n_frame" or value.startswith("n_frame_"):
-        return PIPELINE_FRAME
     if value == "n_clip" or value.startswith("n_clip_"):
         return PIPELINE_CLIP
     return ""
@@ -262,10 +256,9 @@ DESIGNER_AGENT_GROUP_NAME = "designer"
 
 ROLE_DEFAULT_TEMPLATES: dict[str, str] = {
     PIPELINE_BRIEF: f"{DESIGNER_AGENT_GROUP_NAME}/leader",
-    PIPELINE_CHARACTER_DESIGN: f"{DESIGNER_AGENT_GROUP_NAME}/character",
+    PIPELINE_CHARACTER: f"{DESIGNER_AGENT_GROUP_NAME}/character",
     PIPELINE_SCENE: f"{DESIGNER_AGENT_GROUP_NAME}/scene",
     PIPELINE_STORYBOARD: f"{DESIGNER_AGENT_GROUP_NAME}/storyboard",
-    PIPELINE_FRAME: f"{DESIGNER_AGENT_GROUP_NAME}/frame",
     PIPELINE_CLIP: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
     PIPELINE_COMPOSE: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
     NODE_TYPE_TEXT: f"{DESIGNER_AGENT_GROUP_NAME}/leader",
@@ -396,7 +389,7 @@ class DesignerNodeConfig(TypedDict, total=False):
     edit: dict[str, Any]
     interaction_mode: str
     materials: list[Any]
-    shot_index: int
+    clip_index: int
 
 
 class DesignerGraphPatch(TypedDict, total=False):
@@ -660,16 +653,16 @@ def normalize_node(raw: Any) -> DesignerGraphNode:
     if not str(config.get(CONFIG_KEY_ROLE) or "").strip():
         config[CONFIG_KEY_ROLE] = node_type
     role = str(config.get(CONFIG_KEY_ROLE) or node_type).strip()
-    shot_raw = config.get("shot_index")
+    clip_raw = config.get("clip_index")
     try:
-        shot_index = int(shot_raw) if shot_raw is not None else 1
+        clip_index = int(clip_raw) if clip_raw is not None else 1
     except (TypeError, ValueError):
-        shot_index = 1
+        clip_index = 1
     current_label = str(label).strip() if isinstance(label, str) and label.strip() else node_id
     node: DesignerGraphNode = {
         "id": node_id,
         "type": node_type,
-        "label": english_pipeline_label(current_label, role, shot_index),
+        "label": english_pipeline_label(current_label, role, clip_index),
         "config": config,
         "layout": normalize_layout(raw.get("layout")),
     }
@@ -760,7 +753,7 @@ def normalize_execution_graph(raw: Any) -> DesignerExecutionGraph:
         "created_at": int(created_at) if isinstance(created_at, int) else now,
         "updated_at": int(updated_at) if isinstance(updated_at, int) else now,
     }
-    return stamp_concat_video_nodes(drop_keyframe_to_keyframe_deps(graph))
+    return stamp_concat_video_nodes(graph)
 
 
 COMPOSE_NODE_ID = "n_compose"
@@ -854,15 +847,6 @@ def repair_overlapping_pipeline_layout(graph: DesignerExecutionGraph) -> Designe
     _restack_column(
         [by_id[key] for key in ("n_character", "n_scene", "n_storyboard") if key in by_id]
     )
-    frames = sorted(
-        [
-            node
-            for node in nodes
-            if node_pipeline(node) == PIPELINE_FRAME
-            or str(node.get("id") or "").startswith("n_frame")
-        ],
-        key=node_shot_index,
-    )
     clips = sorted(
         [
             node
@@ -870,9 +854,8 @@ def repair_overlapping_pipeline_layout(graph: DesignerExecutionGraph) -> Designe
             if node_pipeline(node) == PIPELINE_CLIP
             or str(node.get("id") or "").startswith("n_clip")
         ],
-        key=node_shot_index,
+        key=node_clip_index,
     )
-    _restack_column(frames)
     _restack_column(clips)
     compose = by_id.get(COMPOSE_NODE_ID)
     if compose and clips:
@@ -889,16 +872,12 @@ def repair_overlapping_pipeline_layout(graph: DesignerExecutionGraph) -> Designe
     return graph
 
 
-def clip_node_id(shot_index: int) -> str:
-    return f"n_clip_{int(shot_index)}"
+def clip_node_id(clip_index: int) -> str:
+    return f"n_clip_{int(clip_index)}"
 
 
-def frame_node_id(shot_index: int) -> str:
-    return f"n_frame_{int(shot_index)}"
-
-
-def node_shot_index(node: DesignerGraphNode) -> int:
-    raw = node_config(node).get("shot_index")
+def node_clip_index(node: DesignerGraphNode) -> int:
+    raw = node_config(node).get("clip_index")
     if isinstance(raw, bool):
         raw = None
     if isinstance(raw, int) and raw > 0:
@@ -908,13 +887,12 @@ def node_shot_index(node: DesignerGraphNode) -> int:
         if value > 0:
             return value
     node_id = str(node.get("id") or "")
-    if node_id in {"n_clip", "n_frame"}:
+    if node_id == "n_clip":
         return 1
-    for prefix in ("n_clip_", "n_frame_"):
-        if node_id.startswith(prefix):
-            suffix = node_id.rsplit("_", 1)[-1]
-            if suffix.isdigit() and int(suffix) > 0:
-                return int(suffix)
+    if node_id.startswith("n_clip_"):
+        suffix = node_id.rsplit("_", 1)[-1]
+        if suffix.isdigit() and int(suffix) > 0:
+            return int(suffix)
     return 1
 
 
@@ -926,144 +904,42 @@ def _copied_delegate(graph: DesignerExecutionGraph) -> str | None:
     return None
 
 
-def _is_shot_pipeline_id(node_id: str) -> bool:
+def _is_clip_pipeline_id(node_id: str) -> bool:
     return (
-        node_id in {"n_frame", "n_clip", COMPOSE_NODE_ID}
-        or node_id.startswith("n_frame_")
+        node_id in {"n_clip", COMPOSE_NODE_ID}
         or node_id.startswith("n_clip_")
     )
 
 
-def _is_frame_pipeline_id(node_id: str) -> bool:
-    return node_id == "n_frame" or node_id.startswith("n_frame_")
-
-
-def _allowed_prior_frame_deps(node: DesignerGraphNode) -> set[str]:
-    """Same-setting prompt-handoff wires that must survive normalize."""
-    config = node.get("config")
-    if not isinstance(config, dict):
-        return set()
-    irefs = config.get("identity_refs") if isinstance(config.get("identity_refs"), dict) else {}
-    allowed: set[str] = set()
-    for key in (
-        "scene_prompt_handoff_from",
-        "scene_master_frame_id",
-        "prior_keyframe_node_id",
-    ):
-        for src in (config.get(key), irefs.get(key)):
-            val = str(src or "").strip()
-            if val and _is_frame_pipeline_id(val):
-                allowed.add(val)
-    # Only keep handoff deps when this node is a non-master keyframe.
-    if bool(config.get("is_scene_master") or irefs.get("is_scene_master")):
-        return set()
-    return allowed
-
-
-def drop_keyframe_to_keyframe_deps(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
-    """Strip accidental keyframe→keyframe edges; keep declared edit-prior / scene-master wires."""
-    nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
-    frame_ids = {
-        str(node.get("id") or "")
-        for node in nodes
-        if (
-            node_pipeline(node) == PIPELINE_FRAME
-            or _is_frame_pipeline_id(str(node.get("id") or ""))
-        )
-        and str(node.get("id") or "")
-    }
-    if len(frame_ids) < 2:
-        return graph
-    keep_pairs: set[tuple[str, str]] = set()
-    by_id = {str(n.get("id") or ""): n for n in nodes if n.get("id")}
-    for nid, node in by_id.items():
-        if nid not in frame_ids:
-            continue
-        for dep in _allowed_prior_frame_deps(node):
-            if dep in frame_ids and dep != nid:
-                keep_pairs.add((dep, nid))
-    kept_edges = [
-        edge
-        for edge in (graph.get("edges") or [])
-        if not (
-            str(edge.get("source") or "") in frame_ids
-            and str(edge.get("target") or "") in frame_ids
-            and (str(edge.get("source") or ""), str(edge.get("target") or "")) not in keep_pairs
-        )
-    ]
-    existing_pairs = {
-        (str(e.get("source") or ""), str(e.get("target") or ""))
-        for e in kept_edges
-        if isinstance(e, dict)
-    }
-    for src, tgt in sorted(keep_pairs):
-        if (src, tgt) not in existing_pairs:
-            kept_edges.append(
-                {
-                    "id": f"e_{src}_{tgt}",
-                    "source": src,
-                    "target": tgt,
-                    "kind": EDGE_KIND_DATA,
-                }
-            )
-            existing_pairs.add((src, tgt))
-    graph["edges"] = kept_edges
-    for node in nodes:
-        node_id = str(node.get("id") or "")
-        if node_id not in frame_ids:
-            continue
-        config = node.get("config")
-        if not isinstance(config, dict):
-            continue
-        allowed = {dep for dep in _allowed_prior_frame_deps(node) if dep != node_id}
-        inputs = [str(item) for item in (config.get("inputs") or [])]
-        next_inputs = [
-            item for item in inputs if item not in frame_ids or item in allowed
-        ]
-        # Ensure declared prior/master stay wired even if a prior pass omitted them.
-        for dep in allowed:
-            if dep not in next_inputs:
-                next_inputs.append(dep)
-        if next_inputs != inputs:
-            config["inputs"] = next_inputs
-    return graph
-
-
-_BOOTSTRAP_FRAME_IDS = frozenset({"n_frame", "n_frame_1"})
 _BOOTSTRAP_CLIP_IDS = frozenset({"n_clip", "n_clip_1"})
 
 
-def _shot_pipeline_ids(graph: DesignerExecutionGraph) -> tuple[set[str], set[str]]:
-    frames: set[str] = set()
+def _clip_pipeline_ids_set(graph: DesignerExecutionGraph) -> set[str]:
     clips: set[str] = set()
     for node in graph.get("nodes") or []:
         node_id = str(node.get("id") or "")
         if not node_id:
             continue
         pipeline = node_pipeline(node)
-        if pipeline == PIPELINE_FRAME or node_id == "n_frame" or node_id.startswith("n_frame_"):
-            frames.add(node_id)
-        elif pipeline == PIPELINE_CLIP or node_id == "n_clip" or node_id.startswith("n_clip_"):
+        if pipeline == PIPELINE_CLIP or node_id == "n_clip" or node_id.startswith("n_clip_"):
             clips.add(node_id)
-    return frames, clips
+    return clips
 
 
 def shot_pipeline_count(graph: DesignerExecutionGraph) -> int:
-    """How many per-shot frame/clip slots the graph currently has."""
-    frames, clips = _shot_pipeline_ids(graph)
-    return max(len(frames), len(clips), 0)
+    """How many per-clip slots the graph currently has."""
+    clips = _clip_pipeline_ids_set(graph)
+    return max(len(clips), 0)
 
 
 def is_one_shot_bootstrap_skeleton(graph: DesignerExecutionGraph) -> bool:
-    """True when the graph still looks like the 1-shot bootstrap, not a user edit."""
-    frames, clips = _shot_pipeline_ids(graph)
-    if not frames and not clips:
-        return False
-    if any(node_id not in _BOOTSTRAP_FRAME_IDS for node_id in frames):
+    """True when the graph still looks like the 1-clip bootstrap, not a user edit."""
+    clips = _clip_pipeline_ids_set(graph)
+    if not clips:
         return False
     if any(node_id not in _BOOTSTRAP_CLIP_IDS for node_id in clips):
         return False
-    return len(frames) <= 1 and len(clips) <= 1
+    return len(clips) <= 1
 
 
 def _asset_ref_uri(ref: object) -> str:
@@ -1112,10 +988,10 @@ def preserve_expanded_shot_nodes(
     incoming: DesignerExecutionGraph,
     existing: DesignerExecutionGraph | None,
 ) -> DesignerExecutionGraph:
-    """Keep already-expanded keyframe/clip nodes when a stale save sends the bootstrap shape.
+    """Keep already-expanded clip nodes when a stale save sends the bootstrap shape.
 
-    User edits that drop extra shots (Image 6 / Video 4) must persist. Only a
-    1-shot bootstrap skeleton is grafted back onto an expanded graph.
+    User edits that drop extra clips (Video 6 / Video 4) must persist. Only a
+    1-clip bootstrap skeleton is grafted back onto an expanded graph.
     """
     if existing is None:
         return incoming
@@ -1138,8 +1014,8 @@ def preserve_expanded_shot_nodes(
         for node in existing.get("nodes") or []
         if str(node.get("id") or "") not in incoming_ids
         and (
-            node_pipeline(node) in {PIPELINE_FRAME, PIPELINE_CLIP, PIPELINE_COMPOSE}
-            or _is_shot_pipeline_id(str(node.get("id") or ""))
+            node_pipeline(node) in {PIPELINE_CLIP, PIPELINE_COMPOSE}
+            or _is_clip_pipeline_id(str(node.get("id") or ""))
         )
     ]
     grafted["nodes"] = [dict(node) for node in incoming.get("nodes") or []] + extra_nodes
@@ -1191,7 +1067,7 @@ def expand_shot_nodes(
     graph: DesignerExecutionGraph,
     shot_count: int,
 ) -> DesignerExecutionGraph:
-    """One clip node per storyboard shot (scene-card R2V), plus compose."""
+    """One clip node per storyboard clip (scene-card R2V), plus compose."""
     count = max(1, int(shot_count or 1))
     raw = dict(graph)
     existing_by_id = {
@@ -1205,14 +1081,14 @@ def expand_shot_nodes(
     kept_nodes = [
         dict(node)
         for node in raw.get("nodes") or []
-        if node_pipeline(node) not in {PIPELINE_FRAME, PIPELINE_CLIP, PIPELINE_COMPOSE}
-        and not _is_shot_pipeline_id(str(node.get("id") or ""))
+        if node_pipeline(node) not in {PIPELINE_CLIP, PIPELINE_COMPOSE}
+        and not _is_clip_pipeline_id(str(node.get("id") or ""))
     ]
     kept_edges = [
         dict(edge)
         for edge in raw.get("edges") or []
-        if not _is_shot_pipeline_id(str(edge.get("source") or ""))
-        and not _is_shot_pipeline_id(str(edge.get("target") or ""))
+        if not _is_clip_pipeline_id(str(edge.get("source") or ""))
+        and not _is_clip_pipeline_id(str(edge.get("target") or ""))
     ]
     kept_ids = {str(node.get("id") or "") for node in kept_nodes}
 
@@ -1223,7 +1099,7 @@ def expand_shot_nodes(
                 ids.append(str(node["id"]))
         return ids
 
-    character_ids = _role_node_ids(NODE_ROLE_CHARACTER_DESIGN)
+    character_ids = _role_node_ids(NODE_ROLE_CHARACTER)
     scene_ids = _role_node_ids(NODE_ROLE_SCENE)
     storyboard_id = (_role_node_ids(NODE_ROLE_STORYBOARD) or [None])[0]
     brief_id = (_role_node_ids(NODE_ROLE_BRIEF) or [None])[0]
@@ -1244,8 +1120,8 @@ def expand_shot_nodes(
         clip_config: dict[str, Any] = {
             "role": NODE_ROLE_CLIP,
             "pipeline": PIPELINE_CLIP,
-            "shot_index": index,
-            "keyframe_strategy": "clip_from_scene_and_solos",
+            "clip_index": index,
+            "clip_strategy": "clip_from_scene_and_character_specs",
             "inputs": clip_inputs,
         }
         prev_clip_generate = _generate_config(existing_by_id.get(clip_id) or {})
@@ -1262,12 +1138,12 @@ def expand_shot_nodes(
             default_y=240.0,
         )
         from jiuwenswarm.server.runtime.designer.node_labels import (
-            derive_shot_name,
+            derive_clip_name,
             label_clip,
         )
 
-        shot_name = derive_shot_name(
-            {"title": f"Shot {index}", "action": ""},
+        clip_name = derive_clip_name(
+            {"title": f"Clip {index}", "action": ""},
             fallback_index=index,
         )
         clip_nodes.append(
@@ -1275,7 +1151,7 @@ def expand_shot_nodes(
                 "id": clip_id,
                 "type": NODE_TYPE_VIDEO,
                 "label": label_clip(
-                    scene_number=1, clip_number=index, clip_name=shot_name
+                    scene_number=1, clip_number=index, clip_name=clip_name
                 ),
                 "config": clip_config,
                 "layout": clip_layout,
@@ -1343,15 +1219,15 @@ def apply_shot_generate_prompts(
     graph: DesignerExecutionGraph,
     prompts: list[str],
 ) -> DesignerExecutionGraph:
-    """Fill frame/clip generate.prompt from storyboard rows unless the user edited them."""
+    """Fill clip generate.prompt from storyboard rows unless the user edited them."""
     changed = False
     nodes: list[DesignerGraphNode] = []
     for node in graph.get("nodes") or []:
         pipeline = node_pipeline(node)
-        if pipeline not in {PIPELINE_FRAME, PIPELINE_CLIP}:
+        if pipeline not in {PIPELINE_CLIP}:
             nodes.append(node)
             continue
-        index = node_shot_index(node)
+        index = node_clip_index(node)
         if index < 1 or index > len(prompts):
             nodes.append(node)
             continue
@@ -1380,14 +1256,6 @@ def apply_shot_generate_prompts(
     raw = dict(graph)
     raw["nodes"] = nodes
     return normalize_execution_graph(raw)
-
-
-def expand_clip_nodes_for_shots(
-    graph: DesignerExecutionGraph,
-    shot_count: int,
-) -> DesignerExecutionGraph:
-    """Backward-compatible alias: expand keyframes and clips together."""
-    return expand_shot_nodes(graph, shot_count)
 
 
 def is_leader_node_id(node_id: Any) -> bool:
@@ -1542,94 +1410,6 @@ def normalize_node_state(raw: Any) -> DesignerNodeState:
             if item is not None
         ][-ACTIVITY_LOG_LIMIT:]
     return state
-
-
-def is_leader_node_id(node_id: Any) -> bool:
-    return str(node_id or "").strip() == LEADER_NODE_ID
-
-
-def clip_activity_text(value: Any, *, max_len: int = ACTIVITY_TEXT_MAX) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if len(text) <= max_len:
-        return text
-    return text[: max(1, max_len - 1)] + "…"
-
-
-def format_activity_line(kind: str, text: str, tool: str = "") -> str:
-    label = str(tool or "").strip() or str(kind or "").strip() or "activity"
-    body = clip_activity_text(text) or label
-    if kind == ACTIVITY_KIND_TOOL_CALL and str(tool or "").strip():
-        return f"{tool} · {body}" if body != tool else tool
-    return body
-
-
-def normalize_node_activity(raw: Any) -> DesignerNodeActivity | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise DesignerGraphValidationError("node_state.activity must be an object")
-    kind = str(raw.get("kind") or ACTIVITY_KIND_STAGE).strip() or ACTIVITY_KIND_STAGE
-    if kind not in ACTIVITY_KINDS:
-        kind = ACTIVITY_KIND_STAGE
-    text = clip_activity_text(raw.get("text"))
-    tool = str(raw.get("tool") or "").strip()
-    at = raw.get("at")
-    activity: DesignerNodeActivity = {"kind": kind, "text": text}
-    if tool:
-        activity["tool"] = tool
-    if isinstance(at, int) and not isinstance(at, bool):
-        activity["at"] = at
-    else:
-        activity["at"] = utc_now_ms()
-    return activity
-
-
-def apply_node_activity(
-    state: DesignerNodeState | dict[str, Any] | None,
-    *,
-    kind: str,
-    text: str,
-    tool: str = "",
-    at: int | None = None,
-) -> DesignerNodeState:
-    current = dict(state or {})
-    activity = normalize_node_activity(
-        {
-            "kind": kind,
-            "text": text,
-            "tool": tool,
-            "at": at if isinstance(at, int) else utc_now_ms(),
-        }
-    )
-    assert activity is not None
-    line = format_activity_line(
-        str(activity.get("kind") or ""),
-        str(activity.get("text") or ""),
-        str(activity.get("tool") or ""),
-    )
-    tail = [item for item in (current.get("activity_tail") or []) if isinstance(item, str)]
-    if line and (not tail or tail[-1] != line):
-        tail.append(line)
-    log = [item for item in (current.get("activity_log") or []) if isinstance(item, dict)]
-    signature = (
-        str(activity.get("kind") or ""),
-        str(activity.get("text") or ""),
-        str(activity.get("tool") or ""),
-    )
-    previous_signature = (
-        str(log[-1].get("kind") or ""),
-        str(log[-1].get("text") or ""),
-        str(log[-1].get("tool") or ""),
-    ) if log else None
-    if signature != previous_signature:
-        log.append(activity)
-    current["activity"] = activity
-    current["activity_tail"] = tail[-ACTIVITY_TAIL_LIMIT:]
-    current["activity_log"] = log[-ACTIVITY_LOG_LIMIT:]
-    if "status" not in current:
-        current["status"] = NODE_STATUS_RUNNING
-    return current  # type: ignore[return-value]
-
 
 def normalize_execution_run(raw: Any) -> DesignerExecutionRun:
     if not isinstance(raw, dict):
@@ -1838,7 +1618,6 @@ def is_concat_video_source(node: DesignerGraphNode | dict[str, Any] | None) -> b
         return True
     return ntype == NODE_TYPE_VIDEO
 
-
 def video_concat_source_ids(graph: DesignerExecutionGraph, target_id: str) -> list[str]:
     """Direct video predecessors of ``target_id`` in input / edge order."""
     target = str(target_id or "").strip()
@@ -1930,11 +1709,8 @@ def _node_schedule_priority(node: DesignerGraphNode | dict[str, Any]) -> tuple[i
         "table": 20,
         "storyboard": 20,
         "character": 30,
-        "character_design": 30,
         "scene": 40,
         "image": 45,
-        "frame": 50,
-        "keyframe": 50,
         "speech": 55,
         "tts": 55,
         "audio": 55,
@@ -1948,10 +1724,10 @@ def _node_schedule_priority(node: DesignerGraphNode | dict[str, Any]) -> tuple[i
         "film": 70,
     }.get(role, 50)
     try:
-        shot = int(cfg.get("shot_index") or 0)
+        clip = int(cfg.get("clip_index") or 0)
     except (TypeError, ValueError):
-        shot = 0
-    return (role_rank, max(0, shot), str(node.get("id") or ""))
+        clip = 0
+    return (role_rank, max(0, clip), str(node.get("id") or ""))
 
 
 def _config_soft_predecessors(node: DesignerGraphNode | dict[str, Any]) -> list[str]:
@@ -1969,9 +1745,6 @@ def _config_soft_predecessors(node: DesignerGraphNode | dict[str, Any]) -> list[
         "continuity_clip_node_id",
         "previous_clip_node_id",
         "scene_prompt_handoff_from",
-        "prior_keyframe_node_id",
-        "scene_master_frame_id",
-        "continuity_frame_node_id",
         "master_scene_node_id",
     ):
         val = str(cfg.get(key) or "").strip()
@@ -1980,8 +1753,6 @@ def _config_soft_predecessors(node: DesignerGraphNode | dict[str, Any]) -> list[
     identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
     for key in (
         "scene_prompt_handoff_from",
-        "prior_keyframe_node_id",
-        "scene_master_frame_id",
         "scene_node_id",
     ):
         val = str(identity.get(key) or "").strip()
@@ -2182,7 +1953,7 @@ def compose_required_predecessor_ids(graph: DesignerExecutionGraph) -> list[str]
         if is_clip or (is_audio and nid in connected_to_compose):
             seen.add(nid)
             out.append(nid)
-    # Stable: clips by shot, then audio ids.
+    # Stable: clips by clip_index, then audio ids.
     def _sort_key(nid: str) -> tuple[int, int, str]:
         by_id = {
             str(n.get("id") or ""): n
@@ -2193,11 +1964,11 @@ def compose_required_predecessor_ids(graph: DesignerExecutionGraph) -> list[str]
         role = _pipeline_role(n)
         cfg = n.get("config") if isinstance(n.get("config"), dict) else {}
         try:
-            shot = int(cfg.get("shot_index") or 0)
+            clip = int(cfg.get("clip_index") or 0)
         except (TypeError, ValueError):
-            shot = 0
+            clip = 0
         kind = 0 if role in {"clip"} or nid.startswith("n_clip") else 1
-        return (kind, shot, nid)
+        return (kind, clip, nid)
 
     return sorted(out, key=_sort_key)
 
@@ -2209,7 +1980,7 @@ def is_soft_artifact_dependency(
 ) -> bool:
     """True when the dependent only needs an early artifact (e.g. Wan prompt), not full completion.
 
-    Clip→shot consistency and same-setting scene-prompt handoffs are soft: once the
+    Clip→clip consistency and same-setting scene-prompt handoffs are soft: once the
     upstream node has published its prompt, the downstream node may start even while
     upstream media generation is still running.
 
@@ -2229,54 +2000,10 @@ def is_soft_artifact_dependency(
         return False
     prole = _pipeline_role(pred)
     nrole = _pipeline_role(node)
-    ncfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-    pcfg = pred.get("config") if isinstance(pred.get("config"), dict) else {}
 
     # Only real clip leaves (role=clip), never type=video compose sinks.
     if nrole == "clip" and prole == "clip":
         return True
-
-    frame_roles = {"frame", "keyframe"}
-
-    # Same-setting KF handoff: later compose KFs need master scene prompt text.
-    if nrole in frame_roles and prole in frame_roles:
-        handoff = str(
-            ncfg.get("scene_prompt_handoff_from")
-            or ncfg.get("scene_master_frame_id")
-            or ""
-        ).strip()
-        if handoff == str(pred_id):
-            return True
-        if str(ncfg.get("continuity_frame_node_id") or "").strip() == str(pred_id):
-            strategy = str(
-                ncfg.get("keyframe_strategy")
-                or ((ncfg.get("identity_refs") or {}) if isinstance(ncfg.get("identity_refs"), dict) else {}).get(
-                    "keyframe_strategy"
-                )
-                or ""
-            )
-            if "compose" in strategy or strategy == "compose_from_solo_refs":
-                return True
-        return False
-
-    # Clip depending on another shot's frame only for scene/prompt text (not own KF image).
-    if nrole == "clip" and prole in frame_roles:
-        try:
-            own_shot = int(ncfg.get("shot_index") or 0)
-        except (TypeError, ValueError):
-            own_shot = 0
-        try:
-            pred_shot = int(pcfg.get("shot_index") or 0)
-        except (TypeError, ValueError):
-            pred_shot = 0
-        if own_shot and (pred_shot == own_shot or str(pred_id) == f"n_frame_{own_shot}"):
-            return False  # own keyframe image is a hard media dep
-        soft_ids = {
-            str(ncfg.get("continuity_frame_node_id") or "").strip(),
-            str(ncfg.get("scene_prompt_handoff_from") or "").strip(),
-            str(ncfg.get("scene_master_frame_id") or "").strip(),
-        }
-        return str(pred_id) in soft_ids and bool(str(pred_id))
 
     # Scene card → clip: always hard (R2V reference media). Prompt handoff alone is not enough.
     if nrole == "clip" and prole == "scene":
@@ -2304,14 +2031,13 @@ def artifact_dependency_satisfied(
     pcfg = pred.get("config") if isinstance(pred.get("config"), dict) else {}
     prole = _pipeline_role(pred)
     nrole = _pipeline_role(node)
-    frame_roles = {"frame", "keyframe"}
 
     if nrole in {"clip"} and prole in {"clip"}:
         # Same-setting clip handoff needs the prior Wan prompt text — not only the
-        # storyboard shot_action (that is known at graph build and would unlock too early).
+        # storyboard clip action (that is known at graph build and would unlock too early).
         if str(ncfg.get("previous_clip_wan_prompt") or "").strip():
             return True
-        if isinstance(ncfg.get("previous_clip_continuity_card"), dict):
+        if isinstance(ncfg.get("previous_clip_character_consistency"), dict):
             return True
         prior_prompt = str(
             pcfg.get("last_wan_prompt")
@@ -2321,43 +2047,10 @@ def artifact_dependency_satisfied(
         ).strip()
         if prior_prompt and (
             bool(pcfg.get("handoff_artifact_ready"))
-            or isinstance(pcfg.get("continuity_card"), dict)
+            or isinstance(pcfg.get("character_consistency"), dict)
         ):
             return True
         return False
-
-    if (nrole in frame_roles and prole in frame_roles) or (
-        nrole == "clip" and prole in frame_roles
-    ):
-        if isinstance(ncfg.get("previous_keyframe_continuity_card"), dict):
-            return True
-        if str(
-            ncfg.get("scene_architecture_clause")
-            or ncfg.get("scene_master_prompt")
-            or ncfg.get("previous_keyframe_action")
-            or ncfg.get("previous_keyframe_prompt")
-            or ""
-        ).strip():
-            return True
-        return bool(
-            str(
-                pcfg.get("scene_architecture_clause")
-                or pcfg.get("scene_master_prompt")
-                or pcfg.get("last_approved_prompt")
-                or (pcfg.get("generate") or {}).get("prompt")
-                or ""
-            ).strip()
-        ) and (
-            bool(pcfg.get("handoff_artifact_ready"))
-            or bool(
-                str(
-                    pcfg.get("last_approved_prompt")
-                    or pcfg.get("scene_master_prompt")
-                    or pcfg.get("scene_architecture_clause")
-                    or ""
-                ).strip()
-            )
-        )
 
     return False
 

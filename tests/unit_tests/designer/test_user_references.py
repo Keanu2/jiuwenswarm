@@ -325,9 +325,9 @@ def test_bootstrap_graph_registers_user_references(
         "source": "llm",
         "characters": [{"id": "char_1", "name": "Hero", "description": "reference cast"}],
         "scenes": [{"id": "set_1", "name": "Set", "description": "location"}],
-        "shots": [
+        "clips": [
             {
-                "shot_index": 1,
+                "clip_index": 1,
                 "action": "stands",
                 "camera": "medium",
                 "on_screen": ["char_1"],
@@ -335,7 +335,7 @@ def test_bootstrap_graph_registers_user_references(
                 "timeline": "0-5s",
             }
         ],
-        "target_shot_count": 1,
+        "target_clip_count": 1,
     }
     payload, error, code = adapter._bootstrap_graph(
         {
@@ -417,7 +417,7 @@ def test_reference_image_becomes_a_canvas_node_feeding_brief_and_cast(
                     "id": "n_character",
                     "type": "image",
                     "config": {
-                        "role": "character_design",
+                        "role": "character",
                         "character_ids": ["char_1"],
                     },
                 },
@@ -469,12 +469,12 @@ def test_reference_images_follow_what_the_agent_saw(tmp_path: Path) -> None:
                 {
                     "id": "n_character",
                     "type": "image",
-                    "config": {"role": "character_design", "character_ids": ["char_1"]},
+                    "config": {"role": "character", "character_ids": ["char_1"]},
                 },
                 {
                     "id": "n_character_2",
                     "type": "image",
-                    "config": {"role": "character_design", "character_ids": ["char_2"]},
+                    "config": {"role": "character", "character_ids": ["char_2"]},
                 },
                 {
                     "id": "n_scene_1",
@@ -511,7 +511,7 @@ def test_reference_images_follow_what_the_agent_saw(tmp_path: Path) -> None:
         {
             "nodes": [
                 {"id": "n_brief", "type": "text", "config": {"role": "brief"}},
-                {"id": "n_character", "type": "image", "config": {"role": "character_design"}},
+                {"id": "n_character", "type": "image", "config": {"role": "character"}},
                 {"id": "n_scene_1", "type": "image", "config": {"role": "scene", "setting_id": "set_1"}},
                 {"id": "n_clip_1", "type": "video", "config": {"role": "clip"}},
             ],
@@ -600,7 +600,7 @@ async def test_classify_reference_images_marks_a_product_as_an_object(
     system = str(seen.get("system") or "")
     assert "suppress_companions" not in system
     assert "solo_subject" not in system
-    assert "keyframe_complete" not in system
+    assert "still_complete" not in system
     body = str(seen.get("prompt") or "")
     assert "char_1" in body
     assert "set_1" in body
@@ -659,7 +659,7 @@ def test_wiped_product_edge_is_restored_as_a_clip_input(tmp_path: Path) -> None:
         {
             "nodes": [
                 {"id": "n_brief", "type": "text", "config": {"role": "brief"}},
-                {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "shot_index": 1}},
+                {"id": "n_clip_1", "type": "video", "config": {"role": "clip", "clip_index": 1}},
             ],
             "edges": [],
             "metadata": {},
@@ -741,7 +741,7 @@ async def test_character_card_edits_the_reference_instead_of_redesigning(
                     "type": "image",
                     "label": "Character",
                     "config": {
-                        "role": "character_design",
+                        "role": "character",
                         "prompt": "a tall knight in red armor",
                     },
                 },
@@ -838,9 +838,9 @@ async def test_analyze_creative_brief_sends_reference_images(
             "text": (
                 '{"characters":[{"id":"char_1","name":"Hero","description":"from image 1"}],'
                 '"scenes":[{"id":"scene_1","name":"Street","description":"urban"}],'
-                '"shots":[{"shot_index":1,"title":"Walk","action":"walks","camera":"medium",'
-                '"character_ids":["char_1"],"keyframe_prompt":"Hero walks","timeline":"0.0-5.0s"}],'
-                '"cast_layout":"single","target_shot_count":1,"prefer_combined_cast":false,'
+                '"clips":[{"clip_index":1,"title":"Walk","action":"walks","camera":"medium",'
+                '"character_ids":["char_1"],"clip_prompt":"Hero walks","timeline":"0.0-5.0s"}],'
+                '"cast_layout":"single","target_clip_count":1,"prefer_combined_cast":false,'
                 '"prefer_split_cast":false,'
                 '"audio":{"policy":"optional_music","include_speech":false,"include_music":true,"notes":""},'
                 '"reference_reads":[{"slot":1,"subject":"character","character_id":"char_1","setting_id":""}],'
@@ -876,8 +876,7 @@ async def test_clip_passes_user_video_as_file_not_first_frame(
 ) -> None:
     from jiuwenswarm.common.schema.designer_graph import (
         NODE_ROLE_CLIP,
-        NODE_ROLE_FRAME,
-        NODE_TYPE_IMAGE,
+            NODE_TYPE_IMAGE,
         NODE_TYPE_VIDEO,
     )
     from jiuwenswarm.server.runtime.designer.handlers.clip import (
@@ -887,7 +886,7 @@ async def test_clip_passes_user_video_as_file_not_first_frame(
     from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
     from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 
-    frame = tmp_path / "keyframe.png"
+    frame = tmp_path / "clip_still.png"
     video = tmp_path / "ref.mp4"
     out = tmp_path / "clip.mp4"
     frame.write_bytes(_png_bytes())
@@ -903,13 +902,13 @@ async def test_clip_passes_user_video_as_file_not_first_frame(
                 "id": "n_frame",
                 "type": NODE_TYPE_IMAGE,
                 "label": "frame",
-                "config": {"role": NODE_ROLE_FRAME, "shot_index": 1},
+                "config": {"role": NODE_ROLE_CLIP, "clip_index": 1},
             },
             {
                 "id": "n_clip",
                 "type": NODE_TYPE_VIDEO,
                 "label": "clip",
-                "config": {"role": NODE_ROLE_CLIP, "shot_index": 1},
+                "config": {"role": NODE_ROLE_CLIP, "clip_index": 1},
             },
         ],
         "metadata": {},
@@ -1006,7 +1005,7 @@ def test_analysis_prompt_reference_roster_is_not_a_shot() -> None:
         [{"filename": "castle-1.png", "kind": "image"}],
     )
     analysis = heuristic_analysis(prompt)
-    actions = " ".join(str(shot.get("action") or "") for shot in analysis["shots"])
+    actions = " ".join(str(shot.get("action") or "") for shot in analysis["clips"])
     assert "User attached" not in actions
     assert "REFERENCE_MEDIA" not in actions
     names = " ".join(str(item.get("name") or "") for item in analysis["characters"])
