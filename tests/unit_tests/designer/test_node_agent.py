@@ -710,3 +710,108 @@ async def test_creative_text_still_materializes_one_video(
     assert calls == ["n_clip_1"]
     assert result.output_ref is not None
     assert str(result.output_ref.get("uri") or "").endswith("clip.mp4")
+
+
+def test_own_saved_image_is_not_treated_as_upstream(tmp_path: Path) -> None:
+    from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
+    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
+    from jiuwenswarm.server.runtime.designer.node_agent import (
+        _prefer_media_primary,
+        _result_satisfies_required_media,
+    )
+
+    own = tmp_path / "dad_card.png"
+    other = tmp_path / "mom_card.png"
+    spec = tmp_path / "dad_spec.md"
+    own.write_bytes(b"png")
+    other.write_bytes(b"png")
+    spec.write_text("wardrobe", encoding="utf-8")
+    own_ref = file_output_ref(own, kind="image", mime_type="image/png")
+    other_ref = file_output_ref(other, kind="image", mime_type="image/png")
+    spec_ref = file_output_ref(spec, kind="text", mime_type="text/markdown")
+    dad = {"id": "n_dad", "type": "image", "config": {"pipeline": "character"}}
+    mom = {"id": "n_mom", "type": "image", "config": {"pipeline": "character"}}
+    ctx = NodeExecutionContext(
+        graph={"nodes": [dad, mom], "edges": []},
+        run_id="run_double",
+        node_id="n_dad",
+        run={
+            "node_states": {
+                "n_dad": {"output_ref": own_ref, "output_refs": [own_ref]},
+                "n_mom": {"output_ref": other_ref, "output_refs": [other_ref]},
+            }
+        },
+    )
+    assert _result_satisfies_required_media(
+        NodeResult(output_ref=own_ref, output_refs=[own_ref, spec_ref]),
+        dad,
+        ctx,
+    )
+    assert not _result_satisfies_required_media(
+        NodeResult(output_ref=other_ref, output_refs=[other_ref]),
+        dad,
+        ctx,
+    )
+    handler = tmp_path / "dad_handler.png"
+    handler.write_bytes(b"png2")
+    handler_ref = file_output_ref(handler, kind="image", mime_type="image/png")
+    preferred = _prefer_media_primary(
+        NodeResult(output_ref=handler_ref, output_refs=[handler_ref], message="handler"),
+        NodeResult(output_ref=own_ref, output_refs=[own_ref, spec_ref], message="agent"),
+        required="image",
+    )
+    assert preferred is not None
+    assert preferred.output_ref == handler_ref
+    uris = [str((ref or {}).get("uri") or "") for ref in preferred.output_refs or []]
+    assert handler_ref["uri"] in uris
+    assert own_ref["uri"] not in uris
+    assert spec_ref["uri"] in uris
+
+
+@pytest.mark.asyncio
+async def test_completed_character_image_is_not_generated_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.designer.handlers.common import file_output_ref
+    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
+    from jiuwenswarm.server.runtime.designer.node_agent import (
+        DesignerGraphToolkit,
+        NodeAgentHost,
+    )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_workspace_dir",
+        lambda: tmp_path,
+    )
+    _install_fake_deep_agent(monkeypatch, {"output": "done", "result_type": "answer"})
+    own = tmp_path / "dad_card.png"
+    own.write_bytes(b"png")
+    own_ref = file_output_ref(own, kind="image", mime_type="image/png")
+    calls: list[str] = []
+
+    async def fake_materialize(self, node):  # noqa: ANN001
+        calls.append(str(node.get("id") or ""))
+        raise AssertionError("own image must not trigger a second image call")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.node_agent.DesignerGraphToolkit.materialize_media",
+        fake_materialize,
+    )
+    node = {
+        "id": "n_dad",
+        "type": "image",
+        "label": "Dad",
+        "config": {"pipeline": "character"},
+    }
+    ctx = NodeExecutionContext(
+        graph={"graph_id": "g1", "nodes": [node], "edges": [], "metadata": {}},
+        run_id="r1",
+        node_id="n_dad",
+        run={"run_id": "r1", "node_states": {"n_dad": {"output_ref": own_ref, "output_refs": [own_ref]}}},
+    )
+    toolkit = DesignerGraphToolkit(_DummySpawner(), ctx)
+    toolkit.completed = NodeResult(output_ref=own_ref, output_refs=[own_ref], message="call_image_model")
+    result = await NodeAgentHost(_DummySpawner())._run_deep_agent(node, ctx, toolkit)
+    assert calls == []
+    assert result.output_ref == own_ref

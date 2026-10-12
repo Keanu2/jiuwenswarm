@@ -151,19 +151,29 @@ def _result_has_media(result: NodeResult | None, *, required: str | None = None)
 
 
 def _upstream_image_uri_keys(ctx: NodeExecutionContext | None) -> set[str]:
-    """Character/scene sheet URIs — must not be mistaken for this node's own output."""
+    """Other character/scene sheet URIs. This node's own saved image is not upstream."""
     if ctx is None:
         return set()
     keys: set[str] = set()
+    own_id = str(getattr(ctx, "node_id", "") or "").strip()
     try:
         from jiuwenswarm.server.runtime.designer.handlers.common import (
-            role_output_image_paths,
+            node_output_image_paths,
         )
     except Exception:  # noqa: BLE001
         return set()
-    for role in ("character", "character", "scene"):
+    graph = ctx.graph if isinstance(getattr(ctx, "graph", None), dict) else {}
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "").strip()
+        if not node_id or node_id == own_id:
+            continue
+        role = str(node_pipeline(node) or node_role(node) or "").strip().lower()
+        if role not in {"character", "scene"}:
+            continue
         try:
-            paths = role_output_image_paths(ctx, role)
+            paths = node_output_image_paths(ctx, node_id)
         except Exception:  # noqa: BLE001
             continue
         for path in paths or []:
@@ -328,15 +338,19 @@ def _prefer_media_primary(
         if isinstance(ref, dict) and ref not in refs:
             refs.append(ref)
     if agent_family == want and isinstance(agent.output_ref, dict):
+        # The handler image is the card. Do not also keep the agent's earlier call.
         if primary is None:
             primary = agent.output_ref
-        if agent.output_ref not in refs:
-            refs.append(agent.output_ref)
+            if agent.output_ref not in refs:
+                refs.append(agent.output_ref)
     elif isinstance(agent.output_ref, dict) and agent.output_ref not in refs:
         refs.append(agent.output_ref)
     for ref in agent.output_refs or []:
-        if isinstance(ref, dict) and ref not in refs:
-            refs.append(ref)
+        if not isinstance(ref, dict) or ref in refs:
+            continue
+        if primary is not None and _ref_media_family(ref) == want:
+            continue
+        refs.append(ref)
     if primary is None and refs:
         # Prefer first matching media family among refs.
         for ref in refs:
@@ -1985,23 +1999,12 @@ class NodeAgentHost:
                     f"node {ctx.node_id} handler did not produce required "
                     f"{required_family or 'media'}"
                 )
-            refs: list[AssetRef] = []
-            if isinstance(media.output_ref, dict):
-                refs.append(media.output_ref)
-            for ref in media.output_refs or []:
-                if isinstance(ref, dict) and ref not in refs:
-                    refs.append(ref)
-            if isinstance(agent_result.output_ref, dict) and agent_result.output_ref not in refs:
-                refs.append(agent_result.output_ref)
-            for ref in agent_result.output_refs or []:
-                if isinstance(ref, dict) and ref not in refs:
-                    refs.append(ref)
             preferred = _prefer_media_primary(
                 media, agent_result, required=required_family
             )
             return preferred or NodeResult(
-                output_ref=media.output_ref or (refs[0] if refs else None),
-                output_refs=refs,
+                output_ref=media.output_ref,
+                output_refs=list(media.output_refs or []),
                 message=f"agent+handler: {media.message or 'media materialized'}",
             )
         return agent_result
@@ -2147,8 +2150,7 @@ class NodeAgentHost:
                     )
                     completed = preferred or NodeResult(
                         output_ref=media.output_ref,
-                        output_refs=list(media.output_refs or [])
-                        + ([completed.output_ref] if isinstance(completed.output_ref, dict) else []),
+                        output_refs=list(media.output_refs or []),
                         message=f"agent+handler: {media.message or 'media materialized'}",
                     )
             if _node_expects_media(node):
