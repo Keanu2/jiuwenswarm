@@ -132,6 +132,7 @@
       "material": "Asset",
       "removeMaterial": "Remove asset",
       "promptPlaceholder": "This clip's prompt; sent to the model with the reference images above",
+      "promptHint": "Prompt for this node's subagent. You can optionally edit it before generating; the subagent may still refine it based on the project.",
       "editPlaceholder": "Edit text content…",
       "aspectRatio": "Aspect ratio",
       "resolution": "Resolution",
@@ -193,9 +194,15 @@
       }
     },
     "nodeActions": {
-      "add": "Add connected node",
-      "addTitle": "Connect to this node",
-      "delete": "Delete node",
+      "add": "Add successor node",
+      "addPredecessor": "Add predecessor node",
+      "successorMenuTitle": "Generate from this node",
+      "predecessorMenuTitle": "Add context",
+      "actionBarLabel": "Node actions",
+      "preview": "Preview",
+      "previewOrEdit": "Preview or edit",
+      "download": "Download",
+      "delete": "Delete",
       "deleteHint": "Delete this node and its connections. You can also press Delete / Backspace.",
       "resize": "Resize",
       "resizeHint": "Drag the bottom-right corner to resize this node"

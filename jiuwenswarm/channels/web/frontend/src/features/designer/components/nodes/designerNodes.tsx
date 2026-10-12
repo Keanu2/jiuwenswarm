@@ -4,13 +4,12 @@ import {
   Image as ImageIcon,
   Loader2,
   Sheet,
-  Trash2,
   Video,
   type LucideIcon,
 } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Handle, NodeResizeControl, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react';
+import { NodeResizeControl, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react';
 import { isComfyuiNodeConfig } from '../../comfyuiWorkflow';
 import { designerAssetPreviewUrl, designerAssetTextUrl } from '../../designerAssetUrl';
 import {
@@ -44,8 +43,9 @@ import { isDesignerPreviewGraph } from '../../designerBootstrapGraph';
 import { isMediaNodeType, supportsNodeToolbar } from '../../mediaNodeConfig';
 import { DesignerStoryboardTable } from '../../DesignerStoryboardTable';
 import { DesignerActivityPeek } from '../DesignerActivityPeek';
+import { DesignerNodeActionBar } from '../controls/DesignerNodeActionBar';
 import { DesignerNodeToolbar } from '../controls/DesignerNodeToolbar';
-import { DesignerNodeSuccessorControl } from './DesignerNodeSuccessorControl';
+import { DesignerNodePortControl } from './DesignerNodePortControl';
 
 type DesignerNodeData = DesignerReactFlowNode['data'];
 type DesignerFlowNode = Node<DesignerNodeData>;
@@ -147,6 +147,7 @@ function DesignerNodeShell({
   media = false,
   mediaFilled = false,
   selected = false,
+  resolutionLabel = null,
   toolbar = null,
 }: {
   nodeId: string;
@@ -156,6 +157,8 @@ function DesignerNodeShell({
   media?: boolean;
   mediaFilled?: boolean;
   selected?: boolean;
+  /** Pixel size label for image/video content, e.g. "1920×1080". */
+  resolutionLabel?: string | null;
   toolbar?: ReactNode;
 }) {
   const { t } = useTranslation();
@@ -177,20 +180,8 @@ function DesignerNodeShell({
           : '';
   const TypeIcon = modalityIcon(nodeType);
   const showMediaFill = media && (mediaFilled || status === DESIGNER_NODE_STATUS_COMPLETED);
-  const removeNodes = useDesignerStore((state) => state.removeNodes);
   const isComfyui = useDesignerStore((state) =>
     isComfyuiNodeConfig(state.domainGraph?.nodes.find((node) => node.id === nodeId)?.config),
-  );
-  const closeDock = useDesignerUiStore((state) => state.closeDock);
-
-  const onDelete = useCallback(
-    (event: MouseEvent) => {
-      event.stopPropagation();
-      event.preventDefault();
-      removeNodes([nodeId]);
-      closeDock();
-    },
-    [closeDock, nodeId, removeNodes],
   );
 
   return (
@@ -200,25 +191,28 @@ function DesignerNodeShell({
       data-selected={selected ? 'true' : 'false'}
       data-status={status}
     >
+      <NodeToolbar
+        isVisible={selected}
+        position={Position.Top}
+        offset={12}
+        align="center"
+        className="designer-node-action-bar-portal"
+      >
+        <DesignerNodeActionBar nodeId={nodeId} nodeType={nodeType} />
+      </NodeToolbar>
       <div className="designer-node__caption">
         <span className="designer-node__type-icon" aria-hidden data-testid="designer-node-type-icon" data-node-type={nodeType}>
           <TypeIcon size={12} strokeWidth={1.75} />
         </span>
         <span className="designer-node__label">{label}</span>
-        <button
-          type="button"
-          className="designer-node__delete nodrag nopan"
-          aria-label={t('designer.nodeActions.delete')}
-          title={t('designer.nodeActions.deleteHint')}
-          data-testid="designer-node-delete"
-          onClick={onDelete}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <Trash2 size={12} strokeWidth={2.25} aria-hidden />
-        </button>
+        {resolutionLabel ? (
+          <span className="designer-node__resolution" data-testid="designer-node-resolution">
+            {resolutionLabel}
+          </span>
+        ) : null}
       </div>
       <div className="designer-node__card">
-        <Handle type="target" position={Position.Left} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
+        <DesignerNodePortControl nodeId={nodeId} side="predecessor" />
         {isComfyui ? (
           <span
             className="designer-node__comfyui-badge"
@@ -235,8 +229,7 @@ function DesignerNodeShell({
             {nodeError}
           </p>
         ) : null}
-        <Handle type="source" position={Position.Right} className='size-2 bg-gray-500 transition-all ease-out group-hover:size-3' />
-        <DesignerNodeSuccessorControl nodeId={nodeId} />
+        <DesignerNodePortControl nodeId={nodeId} side="successor" />
         <DesignerNodeResizeHandle nodeId={nodeId} />
       </div>
       {toolbar}
@@ -372,17 +365,6 @@ function TextPreviewBody({ nodeId, nodeType }: { nodeId: string; nodeType: strin
 export function DesignerTextNode({ id, data, selected }: NodeProps<DesignerFlowNode>) {
   const nodeData = data as DesignerNodeData;
   const status = useDesignerRunStore((state) => state.nodeStates[id]?.status ?? 'pending');
-  const toolbar = (
-    <NodeToolbar
-      isVisible={selected}
-      position={Position.Bottom}
-      offset={16}
-      align="center"
-      className="designer-node-toolbar-portal"
-    >
-      <DesignerNodeToolbar nodeId={id} nodeType={DESIGNER_NODE_TYPE_TEXT} />
-    </NodeToolbar>
-  );
 
   return (
     <DesignerNodeShell
@@ -395,7 +377,6 @@ export function DesignerTextNode({ id, data, selected }: NodeProps<DesignerFlowN
           <TextPreviewBody nodeId={id} nodeType={DESIGNER_NODE_TYPE_TEXT} />
         </NodeOutputFrame>
       }
-      toolbar={toolbar}
     />
   );
 }
@@ -403,17 +384,6 @@ export function DesignerTextNode({ id, data, selected }: NodeProps<DesignerFlowN
 export function DesignerTableNode({ id, data, selected }: NodeProps<DesignerFlowNode>) {
   const nodeData = data as DesignerNodeData;
   const status = useDesignerRunStore((state) => state.nodeStates[id]?.status ?? 'pending');
-  const toolbar = (
-    <NodeToolbar
-      isVisible={selected}
-      position={Position.Bottom}
-      offset={16}
-      align="center"
-      className="designer-node-toolbar-portal"
-    >
-      <DesignerNodeToolbar nodeId={id} nodeType={DESIGNER_NODE_TYPE_TABLE} />
-    </NodeToolbar>
-  );
 
   return (
     <DesignerNodeShell
@@ -426,7 +396,6 @@ export function DesignerTableNode({ id, data, selected }: NodeProps<DesignerFlow
           <TablePreviewBody nodeId={id} />
         </NodeOutputFrame>
       }
-      toolbar={toolbar}
     />
   );
 }
@@ -459,6 +428,13 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
   const previewSrc = designerAssetPreviewUrl(previewUri) || previewUri;
   const hasPreview = Boolean(previewSrc);
   const applyRatio = useFitMediaNodeSize(id, nodeType, nodeData.config || {});
+  const [resolutionLabel, setResolutionLabel] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!hasPreview || (nodeType !== DESIGNER_NODE_TYPE_IMAGE && nodeType !== DESIGNER_NODE_TYPE_VIDEO)) {
+      setResolutionLabel(null);
+    }
+  }, [hasPreview, nodeType, previewSrc]);
 
   let inner: ReactNode = <PlaceholderBody nodeType={nodeType} />;
   if (hasPreview && nodeType === DESIGNER_NODE_TYPE_IMAGE) {
@@ -472,6 +448,7 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
           const image = event.currentTarget;
           if (image.naturalWidth > 0 && image.naturalHeight > 0) {
             applyRatio(image.naturalWidth / image.naturalHeight);
+            setResolutionLabel(`${image.naturalWidth}×${image.naturalHeight}`);
           }
         }}
       />
@@ -489,6 +466,7 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
           const video = event.currentTarget;
           if (video.videoWidth > 0 && video.videoHeight > 0) {
             applyRatio(video.videoWidth / video.videoHeight);
+            setResolutionLabel(`${video.videoWidth}×${video.videoHeight}`);
           }
         }}
       />
@@ -524,6 +502,11 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
       media={isMediaNodeType(nodeType)}
       mediaFilled={hasPreview}
       selected={selected}
+      resolutionLabel={
+        hasPreview && (nodeType === DESIGNER_NODE_TYPE_IMAGE || nodeType === DESIGNER_NODE_TYPE_VIDEO)
+          ? resolutionLabel
+          : null
+      }
       body={
         <NodeOutputFrame nodeId={id} running={status === DESIGNER_NODE_STATUS_RUNNING}>
           {inner}

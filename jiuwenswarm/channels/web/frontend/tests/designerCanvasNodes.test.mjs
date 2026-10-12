@@ -19,6 +19,7 @@ import {
   offsetCanvasPosition,
   packDesignerNodeLayouts,
   parseContentAspect,
+  positionLeftOfNode,
   positionRightOfNode,
   removeNodesFromGraph,
   resolvedNodeCanvasSize,
@@ -94,6 +95,18 @@ test('positionRightOfNode stacks below an occupied successor slot', () => {
   assert.equal(first.x, 40 + 280 + DESIGNER_SUCCESSOR_GAP_X);
   assert.equal(first.y, 100);
   const second = positionRightOfNode(source, [
+    { id: 'n_other', layout: { x: first.x, y: first.y } },
+  ]);
+  assert.equal(second.x, first.x);
+  assert.equal(second.y, first.y + 160 + DESIGNER_SUCCESSOR_GAP_Y);
+});
+
+test('positionLeftOfNode stacks below an occupied predecessor slot', () => {
+  const source = { id: 'n_brief', layout: { x: 400, y: 100, width: 280, height: 160 } };
+  const first = positionLeftOfNode(source, []);
+  assert.equal(first.x, 400 - 280 - DESIGNER_SUCCESSOR_GAP_X);
+  assert.equal(first.y, 100);
+  const second = positionLeftOfNode(source, [
     { id: 'n_other', layout: { x: first.x, y: first.y } },
   ]);
   assert.equal(second.x, first.x);

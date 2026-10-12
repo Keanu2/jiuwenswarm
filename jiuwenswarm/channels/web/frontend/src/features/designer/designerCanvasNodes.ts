@@ -40,6 +40,8 @@ export const DESIGNER_ADD_GROUP_ORDER: DesignerAddGroup[] = ['image', 'video', '
 
 export type DesignerCanvasTool = 'select' | 'hand';
 export type DesignerDockPanel = 'add' | 'assets' | null;
+/** Side port on a canvas node: left adds a predecessor, right adds a successor. */
+export type DesignerNodePortSide = 'predecessor' | 'successor';
 export type DesignerAddGroup = 'image' | 'video' | 'audio';
 
 export type DesignerAddTemplate = {
@@ -547,13 +549,17 @@ export function offsetCanvasPosition(
   };
 }
 
-export function positionRightOfNode(
+function positionBesideNode(
   source: { id?: string; layout?: { x?: number; y?: number; width?: number; height?: number } },
   existing: Array<{ id: string; layout?: { x?: number; y?: number; width?: number; height?: number } }>,
+  side: 'left' | 'right',
 ): { x: number; y: number } {
   const width = source.layout?.width ?? DESIGNER_CANVAS_NODE_WIDTH;
   const height = source.layout?.height ?? DESIGNER_CANVAS_NODE_HEIGHT;
-  const x = (source.layout?.x ?? 0) + width + DESIGNER_SUCCESSOR_GAP_X;
+  const x =
+    side === 'right'
+      ? (source.layout?.x ?? 0) + width + DESIGNER_SUCCESSOR_GAP_X
+      : (source.layout?.x ?? 0) - DESIGNER_CANVAS_NODE_WIDTH - DESIGNER_SUCCESSOR_GAP_X;
   const baseY = source.layout?.y ?? 0;
   const occupied = existing
     .filter((node) => node.id !== source.id)
@@ -570,6 +576,20 @@ export function positionRightOfNode(
     }
   }
   return { x, y };
+}
+
+export function positionRightOfNode(
+  source: { id?: string; layout?: { x?: number; y?: number; width?: number; height?: number } },
+  existing: Array<{ id: string; layout?: { x?: number; y?: number; width?: number; height?: number } }>,
+): { x: number; y: number } {
+  return positionBesideNode(source, existing, 'right');
+}
+
+export function positionLeftOfNode(
+  source: { id?: string; layout?: { x?: number; y?: number; width?: number; height?: number } },
+  existing: Array<{ id: string; layout?: { x?: number; y?: number; width?: number; height?: number } }>,
+): { x: number; y: number } {
+  return positionBesideNode(source, existing, 'left');
 }
 
 export function buildSuccessorEdge(sourceId: string, targetId: string): DesignerGraphEdge {

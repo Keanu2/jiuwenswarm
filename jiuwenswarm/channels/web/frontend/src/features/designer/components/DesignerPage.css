@@ -1193,11 +1193,6 @@
   user-select: none;
 }
 
-.designer-node.is-selected .designer-node__card {
-  border-color: var(--color-text-primary);
-  box-shadow: var(--effect-shadow-md, var(--effect-shadow-sm));
-}
-
 .designer-node.is-running .designer-node__card {
   border-color: #3b82f6;
   box-shadow: 0 0 0 1px color-mix(in srgb, #3b82f6 35%, transparent);
@@ -1221,6 +1216,13 @@
 
 .designer-node.is-failed .designer-node__type-icon {
   color: #b91c1c;
+}
+
+/* Selected wins over status colors; match highlighted-edge blue stroke width (2.5). */
+.designer-node.is-selected .designer-node__card {
+  border-color: var(--color-border-focus);
+  border-width: 2.5px;
+  box-shadow: none;
 }
 
 .designer-node__error {
@@ -1257,31 +1259,16 @@
   white-space: nowrap;
 }
 
-.designer-node__delete {
-  display: inline-flex;
+.designer-node__resolution {
   flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-right: -2px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
+  margin-left: auto;
+  padding-left: 6px;
   color: var(--color-text-muted);
-  opacity: 0;
-  cursor: pointer;
-}
-
-.designer-node:hover .designer-node__delete,
-.designer-node.is-selected .designer-node__delete,
-.designer-node__delete:focus-visible {
-  opacity: 1;
-}
-
-.designer-node__delete:hover {
-  color: #b91c1c;
-  background: color-mix(in srgb, #ef4444 16%, transparent);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .designer-node__card .react-flow__resize-control.handle.bottom.right {
@@ -1321,64 +1308,124 @@
   pointer-events: none;
 }
 
-.designer-node__successor-wrap {
-  position: absolute;
-  top: 50%;
-  left: calc(100% - 8px);
+/* Port handle = tiny edge anchor on the node border. The circle-plus icon is a
+   visually offset child so edges still meet the card while the icon floats on top. */
+.designer-node__card .react-flow__handle.designer-node__port {
   z-index: 5;
-  display: flex;
-  align-items: flex-start;
-  padding: 10px 8px 10px 20px;
-  pointer-events: auto;
-  transform: translateY(-50%);
+  width: 8px;
+  height: 8px;
+  min-width: 8px;
+  min-height: 8px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  opacity: 0;
+  overflow: visible;
+  pointer-events: none;
+  cursor: pointer;
+  transition: color 120ms ease, opacity 120ms ease;
 }
 
-.designer-node__successor {
-  position: relative;
-  z-index: 5;
+.designer-node__port-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 999px;
-  background: var(--color-surface-card);
-  color: var(--color-text-primary);
-  box-shadow: var(--effect-shadow-sm);
-  opacity: 0;
+  width: 28px;
+  height: 28px;
   pointer-events: none;
-  cursor: pointer;
+  transform: translate(-50%, -50%);
 }
 
-.designer-node:hover .designer-node__successor,
-.designer-node.is-selected .designer-node__successor,
-.designer-node__successor-wrap:hover .designer-node__successor,
-.designer-node__successor.is-open,
-.designer-node__successor:focus-visible {
+/*
+ * Invisible hover bridge back toward the card. Without it, the gap between the
+ * node box and the offset icon is not a descendant hit target, so
+ * `.designer-node:hover` drops (unlike the in-caption delete button).
+ */
+.designer-node__port-icon::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 22px;
+  height: 48px;
+  transform: translateY(-50%);
+}
+
+/* Float the icon just outside the border, over the outgoing/incoming edge. */
+.designer-node__card .react-flow__handle.designer-node__port--successor .designer-node__port-icon {
+  transform: translate(-50%, -50%) translateX(16px);
+}
+
+.designer-node__card .react-flow__handle.designer-node__port--successor .designer-node__port-icon::before {
+  right: 50%;
+}
+
+.designer-node__card .react-flow__handle.designer-node__port--predecessor .designer-node__port-icon {
+  transform: translate(-50%, -50%) translateX(-16px);
+}
+
+.designer-node__card .react-flow__handle.designer-node__port--predecessor .designer-node__port-icon::before {
+  left: 50%;
+}
+
+.designer-node:hover .designer-node__card .react-flow__handle.designer-node__port,
+.designer-node__card .react-flow__handle.designer-node__port:has(.designer-node__port-icon:hover),
+.designer-node__card .react-flow__handle.designer-node__port.is-open,
+.designer-node__card .react-flow__handle.designer-node__port:focus-visible,
+.designer-node__card .react-flow__handle.designer-node__port.connectingfrom {
   opacity: 1;
+}
+
+.designer-node:hover .designer-node__card .react-flow__handle.designer-node__port .designer-node__port-icon,
+.designer-node__card .react-flow__handle.designer-node__port:has(.designer-node__port-icon:hover) .designer-node__port-icon,
+.designer-node__card .react-flow__handle.designer-node__port.is-open .designer-node__port-icon,
+.designer-node__card .react-flow__handle.designer-node__port:focus-visible .designer-node__port-icon,
+.designer-node__card .react-flow__handle.designer-node__port.connectingfrom .designer-node__port-icon {
   pointer-events: auto;
 }
 
-.designer-node__successor:hover,
-.designer-node__successor.is-open {
-  background: var(--color-action-secondary);
+.designer-node__card .react-flow__handle.designer-node__port:hover,
+.designer-node__card .react-flow__handle.designer-node__port.is-open,
+.designer-node__card .react-flow__handle.designer-node__port.connectingfrom {
+  color: var(--color-text-primary);
 }
 
-.designer-node__successor-menu {
+.designer-canvas-shell.is-hand .designer-node__card .react-flow__handle.designer-node__port .designer-node__port-icon {
+  cursor: pointer;
+}
+
+.designer-node__port-menu {
   position: absolute;
-  top: 0;
-  left: calc(100% + 8px);
+  top: 50%;
   z-index: 6;
-  width: min(280px, 70vw);
+  min-width: 168px;
   max-height: min(360px, 70vh);
-  overflow: auto;
-  padding: 12px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-surface-card) 96%, transparent);
-  backdrop-filter: blur(10px);
-  box-shadow: var(--effect-shadow-lg);
+  overflow-x: hidden;
+  overflow-y: auto;
+  transform: translateY(-50%);
+}
+
+.designer-node__port-menu--successor {
+  left: calc(100% + 28px);
+}
+
+.designer-node__port-menu--predecessor {
+  right: calc(100% + 28px);
+  left: auto;
+}
+
+.designer-node__port-menu-title {
+  margin: 0 0 4px;
+  padding: 4px 8px 6px;
+  color: var(--color-text-muted, #6b7280);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
 }
 
 .designer-node__body {
@@ -1680,15 +1727,54 @@
   background: #111;
 }
 
-.designer-node-toolbar-portal {
+.designer-node-toolbar-portal,
+.designer-node-action-bar-portal {
   z-index: 30;
+}
+
+.designer-node-action-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-lg);
+  pointer-events: all;
+}
+
+.designer-node-action-bar__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.designer-node-action-bar__btn:hover:not(:disabled),
+.designer-node-action-bar__btn:focus-visible:not(:disabled) {
+  background: var(--color-icon-btn-hover-surface);
+  outline: none;
+}
+
+.designer-node-action-bar__btn:disabled {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
 }
 
 .designer-node-toolbar {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 10px;
+  align-items: stretch;
+  gap: 8px;
   width: 416px;
   max-width: min(416px, 70vw);
   pointer-events: all;
@@ -1740,12 +1826,8 @@
   cursor: not-allowed;
 }
 
-.designer-node-toolbar__tabs {
-  display: inline-flex;
-  gap: 8px;
-}
-
-.designer-node-toolbar__tab {
+.designer-node-toolbar__compare {
+  align-self: center;
   min-width: 72px;
   padding: 6px 14px;
   border: 1px solid var(--color-border-default);
@@ -1756,28 +1838,16 @@
   cursor: pointer;
 }
 
-.designer-node-toolbar__tab:disabled {
-  color: var(--color-text-secondary);
-  background: var(--color-action-secondary);
-  border-color: var(--color-border-default);
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.designer-node-toolbar__tab.is-active {
-  background: #d9d9d9;
-  border-color: #d9d9d9;
-}
-
 .designer-node-toolbar__panel {
   width: 100%;
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 14px;
-  border: 1px solid #d9d9d9;
+  border: 1px solid #25252510;
   border-radius: 6px;
-  background: #d9d9d9;
+  background: var(--color-surface-card);
+  box-shadow: 0 2px 12px 0 #00000006;
   box-sizing: border-box;
 }
 
@@ -1870,17 +1940,64 @@
   color: #fff;
 }
 
+.designer-node-toolbar__prompt-hint {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.375;
+}
+
+.designer-node-toolbar__composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .designer-node-toolbar__prompt {
   width: 100%;
-  min-height: 64px;
-  resize: vertical;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 8px;
-  background: var(--color-surface-card);
+  min-height: 72px;
+  resize: none;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: var(--color-text-primary);
   font-size: 13px;
+  line-height: 1.5;
   box-sizing: border-box;
+}
+
+.designer-node-toolbar__prompt:focus {
+  outline: none;
+}
+
+.designer-node-toolbar__composer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.designer-node-toolbar__send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--color-text-primary);
+  color: var(--color-text-inverse);
+  cursor: pointer;
+}
+
+.designer-node-toolbar__send:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.designer-node-toolbar__send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .designer-node-toolbar__params {
@@ -1996,17 +2113,16 @@ textarea.designer-node-toolbar__param-input {
 .designer-node-toolbar__action {
   align-self: stretch;
   padding: 8px 12px;
-  border: none;
+  border: 1px solid var(--color-border-default);
   border-radius: 8px;
-  background: var(--color-surface-card);
+  background: var(--color-action-secondary);
   color: var(--color-text-primary);
   font-size: 13px;
   cursor: pointer;
 }
 
-.designer-node-toolbar__panel--upload .designer-node-toolbar__action {
-  align-self: center;
-  min-width: 120px;
+.designer-node-toolbar__action:hover:not(:disabled) {
+  background: var(--color-icon-btn-hover-surface);
 }
 
 .designer-page__canvas .react-flow__edge.designer-edge--highlighted {

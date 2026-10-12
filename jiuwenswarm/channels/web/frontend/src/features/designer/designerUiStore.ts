@@ -1,5 +1,14 @@
 import { create } from 'zustand';
-import type { DesignerCanvasTool, DesignerDockPanel } from './designerCanvasNodes';
+import type {
+  DesignerCanvasTool,
+  DesignerDockPanel,
+  DesignerNodePortSide,
+} from './designerCanvasNodes';
+
+export type DesignerNodePortMenu = {
+  nodeId: string;
+  side: DesignerNodePortSide;
+};
 
 type DesignerUiStore = {
   selectedMaterialId: string;
@@ -8,7 +17,7 @@ type DesignerUiStore = {
   editRequestKey: number;
   canvasTool: DesignerCanvasTool;
   dockPanel: DesignerDockPanel;
-  successorMenuNodeId: string | null;
+  nodePortMenu: DesignerNodePortMenu | null;
   chatSidebarOpen: boolean;
   assetsSidebarOpen: boolean;
   minimapVisible: boolean;
@@ -16,7 +25,7 @@ type DesignerUiStore = {
   layoutRequestId: number;
   setCanvasTool: (tool: DesignerCanvasTool) => void;
   setDockPanel: (panel: DesignerDockPanel) => void;
-  toggleSuccessorMenu: (nodeId: string) => void;
+  toggleNodePortMenu: (nodeId: string, side: DesignerNodePortSide) => void;
   closeDock: () => void;
   toggleChatSidebar: () => void;
   setChatSidebarOpen: (open: boolean) => void;
@@ -42,7 +51,7 @@ const initialState = {
   editRequestKey: 0,
   canvasTool: 'select' as DesignerCanvasTool,
   dockPanel: null as DesignerDockPanel,
-  successorMenuNodeId: null as string | null,
+  nodePortMenu: null as DesignerNodePortMenu | null,
   chatSidebarOpen: true,
   assetsSidebarOpen: false,
   minimapVisible: true,
@@ -77,21 +86,25 @@ export const useDesignerUiStore = create<DesignerUiStore>((set) => ({
 
   setSelectedMaterialId: (id) => set({ selectedMaterialId: id }),
 
-  setCanvasTool: (tool) => set({ canvasTool: tool, dockPanel: null, successorMenuNodeId: null }),
+  setCanvasTool: (tool) => set({ canvasTool: tool, dockPanel: null, nodePortMenu: null }),
 
   setDockPanel: (panel) =>
     set((state) => ({
       dockPanel: state.dockPanel === panel ? null : panel,
-      successorMenuNodeId: null,
+      nodePortMenu: null,
     })),
 
-  toggleSuccessorMenu: (nodeId) =>
-    set((state) => ({
-      successorMenuNodeId: state.successorMenuNodeId === nodeId ? null : nodeId,
-      dockPanel: null,
-    })),
+  toggleNodePortMenu: (nodeId, side) =>
+    set((state) => {
+      const open =
+        state.nodePortMenu?.nodeId === nodeId && state.nodePortMenu.side === side;
+      return {
+        nodePortMenu: open ? null : { nodeId, side },
+        dockPanel: null,
+      };
+    }),
 
-  closeDock: () => set({ dockPanel: null, successorMenuNodeId: null }),
+  closeDock: () => set({ dockPanel: null, nodePortMenu: null }),
 
   toggleChatSidebar: () => set((state) => ({ chatSidebarOpen: !state.chatSidebarOpen })),
 
