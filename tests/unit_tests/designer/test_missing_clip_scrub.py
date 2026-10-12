@@ -115,3 +115,44 @@ def test_duration_only_brief_does_not_fail_validate(duration_n: int) -> None:
     assert changed
     assert referenced_shot_indices(texts["n_brief"]) <= {1, 2}
     assert duration_n not in referenced_shot_indices(texts["n_brief"])
+
+
+def test_scrub_drops_only_the_connector_next_to_a_missing_ref() -> None:
+    assert scrub_missing_shot_references("BGM: shot 1 -> shot 2 -> shot 3", {1, 2}) == (
+        "BGM: shot 1 -> shot 2"
+    )
+    assert scrub_missing_shot_references("BGM: shot 3 → shot 1 → shot 2", {1, 2}) == (
+        "BGM: shot 1 → shot 2"
+    )
+    assert scrub_missing_shot_references("镜头1 — 镜头3 — 镜头2", {1, 2}) == "镜头1 — 镜头2"
+
+
+def test_scrub_keeps_markdown_dashes_away_from_missing_refs() -> None:
+    text = (
+        "## Cast\n"
+        "- Ann: red coat\n"
+        "- Bo: blue hat\n"
+        "\n"
+        "---\n"
+        "\n"
+        "Eye-level, 0.0-4.0s, A - B, shot 1 -> shot 2, see shot 3.\n"
+        "\n"
+        "| Shot | Timeline | Character action |\n"
+        "| --- | --- | --- |\n"
+        "| 1 | 0.0-4.0s | enter, as in shot 3 |\n"
+        "| 2 | 4.0-8.0s | walk |"
+    )
+    assert scrub_missing_shot_references(text, {1, 2}) == (
+        "## Cast\n"
+        "- Ann: red coat\n"
+        "- Bo: blue hat\n"
+        "\n"
+        "---\n"
+        "\n"
+        "Eye-level, 0.0-4.0s, A - B, shot 1 -> shot 2, see.\n"
+        "\n"
+        "| Shot | Timeline | Character action |\n"
+        "| --- | --- | --- |\n"
+        "| 1 | 0.0-4.0s | enter, as in |\n"
+        "| 2 | 4.0-8.0s | walk |"
+    )

@@ -38,6 +38,10 @@ export function isEditableDesignerMaterial(material: DesignerMaterial): boolean 
   return material.kind === 'text' || material.kind === 'table';
 }
 
+export function isDesignerTableMaterial(material: Pick<DesignerMaterial, 'kind' | 'role'>): boolean {
+  return material.kind === 'table' || material.role === 'storyboard';
+}
+
 export function classifyDesignerOutput(input: {
   kind?: string;
   mimeType?: string;
@@ -128,6 +132,7 @@ export function materialsFromRefs(
         mime_type: mimeType,
         label,
       });
+    const isTable = node.type === 'table' || ref.kind === 'table' || role === 'storyboard';
     const editable =
       !placeholder &&
       Boolean(textUrl) &&
@@ -137,7 +142,7 @@ export function materialsFromRefs(
         id: `${idPrefix}:${index}`,
         nodeId: node.id,
         label,
-        kind: isTextish ? 'text' : kind,
+        kind: isTable ? 'table' : isTextish ? 'text' : kind,
         role,
         uri: ref.uri,
         mimeType,

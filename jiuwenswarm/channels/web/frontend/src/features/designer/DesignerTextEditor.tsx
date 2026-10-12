@@ -1,7 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { DesignerStoryboardTable, DesignerStoryboardTableDraft } from './DesignerStoryboardTable';
 import { saveDesignerTextFile } from './designerAssetUrl';
-import { DESIGNER_MATERIAL_SAVED_EVENT, isEditableDesignerMaterial, type DesignerMaterial } from './designerMaterials';
+import {
+  DESIGNER_MATERIAL_SAVED_EVENT,
+  isDesignerTableMaterial,
+  isEditableDesignerMaterial,
+  type DesignerMaterial,
+} from './designerMaterials';
+import { parseMarkdownTable } from './designerNodePreview';
 
 type DesignerTextEditorProps = {
   material: DesignerMaterial;
@@ -22,6 +29,7 @@ export function DesignerTextEditor({
 }: DesignerTextEditorProps) {
   const { t } = useTranslation();
   const editable = isEditableDesignerMaterial(material);
+  const isTable = isDesignerTableMaterial(material);
   const [{ text, draft, editing, conflict }, setEditor] = useState(EMPTY_EDITOR);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -128,6 +136,26 @@ export function DesignerTextEditor({
     return <p data-testid="designer-text-placeholder">{t('designer.materials.placeholderHint')}</p>;
   if (error && !text && !editing) return <p data-testid="designer-text-error">{error}</p>;
 
+  const onDraftKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      cancelEdit();
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key === 's') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!saving && !loading && !conflict && draft !== text) void saveEdit();
+    }
+  };
+  const setDraft = (value: string) => {
+    setEditor((current) => ({
+      ...current,
+      draft: value,
+      conflict: current.conflict && value !== current.text,
+    }));
+  };
+  const tableDraft = isTable && editing && parseMarkdownTable(draft) !== null;
+
   return (
     <div
       className={compact ? 'designer-text-editor designer-text-editor--compact' : 'designer-text-editor'}
@@ -177,32 +205,25 @@ export function DesignerTextEditor({
           {t('designer.materials.externalChange')}
         </p>
       ) : null}
-      {editing ? (
+      {tableDraft ? (
+        <div onKeyDown={onDraftKeyDown}>
+          <DesignerStoryboardTableDraft text={draft} disabled={saving} onChange={setDraft} />
+        </div>
+      ) : editing ? (
         <textarea
           className="designer-text-editor__textarea"
           value={draft}
           disabled={saving}
-          onChange={(event) => {
-            const value = event.target.value;
-            setEditor((current) => ({
-              ...current,
-              draft: value,
-              conflict: current.conflict && value !== current.text,
-            }));
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Escape') {
-              event.stopPropagation();
-              cancelEdit();
-            }
-            if ((event.ctrlKey || event.metaKey) && event.key === 's') {
-              event.preventDefault();
-              event.stopPropagation();
-              if (!saving && !loading && !conflict && draft !== text) void saveEdit();
-            }
-          }}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={onDraftKeyDown}
           spellCheck={false}
           data-testid="designer-text-draft"
+        />
+      ) : isTable && !loading ? (
+        <DesignerStoryboardTable
+          text={text}
+          testId="designer-text-preview"
+          layout={compact ? 'node' : 'full'}
         />
       ) : (
         <pre className="designer-text-editor__text" data-testid="designer-text-preview">

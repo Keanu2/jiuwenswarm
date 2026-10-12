@@ -253,112 +253,6 @@ def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
     return pruned
 
 
-def _write_storyboard_markdown(
-    shots: list[dict[str, Any]],
-    characters: list[dict[str, Any]],
-    *,
-    style_lock: dict[str, Any] | None = None,
-) -> str:
-    id_to_name = {str(c.get("id")): str(c.get("name") or c.get("id")) for c in characters}
-    # Hierarchical: scenes (setting_id) → clips/shots.
-    by_set: dict[str, list[dict[str, Any]]] = {}
-    order: list[str] = []
-    for shot in shots:
-        if not isinstance(shot, dict):
-            continue
-        sid = str(shot.get("setting_id") or "set_1").strip() or "set_1"
-        if sid not in by_set:
-            by_set[sid] = []
-            order.append(sid)
-        by_set[sid].append(shot)
-    lines = [
-        "# Storyboard Scenario",
-        "",
-        (
-            "Visual style: "
-            + str((style_lock or {}).get("look") or (style_lock or {}).get("medium") or "").strip()
-        )
-        if style_lock
-        else "",
-        "",
-        "Hierarchy: **Scene (setting_id)** → **Clips/shots**.",
-        "Different scenes = different places. First clip of each scene authors the "
-        "**scene specs + master prompt** (compose scene + only on-screen cast). "
-        "Later same-scene clips **compose again from character specs** "
-        "using that shared scene prompt/view locks (architecture locked). "
-        "Never borrow another setting_id. Not every cast member is in every scene.",
-        "",
-    ]
-    for sid in order:
-        scene_shots = by_set.get(sid) or []
-        scene_text = ""
-        for shot in scene_shots:
-            scene_text = str(shot.get("setting_description") or "").strip()
-            if scene_text:
-                break
-        lines.append(f"## Scene `{sid}`" + (f" — {scene_text}" if scene_text else ""))
-        lines.append("")
-        for shot in scene_shots:
-            idx = int(shot.get("clip_index") or 0)
-            strategy = str(shot.get("clip_strategy") or "")
-            visible = [
-                id_to_name.get(str(cid), str(cid))
-                for cid in (
-                    shot.get("on_screen")
-                    or shot.get("visible_cast_ids")
-                    or shot.get("character_ids")
-                    or []
-                )
-            ]
-            offscreen = [
-                id_to_name.get(str(cid), str(cid))
-                for cid in (shot.get("offscreen") or shot.get("off_screen_cast_ids") or [])
-            ]
-            featured = [
-                id_to_name.get(str(cid), str(cid))
-                for cid in (shot.get("featured_cast_ids") or [])
-            ]
-            actions = shot.get("cast_actions") if isinstance(shot.get("cast_actions"), dict) else {}
-            doing_lines = [
-                f"{id_to_name.get(str(cid), str(cid))}: {act}"
-                for cid, act in actions.items()
-                if str(act).strip()
-            ]
-            crowd = shot.get("crowd_lock") if isinstance(shot.get("crowd_lock"), dict) else {}
-            lines.append(f"### Shot {idx} — {shot.get('title') or f'Shot {idx}'}")
-            lines.append(f"- Timeline: {shot.get('timeline') or ''}")
-            lines.append(f"- Strategy: `{strategy}`")
-            lines.append(f"- Camera: {shot.get('camera') or ''}")
-            lines.append(f"- On screen (visible): {', '.join(visible) or '—'}")
-            lines.append(f"- Offscreen (in scene, not in frame): {', '.join(offscreen) or '—'}")
-            lines.append(f"- Featured (camera focus): {', '.join(featured) or '—'}")
-            if doing_lines:
-                lines.append(f"- Doing: {'; '.join(doing_lines)}")
-            lines.append(f"- Action: {shot.get('action') or shot.get('clip_prompt') or ''}")
-            if shot.get("scene_distinctness"):
-                lines.append(f"- Scene note: {shot.get('scene_distinctness')}")
-            speech_line = str(shot.get("speech_line") or "").strip()
-            by_char = shot.get("speech_by_character") if isinstance(shot.get("speech_by_character"), dict) else {}
-            if by_char:
-                bits = "; ".join(f"{cid}: {line}" for cid, line in by_char.items() if str(line).strip())
-                if bits:
-                    lines.append(f"- Speech by character: {bits}")
-            elif speech_line:
-                lines.append(f"- Speech: {speech_line}")
-            if shot.get("language_lock"):
-                lines.append(f"- Language lock: {shot.get('language_lock')}")
-            if crowd:
-                lines.append(
-                    f"- Crowd lock: present={crowd.get('present')}; "
-                    f"{str(crowd.get('density') or '')}"
-                )
-            done = shot.get("already_done") or []
-            if done:
-                lines.append(f"- Already done: {'; '.join(str(x) for x in done[:8])}")
-            lines.append("")
-    return "\n".join(lines).strip() + "\n"
-
-
 def _shot_budget(analysis: dict[str, Any], shots: list[dict[str, Any]]) -> int:
     """Honor explicit target_clip_count as a HARD ceiling — never invent extra clips."""
     n = len(shots) or 1
@@ -1022,7 +916,7 @@ def build_smart_video_graph(
                     "style_lock": dict(film_style),
                     "image_size": _IMAGE_SIZE,
                     "max_image_calls": 1,
-                    "inputs": ["n_brief", "n_storyboard"],
+                    "inputs": ["n_brief"],
                     "agent_name": agent,
                     "kind": "agent",
                     "skill_id": "character",
@@ -1038,7 +932,6 @@ def build_smart_video_graph(
                 "layout": {"x": 680, "y": float(40 + (i - 1) * 160), "width": 240, "height": 140},
             }
         )
-        edges.append(_edge(f"e_sb_{nid}", "n_storyboard", nid))
         edges.append(_edge(f"e_brief_{nid}", "n_brief", nid))
 
     # Spatial lock text (weak env hint only). Scene specs are built per setting_id;
@@ -1237,7 +1130,7 @@ def build_smart_video_graph(
             tod = {}
             scene_prompt = "One empty setting. The setting is empty. One clear image."
         _ = (opening_cast, opening_action, ensemble_nids, lock_line_scene)
-        scene_inputs = ["n_brief", "n_storyboard"]
+        scene_inputs = ["n_brief"]
         nodes.append(
             {
                 "id": scene_nid,

@@ -232,6 +232,8 @@
       "placeholderHint": "这个节点还是占位产物，没有真实文件。",
       "openFile": "打开文件",
       "textError": "无法读取文本",
+      "addTableRow": "添加行",
+      "deleteTableRow": "删除第 {{row}} 行",
       "frameCount": "{{count}} 张关键帧",
       "collapse": "收起物料",
       "expand": "展开物料",
@@ -240,6 +242,17 @@
       "previous": "上一张",
       "next": "下一张",
       "viewerIndex": "{{current}} / {{total}}"
+    },
+    "storyboard": {
+      "columns": {
+        "clip_no": "镜号",
+        "timeline": "时间",
+        "camera": "景别/机位",
+        "move": "运镜",
+        "on_screen": "出镜角色",
+        "character_action": "角色动作",
+        "speech": "台词"
+      }
     },
     "errors": {
       "runFailed": "启动运行失败",

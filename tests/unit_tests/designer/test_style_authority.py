@@ -172,20 +172,3 @@ def test_leaf_prompt_helpers_do_not_invent_a_medium() -> None:
     for prompt in (image_prompt, video_prompt):
         assert "photoreal" not in prompt.lower()
         assert "cartoonish" not in prompt.lower()
-
-
-def test_generated_storyboard_visibly_carries_style_authority() -> None:
-    from jiuwenswarm.server.runtime.designer.smart_graph import (
-        _write_storyboard_markdown,
-    )
-
-    markdown = _write_storyboard_markdown(
-        _analysis()["clips"],
-        _analysis()["characters"],
-        style_lock={
-            "look": "cartoonish animation with flat shapes and rounded forms",
-            "medium": "stylized_animation",
-        },
-    )
-
-    assert "Visual style: cartoonish animation with flat shapes and rounded forms" in markdown

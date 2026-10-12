@@ -45,7 +45,16 @@ def _handler_graph(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
         config["delegate"] = CONFIG_DELEGATE_HANDLER
         config["force_handler"] = True
         config["skip_llm"] = True
+        if node_pipeline(node) == NODE_ROLE_STORYBOARD:
+            config.setdefault("planned_shots", _STUB_PLANNED_SHOTS)
     return graph
+
+
+_STUB_PLANNED_SHOTS = [
+    {"clip_index": 1, "timeline": "0.0-2.0s", "camera": "全景/平视", "camera_move": "缓摇", "action": "未入画"},
+    {"clip_index": 2, "timeline": "2.0-3.5s", "camera": "中景/平视", "camera_move": "跟移", "action": "主体入画"},
+    {"clip_index": 3, "timeline": "3.5-5.0s", "camera": "近景/平视", "camera_move": "固定", "action": "转身"},
+]
 
 
 def _assert_nodes_do_not_overlap(nodes: list) -> None:
@@ -69,12 +78,11 @@ def stub_clip_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_text(prompt: str, max_tokens: int = 1200) -> str:
         if "分镜" in prompt or "运镜" in prompt or "Storyboard" in prompt:
             return (
-                "## 分镜表\n\n"
-                "| 镜号 | 时间轴 | 镜头视角 | 运镜 | 人物变化 | 场景变化 |\n"
-                "| --- | --- | --- | --- | --- | --- |\n"
-                "| 1 | 0.0-2.0s | 全景/平视 | 缓摇 | 未入画 | 站台 |\n"
-                "| 2 | 2.0-3.5s | 中景/平视 | 跟移 | 主体入画 | 出站 |\n"
-                "| 3 | 3.5-5.0s | 近景/平视 | 固定 | 转身 | 月台 |\n"
+                "| Shot | Timeline | Camera | Move | On screen | Character action | Speech |\n"
+                "| --- | --- | --- | --- | --- | --- | --- |\n"
+                "| 1 | 0.0-2.0s | 全景/平视 | 缓摇 |  | 未入画 |  |\n"
+                "| 2 | 2.0-3.5s | 中景/平视 | 跟移 | 主体 | 主体入画 |  |\n"
+                "| 3 | 3.5-5.0s | 近景/平视 | 固定 | 主体 | 转身 |  |\n"
             )
         return f"# stub\n{prompt[:80]}"
 
@@ -417,10 +425,10 @@ def test_expand_shots_keeps_director_topology_and_syncs_prompts(
     story.write_text(
         "# Storyboard\n\n"
         "## Storyboard\n\n"
-        "| Shot | Timeline | Camera | Move | Character action | Continuity | Comment |\n"
+        "| Shot | Timeline | Camera | Move | On screen | Character action | Speech |\n"
         "| --- | --- | --- | --- | --- | --- | --- |\n"
-        "| 1 | 0.0-4.0s | wide | hold | enter | hold | shot one |\n"
-        "| 2 | 4.0-8.0s | medium | push | walk | hold | shot two |\n",
+        "| 1 | 0.0-4.0s | wide | hold | Ann | enter |  |\n"
+        "| 2 | 4.0-8.0s | medium | push | Ann | walk |  |\n",
         encoding="utf-8",
     )
     executor = GraphExecutor(designer_store)

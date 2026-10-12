@@ -131,7 +131,7 @@ def missing_shot_tombstones(
 
 
 def _collapse_blank_lines(text: str) -> str:
-    text = re.sub(r"[ \s]+\n", "\n", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -202,23 +202,43 @@ def _neutralize_inline_missing_refs(text: str, missing: set[int]) -> str:
         if not _is_clip_index_reference(text, match):
             return match[0]
         if int(match[1]) in missing:
-            return ""
+            return _DROPPED_REF
         return match[0]
 
     out = _SHOT_REFERENCE.sub(replace_shot, text)
 
     def replace_continuity(match: re.Match[str]) -> str:
         if int(match[1]) in missing:
-            return ""
+            return _DROPPED_REF
         return match[0]
 
-    out = _CONTINUITY_REFERENCE.sub(replace_continuity, out)
-    # Clean orphaned chain arrows left after dropping a missing index.
-    out = re.sub(r"[→\-–—]+(?:\s*[→\-–—]+)+", "→", out)
-    out = re.sub(r"(?:^|[\s,，、])[→\-–—]+", " ", out)
-    out = re.sub(r"[→\-–—]+(?:\s|$)", " ", out)
-    out = re.sub(r"[ \s]{2,}", " ", out)
-    return out
+    return _CONTINUITY_REFERENCE.sub(replace_continuity, out)
+
+
+# Stands in for a dropped reference until its chain connector is removed. Only the
+# connector touching a dropped reference goes: table separators, list markers,
+# rules, ranges, and live arrows elsewhere in the document stay as written.
+_DROPPED_REF = "\x00"
+_CHAIN_CONNECTOR = r"[ \t]*(?:-+>|=>|[→–—]+|(?<=[ \t])-+(?=[ \t]))[ \t]*"
+_CONNECTOR_BEFORE_DROPPED = re.compile(_CHAIN_CONNECTOR + _DROPPED_REF)
+_CONNECTOR_AFTER_DROPPED = re.compile(_DROPPED_REF + _CHAIN_CONNECTOR)
+_SPACED_DROPPED = re.compile(r"[ \t]*" + _DROPPED_REF + r"[ \t]*")
+_NO_SPACE_BEFORE = set(".,;:!?)]}，。；：！？）、")
+
+
+def _drop_dropped_refs(text: str) -> str:
+    out = _CONNECTOR_BEFORE_DROPPED.sub("", text)
+    out = _CONNECTOR_AFTER_DROPPED.sub("", out)
+
+    def join(match: re.Match[str]) -> str:
+        source = match.string
+        before = source[match.start() - 1] if match.start() > 0 else "\n"
+        after = source[match.end()] if match.end() < len(source) else "\n"
+        if before.isspace() or after.isspace() or after in _NO_SPACE_BEFORE:
+            return ""
+        return " " if match[0] != _DROPPED_REF else ""
+
+    return _SPACED_DROPPED.sub(join, out)
 
 
 def scrub_missing_shot_references(text: str, live_indices: set[int]) -> str:
@@ -232,14 +252,14 @@ def scrub_missing_shot_references(text: str, live_indices: set[int]) -> str:
     targets = missing_shot_tombstones(out, set(live_indices))
     if targets:
         out = map_shot_references(out, targets)
-    out = _REMOVED_SHOT_MARKER.sub("", out)
+    out = _REMOVED_SHOT_MARKER.sub(_DROPPED_REF, out)
     out = _neutralize_inline_missing_refs(out, missing)
     # Second pass: any remaining true missing refs (e.g. rebuilt after section edits).
     still_missing = referenced_shot_indices(out) - set(live_indices)
     if still_missing:
         out = _neutralize_inline_missing_refs(out, still_missing)
         out = _drop_missing_shot_sections(out, still_missing)
-    return _collapse_blank_lines(out)
+    return _collapse_blank_lines(_drop_dropped_refs(out))
 
 
 def redirects_removed_continuity(

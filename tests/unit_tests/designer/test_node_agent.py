@@ -12,15 +12,18 @@ import pytest
 
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
+    NODE_ROLE_STORYBOARD,
     NODE_STATUS_COMPLETED,
     NODE_STATUS_PENDING,
     NODE_TYPE_TEXT,
     ROLE_DEFAULT_TEMPLATES,
     RUN_STATUS_CANCELLED,
     RUN_STATUS_COMPLETED,
+    DesignerExecutionGraph,
     DesignerGraphNode,
     node_agent_template,
     node_delegate,
+    node_pipeline,
     normalize_node,
 )
 from tests.unit_tests.designer.graph_fixtures import make_pipeline_graph
@@ -117,6 +120,17 @@ async def _await_executor_task(executor: GraphExecutor, run_id: str) -> None:
         await task
 
 
+def _pipeline_graph(*, project_id: str, prompt: str) -> DesignerExecutionGraph:
+    """The storyboard always runs on the handler, which tabulates planned shots."""
+    graph = make_pipeline_graph(project_id=project_id, prompt=prompt)
+    for node in graph["nodes"]:
+        if node_pipeline(node) == NODE_ROLE_STORYBOARD:
+            node["config"]["planned_shots"] = [
+                {"clip_index": 1, "timeline": "0.0-5.0s", "camera": "wide", "camera_move": "static", "action": "enter"},
+            ]
+    return graph
+
+
 def test_parse_agent_template_ref() -> None:
     assert parse_agent_template_ref("designer/leader") == ("designer", "leader")
     assert parse_agent_template_ref("my_template") == (None, "my_template")
@@ -162,7 +176,7 @@ async def test_agent_scheduler_starts_only_ready_root(
         return await _complete_with_dummy_media(tmp_path, node, toolkit)
 
     graph = designer_store.save_graph(
-        make_pipeline_graph(project_id="proj_agent_root", prompt="only root"),
+        _pipeline_graph(project_id="proj_agent_root", prompt="only root"),
     )
     executor = GraphExecutor(designer_store, runner=runner)
     run = executor.create_run(graph)
@@ -190,7 +204,7 @@ async def test_agent_node_run_starts_companion(
         return await _complete_with_dummy_media(tmp_path, node, toolkit)
 
     graph = designer_store.save_graph(
-        make_pipeline_graph(project_id="proj_agent_run", prompt="pull companion"),
+        _pipeline_graph(project_id="proj_agent_run", prompt="pull companion"),
     )
     executor = GraphExecutor(designer_store, runner=runner)
     run = executor.create_run(graph)
@@ -231,7 +245,7 @@ async def test_agent_patch_cannot_add_nodes_to_frozen_topology(
 
     spawned: list[str] = []
     graph = designer_store.save_graph(
-        make_pipeline_graph(project_id="proj_agent_patch", prompt="patch then run"),
+        _pipeline_graph(project_id="proj_agent_patch", prompt="patch then run"),
     )
     executor = GraphExecutor(designer_store, runner=runner)
     run = executor.create_run(graph)
@@ -262,7 +276,7 @@ async def test_cancel_stops_node_agent_host(
         return toolkit.completed
 
     graph = designer_store.save_graph(
-        make_pipeline_graph(project_id="proj_agent_cancel", prompt="cancel me"),
+        _pipeline_graph(project_id="proj_agent_cancel", prompt="cancel me"),
     )
     executor = GraphExecutor(designer_store, runner=runner)
     run = executor.create_run(graph)
@@ -299,7 +313,7 @@ async def test_completed_output_survives_agent_timeout(
         return toolkit.completed
 
     graph = designer_store.save_graph(
-        make_pipeline_graph(project_id="proj_timeout_keep", prompt="keep completed brief"),
+        _pipeline_graph(project_id="proj_timeout_keep", prompt="keep completed brief"),
     )
     executor = GraphExecutor(designer_store, runner=runner)
     run = executor.create_run(graph)
@@ -328,7 +342,7 @@ async def test_node_run_after_complete_does_not_spawn(
         return await _complete_with_dummy_media(tmp_path, node, toolkit)
 
     graph = designer_store.save_graph(
-        make_pipeline_graph(project_id="proj_no_spawn", prompt="do not spawn after complete"),
+        _pipeline_graph(project_id="proj_no_spawn", prompt="do not spawn after complete"),
     )
     executor = GraphExecutor(designer_store, runner=runner)
     run = executor.create_run(graph)

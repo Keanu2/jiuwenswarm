@@ -20,7 +20,6 @@ from jiuwenswarm.server.runtime.designer.a2a_collab import (
     align_specialists,
     collaborate_ready_wave,
     collaboration_card,
-    review_storyboard_with_peers,
 )
 
 
@@ -181,29 +180,3 @@ async def test_collaborate_skipped_when_disabled(
     )
     assert await collaborate_ready_wave(graph, run, ["n_character", "n_scene"]) == {}
     assert called["n"] == 0
-
-
-@pytest.mark.asyncio
-async def test_review_storyboard_keeps_table_when_peers_ok(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace.joinpath("designer_a2a_run_rev01_character.md").write_text(
-        "# 角色\n皮衣", encoding="utf-8"
-    )
-    workspace.joinpath("designer_a2a_run_rev01_scene.md").write_text(
-        "# 场景\n玻璃站台", encoding="utf-8"
-    )
-
-    async def fake_text(prompt: str, max_tokens: int = 800) -> str:
-        return "OK"
-
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.handlers.common.complete_designer_text",
-        fake_text,
-    )
-    table = (
-        "| 镜号 | 时间轴 | 镜头视角 | 运镜 | 人物变化 | 场景变化 |\n"
-        "| --- | --- | --- | --- | --- | --- |\n"
-        "| 1 | 0-5s | 全景 | 固定 | 未入画 | 站台 |\n"
-    )
-    assert await review_storyboard_with_peers(table, run_id="run_rev01") == table

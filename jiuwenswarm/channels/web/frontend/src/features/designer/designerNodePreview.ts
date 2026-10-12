@@ -1,4 +1,4 @@
-import { parseStoryboardClips } from './storyboardClips';
+import { parseStoryboardClips, STORYBOARD_COLUMNS } from './storyboardClips';
 
 export type MarkdownTablePreview = {
   headers: string[];
@@ -24,26 +24,15 @@ export function storyboardClipPreviews(
         clipNo: String(clip.clip_no || '').trim(),
         timeline: String(clip.timeline || '').trim(),
         action: String(clip.character_action || '').trim(),
-        picture: String(clip.comment || clip.scene_change || camera || '').trim(),
+        picture: camera,
       };
     })
     .filter((clip) => clip.clipNo || clip.timeline || clip.action || clip.picture);
 }
 
 export const EMPTY_STORYBOARD_TABLE: MarkdownTablePreview = {
-  headers: [
-    'Clip',
-    'Timeline',
-    'Camera',
-    'Move',
-    'Character action',
-    'Scene change',
-    'Comment',
-  ],
-  rows: [
-    ['', '', '', '', '', '', ''],
-    ['', '', '', '', '', '', ''],
-  ],
+  headers: STORYBOARD_COLUMNS.map(([, header]) => header),
+  rows: [STORYBOARD_COLUMNS.map(() => ''), STORYBOARD_COLUMNS.map(() => '')],
 };
 
 function splitMarkdownRow(line: string): string[] {
@@ -55,6 +44,18 @@ function splitMarkdownRow(line: string): string[] {
 
 function isSeparator(cells: string[]): boolean {
   return cells.length > 0 && cells.every((cell) => !cell || /^:?-{3,}:?$/.test(cell));
+}
+
+/** A cell can't hold a pipe or a line break without breaking the Markdown row. */
+export function sanitizeMarkdownTableCell(value: string): string {
+  return value.replace(/\|/g, '/').replace(/\r?\n/g, ' ');
+}
+
+export function serializeMarkdownTable(table: MarkdownTablePreview): string {
+  const line = (cells: string[]) =>
+    `| ${table.headers.map((_, index) => sanitizeMarkdownTableCell(cells[index] ?? '').trim()).join(' | ')} |`;
+  const separator = `| ${table.headers.map(() => '---').join(' | ')} |`;
+  return `${[line(table.headers), separator, ...table.rows.map(line)].join('\n')}\n`;
 }
 
 export function parseMarkdownTable(

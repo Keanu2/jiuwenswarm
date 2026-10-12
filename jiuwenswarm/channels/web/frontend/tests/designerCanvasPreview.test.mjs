@@ -8,6 +8,8 @@ import {
 import {
   EMPTY_STORYBOARD_TABLE,
   parseMarkdownTable,
+  sanitizeMarkdownTableCell,
+  serializeMarkdownTable,
   storyboardClipPreviews,
 } from '../node_modules/.cache/designer-canvas-preview/designerNodePreview.js';
 import {
@@ -36,47 +38,81 @@ test('bootstrap thinking canvas never reuses another project graph', () => {
   assert.equal(next.description, '新的情人节短片');
 });
 
-test('storyboardClipPreviews shows action and picture from the Brief columns', () => {
+const STORYBOARD_HEADER = '| Shot | Timeline | Camera | Move | On screen | Character action | Speech |';
+const STORYBOARD_SEPARATOR = '| --- | --- | --- | --- | --- | --- | --- |';
+
+test('storyboardClipPreviews shows action and camera from the storyboard columns', () => {
   const clips = storyboardClipPreviews(
     [
-      '| Clip | Timeline | Camera | Move | Character action | Scene change | Comment |',
-      '| --- | --- | --- | --- | --- | --- | --- |',
-      '| 1 | 0.0-2.0s | wide | static | steps off the train | platform morning light | Wide shot of a young man leaving the train |',
-      '| 2 | 2.0-5.0s | medium | pan | walks toward the exit | same station | Medium shot walking through the concourse |',
+      STORYBOARD_HEADER,
+      STORYBOARD_SEPARATOR,
+      '| 1 | 0.0-2.0s | wide / eye-level | slow pan | Ann | steps off the train | |',
+      '| 2 | 2.0-5.0s | medium | | Ann | walks toward the exit | "Home." |',
     ].join('\n'),
   );
   assert.equal(clips.length, 2);
   assert.equal(clips[0].clipNo, '1');
   assert.equal(clips[0].action, 'steps off the train');
-  assert.equal(clips[0].picture, 'Wide shot of a young man leaving the train');
+  assert.equal(clips[0].picture, 'wide / eye-level / slow pan');
   assert.equal(clips[1].action, 'walks toward the exit');
+  assert.equal(clips[1].picture, 'medium');
 });
 
-test('storyboardClipPreviews still lists clips when Comment is empty', () => {
-  const clips = storyboardClipPreviews(
-    [
-      '| Clip | Timeline | Camera | Move | Character action | Scene change | Comment |',
-      '| --- | --- | --- | --- | --- | --- | --- |',
-      '| 1 | 0.0-2.0s | wide / eye-level | slow pan | steps off the train | platform morning light | |',
-    ].join('\n'),
+test('storyboardClipPreviews keeps every row', () => {
+  const rows = Array.from(
+    { length: 10 },
+    (_, index) => `| ${index + 1} | ${index}.0s | wide | hold | Ann | beat ${index + 1} | |`,
   );
-  assert.equal(clips.length, 1);
-  assert.equal(clips[0].action, 'steps off the train');
-  assert.equal(clips[0].picture, 'platform morning light');
+  const clips = storyboardClipPreviews([STORYBOARD_HEADER, STORYBOARD_SEPARATOR, ...rows].join('\n'), 20);
+  assert.equal(clips.length, 10);
+  assert.equal(clips[9].action, 'beat 10');
 });
 
 test('empty storyboard table is a blank seven-column frame', () => {
   assert.deepEqual(EMPTY_STORYBOARD_TABLE.headers, [
-    'Clip',
+    'Shot',
     'Timeline',
     'Camera',
     'Move',
+    'On screen',
     'Character action',
-    'Scene change',
-    'Comment',
+    'Speech',
   ]);
   assert.equal(EMPTY_STORYBOARD_TABLE.rows.length, 2);
   assert.ok(EMPTY_STORYBOARD_TABLE.rows.every((row) => row.length === 7 && row.every((cell) => cell === '')));
+});
+
+test('serializeMarkdownTable round-trips edited cells and added or removed rows', () => {
+  const table = parseMarkdownTable(
+    [
+      STORYBOARD_HEADER,
+      STORYBOARD_SEPARATOR,
+      '| 1 | 0.0-2.0s | wide | static | Ann | steps off the train | |',
+      '| 2 | 2.0-5.0s | medium | pan | Ann | walks to the exit | |',
+    ].join('\n'),
+  );
+  assert.ok(table);
+  const rows = [
+    table.rows[0].map((cell, index) => (index === 5 ? 'steps off | the\ntrain' : cell)),
+    ['3', '5.0-7.0s', '', '', '', 'waves', ''],
+  ];
+  const text = serializeMarkdownTable({ headers: table.headers, rows });
+  assert.ok(text.startsWith(`${STORYBOARD_HEADER}\n${STORYBOARD_SEPARATOR}\n`));
+  const reparsed = parseMarkdownTable(text);
+  assert.ok(reparsed);
+  assert.deepEqual(reparsed.headers, table.headers);
+  assert.equal(reparsed.rows.length, 2);
+  assert.equal(reparsed.rows[0][5], 'steps off / the train');
+  assert.deepEqual(reparsed.rows[1], ['3', '5.0-7.0s', '', '', '', 'waves', '']);
+  const clips = storyboardClipPreviews(text);
+  assert.deepEqual(
+    clips.map((clip) => clip.clipNo),
+    ['1', '3'],
+  );
+});
+
+test('sanitizeMarkdownTableCell keeps a cell on one Markdown row', () => {
+  assert.equal(sanitizeMarkdownTableCell('a | b\r\nc'), 'a / b c');
 });
 
 test('parseMarkdownTable keeps a table frame from generated markdown', () => {

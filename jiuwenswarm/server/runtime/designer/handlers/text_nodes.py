@@ -8,10 +8,7 @@ import re
 from typing import Any, TypedDict
 
 from jiuwenswarm.common.schema.designer_graph import (
-    NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER,
     NODE_ROLE_CLIP,
-    NODE_ROLE_SCENE,
     NODE_TYPE_TABLE,
     NODE_TYPE_TEXT,
     DesignerGraphNode,
@@ -21,11 +18,8 @@ from jiuwenswarm.common.schema.designer_graph import (
 from jiuwenswarm.server.runtime.designer.handlers.common import (
     file_output_ref,
     graph_prompt,
-    role_output_image_path,
-    role_output_text,
     write_workspace_text,
 )
-from jiuwenswarm.server.runtime.designer.a2a_collab import collaboration_card
 from jiuwenswarm.server.runtime.designer.subagent import complete_designer_node_text
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 
@@ -56,48 +50,15 @@ story, celebration, advertisement, or other fitting concept rather than stretchi
 Request:
 """
 
-# Shot consistency is the storyboard column. Continuity remains an alias for older tables.
-_STORYBOARD_COLUMNS = "Shot | Timeline | Camera | Move | Character action | Shot consistency | Comment"
-
-_STORYBOARD_INSTRUCTION = """Write a time-coherent storyboard from the Brief. This is a camera script table, not a drawing.
-Use English Markdown. Include this heading and one table:
-
-## Storyboard
-
-Before the table, write one line: `Visual style: ...` copied from the Brief. Never replace
-that style with a leaf/model default.
-
-Use a Markdown table whose columns MUST be:
-Shot | Timeline | Camera | Move | Character action | Shot consistency | Comment
-
-Rules:
-- Cover every shot in the Brief. Do not stop at a fixed shot count
-- Materialize every beat in the Brief's narrative/content arc; fill the full requested duration
-- Every row advances action, information, product proof, or emotion; no filler, repeated action, or duplicate coverage
-- Preserve the arc's setup/hook, development/turn, and payoff/CTA as applicable
-- Timeline as start-end seconds, e.g. 0.0-5.0s — each window must meet the
-  configured video model's minimum duration (see capacity catalog); durations must sum coherently
-- If the Brief already gives a shot a duration, copy that duration exactly
-- If the Brief names a character, place, wardrobe, spoken line, or continuity rule, copy it exactly
-- Camera is shot size + angle, e.g. wide/establishing, medium/eye-level, close-up/eye-level, medium/slow pan
-- Move is push/pull/pan/dolly/static and speed
-- Character action: FULL DETAIL for THIS shot only — who is on screen, where they sit/stand,
-  what they do, wardrobe hold. Match cast identity locks. Consecutive windows concatenate;
-  do not restage the whole user prompt from a new camera, and do not strip the row to a
-  one-liner that drops blocking/speech.
-- Shot consistency: explicit forbids from prior shots (do not undo a completed shot unless this
-  row or the user prompt asks to repeat it; posture/facing/location locks)
-- Comment is the composed-scene prompt: subjects, composition, light, action instant,
-  environment, and the Brief's visual style — ready for image gen (composed scene with all
-  opening-cast characters in the scene)
-- Language: write every spoken line into the row (speaker, exact words, timing) so later clips can speak it. Speech is the default. Empty only when nobody speaks in that window, or the user asked for mime or no dialogue. Do not replace a line with silent lip-sync.
-- Enhance sparse prompts: crowd, atmosphere, lighting, wardrobe detail — without inventing new lead characters
-- Do not invent a new world that contradicts the brief
-
-Do not output storyboard drawings. Do not explain.
-
-Brief:
-"""
+STORYBOARD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("shot_no", "Shot"),
+    ("timeline", "Timeline"),
+    ("camera", "Camera"),
+    ("move", "Move"),
+    ("on_screen", "On screen"),
+    ("character_action", "Character action"),
+    ("speech", "Speech"),
+)
 
 _TABLE_SEP_CELL = re.compile(r"^:?-{3,}:?$")
 
@@ -107,38 +68,14 @@ class StoryboardShot(TypedDict):
     timeline: str
     camera: str
     move: str
+    on_screen: str
     character_action: str
-    scene_change: str
-    comment: str
+    speech: str
 
 
-_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
-    "shot_no": ("Clip", "Shot", "镜号", "片段", "分镜#"),
-    "timeline": ("Timeline", "时间轴"),
-    "camera": ("Camera", "镜头视角", "景别"),
-    "move": ("Move", "运镜"),
-    "character_action": ("Character action", "Character", "人物变化"),
-    # Shot consistency is preferred. Older tables may still say Continuity.
-    "scene_change": (
-        "Shot consistency",
-        "Character consistency",
-        "Continuity",
-        "Scene change",
-        "Scene",
-        "场景变化",
-        "连续性",
-    ),
-    "comment": ("Comment", "Notes", "注释", "备注", "画面描述", "提示词"),
+_FIELD_BY_HEADER: dict[str, str] = {
+    header.casefold(): field for field, header in STORYBOARD_COLUMNS
 }
-_POSITIONAL_FIELDS = (
-    "shot_no",
-    "timeline",
-    "camera",
-    "move",
-    "character_action",
-    "scene_change",  # Continuity column lands here positionally
-    "comment",
-)
 
 
 def _split_markdown_row(line: str) -> list[str]:
@@ -156,150 +93,111 @@ def _empty_shot() -> StoryboardShot:
         "timeline": "",
         "camera": "",
         "move": "",
+        "on_screen": "",
         "character_action": "",
-        "scene_change": "",
-        "comment": "",
+        "speech": "",
     }
 
 
 def _header_field_map(cells: list[str]) -> dict[int, str] | None:
-    mapping: dict[int, str] = {}
-    for index, cell in enumerate(cells):
-        name = cell.strip()
-        if not name:
-            continue
-        for field, aliases in _FIELD_ALIASES.items():
-            if any(alias == name or alias in name for alias in aliases):
-                mapping[index] = field
-                break
-    if "shot_no" in mapping.values() or "timeline" in mapping.values():
-        return mapping
-    return None
-
-
-def _shot_from_cells(
-    cells: list[str],
-    field_map: dict[int, str] | None,
-    fallback_no: int,
-) -> StoryboardShot | None:
-    shot = _empty_shot()
-    if field_map:
-        for index, field in field_map.items():
-            if index < len(cells):
-                shot[field] = cells[index]
-    else:
-        for index, field in enumerate(_POSITIONAL_FIELDS):
-            if index < len(cells):
-                shot[field] = cells[index]
-    if not shot["shot_no"]:
-        shot["shot_no"] = str(fallback_no)
-    if not re.match(r"^\d+", shot["shot_no"]) and len(cells) < 4:
-        return None
-    return shot
+    mapping = {
+        index: _FIELD_BY_HEADER[cell.casefold()]
+        for index, cell in enumerate(cells)
+        if cell.casefold() in _FIELD_BY_HEADER
+    }
+    return mapping if "shot_no" in mapping.values() else None
 
 
 def parse_storyboard_shots(text: str) -> list[StoryboardShot]:
-    """Read shot rows from storyboard markdown (pipe table OR hierarchical ### Shot)."""
-    table = _parse_storyboard_table(text)
-    if table:
-        return table
-    return _parse_storyboard_hierarchical(text)
-
-
-def _parse_storyboard_table(text: str) -> list[StoryboardShot]:
+    """Read shot rows from the storyboard's Markdown table."""
     shots: list[StoryboardShot] = []
-    header_seen = False
     field_map: dict[int, str] | None = None
     for line in (text or "").splitlines():
         if "|" not in line:
+            if field_map is not None:
+                break
             continue
         cells = _split_markdown_row(line)
-        if not cells or not any(cells):
+        if field_map is None:
+            field_map = _header_field_map(cells)
             continue
         if all(_TABLE_SEP_CELL.match(cell) for cell in cells if cell):
             continue
-        joined = "".join(cells)
-        header_hit = any(
-            marker.casefold() in joined.casefold()
-            for marker in ("Shot", "Timeline", "镜号", "时间轴")
-        )
-        if not header_seen and header_hit:
-            header_seen = True
-            field_map = _header_field_map(cells)
-            continue
-        if not header_seen:
-            continue
-        shot = _shot_from_cells(cells, field_map, len(shots) + 1)
-        if shot is None:
-            continue
+        shot = _empty_shot()
+        for index, field in field_map.items():
+            if index < len(cells):
+                shot[field] = cells[index]
+        if not shot["shot_no"]:
+            shot["shot_no"] = str(len(shots) + 1)
         shots.append(shot)
     return shots
 
 
-_HIER_SHOT_RE = re.compile(
-    r"(?im)^###\s*(?:Clip|Shot)\s+(\d+)\s*[—\-–:]?\s*(.*)$"
-)
-_HIER_FIELD_RE = re.compile(
-    r"(?im)^-\s*(Timeline|Camera|Camera move|Move|Action|Character action|"
-    r"Comment|Clip spec|Keyframe|Doing|Speech)\s*:\s*(.*)$"
-)
+def _table_cell(value: Any) -> str:
+    return " ".join(str(value or "").replace("|", "/").split())
 
 
-def _parse_storyboard_hierarchical(text: str) -> list[StoryboardShot]:
-    """Parse smart_graph hierarchical storyboard (### Shot N / - Action: …)."""
-    shots: list[StoryboardShot] = []
-    current: StoryboardShot | None = None
-    for line in (text or "").splitlines():
-        head = _HIER_SHOT_RE.match(line.strip())
-        if head:
-            if current is not None:
-                shots.append(current)
-            idx = int(head.group(1))
-            title = str(head.group(2) or "").strip()
-            current = {
-                "shot_no": str(idx),
-                "timeline": "",
-                "camera": "",
-                "move": "",
-                "character_action": "",
-                "scene_change": "",
-                "comment": title,
-            }
-            continue
-        if current is None:
-            continue
-        field = _HIER_FIELD_RE.match(line.strip())
-        if not field:
-            continue
-        key = field.group(1).strip().casefold()
-        val = field.group(2).strip()
-        if key == "timeline":
-            current["timeline"] = val
-        elif key == "camera":
-            current["camera"] = val
-        elif key in {"camera move", "move"}:
-            current["move"] = val
-        elif key in {"action", "character action", "doing"}:
-            # Prefer Action over Doing if both appear; first non-empty wins unless Action.
-            if key == "action" or not current.get("character_action"):
-                current["character_action"] = val
-            if key == "action":
-                current["comment"] = val or current.get("comment") or ""
-        elif key in {"comment", "clip spec", "keyframe"}:
-            current["comment"] = val
-        elif key == "speech" and not current.get("character_action"):
-            current["character_action"] = val
-    if current is not None:
-        shots.append(current)
-    return shots
+def _cast_names(ids: Any, id_to_name: dict[str, str]) -> list[str]:
+    if not isinstance(ids, list):
+        return []
+    return [id_to_name.get(str(cid), str(cid)) for cid in ids if str(cid).strip()]
 
+
+def render_storyboard_table(
+    shots: list[dict[str, Any]],
+    characters: list[dict[str, Any]],
+) -> str:
+    """Render structured shots as the storyboard's only content: one Markdown table."""
+    id_to_name = {
+        str(c.get("id")): str(c.get("name") or c.get("id"))
+        for c in characters
+        if isinstance(c, dict) and c.get("id")
+    }
+    lines = [
+        "| " + " | ".join(header for _, header in STORYBOARD_COLUMNS) + " |",
+        "| " + " | ".join("---" for _ in STORYBOARD_COLUMNS) + " |",
+    ]
+    for position, shot in enumerate((s for s in shots if isinstance(s, dict)), start=1):
+        on_screen = _cast_names(
+            shot.get("on_screen") or shot.get("visible_cast_ids") or shot.get("character_ids"),
+            id_to_name,
+        )
+        action = str(shot.get("action") or shot.get("clip_prompt") or "").strip()
+        cast_actions = shot.get("cast_actions") if isinstance(shot.get("cast_actions"), dict) else {}
+        doing = "; ".join(
+            f"{id_to_name.get(str(cid), str(cid))}: {act}"
+            for cid, act in cast_actions.items()
+            if str(act).strip()
+        )
+        if doing:
+            action = f"{action} Doing: {doing}".strip()
+        by_char = (
+            shot.get("speech_by_character")
+            if isinstance(shot.get("speech_by_character"), dict)
+            else {}
+        )
+        speech = "; ".join(
+            f"{id_to_name.get(str(cid), str(cid))}: {line}"
+            for cid, line in by_char.items()
+            if str(line).strip()
+        ) or str(shot.get("speech_line") or "").strip()
+        row = {
+            "shot_no": shot.get("clip_index") or position,
+            "timeline": shot.get("timeline"),
+            "camera": shot.get("camera"),
+            "move": shot.get("move") or shot.get("camera_move"),
+            "on_screen": ", ".join(on_screen),
+            "character_action": action,
+            "speech": speech,
+        }
+        lines.append(
+            "| " + " | ".join(_table_cell(row[field]) for field, _ in STORYBOARD_COLUMNS) + " |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def shot_generate_prompt(shot: StoryboardShot) -> str:
     """Turn one storyboard row into the clip generate prompt."""
-    comment = str(shot.get("comment") or "").strip()
-    if comment:
-        return comment
     parts: list[str] = []
     timeline = str(shot.get("timeline") or "").strip()
     if timeline:
@@ -307,8 +205,9 @@ def shot_generate_prompt(shot: StoryboardShot) -> str:
     for label, key in (
         ("Camera", "camera"),
         ("Camera move", "move"),
+        ("On screen", "on_screen"),
         ("Character action", "character_action"),
-        ("Scene change", "scene_change"),
+        ("Speech", "speech"),
     ):
         value = str(shot.get(key) or "").strip()
         if value:
@@ -340,7 +239,7 @@ def sync_shot_nodes_from_storyboard_markdown(
         shot = by_index.get(idx)
         if not isinstance(shot, dict):
             continue
-        narrative = str(shot.get("comment") or shot.get("character_action") or "").strip()
+        narrative = str(shot.get("character_action") or "").strip()
         camera = str(shot.get("camera") or "").strip()
         timeline = str(shot.get("timeline") or "").strip()
         changed = False
@@ -507,71 +406,18 @@ class BriefNodeHandler:
         )
 
 
-def _storyboard_alignment_context(ctx: NodeExecutionContext) -> str:
-    parts: list[str] = []
-    character_notes = (
-        collaboration_card(ctx.run_id, NODE_ROLE_CHARACTER)
-        or role_output_text(ctx, NODE_ROLE_CHARACTER)
-    )
-    scene_notes = (
-        collaboration_card(ctx.run_id, NODE_ROLE_SCENE)
-        or role_output_text(ctx, NODE_ROLE_SCENE)
-    )
-    if character_notes:
-        parts.append("Character sheet / notes (character action must match):\n" + character_notes)
-    elif role_output_image_path(ctx, NODE_ROLE_CHARACTER) is not None:
-        parts.append("A character sheet exists. Character action must match that look, costume, and materials. Do not invent a new character.")
-    if scene_notes:
-        parts.append("Scene sheet / notes (scene change must match):\n" + scene_notes)
-    elif role_output_image_path(ctx, NODE_ROLE_SCENE) is not None:
-        parts.append("A scene sheet exists. Scene change must match that space, weather, and lighting. Do not change location.")
-    return "\n\n".join(parts)
-
-
 class StoryboardNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        import asyncio
-
-        cfg = node_config(node)
-        planned = cfg.get("planned_shots")
         meta = ctx.graph.get("metadata") if isinstance(ctx.graph.get("metadata"), dict) else {}
-        approved = str(meta.get("approved_storyboard") or "").strip()
-        if approved:
-            _sync_style_authority(approved, ctx)
-            sync_shot_nodes_from_storyboard_markdown(ctx.graph, approved)
-            text = _stamp_bible_on_text(approved, ctx)
-            path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
-            return NodeResult(
-                output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),
-                message="storyboard written (director)",
-            )
-        source = role_output_text(ctx, NODE_ROLE_BRIEF) or graph_prompt(ctx.graph, node)
-        alignment = _storyboard_alignment_context(ctx)
-        planned_block = ""
-        if isinstance(planned, list) and planned:
-            import json as _json
-
-            planned_block = (
-                "\n\nPlanned shots from director casting (honor these beats; expand camera detail):\n"
-                + _json.dumps(planned, ensure_ascii=False, indent=2)
-                + "\n"
-            )
-        prompt = _STORYBOARD_INSTRUCTION + source + planned_block
-        if alignment:
-            prompt = f"{prompt}\n\n{alignment}\n"
-        text = await asyncio.wait_for(
-            complete_designer_node_text(
-                prompt,
-                delegate=str(cfg.get("delegate") or ""),
-                max_tokens=16384,
-            ),
-            timeout=45.0,
-        )
-        if not str(text or "").strip():
-            raise RuntimeError("Chat model did not return a usable storyboard.")
-        _sync_style_authority(text, ctx)
+        text = str(meta.get("approved_storyboard") or "").strip()
+        if not text:
+            planned = node_config(node).get("planned_shots")
+            if not isinstance(planned, list) or not planned:
+                raise RuntimeError("Storyboard has no planned shots to tabulate.")
+            analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+            characters = [c for c in (analysis.get("characters") or []) if isinstance(c, dict)]
+            text = render_storyboard_table(planned, characters)
         sync_shot_nodes_from_storyboard_markdown(ctx.graph, text)
-        text = _stamp_bible_on_text(text, ctx)
         path = write_workspace_text(f"designer_storyboard_{ctx.run_id}_{ctx.node_id}", text)
         return NodeResult(
             output_ref=file_output_ref(path, kind=NODE_TYPE_TABLE, mime_type="text/markdown"),

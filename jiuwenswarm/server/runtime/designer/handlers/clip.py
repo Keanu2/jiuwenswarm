@@ -134,6 +134,8 @@ def edge_image_flow(
 def edge_text_inputs(
     ctx: NodeExecutionContext | None,
     node: DesignerGraphNode | None,
+    *,
+    exclude_roles: frozenset[str] = frozenset(),
 ) -> list[tuple[str, str]]:
     """Text bodies that arrive on incoming data edges, in edge order."""
     from jiuwenswarm.server.runtime.designer.handlers.common import predecessor_outputs
@@ -141,7 +143,7 @@ def edge_text_inputs(
     outputs = predecessor_outputs(ctx, node if isinstance(node, dict) else None) or []
     texts: list[tuple[str, str]] = []
     for item in outputs:
-        if item.kind != "text":
+        if item.kind != "text" or item.role in exclude_roles:
             continue
         body = item.text.strip()
         if body:
@@ -372,11 +374,24 @@ def collect_clip_reference_images(
     return cap_r2v_reference_paths(paths)
 
 
+def edge_storyboard_text(
+    ctx: NodeExecutionContext | None,
+    node: DesignerGraphNode | None,
+) -> str:
+    """The storyboard table that arrives on this clip's incoming data edge."""
+    from jiuwenswarm.server.runtime.designer.handlers.common import predecessor_outputs
+
+    outputs = predecessor_outputs(ctx, node if isinstance(node, dict) else None) or []
+    for item in outputs:
+        if item.kind == "text" and item.role == NODE_ROLE_STORYBOARD and item.text.strip():
+            return item.text
+    return ""
+
+
 def _storyboard_narrative_action(shot: dict[str, Any] | None) -> str:
-    """Prefer Comment (clip spec description), then Character action."""
     if not isinstance(shot, dict):
         return ""
-    return str(shot.get("comment") or shot.get("character_action") or "").strip()
+    return str(shot.get("character_action") or "").strip()
 
 
 def _extract_action_from_generate_prompt(text: str) -> str:
@@ -402,18 +417,9 @@ def _shot_for_node(
     ctx: NodeExecutionContext | None,
 ) -> tuple[int, StoryboardShot | None]:
     index = node_clip_index(node)
-    text = role_output_text(ctx, NODE_ROLE_STORYBOARD) if ctx is not None else ""
-    shots = parse_storyboard_shots(text)
+    shots = parse_storyboard_shots(edge_storyboard_text(ctx, node))
     if shots and 1 <= index <= len(shots):
-        shot = dict(shots[index - 1])
-        # Keep live storyboard comment/character_action intact.
-        # Do NOT overwrite comment with generate.prompt (often lock-stuffed / stale).
-        sb_action = _storyboard_narrative_action(shot)
-        if not str(shot.get("character_action") or "").strip() and sb_action:
-            shot["character_action"] = sb_action
-        if not str(shot.get("comment") or "").strip() and sb_action:
-            shot["comment"] = sb_action
-        return index, shot
+        return index, shots[index - 1]
     return index, None
 
 
@@ -440,12 +446,9 @@ def _format_shot_block(shot: StoryboardShot, clip_index: int) -> str:
         f"- Timeline: {shot.get('timeline') or ''}",
         f"- Camera: {shot.get('camera') or ''}",
         f"- Camera move: {shot.get('move') or ''}",
+        f"- On screen: {shot.get('on_screen') or ''}",
         f"- Character action: {shot.get('character_action') or ''}",
-        f"- Scene change: {shot.get('scene_change') or ''}",
     ]
-    comment = str(shot.get("comment") or "").strip()
-    if comment:
-        lines.append(f"- Shot description: {comment}")
     return "\n".join(lines)
 
 
@@ -546,27 +549,17 @@ def build_clip_prompt(
         str(cfg.get("continuity_clip_node_id") or "").strip()
     )
     sb_action = _storyboard_narrative_action(shot if isinstance(shot, dict) else None)
-    action = str(
-        sb_action
-        or cfg.get("clip_action")
-        or (shot or {}).get("character_action")
-        or (shot or {}).get("comment")
-        or ""
-    ).strip()
+    action = str(sb_action or cfg.get("clip_action") or "").strip()
     if not action:
         local = str(cfg.get("prompt") or "").strip()
         user = str(graph.get("description") or "")
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
                 looks_like_full_story_restatement,
-                storyboard_fallback_beat,
             )
 
             if local and not looks_like_full_story_restatement(local, user) and len(local) <= 400:
                 action = local
-            elif ctx is not None:
-                sb_text = str(role_output_text(ctx, NODE_ROLE_STORYBOARD) or "").strip()
-                action = storyboard_fallback_beat(sb_text, clip_index)
         except Exception:  # noqa: BLE001
             if local and len(local) <= 220:
                 action = local
@@ -575,8 +568,7 @@ def build_clip_prompt(
     ).strip()
     speech_line = str(
         cfg.get("speech_line")
-        or (shot or {}).get("speech_line")
-        or (shot or {}).get("dialogue")
+        or (shot or {}).get("speech")
         or ""
     ).strip()
     story_lines: list[str] = [
@@ -970,7 +962,7 @@ class ClipNodeHandler:
         duration = parse_shot_duration_seconds((shot or {}).get("timeline") or "", default=5)
         prompt = build_clip_prompt(ctx.graph, node, ctx)
         payload = connected_payload_clause(
-            edge_text_inputs(ctx, node),
+            edge_text_inputs(ctx, node, exclude_roles=frozenset({NODE_ROLE_STORYBOARD})),
             edge_video_inputs(ctx, node),
         )
         if payload and payload not in prompt:

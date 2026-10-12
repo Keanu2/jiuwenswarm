@@ -31,6 +31,12 @@ from jiuwenswarm.server.runtime.designer.user_references import carry_user_refer
 
 logger = logging.getLogger(__name__)
 
+_SHOT_TEXT_LANGUAGE_RULE = (
+    "Write every camera, action, and cast_actions value entirely in the "
+    "language of user_prompt, even where the approved brief or locks are in "
+    "another language; only ids, ratios such as 16:9, and timelines stay as-is. "
+)
+
 # Role → tool set for one-pass node agents (no feedback loop).
 _ROLE_TOOLS: dict[str, list[str]] = {
     "brief": ["call_model", "read_upstream"],
@@ -476,33 +482,14 @@ def _director_reedit_artifacts_after_prune(
         meta["script_analysis"] = analysis
         notes.append("reedit_already_done_occupancy")
 
-    # Sync storyboard markdown + approved_storyboard from surviving shots.
     chars = [c for c in (analysis.get("characters") or []) if isinstance(c, dict)]
     surviving = [s for s in (analysis.get("clips") or []) if isinstance(s, dict)]
     if surviving:
-        lines = ["# Storyboard Scenario", ""]
-        for s in surviving:
-            idx = int(s.get("clip_index") or 0)
-            lines.append(
-                f"### Shot {idx} — {s.get('title') or s.get('camera') or 'beat'}"
-            )
-            lines.append(f"- Setting: {s.get('setting_id') or 'set_1'}")
-            lines.append(f"- Timeline: {s.get('timeline') or f'{(idx-1)*5}-{idx*5}s'}")
-            lines.append(f"- Action: {s.get('action') or s.get('clip_prompt') or ''}")
-            lines.append(f"- Camera: {s.get('camera') or ''}")
-            if s.get("speech_line"):
-                lines.append(f"- Speech: {s.get('speech_line')}")
-            done = s.get("already_done") or []
-            if done:
-                lines.append(f"- Already done: {'; '.join(str(x) for x in done[:8])}")
-            occ = s.get("occupancy") if isinstance(s.get("occupancy"), dict) else {}
-            if occ:
-                lines.append(
-                    f"- Occupancy must_appear={occ.get('must_appear')}; featured={occ.get('featured')}"
-                )
-            lines.append("")
-        sb_md = "\n".join(lines).strip() + "\n"
-        meta["approved_storyboard"] = sb_md
+        from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
+            render_storyboard_table,
+        )
+
+        meta["approved_storyboard"] = render_storyboard_table(surviving, chars)
         graph["metadata"] = meta
         notes.append("reedit_approved_storyboard")
 
@@ -1431,13 +1418,13 @@ class Director:
     async def author_storyboard(
         self, graph: DesignerExecutionGraph
     ) -> dict[str, Any]:
-        """LLM-author storyboard markdown + planned_shots. Failures raise."""
+        """LLM-author planned_shots; the storyboard table is rendered from them. Failures raise."""
+        from jiuwenswarm.server.runtime.designer.handlers.text_nodes import render_storyboard_table
         from jiuwenswarm.server.runtime.designer.model_tools import (
             DesignerLlmError,
             LLM_API_ERROR,
             model_text_or_raise,
         )
-        from jiuwenswarm.server.runtime.designer.smart_graph import _write_storyboard_markdown
 
         meta = dict(graph.get("metadata") or {})
         analysis = (
@@ -1450,19 +1437,17 @@ class Director:
         user_prompt = str(graph.get("description") or "")
         # Keep the enriched timed shot and speech sections available to storyboard authoring.
         approved_brief = str(meta.get("approved_brief") or "")[:12000]
-        sb_md = ""
         source = ""
         notes = "Director LLM authored storyboard."
         try:
             system = (
-                "You are the Designer Director. Author a hierarchical "
-                "storyboard: Scene (setting_id) → Clips/shots. FIRST list every "
+                "You are the Designer Director. Author the storyboard as structured "
+                "shots grouped by setting_id. FIRST list every "
                 "on-screen human as characters[] (id, name, description) — one identity card "
                 "each, including unnamed groups that share one look. Put that id in on_screen "
                 "on every shot where they are visible. NOT every character appears in every scene. "
-                "Copy the approved Brief's visual style exactly into style_lock and "
-                "the storyboard_markdown Visual Style section; never substitute a "
-                "model or leaf default. "
+                "Copy the approved Brief's visual style exactly into style_lock; never "
+                "substitute a model or leaf default. "
                 "Different setting_id = DIFFERENT place (distinct architecture). "
                 "Group shots by setting_id. Shots are consecutive TIME windows that "
                 "concatenate to the film — each action is THAT window in FULL DETAIL "
@@ -1489,8 +1474,7 @@ class Director:
                 "and put them in those fields. Do not leave speaking shots empty, and do not "
                 "substitute silent lip-sync, (silent), or 无声 for words. "
                 "Empty speech fields only when nobody speaks in that window, or the user asked "
-                "for no dialogue. The human-readable storyboard_markdown must show each exact "
-                "spoken line or voiceover, with its speaker, in its timed shot. "
+                "for no dialogue. "
                 "First shot of each setting: "
                 "clip_strategy=compose_from_character_specs — composer places ONLY "
                 "on_screen cast with cast_actions (who is doing what). "
@@ -1512,7 +1496,9 @@ class Director:
                 "{id:{wardrobe,emotion,presence}}. Face stays the character sheet; "
                 "change wardrobe or emotion only when this shot's story changes them. "
                 "Shots are self-contained continuity windows — do not rely on prior "
-                "clip media. Film-wide locks: language_lock (e.g. en/zh — ALL dialogue in that "
+                "clip media. "
+                + _SHOT_TEXT_LANGUAGE_RULE
+                + "Film-wide locks: language_lock (e.g. en/zh — ALL dialogue in that "
                 "language), bgm_lock {mood,style,instruments,continuity,rule}, "
                 "include_speech, include_music. "
                 "Respond JSON only: "
@@ -1533,7 +1519,7 @@ class Director:
                 '"bgm_lock":{"mood":"...","style":"...","instruments":"...",'
                 '"continuity":"same bed","rule":"non-vocal underscore"},'
                 '"include_speech":true,"include_music":true,'
-                '"storyboard_markdown":"...","notes":"...","target_clip_count":N}'
+                '"notes":"...","target_clip_count":N}'
             )
             result = await call_model_tool(
                 prompt=json.dumps(
@@ -1632,11 +1618,6 @@ class Director:
             elif audio.get("include_music"):
                 audio["policy"] = audio.get("policy") or "optional_music"
             analysis["audio"] = audio
-            md_candidate = str(parsed.get("storyboard_markdown") or "").strip()
-            if md_candidate and len(md_candidate) > 40:
-                sb_md = md_candidate
-                source = "llm"
-                analysis["source"] = "llm"
             if source != "llm":
                 raise DesignerLlmError(
                     "Chat model did not return a usable storyboard.",
@@ -1697,31 +1678,15 @@ class Director:
         if shots:
             analysis["clips"] = shots
             meta["script_analysis"] = analysis
-        if not sb_md:
-            if source != "llm" or not shots:
-                raise DesignerLlmError(
-                    "Chat model did not return a usable storyboard.",
-                    code=LLM_API_ERROR,
-                )
-            # LLM returned shots/cast but omitted markdown — draft hint only.
-            sb_md = _write_storyboard_markdown(
-                shots,
-                characters,
-                style_lock=(
-                    analysis.get("style_lock")
-                    if isinstance(analysis.get("style_lock"), dict)
-                    else {}
-                ),
+        if not shots:
+            raise DesignerLlmError(
+                "Chat model did not return a usable storyboard.",
+                code=LLM_API_ERROR,
             )
+        sb_md = render_storyboard_table(shots, characters)
 
         from jiuwenswarm.server.runtime.designer.media_model_playbook import (
-            ensure_visual_style_statement,
             synchronize_graph_style_from_brief,
-        )
-
-        sb_md = ensure_visual_style_statement(
-            sb_md,
-            analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else {},
         )
 
         stamped = False
@@ -1731,8 +1696,6 @@ class Director:
                 continue
             cfg.pop("skip_llm", None)
             cfg["planned_shots"] = shots
-            cfg["kind"] = "agent"
-            cfg["delegate"] = "agent"
             node["config"] = cfg
             stamped = True
             break
@@ -1792,7 +1755,7 @@ class Director:
 
         meta["approved_storyboard"] = sb_md
         graph["metadata"] = meta
-        synchronize_graph_style_from_brief(graph, sb_md)
+        synchronize_graph_style_from_brief(graph, str(meta.get("approved_brief") or ""))
         meta = dict(graph.get("metadata") or {})
         meta["director_storyboard_ack"] = {
             "ok": True,
@@ -3551,7 +3514,9 @@ class Director:
                 "Also approve/enforce film audio locks: language_lock (one language for all "
                 "speech), per-shot speech_by_character (exact lines for every speaking shot; "
                 "{} only when that shot has no speaker or the user asked for mime or no dialogue), and "
-                "film-wide bgm_lock. Respond JSON only: "
+                "film-wide bgm_lock. "
+                + _SHOT_TEXT_LANGUAGE_RULE
+                + "Respond JSON only: "
                 '{"ok":true,"shot_fixes":[{"clip_index":1,"action":"...","camera":"...",'
                 '"timeline":"<copy this shot timeline from the approved brief>",'
                 '"continuity_lock":{"forbid":"..."},'
@@ -3653,18 +3618,13 @@ class Director:
         if shots:
             analysis["clips"] = shots
             meta["script_analysis"] = analysis
-            from jiuwenswarm.server.runtime.designer.smart_graph import (
-                _write_storyboard_markdown,
+            from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
+                render_storyboard_table,
             )
 
-            meta["approved_storyboard"] = _write_storyboard_markdown(
+            meta["approved_storyboard"] = render_storyboard_table(
                 shots,
-                list(analysis.get("characters") or []),
-                style_lock=(
-                    analysis.get("style_lock")
-                    if isinstance(analysis.get("style_lock"), dict)
-                    else {}
-                ),
+                [c for c in (analysis.get("characters") or []) if isinstance(c, dict)],
             )
             # Patch storyboard + downstream clip configs once.
             try:
@@ -3774,7 +3734,8 @@ class Director:
             "(7) GRAPH USEFULNESS: every node must be useful for the final compose shot — "
             "list prune_ids for unused/orphan nodes; after prune the remaining graph must stay "
             "coherent (master scene → shot views → frames → shots → compose). "
-            "Respond JSON only: "
+            + _SHOT_TEXT_LANGUAGE_RULE
+            + "Respond JSON only: "
             '{"ok":true|false,"issues":["..."],"prune_ids":["n_unused"],'
             '"spatial_lock":{"landmarks":"...","layout":"...","light":"...","static_rule":"..."},'
             '"shot_fixes":[{"clip_index":1,"character_ids":["char_1"],'
@@ -4479,20 +4440,11 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
 
     # Refresh approved storyboard so the handler writes the corrected focus cast.
     try:
-        from jiuwenswarm.server.runtime.designer.smart_graph import _write_storyboard_markdown
+        from jiuwenswarm.server.runtime.designer.handlers.text_nodes import render_storyboard_table
 
         planned = list(analysis.get("clips") or [])
         if planned:
-            sb_md = _write_storyboard_markdown(
-                planned,
-                characters,
-                style_lock=(
-                    analysis.get("style_lock")
-                    if isinstance(analysis.get("style_lock"), dict)
-                    else {}
-                ),
-            )
-            meta["approved_storyboard"] = sb_md
+            meta["approved_storyboard"] = render_storyboard_table(planned, characters)
             graph["metadata"] = meta
             for node in graph.get("nodes") or []:
                 cfg = dict(node.get("config") or {})

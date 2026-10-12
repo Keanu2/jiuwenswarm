@@ -12,7 +12,6 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
-from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +41,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
     read_node_text,
 )
 from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
+    STORYBOARD_COLUMNS,
     StoryboardShot,
     parse_storyboard_shots,
 )
@@ -140,42 +140,23 @@ def timeline_seconds(value: str) -> tuple[Decimal, Decimal]:
 
 
 def _candidate_shots(text: str) -> list[StoryboardShot]:
-    """Keep auxiliary tables out of the existing parser's storyboard row scan."""
-    shots: list[StoryboardShot] = []
-    prose: list[str] = []
-    for is_table, block in groupby(text.splitlines(), key=lambda line: "|" in line):
-        lines = list(block)
-        if not is_table:
-            prose.extend(lines)
-            continue
-        headers = [cell.strip() for cell in lines[0].strip().strip("|").split("|")]
-        headers = [
-            "Shot"
-            if cell.casefold() in {"clip", "shot", "镜号", "分镜#", "片段"}
-            else "Timeline" if cell.casefold() in {"timeline", "时间轴"}
-            else cell
-            for cell in headers
-        ]
-        if "Shot" not in headers or "Timeline" not in headers:
-            continue
-        parsed = parse_storyboard_shots("\n".join(["|".join(headers), *lines[1:]]))
-        # The shared parser caps its output; never validate a silently truncated table.
-        if len(parsed) != len(lines) - 2:
-            raise DesignerGraphValidationError("Could not parse every storyboard table row")
-        shot_column = headers.index("Shot")
-        for line in lines[2:]:
-            cells = line.strip().strip("|").split("|")
-            if shot_column >= len(cells) or not cells[shot_column].strip():
-                raise DesignerGraphValidationError("Storyboard rows must include a shot number")
-        shots.extend(parsed)
-    if shots:
-        return shots
-    hierarchical = "\n".join(prose)
-    shots = parse_storyboard_shots(hierarchical)
-    if len(shots) != len(
-        re.findall(r"(?im)^\s*###\s+(?:Clip|Shot)\s+\d+\b", hierarchical)
-    ):
-        raise DesignerGraphValidationError("Could not parse every storyboard shot heading")
+    """The storyboard is one table; anything outside it is rejected, not ignored."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines or any("|" not in line for line in lines):
+        raise DesignerGraphValidationError("The storyboard must be a single table with no prose")
+    headers = [cell.strip().casefold() for cell in lines[0].strip().strip("|").split("|")]
+    expected = [header.casefold() for _, header in STORYBOARD_COLUMNS]
+    if headers != expected:
+        raise DesignerGraphValidationError(
+            "Storyboard table columns must be: " + " | ".join(header for _, header in STORYBOARD_COLUMNS)
+        )
+    shots = parse_storyboard_shots(text)
+    if len(shots) != len(lines) - 2:
+        raise DesignerGraphValidationError("Could not parse every storyboard table row")
+    for line in lines[2:]:
+        cells = line.strip().strip("|").split("|")
+        if not cells[0].strip():
+            raise DesignerGraphValidationError("Storyboard rows must include a shot number")
     return shots
 
 
@@ -523,7 +504,8 @@ def save_document_update(
                         temporary.unlink(missing_ok=True)
                 written.append(target)
                 updated_uris.append(path.resolve().as_uri())
-            ref = file_output_ref(path, kind="text", mime_type="text/markdown")
+            kind = "table" if doc.pipeline == "storyboard" else "text"
+            ref = file_output_ref(path, kind=kind, mime_type="text/markdown")
             nodes[node_id]["output_ref"] = ref
             state = (run.get("node_states") or {}).get(node_id) if run else None
             if state is not None:

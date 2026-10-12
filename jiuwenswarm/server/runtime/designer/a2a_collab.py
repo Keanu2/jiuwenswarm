@@ -27,7 +27,6 @@ from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER,
     NODE_ROLE_SCENE,
-    NODE_ROLE_STORYBOARD,
     DesignerExecutionGraph,
     DesignerExecutionRun,
     node_config,
@@ -55,13 +54,7 @@ _SPECIALISTS: dict[str, tuple[str, str]] = {
         "You are a production designer. Write space, weather, lighting, signage, ground, and props only. "
         "No people. Do not write a storyboard. Short English Markdown.",
     ),
-    NODE_ROLE_STORYBOARD: (
-        "storyboard director",
-        "You are a storyboard director. Keep character consistency and scene geography. "
-        "Shots must cover the duration stated in the Brief or user request.",
-    ),
 }
-
 
 @dataclass
 class DesignerA2APart:
@@ -278,50 +271,3 @@ async def collaborate_ready_wave(
     except Exception as exc:  # noqa: BLE001
         logger.warning("designer A2A collaboration skipped: %s", exc)
         return {}
-
-
-async def review_storyboard_with_peers(
-    table: str, *, run_id: str, brief: str = ""
-) -> str:
-    """Let character / scene agents comment on a drafted storyboard table."""
-    if not table.strip():
-        return table
-    character = collaboration_card(run_id, NODE_ROLE_CHARACTER)
-    scene = collaboration_card(run_id, NODE_ROLE_SCENE)
-    if not character and not scene:
-        return table
-    notes: list[str] = []
-    if character:
-        reply = await ask_specialist(
-            NODE_ROLE_CHARACTER,
-            "Review the Character action column of this storyboard. Flag costume changes, swapped people, or look mismatches. "
-            "Reply OK if none.\n\n"
-            f"Your character specs:\n{character}\n\nStoryboard:\n{table}\n",
-            max_tokens=4096,
-        )
-        if reply and reply.strip().upper() != "OK":
-            notes.append("character designer:\n" + reply)
-    if scene:
-        reply = await ask_specialist(
-            NODE_ROLE_SCENE,
-            "Review the Scene change column of this storyboard. Flag location changes, weather swaps, or broken lighting. "
-            "Reply OK if none.\n\n"
-            f"Your scene card:\n{scene}\n\nStoryboard:\n{table}\n",
-            max_tokens=4096,
-        )
-        if reply and reply.strip().upper() != "OK":
-            notes.append("production designer:\n" + reply)
-    if not notes:
-        return table
-    brief_block = (brief or "").strip()
-    brief_section = f"Brief (keep this world; do not replace it):\n{brief_block}\n\n" if brief_block else ""
-    revised = await ask_specialist(
-        NODE_ROLE_STORYBOARD,
-        "Revise the storyboard from colleague A2A notes. Keep this header: "
-        "Shot | Timeline | Camera | Move | Character action | Scene change | Comment.\n"
-        "Every row must still match the Brief. Output the Markdown table only, no explanation.\n\n"
-        f"{brief_section}"
-        f"Original:\n{table}\n\nNotes:\n" + "\n\n".join(notes),
-        max_tokens=16384,
-    )
-    return revised or table

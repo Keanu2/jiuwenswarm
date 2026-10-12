@@ -42,6 +42,7 @@ import {
 } from '../../designerCanvasNodes';
 import { isDesignerPreviewGraph } from '../../designerBootstrapGraph';
 import { isMediaNodeType, supportsNodeToolbar } from '../../mediaNodeConfig';
+import { DesignerStoryboardTable } from '../../DesignerStoryboardTable';
 import { DesignerActivityPeek } from '../DesignerActivityPeek';
 import { DesignerNodeToolbar } from '../controls/DesignerNodeToolbar';
 import { DesignerNodeSuccessorControl } from './DesignerNodeSuccessorControl';
@@ -303,10 +304,12 @@ function useNodePreviewUri(nodeId: string): string | null {
 function DocumentFitBody({
   nodeId,
   contentKey,
+  kind = 'text',
   children,
 }: {
   nodeId: string;
   contentKey: string;
+  kind?: 'text' | 'table';
   children: ReactNode;
 }) {
   const measureRef = useRef<HTMLDivElement>(null);
@@ -321,23 +324,35 @@ function DocumentFitBody({
       const width = Math.max(el.scrollWidth, el.offsetWidth);
       const height = Math.max(el.scrollHeight, el.offsetHeight);
       if (width < 8 || height < 8) return;
-      updateNodeLayoutSize(nodeId, sizeNodeForDocumentContent({ width, height }, 'text'));
+      updateNodeLayoutSize(nodeId, sizeNodeForDocumentContent({ width, height }, kind));
     };
     apply();
     if (typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver(apply);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [contentKey, nodeId, updateNodeLayoutSize]);
+  }, [contentKey, kind, nodeId, updateNodeLayoutSize]);
 
   return (
     <div
       ref={measureRef}
-      className="designer-node__fit-content designer-node__fit-content--text"
+      className={`designer-node__fit-content designer-node__fit-content--${kind}`}
       data-testid="designer-node-fit-content"
+      data-variant={kind}
     >
       {children}
     </div>
+  );
+}
+
+function TablePreviewBody({ nodeId }: { nodeId: string }) {
+  const uri = useNodePreviewUri(nodeId);
+  const text = useDesignerAssetText(uri);
+  if (!text) return <PlaceholderBody nodeType={DESIGNER_NODE_TYPE_TABLE} />;
+  return (
+    <DocumentFitBody nodeId={nodeId} contentKey={text} kind="table">
+      <DesignerStoryboardTable text={text} testId="designer-node-storyboard-table" layout="node" />
+    </DocumentFitBody>
   );
 }
 
@@ -408,7 +423,7 @@ export function DesignerTableNode({ id, data, selected }: NodeProps<DesignerFlow
       selected={selected}
       body={
         <NodeOutputFrame nodeId={id} running={status === DESIGNER_NODE_STATUS_RUNNING}>
-          <TextPreviewBody nodeId={id} nodeType={DESIGNER_NODE_TYPE_TABLE} />
+          <TablePreviewBody nodeId={id} />
         </NodeOutputFrame>
       }
       toolbar={toolbar}

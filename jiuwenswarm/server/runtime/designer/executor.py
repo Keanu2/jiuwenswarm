@@ -2226,11 +2226,13 @@ class GraphExecutor:
                         if isinstance(fresh_node, dict) and str(fresh_node.get("id") or "") == node_id:
                             node = fresh_node
                             break
-                # User uploads stay on the handler. Director markdown for brief
-                # and storyboard is the node file, so those nodes use the handler
-                # too and do not call the leaf model again.
+                # User uploads stay on the handler. Director markdown for the brief
+                # is the node file, and the storyboard table is always rendered from
+                # structured shots, so those nodes use the handler and do not call
+                # the leaf model again.
                 uses_agent = (
                     node_uses_agent_runtime(node)
+                    and node_pipeline(node) != NODE_ROLE_STORYBOARD
                     and not is_uploaded_media_node(node)
                     and not is_comfyui_node(node)
                     and not _director_text_ready(ctx.graph, node)

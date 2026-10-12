@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { classifyDesignerOutput, type DesignerMaterial, type DesignerPendingRevision } from './designerMaterials';
+import { DesignerStoryboardTableFromUrl } from './DesignerStoryboardTable';
+import {
+  classifyDesignerOutput,
+  isDesignerTableMaterial,
+  type DesignerMaterial,
+  type DesignerPendingRevision,
+} from './designerMaterials';
 
 type DesignerRevisionChooserProps = {
   revision: DesignerPendingRevision;
@@ -37,7 +43,16 @@ function MaterialPreview({ material }: { material: DesignerMaterial }) {
   if (kind === 'audio' && material.previewUrl) {
     return <audio src={material.previewUrl} controls />;
   }
-  if ((kind === 'text' || material.kind === 'table') && material.textUrl) {
+  if (isDesignerTableMaterial(material) && material.textUrl) {
+    return (
+      <DesignerStoryboardTableFromUrl
+        url={material.textUrl}
+        testId="designer-revision-chooser-storyboard-table"
+        layout="full"
+      />
+    );
+  }
+  if (kind === 'text' && material.textUrl) {
     return <TextPreview url={material.textUrl} />;
   }
   return <p>{material.label}</p>;
@@ -55,7 +70,12 @@ function RevisionColumn({
       <h3>{title}</h3>
       <div className="designer-revision-chooser__stack">
         {materials.map((item) => (
-          <figure key={item.id} className="designer-revision-chooser__item">
+          <figure
+            key={item.id}
+            className="designer-revision-chooser__item"
+            data-testid="designer-revision-chooser-item"
+            data-variant={item.id}
+          >
             <figcaption>{item.label}</figcaption>
             <MaterialPreview material={item} />
           </figure>

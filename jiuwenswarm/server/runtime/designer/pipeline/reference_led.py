@@ -418,6 +418,7 @@ def build_reference_led_video_graph(
         NODE_ROLE_SCENE,
         NODE_ROLE_STORYBOARD,
         NODE_TYPE_IMAGE,
+        NODE_TYPE_TABLE,
         NODE_TYPE_TEXT,
         NODE_TYPE_VIDEO,
         SCHEMA_VERSION,
@@ -487,7 +488,7 @@ def build_reference_led_video_graph(
     add_node(
         {
             "id": "n_storyboard",
-            "type": NODE_TYPE_TEXT,
+            "type": NODE_TYPE_TABLE,
             "label": "Storyboard",
             "config": {
                 "role": NODE_ROLE_STORYBOARD,
@@ -571,7 +572,7 @@ def build_reference_led_video_graph(
                     "reference_image_task": "character_specs",
                     "require_reference_images": True,
                     "style_lock": dict(style),
-                    "inputs": ["n_storyboard", slot["node_id"]],
+                    "inputs": ["n_brief", slot["node_id"]],
                     "delegate": "handler",
                     "prompt": still_task_prompt(
                         {
@@ -584,7 +585,7 @@ def build_reference_led_video_graph(
                 "layout": {"x": 320, "y": 220 + (sheet_index - 1) * 160, "width": 240, "height": 140},
             }
         )
-        add_edge("n_storyboard", sheet_id)
+        add_edge("n_brief", sheet_id)
         add_edge(str(slot["node_id"]), sheet_id)
 
     # Uncovered analysis cast: companion character specs under the same style_lock.
@@ -621,14 +622,14 @@ def build_reference_led_video_graph(
                     "require_reference_images": False,
                     "companion_cast": True,
                     "style_lock": dict(style),
-                    "inputs": ["n_storyboard"],
+                    "inputs": ["n_brief"],
                     "delegate": "handler",
                     "prompt": _companion_sheet_prompt(character, style),
                 },
                 "layout": {"x": 320, "y": 220 + (sheet_index - 1) * 160, "width": 240, "height": 140},
             }
         )
-        add_edge("n_storyboard", sheet_id)
+        add_edge("n_brief", sheet_id)
 
     # Cap overflow: one combined secondary card for leftover non-lead cast.
     if combined_companions:
@@ -662,20 +663,20 @@ def build_reference_led_video_graph(
                     "companion_cast": True,
                     "combined_cast": True,
                     "style_lock": dict(style),
-                    "inputs": ["n_storyboard"],
+                    "inputs": ["n_brief"],
                     "delegate": "handler",
                     "prompt": _combined_companion_sheet_prompt(combined_companions, style),
                 },
                 "layout": {"x": 320, "y": 220 + (sheet_index - 1) * 160, "width": 240, "height": 140},
             }
         )
-        add_edge("n_storyboard", sheet_id)
+        add_edge("n_brief", sheet_id)
 
     restyle_id = ""
     if job["restyle"] and job.get("motion_slots"):
         restyle_id = "n_restyle_01"
         motion = job["motion_slots"][0]
-        inputs = ["n_storyboard", motion["node_id"]]
+        inputs = ["n_brief", motion["node_id"]]
         for slot in job["style_slots"]:
             inputs.append(str(slot["node_id"]))
         add_node(
@@ -721,13 +722,13 @@ def build_reference_led_video_graph(
                         "setting_id": str(scene.get("id") or f"set_{index}"),
                         "prompt": description,
                         "style_lock": dict(style),
-                        "inputs": ["n_storyboard"],
+                        "inputs": ["n_brief"],
                         "delegate": "handler",
                     },
                     "layout": {"x": 600, "y": 220 + (index - 1) * 160, "width": 240, "height": 140},
                 }
             )
-            add_edge("n_storyboard", plate_id)
+            add_edge("n_brief", plate_id)
 
     plan = _reference_plan(
         job, sheet_ids=sheet_ids, plate_ids=plate_ids, sheet_meta=sheet_meta

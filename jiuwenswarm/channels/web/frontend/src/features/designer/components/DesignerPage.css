@@ -1487,6 +1487,144 @@
   -webkit-line-clamp: unset;
 }
 
+.designer-node__fit-content--table {
+  width: max-content;
+}
+
+.designer-storyboard-table {
+  border-collapse: collapse;
+  color: var(--color-text-primary);
+  text-align: left;
+}
+
+.designer-storyboard-table th,
+.designer-storyboard-table td {
+  padding: 4px 6px;
+  border: 1px solid var(--color-border-default);
+  vertical-align: top;
+}
+
+.designer-storyboard-table th {
+  background: var(--color-surface-card);
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.designer-storyboard-table--node {
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.designer-storyboard-table--node td {
+  min-width: 48px;
+  max-width: 160px;
+}
+
+.designer-storyboard-table--full {
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.designer-storyboard-table-draft {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 100%;
+  overflow: auto;
+}
+
+.designer-storyboard-table--editing td {
+  padding: 0;
+}
+
+/* Textarea and a hidden copy of its text share one grid cell, so the cell
+   keeps the read-only table's content-based column width and row height. */
+.designer-storyboard-table__cell {
+  display: grid;
+}
+
+.designer-storyboard-table__cell::after {
+  content: attr(data-value);
+  visibility: hidden;
+  white-space: pre-wrap;
+}
+
+.designer-storyboard-table__cell::after,
+.designer-storyboard-table__cell-input {
+  grid-area: 1 / 1 / 2 / 2;
+  box-sizing: border-box;
+  min-width: 2.5em;
+  padding: 3px 5px;
+  border: 1px solid transparent;
+  font: inherit;
+  line-height: inherit;
+}
+
+.designer-storyboard-table__cell-input {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  resize: none;
+}
+
+.designer-storyboard-table__cell-input:hover {
+  border-color: var(--color-border-hover);
+}
+
+.designer-storyboard-table__cell-input:focus {
+  outline: none;
+  border-color: var(--color-border-focus);
+  background: var(--color-surface-card);
+}
+
+/* The delete button overlays the row's last cell so it adds no column width or row height. */
+.designer-storyboard-table__row-end {
+  position: relative;
+}
+
+.designer-storyboard-table__row-delete {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  line-height: 0;
+  background: var(--color-surface-card);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.designer-storyboard-table--editing tr:hover .designer-storyboard-table__row-delete,
+.designer-storyboard-table--editing tr:focus-within .designer-storyboard-table__row-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.designer-storyboard-table__row-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.designer-storyboard-table__raw {
+  margin: 0;
+  white-space: pre-wrap;
+  text-align: left;
+  color: var(--color-text-primary);
+}
+
+.designer-storyboard-table__raw--node {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .designer-node__shots {
   list-style: none;
   margin: 0;
@@ -2432,6 +2570,11 @@ textarea.designer-node-toolbar__param-input {
 
 .designer-material-viewer__body .designer-text-editor {
   min-height: min(72vh, 720px);
+}
+
+.designer-material-viewer__body:has(.designer-storyboard-table) {
+  max-height: min(72vh, 720px);
+  overflow: auto;
 }
 
 .designer-material-viewer__body .designer-text-editor__text,

@@ -60,6 +60,9 @@ Insert new paragraphs/shot sections INSIDE an adjacent existing key's text, sepa
 by blank lines. For example, an old clip section's value can become "old section\\n\\nnew section".
 Insert new table rows into that table's existing value. Return complete tables with ALL
 retained rows. Compare ALL sentences/cells in every block with the request and facts.
+The storyboard document is exactly one Markdown table: keep its header row and separator
+row unchanged, write one row per shot, and never add prose, headings, or another table to
+it. Never put a "|" character inside a cell.
 
 The candidate topology (node IDs, order, timing, edges) is fixed. Generation prose is
 still a draft: node_fields supplies the ORIGINAL source for each reference-bearing string

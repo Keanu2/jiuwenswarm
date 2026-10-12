@@ -232,6 +232,8 @@
       "placeholderHint": "This node still has a placeholder output.",
       "openFile": "Open file",
       "textError": "Could not read text",
+      "addTableRow": "Add row",
+      "deleteTableRow": "Delete row {{row}}",
       "frameCount": "{{count}} frames",
       "collapse": "Collapse outputs",
       "expand": "Expand outputs",
@@ -240,6 +242,17 @@
       "previous": "Previous",
       "next": "Next",
       "viewerIndex": "{{current}} / {{total}}"
+    },
+    "storyboard": {
+      "columns": {
+        "clip_no": "Shot",
+        "timeline": "Timeline",
+        "camera": "Camera",
+        "move": "Move",
+        "on_screen": "On screen",
+        "character_action": "Character action",
+        "speech": "Speech"
+      }
     },
     "errors": {
       "runFailed": "Failed to start the run",

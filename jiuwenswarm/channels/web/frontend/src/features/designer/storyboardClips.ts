@@ -10,30 +10,29 @@ export type StoryboardClip = {
   timeline: string;
   camera: string;
   move: string;
+  on_screen: string;
   character_action: string;
-  scene_change: string;
-  comment: string;
+  speech: string;
 };
 
-const FIELD_ALIASES: Record<keyof StoryboardClip, string[]> = {
-  clip_no: ['Clip', 'Shot', '镜号', '片段', '分镜#'],
-  timeline: ['Timeline', '时间轴'],
-  camera: ['Camera', '镜头视角', '景别'],
-  move: ['Move', '运镜'],
-  character_action: ['Character action', 'Character', '人物变化'],
-  scene_change: ['Scene change', 'Scene', '场景变化'],
-  comment: ['Comment', 'Notes', '注释', '备注', '画面描述', '提示词'],
-};
-
-const POSITIONAL_FIELDS: Array<keyof StoryboardClip> = [
-  'clip_no',
-  'timeline',
-  'camera',
-  'move',
-  'character_action',
-  'scene_change',
-  'comment',
+export const STORYBOARD_COLUMNS: ReadonlyArray<readonly [keyof StoryboardClip, string]> = [
+  ['clip_no', 'Shot'],
+  ['timeline', 'Timeline'],
+  ['camera', 'Camera'],
+  ['move', 'Move'],
+  ['on_screen', 'On screen'],
+  ['character_action', 'Character action'],
+  ['speech', 'Speech'],
 ];
+
+const FIELD_BY_HEADER = new Map<string, keyof StoryboardClip>(
+  STORYBOARD_COLUMNS.map(([field, header]) => [header.toLowerCase(), field]),
+);
+
+/** Storyboard field for a canonical table header, or null for any other header. */
+export function storyboardColumnField(header: string): keyof StoryboardClip | null {
+  return FIELD_BY_HEADER.get(header.trim().toLowerCase()) ?? null;
+}
 
 function emptyClip(): StoryboardClip {
   return {
@@ -41,9 +40,9 @@ function emptyClip(): StoryboardClip {
     timeline: '',
     camera: '',
     move: '',
+    on_screen: '',
     character_action: '',
-    scene_change: '',
-    comment: '',
+    speech: '',
   };
 }
 
@@ -61,64 +60,46 @@ function isSeparator(cells: string[]): boolean {
 function headerFieldMap(cells: string[]): Map<number, keyof StoryboardClip> | null {
   const mapping = new Map<number, keyof StoryboardClip>();
   cells.forEach((cell, index) => {
-    const name = cell.trim();
-    if (!name) return;
-    (Object.keys(FIELD_ALIASES) as Array<keyof StoryboardClip>).some((field) => {
-      const matched = FIELD_ALIASES[field].some((alias) => name === alias || name.includes(alias));
-      if (matched) mapping.set(index, field);
-      return matched;
-    });
+    const field = FIELD_BY_HEADER.get(cell.toLowerCase());
+    if (field) mapping.set(index, field);
   });
-  const values = [...mapping.values()];
-  if (values.includes('clip_no') || values.includes('timeline')) return mapping;
-  return null;
+  return [...mapping.values()].includes('clip_no') ? mapping : null;
 }
 
 export function parseStoryboardClips(text: string): StoryboardClip[] {
   const clips: StoryboardClip[] = [];
-  let headerSeen = false;
   let fieldMap: Map<number, keyof StoryboardClip> | null = null;
   for (const line of (text || '').split(/\r?\n/)) {
-    if (!line.includes('|')) continue;
+    if (!line.includes('|')) {
+      if (fieldMap) break;
+      continue;
+    }
     const cells = splitMarkdownRow(line);
-    if (!cells.some(Boolean)) continue;
-    if (isSeparator(cells)) continue;
-    const joined = cells.join('');
-    if (!headerSeen && /clip|shot|timeline|镜号|片段|分镜|时间轴/i.test(joined)) {
-      headerSeen = true;
+    if (!fieldMap) {
       fieldMap = headerFieldMap(cells);
       continue;
     }
-    if (!headerSeen) continue;
+    if (isSeparator(cells)) continue;
     const clip = emptyClip();
-    if (fieldMap) {
-      fieldMap.forEach((field, index) => {
-        if (index < cells.length) clip[field] = cells[index];
-      });
-    } else {
-      POSITIONAL_FIELDS.forEach((field, index) => {
-        if (index < cells.length) clip[field] = cells[index];
-      });
-    }
+    fieldMap.forEach((field, index) => {
+      if (index < cells.length) clip[field] = cells[index];
+    });
     if (!clip.clip_no) clip.clip_no = String(clips.length + 1);
-    if (!/^\d/.test(clip.clip_no) && cells.length < 4) continue;
     clips.push(clip);
-    if (clips.length >= 6) break;
   }
   return clips;
 }
 
 export function clipGeneratePrompt(clip: StoryboardClip): string {
-  const comment = (clip.comment || '').trim();
-  if (comment) return comment;
   const parts: string[] = [];
   const timeline = (clip.timeline || '').trim();
   if (timeline) parts.push(`Timeline ${timeline}`);
   const fields: Array<[string, keyof StoryboardClip]> = [
     ['Camera', 'camera'],
     ['Camera move', 'move'],
+    ['On screen', 'on_screen'],
     ['Character action', 'character_action'],
-    ['Scene change', 'scene_change'],
+    ['Speech', 'speech'],
   ];
   fields.forEach(([label, key]) => {
     const value = (clip[key] || '').trim();
