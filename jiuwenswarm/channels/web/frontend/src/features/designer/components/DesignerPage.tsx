@@ -2,7 +2,7 @@ import { LayoutPanelTop, Loader2, MapPinned, Route, RouteOff } from 'lucide-reac
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import PanelCollapseIcon from '../../../assets/panel-collapse.svg?react';
-import chatOrbIcon from '../../../assets/designer-chat-orb.png';
+import chatOrbIcon from '../../../assets/designer/xiaoyi-app-icon.png';
 import {
   collectDesignerMaterials,
   collectPendingRevisions,

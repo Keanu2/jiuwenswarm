@@ -1,10 +1,8 @@
 import {
   FolderOpen,
   Hand,
-  Image as ImageIcon,
   MousePointer2,
   Upload,
-  Video,
   Workflow,
 } from 'lucide-react';
 import { useCallback, useRef, type ChangeEvent } from 'react';
@@ -16,6 +14,7 @@ import {
   offsetCanvasPosition,
   type DesignerAddTemplate,
 } from '../designerCanvasNodes';
+import { DesignerAddNodeTypeIcon } from '../designerIcons';
 import {
   DESIGNER_UPLOAD_ACCEPT,
   buildUploadedDesignerNode,
@@ -27,12 +26,8 @@ import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
 import { useComfyuiImport } from '../useComfyuiImport';
 
+/** Dock exposes image + video generation; audio stays for asset drops only. */
 const DOCK_ADD_TEMPLATES = DESIGNER_ADD_TEMPLATES.filter((item) => item.type !== 'audio');
-
-function TypeIcon({ type }: { type: string }) {
-  if (type === 'video') return <Video size={18} aria-hidden />;
-  return <ImageIcon size={18} aria-hidden />;
-}
 
 export function DesignerCanvasDock() {
   const { t } = useTranslation();
@@ -130,7 +125,7 @@ export function DesignerCanvasDock() {
             data-testid={`designer-canvas-dock-add-${item.id}`}
             onClick={() => placeAndAdd(item)}
           >
-            <TypeIcon type={item.type} />
+            <DesignerAddNodeTypeIcon type={item.type} />
           </button>
         ))}
         <button

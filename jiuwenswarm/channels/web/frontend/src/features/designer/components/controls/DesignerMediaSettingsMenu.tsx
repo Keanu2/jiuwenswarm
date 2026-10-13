@@ -2,6 +2,7 @@ import { ChevronDown } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { designerGraphClient } from '../../designerGraphClient';
+import { DESIGNER_ASPECT_RATIO_ICONS } from '../../designerIcons';
 import {
   effectiveImageSettings,
   effectiveVideoDuration,
@@ -25,28 +26,36 @@ type ChoiceGroupProps = {
   disabled: boolean;
   testId: string;
   onSelect: (value: string) => void;
+  /** Show rectangular glyph before each option (aspect-ratio choices only). */
+  showAspectIcons?: boolean;
 };
 
-function ChoiceGroup({ label, options, value, disabled, testId, onSelect }: ChoiceGroupProps) {
+function ChoiceGroup({ label, options, value, disabled, testId, onSelect, showAspectIcons }: ChoiceGroupProps) {
   return (
     <div className="designer-media-settings__field" role="radiogroup" aria-label={label} data-testid={testId}>
       <span className="designer-media-settings__label">{label}</span>
       <div className="designer-media-settings__choices">
-        {options.map((option) => (
-          <button
-            key={option}
-            type="button"
-            role="radio"
-            aria-checked={option === value}
-            className={`designer-media-settings__choice${option === value ? ' is-selected' : ''}`}
-            disabled={disabled}
-            onClick={() => {
-              if (option !== value) onSelect(option);
-            }}
-          >
-            {option}
-          </button>
-        ))}
+        {options.map((option) => {
+          const AspectIcon = showAspectIcons ? DESIGNER_ASPECT_RATIO_ICONS[option] : undefined;
+          return (
+            <button
+              key={option}
+              type="button"
+              role="radio"
+              aria-checked={option === value}
+              className={`designer-media-settings__choice${option === value ? ' is-selected' : ''}`}
+              disabled={disabled}
+              onClick={() => {
+                if (option !== value) onSelect(option);
+              }}
+            >
+              {AspectIcon ? (
+                <AspectIcon className="designer-media-settings__choice-icon" aria-hidden />
+              ) : null}
+              {option}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -176,6 +185,7 @@ export function DesignerMediaSettingsMenu({ nodeId, nodeType }: DesignerMediaSet
               value={isVideo ? video.aspect_ratio : image.aspect_ratio}
               disabled={saving}
               testId={isVideo ? 'designer-media-settings-video-ratio' : 'designer-media-settings-image-ratio'}
+              showAspectIcons
               onSelect={(aspect_ratio) =>
                 apply(isVideo ? { video_settings: { aspect_ratio } } : { image_settings: { aspect_ratio } })
               }

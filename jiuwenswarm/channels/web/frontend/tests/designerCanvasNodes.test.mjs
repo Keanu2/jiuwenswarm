@@ -20,7 +20,6 @@ import {
   packDesignerNodeLayouts,
   parseContentAspect,
   portAddTemplatesFor,
-  portAllowsComfyui,
   positionLeftOfNode,
   positionRightOfNode,
   removeNodesFromGraph,
@@ -535,24 +534,14 @@ test('autoLayoutDesignerNodes does not put scene specs in the clip column', () =
 test('portAddTemplatesFor limits port menus to the allowed node types', () => {
   const types = (nodeType, side) => portAddTemplatesFor(nodeType, side).map((item) => item.type);
   for (const docType of ['text', 'table']) {
-    assert.deepEqual(types(docType, 'predecessor'), ['image', 'video', 'audio']);
+    assert.deepEqual(types(docType, 'predecessor'), ['image']);
     assert.deepEqual(types(docType, 'successor'), ['image', 'video']);
   }
   assert.deepEqual(types('image', 'predecessor'), ['image']);
   assert.deepEqual(types('image', 'successor'), ['image', 'video']);
   assert.deepEqual(types('video', 'predecessor'), ['image', 'video']);
-  assert.deepEqual(types('video', 'successor'), ['image', 'video']);
+  assert.deepEqual(types('video', 'successor'), ['video']);
   assert.deepEqual(types('audio', 'predecessor'), []);
   assert.deepEqual(types('audio', 'successor'), ['video']);
   assert.deepEqual(types('unknown', 'successor'), []);
-  const allowsComfy = (nodeType, side) => portAllowsComfyui(nodeType, side);
-  assert.equal(allowsComfy('text', 'successor'), false);
-  assert.equal(allowsComfy('table', 'successor'), false);
-  assert.equal(allowsComfy('image', 'successor'), true);
-  assert.equal(allowsComfy('video', 'successor'), true);
-  assert.equal(allowsComfy('audio', 'successor'), true);
-  assert.equal(allowsComfy('text', 'predecessor'), false);
-  assert.equal(allowsComfy('image', 'predecessor'), false);
-  assert.equal(allowsComfy('video', 'predecessor'), false);
-  assert.equal(allowsComfy('audio', 'predecessor'), false);
 });

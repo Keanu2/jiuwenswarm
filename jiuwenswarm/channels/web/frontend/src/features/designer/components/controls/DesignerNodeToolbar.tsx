@@ -1,6 +1,6 @@
-import { Send } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import SendPlaneIcon from '../../../../assets/send_plane.svg?react';
 import { isComfyuiNodeConfig } from '../../comfyuiWorkflow';
 import { hasPendingDesignerRevision } from '../../designerMaterials';
 import { useDesignerRunStore } from '../../designerRunStore';
@@ -146,7 +146,7 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
                 aria-label={t('designer.toolbar.generateAction')}
                 onClick={onGenerateNode}
               >
-                <Send size={16} fill="currentColor" strokeWidth={0} aria-hidden />
+                <SendPlaneIcon className="designer-node-toolbar__send-icon" aria-hidden />
               </button>
             </div>
           </div>

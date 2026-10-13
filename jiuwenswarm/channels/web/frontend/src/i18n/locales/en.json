@@ -92,7 +92,7 @@
     "chat": {
       "title": "Design assistant",
       "emptyHint": "What can I create for you?",
-      "inputPlaceholder": "Describe what you want to create, and optionally attach references…",
+      "inputPlaceholder": "Describe what you want to create…",
       "collapse": "Collapse chat",
       "expand": "Expand chat",
       "thinking": "Thinking about how to build your design workflow…",

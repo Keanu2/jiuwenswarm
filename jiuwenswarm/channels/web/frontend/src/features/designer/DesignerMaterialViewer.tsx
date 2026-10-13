@@ -1,6 +1,6 @@
-import { X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import CloseCircleIcon from '../../assets/designer/close_circle.svg?react';
 import { DesignerTextEditor } from './DesignerTextEditor';
 import {
   classifyDesignerOutput,
@@ -111,7 +111,7 @@ export function DesignerMaterialViewer({
         data-testid="designer-material-viewer-close"
         aria-label={t('designer.materials.closeViewer')}
       >
-        <X size={18} strokeWidth={2} aria-hidden />
+        <CloseCircleIcon className="designer-material-viewer__close-icon" aria-hidden />
       </button>
       <div className="designer-material-viewer__panel">
         <div className="designer-material-viewer__stage" data-testid="designer-material-viewer-stage">

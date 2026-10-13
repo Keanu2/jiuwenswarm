@@ -92,7 +92,7 @@
     "chat": {
       "title": "设计助手",
       "emptyHint": "需要帮你设计些什么？",
-      "inputPlaceholder": "描述你想创作的内容，可附上参考素材…",
+      "inputPlaceholder": "描述你想创作的内容…",
       "collapse": "收起聊天",
       "expand": "展开聊天",
       "thinking": "正在思考如何搭建设计工作流…",

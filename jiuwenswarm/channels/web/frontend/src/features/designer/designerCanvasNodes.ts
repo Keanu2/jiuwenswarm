@@ -99,13 +99,6 @@ const PORT_ADD_TYPES: Record<string, Record<DesignerNodePortSide, DesignerNodeTy
   },
 };
 
-/** Successor sides that offer a ComfyUI import. Predecessors never do. */
-const PORT_ADD_COMFYUI = new Set<string>([
-  `${DESIGNER_NODE_TYPE_IMAGE}:successor`,
-  `${DESIGNER_NODE_TYPE_VIDEO}:successor`,
-  `${DESIGNER_NODE_TYPE_AUDIO}:successor`,
-]);
-
 /** Templates a node's side port may add; unknown node types allow nothing. */
 export function portAddTemplatesFor(
   nodeType: string,
@@ -113,11 +106,6 @@ export function portAddTemplatesFor(
 ): DesignerAddTemplate[] {
   const allowed = PORT_ADD_TYPES[nodeType]?.[side] ?? [];
   return DESIGNER_ADD_TEMPLATES.filter((item) => allowed.includes(item.type));
-}
-
-/** Whether this side's add menu includes ComfyUI. Text and table successors do not. */
-export function portAllowsComfyui(nodeType: string, side: DesignerNodePortSide): boolean {
-  return PORT_ADD_COMFYUI.has(`${nodeType}:${side}`);
 }
 
 export function groupedDesignerAddTemplates(): Array<{

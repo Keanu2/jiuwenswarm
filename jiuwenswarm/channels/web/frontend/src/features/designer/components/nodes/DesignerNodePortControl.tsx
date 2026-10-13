@@ -6,14 +6,12 @@ import {
   buildManualDesignerNode,
   positionLeftOfNode,
   portAddTemplatesFor,
-  portAllowsComfyui,
   positionRightOfNode,
   type DesignerAddTemplate,
   type DesignerNodePortSide,
 } from '../../designerCanvasNodes';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
-import { useComfyuiImport } from '../../useComfyuiImport';
 import { DesignerAddNodeMenu } from '../DesignerAddNodeMenu';
 
 /** Pointer travel (px) above which a press counts as edge-drag, not a menu click. */
@@ -31,14 +29,12 @@ export function DesignerNodePortControl({ nodeId, side }: DesignerNodePortContro
     (state) => state.domainGraph?.nodes.find((node) => node.id === nodeId)?.type ?? '',
   );
   const templates = useMemo(() => portAddTemplatesFor(nodeType, side), [nodeType, side]);
-  const showComfyui = portAllowsComfyui(nodeType, side);
-  const hasOptions = templates.length > 0 || showComfyui;
+  const hasOptions = templates.length > 0;
   const addNode = useDesignerStore((state) => state.addNode);
   const nodePortMenu = useDesignerUiStore((state) => state.nodePortMenu);
   const toggleNodePortMenu = useDesignerUiStore((state) => state.toggleNodePortMenu);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
   const menuOpen = hasOptions && nodePortMenu?.nodeId === nodeId && nodePortMenu.side === side;
-  const importComfyui = useComfyuiImport();
   const suppressClickRef = useRef(false);
   const isSuccessor = side === 'successor';
   const testId = isSuccessor ? 'designer-node-add' : 'designer-node-add-predecessor';
@@ -106,17 +102,6 @@ export function DesignerNodePortControl({ nodeId, side }: DesignerNodePortContro
     [addNode, closeDock, domainGraph, nodeId, placeNear],
   );
 
-  const onImportComfyui = useCallback(
-    (files: File[]) => {
-      const source = domainGraph?.nodes.find((node) => node.id === nodeId);
-      if (!domainGraph || !source) return;
-      const origin = placeNear(source);
-      closeDock();
-      void importComfyui(files, origin);
-    },
-    [closeDock, domainGraph, importComfyui, nodeId, placeNear],
-  );
-
   return (
     <>
       <Handle
@@ -157,9 +142,7 @@ export function DesignerNodePortControl({ nodeId, side }: DesignerNodePortContro
             )}
             testIdPrefix={testIdPrefix}
             templates={templates}
-            showComfyui={showComfyui}
             onPick={onPick}
-            onImportComfyui={onImportComfyui}
           />
         </div>
       ) : null}

@@ -1,12 +1,4 @@
-import {
-  FileText,
-  Headphones,
-  Image as ImageIcon,
-  Loader2,
-  Sheet,
-  Video,
-  type LucideIcon,
-} from 'lucide-react';
+import { Loader2, Sheet } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { NodeResizeControl, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react';
@@ -27,6 +19,7 @@ import {
   DESIGNER_NODE_TYPE_VIDEO,
 } from '../../executionGraphTypes';
 import type { DesignerReactFlowNode } from '../../designerGraphAdapter';
+import { DesignerModalityTypeIcon } from '../../designerIcons';
 import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
@@ -50,27 +43,14 @@ import { DesignerNodePortControl } from './DesignerNodePortControl';
 type DesignerNodeData = DesignerReactFlowNode['data'];
 type DesignerFlowNode = Node<DesignerNodeData>;
 
-function modalityIcon(nodeType: string): LucideIcon {
-  switch (nodeType) {
-    case DESIGNER_NODE_TYPE_TABLE:
-      return Sheet;
-    case DESIGNER_NODE_TYPE_IMAGE:
-      return ImageIcon;
-    case DESIGNER_NODE_TYPE_VIDEO:
-      return Video;
-    case DESIGNER_NODE_TYPE_AUDIO:
-      return Headphones;
-    case DESIGNER_NODE_TYPE_TEXT:
-    default:
-      return FileText;
-  }
-}
-
 function PlaceholderBody({ nodeType }: { nodeType: string }) {
-  const Icon = modalityIcon(nodeType);
   return (
     <span className="designer-node__placeholder" data-testid="designer-node-placeholder" data-node-type={nodeType}>
-      <Icon className="designer-node__placeholder-icon" size={40} strokeWidth={1.5} aria-hidden />
+      {nodeType === DESIGNER_NODE_TYPE_TABLE ? (
+        <Sheet className="designer-node__placeholder-icon" size={40} strokeWidth={1.5} aria-hidden />
+      ) : (
+        <DesignerModalityTypeIcon nodeType={nodeType} className="designer-node__placeholder-icon" />
+      )}
     </span>
   );
 }
@@ -178,7 +158,6 @@ function DesignerNodeShell({
         : status === DESIGNER_NODE_STATUS_FAILED
           ? ' is-failed'
           : '';
-  const TypeIcon = modalityIcon(nodeType);
   const showMediaFill = media && (mediaFilled || status === DESIGNER_NODE_STATUS_COMPLETED);
   const isComfyui = useDesignerStore((state) =>
     isComfyuiNodeConfig(state.domainGraph?.nodes.find((node) => node.id === nodeId)?.config),
@@ -202,7 +181,11 @@ function DesignerNodeShell({
       </NodeToolbar>
       <div className="designer-node__caption">
         <span className="designer-node__type-icon" aria-hidden data-testid="designer-node-type-icon" data-node-type={nodeType}>
-          <TypeIcon size={12} strokeWidth={1.75} />
+          {nodeType === DESIGNER_NODE_TYPE_TABLE ? (
+            <Sheet size={12} strokeWidth={1.75} />
+          ) : (
+            <DesignerModalityTypeIcon nodeType={nodeType} />
+          )}
         </span>
         <span className="designer-node__label">{label}</span>
         {resolutionLabel ? (
