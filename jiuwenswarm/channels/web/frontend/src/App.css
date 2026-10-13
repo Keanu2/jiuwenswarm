@@ -228,17 +228,6 @@
   max-width: min(88vw, 32rem);
 }
 
-.app-connection-toast {
-  border-radius: 0.5rem;
-  background: var(--color-feedback-danger);
-  padding: 0.5rem 1rem;
-  color: var(--color-text-inverse);
-  box-shadow: var(--effect-shadow-lg);
-  max-height: 6.5rem;
-  overflow: auto;
-  overflow-wrap: anywhere;
-}
-
 .app-session-toast {
   border-radius: 0.5rem;
   background: var(--color-feedback-info);

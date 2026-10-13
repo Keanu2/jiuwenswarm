@@ -22,6 +22,7 @@ import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
 import { DesignerRunControl } from './DesignerRunControl';
 import { designerWorkspaceClient } from '../designerGraphClient';
 import { useWorkspaceStore } from '../../../stores/workspaceStore';
+import './DesignerErrorToast.css';
 import './DesignerPage.css';
 
 type DesignerPageProps = {
@@ -315,7 +316,7 @@ export function DesignerPage({
             className="app-toast-wrapper app-toast-wrapper--top-center"
             data-testid="designer-run-error-toast"
           >
-            <div className="app-connection-toast" role="alert" data-testid="designer-error">
+            <div className="designer-error-toast" role="alert" data-testid="designer-error">
               {runError}
             </div>
           </div>

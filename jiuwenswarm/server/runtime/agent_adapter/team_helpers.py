@@ -12,7 +12,7 @@ import re
 import time
 from contextlib import AsyncExitStack, aclosing
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -39,7 +39,7 @@ from jiuwenswarm.server.runtime.session.history_io import (
 from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
 from jiuwenswarm.agents.harness.team.team_manager import TEAM_EVENT_QUEUE_MAXSIZE
 from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
-from jiuwenswarm.common.utils import get_agent_skills_dir
+from jiuwenswarm.common.utils import get_agent_skills_dir, mask_sensitive
 from jiuwenswarm.common.config import get_config, get_skill_evolution_enabled
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
@@ -686,6 +686,10 @@ async def _prepare_first_team_request(
             error_chunks=error_chunks,
         )
 
+    if isinstance(query, dict) and query.get("type") == "group_chat":
+        return _FirstTeamRequestPreparation(
+            recovered_runtime=False, query=query, hide_dm=False, debug=False, error_chunks=None,
+        )
     query, hide_dm, debug = _extract_query_directives(str(query or ""))
     if hide_dm or debug:
         logger.info(
@@ -901,6 +905,24 @@ def _coerce_budget(value) -> int | None:
     return n if n > 0 else None
 
 
+def _resolve_session_worktree_flag(
+    params: dict | None,
+    persisted: dict | None,
+) -> bool | None:
+    """Resolve the session worktree flag per-key: params > persisted > unset.
+
+    Unlike ``enable_swarmflow`` (whole-dict per source), the worktree flag
+    falls through independently so a client that omits it (older frontend,
+    TUI, cron) keeps the session's persisted value; ``None`` means "not
+    specified" and the team config's ``worktree`` section stands.
+    """
+    if params is not None and params.get("swarmflow_worktree") is not None:
+        return bool(params.get("swarmflow_worktree"))
+    if persisted is not None and persisted.get("swarmflow_worktree") is not None:
+        return bool(persisted.get("swarmflow_worktree"))
+    return None
+
+
 def _resolve_session_swarmflow_config(
     params: dict | None,
     config_base: dict,
@@ -910,6 +932,9 @@ def _resolve_session_swarmflow_config(
     """Resolve session-level swarmflow config by priority:
 
     request params > metadata persisted > config.yaml.
+
+    ``swarmflow_worktree`` resolves per-key (params > persisted, else None =
+    follow the team config's ``worktree`` section).
     """
     team_cfg = ((config_base.get("modes") or {}).get("team") or {}).get("jiuwen_team") or {}
     config_enabled = bool(team_cfg.get("enable_swarmflow", False))
@@ -921,9 +946,18 @@ def _resolve_session_swarmflow_config(
     )
 
     if params and params.get("enable_swarmflow") is not None:
+        # Fast path: current clients send the worktree key alongside
+        # enable_swarmflow, so the metadata read is skipped unless the key is
+        # absent (older client) and a sticky value may exist.
+        persisted = (
+            restore_session_swarmflow_config(session_id)
+            if params.get("swarmflow_worktree") is None
+            else None
+        )
         result = {
             "enable_swarmflow": bool(params.get("enable_swarmflow")),
             "swarmflow_budget": _coerce_budget(params.get("swarmflow_budget")),
+            "swarmflow_worktree": _resolve_session_worktree_flag(params, persisted),
         }
         logger.info(
             "[TeamHelpers] swarmflow config (source=request params, session=%s): %s",
@@ -936,6 +970,7 @@ def _resolve_session_swarmflow_config(
         result = {
             "enable_swarmflow": bool(persisted.get("enable_swarmflow", False)),
             "swarmflow_budget": _coerce_budget(persisted.get("swarmflow_budget")),
+            "swarmflow_worktree": _resolve_session_worktree_flag(params, persisted),
         }
         logger.info(
             "[TeamHelpers] swarmflow config (source=metadata, session=%s): %s",
@@ -943,7 +978,11 @@ def _resolve_session_swarmflow_config(
         )
         return result
 
-    result = {"enable_swarmflow": config_enabled, "swarmflow_budget": config_budget}
+    result = {
+        "enable_swarmflow": config_enabled,
+        "swarmflow_budget": config_budget,
+        "swarmflow_worktree": _resolve_session_worktree_flag(params, None),
+    }
     logger.info(
         "[TeamHelpers] swarmflow config (source=config.yaml, session=%s): %s",
         session_id, result,
@@ -980,6 +1019,17 @@ def _safe_query_preview(query: Any, limit: int = DEFAULT_PREVIEW_MAX_CHARS) -> s
 # framework control events (team.runtime_ready, tool.use, ...) that also travel
 # on the same stream.
 _MODEL_OUTPUT_EVENT_TYPES = frozenset({"chat.delta", "chat.final", "chat.reasoning"})
+
+# 前端按 team 分流对话视图时，需要知道这些帧属于哪个 team。见 _tag_team_output_origin。
+_TEAM_ATTRIBUTED_EVENT_TYPES = frozenset({
+    "chat.delta",
+    "chat.final",
+    "chat.reasoning",
+    "chat.tool_call",
+    "chat.tool_result",
+    "chat.usage",
+    "chat.error",
+})
 
 
 def _resolve_user_turn(
@@ -1156,6 +1206,43 @@ def _is_member_addressed(text: str) -> bool:
     return bool(payloads) and any(not isinstance(p, GodViewMessage) for p in payloads)
 
 
+def _group_chat_input(request: Any, text: Any) -> dict | None:
+    """Convert explicit public input; mention objects carry their core member identity."""
+    params = getattr(request, "params", None) or {}
+    raw = params.get("query")
+    if not isinstance(raw, dict) or raw.get("type") != "group_chat":
+        if params.get("type") != "group_chat":
+            return None
+        raw = params
+    mentions = raw.get("mentions", [])
+    if not isinstance(mentions, list):
+        raise ValueError("Group mentions must be an array")
+    targets = []
+    for mention in mentions:
+        if isinstance(mention, dict):
+            # An expert team is represented by its leader in the outer team.
+            mention = mention.get("leader_member_name") or mention.get("member_name")
+        if not isinstance(mention, str) or not mention.strip():
+            raise ValueError("Each group mention requires a core member name")
+        targets.append(mention)
+    payload = {
+        "type": "group_chat", "body": raw.get("body", text),
+        "client_message_id": raw.get("client_message_id") or request.request_id,
+        "mentions": list(dict.fromkeys(targets)), "attachments": raw.get("attachments", []),
+    }
+    if not isinstance(payload["body"], str):
+        raise ValueError("Group body must be a string")
+    identity = payload["client_message_id"]
+    if not isinstance(identity, str) or not identity.strip():
+        raise ValueError("Group chat requires client_message_id")
+    attachments = payload["attachments"]
+    if not isinstance(attachments, list):
+        raise ValueError("Group attachments must be an array")
+    if any(not isinstance(item, dict) for item in attachments):
+        raise ValueError("Group attachments must contain JSON objects")
+    return payload
+
+
 def _deliverable(turn: UserTurn, text: Any) -> Any:
     """Render ``text`` into the payload delivered to the team runtime.
 
@@ -1178,6 +1265,8 @@ def _deliverable(turn: UserTurn, text: Any) -> Any:
         The rendered envelope for team-wide input, or ``text`` unchanged when
         the team message system owns delivery.
     """
+    if isinstance(text, dict) and text.get("type") == "group_chat":
+        return text
     if not isinstance(text, str):
         return turn.with_text(text).render()
     if _is_member_addressed(text):
@@ -1626,6 +1715,45 @@ async def _broadcast_team_state_snapshot(
             await run_history_io(_persist_team_history_event, channel_id, session_id, event)
             await _broadcast_event(channel_id, session_id, event)
 
+        # Replay mirrored workflow members from the checkpointed run states so
+        # a full page refresh restores them grouped by ``workflow_run_id`` —
+        # including members of already-finished runs, whose live events will
+        # never come again. Mirrored members have no DB row, so the DB snapshot
+        # cannot cover them; DB members stay authoritative, so a run member
+        # sharing a DB member_id is skipped.
+        get_wf_handler = getattr(team_manager, "get_workflow_handler", None)
+        if get_wf_handler is not None:
+            wf_handler = get_wf_handler(session_id)
+            if wf_handler is not None:
+                db_member_ids = {m.get("member_id", "") for m in snapshot.get("members", [])}
+                # Iterative loops reuse an agent id across phases of one run;
+                # like the live path's session-wide spawned_members, each
+                # mirrored member is emitted exactly once per replay.
+                replayed_member_ids: set[str] = set()
+                for run in getattr(wf_handler, "get_run_states", lambda: {})().values():
+                    if not run.id:
+                        continue
+                    for phase in run.phases:
+                        for agent in phase.agents:
+                            member_id = f"{run.id}:{agent.id}"
+                            if member_id in db_member_ids or member_id in replayed_member_ids:
+                                continue
+                            replayed_member_ids.add(member_id)
+                            event = _team_event_envelope(
+                                "team.member",
+                                session_id,
+                                _wf_spawned_member_event(
+                                    run.id,
+                                    team_id,
+                                    agent.model_dump(exclude_none=True),
+                                    status=_wf_agent_status_to_member_status(agent.status),
+                                ),
+                            )
+                            await run_history_io(
+                                _persist_team_history_event, channel_id, session_id, event
+                            )
+                            await _broadcast_event(channel_id, session_id, event)
+
         # Broadcast task status snapshot
         for t in snapshot.get("tasks", []):
             event = {
@@ -1846,6 +1974,28 @@ def _enrich_teammate_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]
 
 
 _TEAM_TOOL_RESULT_TEXT_LIMIT = 512
+
+
+def _tag_team_output_origin(parsed: dict[str, Any], team_name: str) -> dict[str, Any]:
+    """给模型产出的帧打上 team_name/team_id，供前端分流到各自的对话视图。
+
+    一个 session 可以同时挂多个 team（TeamRuntimePool 以 team_name 为键、按
+    current_session_id 归属），而 chat.delta / chat.reasoning 这些帧本身不带任何
+    team 标识——前端只有一个 session_id 可用于归属，于是多个 team 的流会混进同一份
+    messages 里，切换 team 时看到的是同一段对话。
+
+    只标注模型产出与工具事件：team.member / team.task / team.completed 这类控制帧
+    的归属由 payload 内层的 team_id 表达，重复注入外层 team_name 反而会让既有的
+    fan_out / agent_ref 推导（_build_team_event_chunk_meta 读 event.event 内层）
+    与外层字段不一致。
+    """
+    if not team_name:
+        return parsed
+    if parsed.get("event_type") not in _TEAM_ATTRIBUTED_EVENT_TYPES:
+        return parsed
+    parsed["team_name"] = team_name
+    parsed["team_id"] = team_name
+    return parsed
 
 
 def _truncate_team_tool_result_event(parsed: dict[str, Any]) -> dict[str, Any]:
@@ -2324,6 +2474,16 @@ async def _process_team_message_stream(
     # the leader receives exactly the envelope a single agent would.
     turn = _resolve_user_turn(inputs, channel_id=channel_id, language=language)
     query = turn.text
+    try:
+        group_input = _group_chat_input(request, query)
+    except ValueError as exc:
+        yield AgentResponseChunk(
+            request_id=rid, channel_id=channel_id,
+            payload={"event_type": "chat.error", "error": str(exc)}, is_complete=True,
+        )
+        return
+    if group_input is not None:
+        query = group_input
     query_text = query if isinstance(query, str) else ""
     try:
         from jiuwenswarm.agents.harness.team.remote_member_bootstrap import (
@@ -2388,6 +2548,8 @@ async def _process_team_message_stream(
 
     async def _begin_team_round() -> None:
         nonlocal cron_user_admitted, user_admitted
+        if group_input is not None and not group_input["mentions"]:
+            return
         if not is_bounded_round:
             if admission is not None:
                 begin_team_user = getattr(
@@ -2559,6 +2721,49 @@ async def _process_team_message_stream(
             params_obj if isinstance(params_obj, dict) else None,
             requested_model_name or "",
         )
+        # Remember whether the caller explicitly selected a model.  Only an
+        # explicit choice updates the long-lived Team binding; inherited
+        # session metadata remains a compatibility fallback and is not
+        # implicitly promoted to Team scope.
+        explicit_model_selection = (
+            isinstance(params_obj, dict) and "model_selection" in params_obj
+        )
+        model_selection = params_obj.get("model_selection") if isinstance(params_obj, dict) else None
+        # Request params are client-controlled, so they carry only the stable
+        # business reference; the server resolves and compiles it (a
+        # caller-supplied compiled payload with runtime credentials is never
+        # accepted).
+        if model_selection is not None:
+            from jiuwenswarm.common.model_selection import ModelSelection as SwarmModelSelection
+            model_selection = SwarmModelSelection.model_validate(model_selection).model_dump()
+        if model_selection is None:
+            current_metadata = get_session_metadata(session_id, cache_bust=True)
+            stored_selection = None
+            team_name_for_selection = str(current_metadata.get("team_name") or "").strip()
+            if team_name_for_selection:
+                try:
+                    from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+                    stored_selection = get_team_binding_store().get_team_selection(
+                        team_name_for_selection
+                    )
+                except Exception:
+                    stored_selection = None
+            if not isinstance(stored_selection, dict):
+                from jiuwenswarm.server.runtime.session.model_selection_store import (
+                    get_session_model_selection,
+                )
+
+                try:
+                    stored = get_session_model_selection(session_id)
+                except ValueError:
+                    stored = None
+                stored_selection = (
+                    stored.model_dump(exclude_none=True) if stored is not None else None
+                )
+            if isinstance(stored_selection, dict):
+                from jiuwenswarm.common.model_selection import ModelSelection as SwarmModelSelection
+                model_selection = SwarmModelSelection.model_validate(stored_selection).model_dump()
+        runtime_model_selection = model_selection
         # Provider-based assembly: build members from the shared config source,
         # no pre-built parent DeepAgent required.
         # 会话级 swarmflow 配置：请求 params > metadata > config.yaml
@@ -2582,11 +2787,44 @@ async def _process_team_message_stream(
             login_model_entry=login_model_entry,
             agent_group_name=agent_group_name,
             swarmflow_config=swarmflow_config,
+            model_selection=runtime_model_selection,
         )
+        if isinstance(model_selection, dict) and model_selection.get("type") and model_selection.get("id"):
+            from jiuwenswarm.common.model_selection import ModelSelection as SwarmModelSelection
+            from jiuwenswarm.server.runtime.session.model_selection_store import (
+                get_session_model_selection,
+                set_session_model_selection,
+            )
+
+            selection_obj = SwarmModelSelection.model_validate(model_selection)
+            normalized = selection_obj.model_dump(exclude_none=True)
+            try:
+                existing = get_session_model_selection(session_id)
+            except ValueError:
+                existing = None
+            if existing is None or existing.model_dump(exclude_none=True) != normalized:
+                set_session_model_selection(session_id, selection_obj)
+            if explicit_model_selection:
+                team_name = str(get_session_metadata(session_id, cache_bust=True).get("team_name") or "").strip()
+                if team_name:
+                    from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+                    binding_store = get_team_binding_store()
+                    # Legacy session-only Teams may not have a binding yet;
+                    # retain their session persistence without making model
+                    # selection fail solely because the optional Team store
+                    # is absent.
+                    if binding_store.get(team_name) is not None:
+                        binding_store.set_team_selection(
+                            team_name=team_name,
+                            selection=model_selection,
+                        )
         # 请求携带了会话级配置时持久化（刷新恢复用）
         if (
             isinstance(params_obj, dict)
-            and params_obj.get("enable_swarmflow") is not None
+            and (
+                params_obj.get("enable_swarmflow") is not None
+                or params_obj.get("swarmflow_worktree") is not None
+            )
         ):
             persist_session_swarmflow_config(session_id, swarmflow_config)
         if team_skill_names is not None:
@@ -2628,13 +2866,29 @@ async def _process_team_message_stream(
             )
     except Exception as exc:
         logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)
-        error_payload: dict[str, Any] = {
-            "event_type": "chat.error",
-            "error": str(exc),
-        }
+        # Resolver/compiler failures can originate in provider configuration;
+        # never put credentials or authorization headers into a user-visible
+        # Team error payload.
+        error_payload: dict[str, Any] = {"event_type": "chat.error", "error": mask_sensitive(str(exc))}
         error_code = getattr(exc, "code", None)
-        if isinstance(error_code, str) and error_code.startswith("AGENT_GROUP_"):
-            error_payload["code"] = error_code
+        if error_code:
+            error_payload["code"] = str(error_code)
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict):
+            def _safe_detail(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return {
+                        key: _safe_detail(item)
+                        for key, item in value.items()
+                        if str(key).lower() not in {"api_key", "apikey", "secret", "token", "password", "authorization"}
+                    }
+                if isinstance(value, list):
+                    return [_safe_detail(item) for item in value]
+                if isinstance(value, str):
+                    return mask_sensitive(value)
+                return value
+
+            error_payload.update(_safe_detail(details))
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=channel_id,
@@ -2899,6 +3153,20 @@ async def _process_team_message_stream(
 
             if not is_first_request:
                 await startup.aclose()
+                if group_input is not None and success:
+                    yield AgentResponseChunk(
+                        request_id=rid, channel_id=channel_id,
+                        payload={"event_type": "team.group_message.accepted",
+                                 "client_message_id": group_input["client_message_id"]},
+                        is_complete=False,
+                    )
+                    if not group_input["mentions"]:
+                        await team_manager.release_round(session_id, rid)
+                        yield _team_processing_done_chunk(rid, channel_id, session_id)
+                        yield AgentResponseChunk(
+                            request_id=rid, channel_id=channel_id, payload=None, is_complete=True,
+                        )
+                        return
                 if is_bounded_round and request_queue is not None:
                     logger.info(
                         "[TeamHelpers] automated follow-up team request waits for round: "
@@ -3055,6 +3323,17 @@ async def _process_team_message_stream(
                             metadata=_metadata,
                             is_complete=False,
                         )
+                        if group_input is not None and not group_input["mentions"]:
+                            if isinstance(event, dict) and event.get("event_type") == "team.group_message.accepted":
+                                identity = event.get("client_message_id") or event.get("message", {}).get(
+                                    "client_message_id",
+                                )
+                                if identity == group_input["client_message_id"]:
+                                    yield _team_processing_done_chunk(rid, channel_id, session_id)
+                                    yield AgentResponseChunk(
+                                        request_id=rid, channel_id=channel_id, payload=None, is_complete=True,
+                                    )
+                                    return
                         if isinstance(event, dict) and event.get("event_type") == "team.error":
                             break
                     except asyncio.TimeoutError:
@@ -3188,6 +3467,48 @@ def _run_lamp_active(run: WorkflowRunState) -> bool:
         for phase in run.phases
         for a in phase.agents
     )
+
+
+async def _finalize_org_bound_team_after_idle(
+    *,
+    session_id: str,
+    team_name: str,
+) -> None:
+    """Pause org-bound teams after a chat stream ends so organization wakes can run.
+
+    Org background turns (unclaimed revision/expired, parent review, ...) only
+    resume leaders in ``RuntimeState.PAUSED``. Call this from stream ``finally``
+    (and ``team.completed``), never from ``team.idle`` while the stream is open.
+    """
+    name = str(team_name or "").strip()
+    sid = str(session_id or "").strip()
+    if not name or not sid:
+        return
+    try:
+        from openjiuwen.agent_teams.runtime.pool import RuntimeState
+        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+        from jiuwenswarm.agents.harness.team.team_manager import (
+            _runner_team_runtime_manager,
+        )
+
+        runtime = _runner_team_runtime_manager(GLOBAL_RUNNER)
+        entry = await runtime.pool.get(name)
+        if entry is None or getattr(entry, "current_session_id", None) != sid:
+            return
+        if getattr(entry, "state", None) is RuntimeState.PAUSED:
+            return
+        backend = getattr(getattr(entry, "agent", None), "team_backend", None)
+        if getattr(backend, "org_task_manager", None) is None:
+            return
+        await runtime.finalize(team_name=name, session_id=sid)
+    except Exception:
+        logger.exception(
+            "[TeamHelpers] finalize org-bound team after idle failed "
+            "session_id=%s team_name=%s",
+            sid,
+            name,
+        )
 
 
 async def _consume_stream_with_query(
@@ -3324,6 +3645,8 @@ async def _consume_stream_with_query(
                         parsed.get("event_type"),
                         parsed.get("role") or getattr(chunk, "role", None),
                     )
+                # Preserve foreground Team reasoning visibility. Expert streams
+                # use their own organization relay and conversation runtime.
                 if not is_leader and parsed.get("event_type") == "chat.reasoning":
                     continue
                 if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
@@ -3334,6 +3657,10 @@ async def _consume_stream_with_query(
                 if not is_leader and parsed.get("event_type") == "chat.ask_user_question":
                     continue
                 parsed["rid"] = round_id
+                # 标注来源 team，让前端能把这一帧分流到对应 team 的对话视图。
+                # 放在 role 标记之前：_enrich_teammate_event 会覆盖 member_name，
+                # 但不动 team_name，顺序上只是先钉住归属再补身份。
+                parsed = _tag_team_output_origin(parsed, roster_team_name)
                 if is_teammate:
                     parsed = _enrich_teammate_event(parsed, chunk)
                 elif is_leader:
@@ -3441,6 +3768,10 @@ async def _consume_stream_with_query(
                         },
                     )
                     terminal_broadcasted = True
+                    await _finalize_org_bound_team_after_idle(
+                        session_id=session_id,
+                        team_name=roster_team_name,
+                    )
                     continue
                 elif parsed.get("event_type") == "team.idle":
                     # A swarmflow workflow may still be running while the leader
@@ -3491,6 +3822,8 @@ async def _consume_stream_with_query(
                         },
                     )
                     terminal_broadcasted = True
+                    # Do not finalize here: the leader stream stays open after
+                    # idle. Org-bound pause happens in finally / team.completed.
                     continue
                 elif (
                     is_leader
@@ -3642,6 +3975,10 @@ async def _consume_stream_with_query(
                         "session_id=%s",
                         session_id,
                     )
+                await _finalize_org_bound_team_after_idle(
+                    session_id=session_id,
+                    team_name=roster_team_name,
+                )
         finally:
             # Registry release must run even if cancellation arrives while a
             # normal stream is delivering its final snapshot.
@@ -3737,23 +4074,101 @@ _WF_TERMINAL_PLANNED_CONTENT = "i18n:team.taskDetail.skipReasonPlanned"
 def _team_event_envelope(
     category: str, session_id: str, event: dict[str, Any]
 ) -> dict[str, Any]:
-    """Wrap an inner team event dict in the standard broadcast envelope."""
+    """Wrap an inner team event dict in the standard broadcast envelope.
+
+    The emission time rides on the inner event: the frontend dedups identical
+    payloads within 1.5s, so a phase status that legitimately repeats (a card
+    re-entered between same-phase agent events) must carry a distinguishing
+    timestamp or the second emission is dropped as a redelivery and the task
+    card sticks on the stale status.
+    """
+    event = {**event, "timestamp": int(time.time() * 1000)}
     return {"event_type": category, "session_id": session_id, "event": event}
+
+
+def _wf_spawned_member_event(
+    run_id: str,
+    team_id: str,
+    agent: dict[str, Any],
+    *,
+    status: str,
+) -> dict[str, Any]:
+    """Build the spawned ``team.member`` event for a workflow worker.
+
+    Single construction point shared by the live conversion
+    (``_workflow_updated_to_team_events``) and the team snapshot replay, so a
+    mirrored member always carries the same identity fields. The caller
+    supplies the member ``status``: the live path always spawns ``busy`` and
+    lands the real status in a later status_changed, while the snapshot replay
+    maps the agent node status directly (no follow-up delta exists there).
+    """
+    agent_id = str(agent.get("id") or "")
+    event: dict[str, Any] = {
+        "type": "team.member.spawned",
+        "team_id": team_id,
+        "member_id": f"{run_id}:{agent_id}",
+        "name": agent.get("name") or agent_id,
+        "status": status,
+        "workflow_run_id": run_id,
+    }
+    # Same identity fields the roster uses for real members, so the member
+    # list resolves the same avatar as the workflow tree.
+    if agent.get("agent_type"):
+        event["cli_agent"] = agent["agent_type"]
+    elif agent.get("kind") == "human":
+        event["role"] = TeamRole.HUMAN_AGENT.value
+        event["mode"] = "human"
+    return event
+
+
+def _wf_agent_status_to_member_status(agent_status: str) -> str:
+    """Map a workflow agent node status onto the member busy/idle convention.
+
+    The live mirror spawns a worker ``busy`` and only lands the raw terminal
+    status through a later status_changed. The snapshot replay emits a single
+    spawned event per node with no follow-up delta, so it folds that two-step
+    result in: a node still producing (running, or awaiting a human reply) stays
+    ``busy``, anything terminal maps to ``idle``.
+    """
+    return "busy" if agent_status in ("running", "waiting_for_human") else "idle"
+
+
+@dataclass(slots=True)
+class _WorkflowMirrorDedup:
+    """Session-scoped dedup tables behind the ``workflow.updated`` → team mirror.
+
+    The tables belong to the workflow handler (they must outlive one consumer
+    loop so a resume replay is not re-emitted); this bundle only carries them
+    by reference into the converter.
+    """
+
+    seen_phase: dict[str, str] = field(default_factory=dict)
+    seen_agent: dict[str, str] = field(default_factory=dict)
+    spawned_members: set[str] = field(default_factory=set)
+    seen_activity: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
 
 
 def _workflow_updated_to_team_events(
     event: dict[str, Any],
     session_id: str,
-    seen_phase: dict[str, str],
-    seen_agent: dict[str, str],
-    spawned_members: set[str],
+    dedup: _WorkflowMirrorDedup,
 ) -> list[dict[str, Any]]:
     """Convert one ``workflow.updated`` event into web ``team.member`` / ``team.task`` events.
 
     Each swarmflow phase becomes a ``team.task`` and each worker (agent) becomes a
     ``team.member``. Only status *changes* produce events — the ``workflow.updated``
     delta repeatedly re-includes a running phase (once per agent that starts inside
-    it), so ``seen_phase`` / ``seen_agent`` dedup by last-observed status.
+    it), so ``dedup.seen_phase`` / ``dedup.seen_agent`` dedup by last-observed status.
+
+    Worker tool activity mirrors onto the member call list through the same
+    ``chat.tool_call`` / ``chat.tool_result`` frames real teammates produce
+    (``role="teammate"`` + ``member_name`` gate the frontend into its existing
+    hidden-teammate execution-event chain): a ``tool_call`` row emits one
+    ``chat.tool_call`` frame, a paired ``tool_result_preview`` emits a matching
+    ``chat.tool_result`` frame with the same ``tool_call_id`` (the frontend's
+    existing call/result pairing links them), and an orphan ``tool_result`` row
+    emits a lone ``chat.tool_result`` frame. ``dedup.seen_activity`` (per member,
+    ``(type, tool_call_id)`` keys) dedups rows that a later delta re-includes.
     """
     if event.get("event_type") != "workflow.updated":
         return []
@@ -3763,6 +4178,10 @@ def _workflow_updated_to_team_events(
     team_id = str(wf.get("name") or run_id or "swarmflow")
     if not run_id:
         return []
+    seen_phase = dedup.seen_phase
+    seen_agent = dedup.seen_agent
+    spawned_members = dedup.spawned_members
+    seen_activity = dedup.seen_activity
 
     # At workflow terminal status, a still-planned phase never started; map it
     # via _WF_TERMINAL_PLANNED_TASK to skipped/cancelled with a reason string,
@@ -3825,14 +4244,7 @@ def _workflow_updated_to_team_events(
                     _team_event_envelope(
                         "team.member",
                         session_id,
-                        {
-                            "type": "team.member.spawned",
-                            "team_id": team_id,
-                            "member_id": member_id,
-                            "name": agent.get("name") or agent_id,
-                            "status": "busy",
-                            "workflow_run_id": run_id,
-                        },
+                        _wf_spawned_member_event(run_id, team_id, agent, status="busy"),
                     )
                 )
 
@@ -3855,7 +4267,85 @@ def _workflow_updated_to_team_events(
                         )
                     )
 
+            # Mirror worker tool activity into the member call list. Each row
+            # becomes the same chat.tool_call / chat.tool_result frame real
+            # teammates produce, keyed on the worker mirror; a paired
+            # tool_result_preview emits a matching chat.tool_result frame with
+            # the same tool_call_id so the frontend pairs call + result.
+            activity = agent.get("activity") or []
+            if activity:
+                seen_rows = seen_activity.setdefault(member_id, set())
+                for row in activity:
+                    if not isinstance(row, dict):
+                        continue
+                    row_type = row.get("type")
+                    tool_call_id = row.get("tool_call_id")
+                    row_content = row.get("content") or ""
+                    row_key = (
+                        row_type,
+                        tool_call_id if tool_call_id else f"no-id:{row_content}",
+                    )
+                    # role=teammate + member_name gate the frame into the
+                    # frontend's hidden-teammate execution-event chain, exactly
+                    # like _enrich_teammate_event does for real teammate frames.
+                    base: dict[str, Any] = {
+                        "session_id": session_id,
+                        "role": TeamRole.TEAMMATE.value,
+                        "member_name": member_id,
+                    }
+                    if row.get("timestamp"):
+                        base["timestamp"] = row["timestamp"]
+                    preview = row.get("tool_result_preview") if row_type == "tool_call" else None
+                    preview_key = (
+                        "tool_result",
+                        tool_call_id if tool_call_id else f"no-id:{preview or ''}",
+                    )
+                    if row_key in seen_rows:
+                        # The call row was mirrored before its result paired back
+                        # (the call outlived the activity batch window): the
+                        # preview is the only new information, so emit just its
+                        # result frame — once.
+                        if preview is not None and preview_key not in seen_rows:
+                            seen_rows.add(preview_key)
+                            out.append(_activity_result_frame(base, row, tool_call_id, preview))
+                        continue
+                    seen_rows.add(row_key)
+                    if row_type == "tool_call":
+                        frame: dict[str, Any] = {
+                            **base,
+                            "event_type": "chat.tool_call",
+                            # name rides the nested tool_call (the normalizer's
+                            # first candidate); description carries the row
+                            # content so the member call list renders it
+                            # (description is its first display candidate).
+                            "tool_call": {
+                                "name": row.get("tool_name") or "unknown",
+                                "description": row_content,
+                            },
+                        }
+                        if tool_call_id:
+                            frame["tool_call"]["id"] = tool_call_id
+                        out.append(frame)
+                        if preview is not None:
+                            seen_rows.add(preview_key)
+                            out.append(_activity_result_frame(base, row, tool_call_id, preview))
+                    elif row_type == "tool_result":
+                        out.append(_activity_result_frame(base, row, tool_call_id, row_content))
+
     return out
+
+
+def _activity_result_frame(
+    base: dict[str, Any], row: dict[str, Any], tool_call_id: Any, result: str,
+) -> dict[str, Any]:
+    """One ``chat.tool_result`` frame for a mirrored activity row (paired or orphan)."""
+    return {
+        **base,
+        "event_type": "chat.tool_result",
+        "tool_name": row.get("tool_name") or "unknown",
+        **({"tool_call_id": tool_call_id} if tool_call_id else {}),
+        "result": result or "",
+    }
 
 
 def _detect_human_waiting_prompts(
@@ -3927,9 +4417,12 @@ async def _consume_workflow_events(
     # Phase/agent dedup lives on the handler (session-scoped): this loop is
     # cancelled on team pause, and a resume relaunch replays the cached
     # prefix — a fresh per-loop table would re-emit the replay as new tasks.
-    seen_phase = workflow_handler.seen_phase
-    seen_agent = workflow_handler.seen_agent
-    spawned_members = workflow_handler.spawned_members
+    mirror_dedup = _WorkflowMirrorDedup(
+        seen_phase=workflow_handler.seen_phase,
+        seen_agent=workflow_handler.seen_agent,
+        spawned_members=workflow_handler.spawned_members,
+        seen_activity=workflow_handler.seen_activity,
+    )
     seen_human_waiting: set[str] = set()
     try:
         logger.info(
@@ -4006,7 +4499,7 @@ async def _consume_workflow_events(
 
             # ── 非 TUI: 额外转换扁平 team.task/team.member 事件（向后兼容）──
             for team_ev in _workflow_updated_to_team_events(
-                event, session_id, seen_phase, seen_agent, spawned_members
+                event, session_id, mirror_dedup,
             ):
                 await run_history_io(_persist_team_history_event, channel_id, session_id, team_ev)
                 await _broadcast_event(channel_id, session_id, team_ev)
