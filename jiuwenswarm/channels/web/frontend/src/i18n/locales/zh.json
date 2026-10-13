@@ -223,6 +223,10 @@
       "download": "下载",
       "delete": "删除",
       "deleteHint": "删除此节点及其连线。也可选中后按 Delete / Backspace。",
+      "deleteConfirmTitle": "删除节点",
+      "deleteConfirmMessage": "该节点包含已生成的内容，删除后不可恢复。是否确定删除？",
+      "deleteConfirmCancel": "取消",
+      "deleteConfirmOk": "确定",
       "resize": "调整大小",
       "resizeHint": "拖动右下角调整节点大小"
     },
@@ -1098,6 +1102,7 @@
     "modePlan": "规划模式",
     "modeAgent": "性能模式",
     "modeAgentTeam": "集群模式",
+    "videoGeneration": "视频生成",
     "modeAutoHarness": "自优化模式",
     "modeAutoHarnessDesc": "自动分析并优化目标仓库",
     "recording": "正在录音...（再次点击麦克风结束）",

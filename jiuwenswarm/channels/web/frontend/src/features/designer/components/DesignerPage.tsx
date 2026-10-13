@@ -1,5 +1,5 @@
 import { LayoutGrid, Loader2, Map as MapIcon, MessageSquare } from 'lucide-react';
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import PanelCollapseIcon from '../../../assets/panel-collapse.svg?react';
 import {
@@ -13,6 +13,7 @@ import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
 import { DesignerMaterialViewer } from '../DesignerMaterialViewer';
 import { DesignerRevisionChooser } from '../DesignerRevisionChooser';
+import { DesignerDeleteNodeDialog } from './controls/DesignerDeleteNodeDialog';
 import { DesignerAssetsSidebar } from './DesignerAssetsSidebar';
 import { DesignerCanvas } from './DesignerCanvas';
 import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
@@ -104,6 +105,17 @@ export function DesignerPage({
   const toggleChatSidebar = useDesignerUiStore((state) => state.toggleChatSidebar);
   const toggleMinimap = useDesignerUiStore((state) => state.toggleMinimap);
   const requestAutoLayout = useDesignerUiStore((state) => state.requestAutoLayout);
+  const pendingDeleteNodeIds = useDesignerUiStore((state) => state.pendingDeleteNodeIds);
+  const dismissDeleteNodes = useDesignerUiStore((state) => state.dismissDeleteNodes);
+  const closeDock = useDesignerUiStore((state) => state.closeDock);
+  const removeNodes = useDesignerStore((state) => state.removeNodes);
+  const confirmDeleteNodes = useCallback(() => {
+    const ids = useDesignerUiStore.getState().pendingDeleteNodeIds;
+    dismissDeleteNodes();
+    if (ids.length === 0) return;
+    removeNodes(ids);
+    closeDock();
+  }, [closeDock, dismissDeleteNodes, removeNodes]);
   const workspaceLoadSeqRef = useRef(0);
   const loadedKeyRef = useRef('');
   const onOpenSessionRef = useRef(onOpenSession);
@@ -342,6 +354,9 @@ export function DesignerPage({
           }}
           onClose={closeRevision}
         />
+      ) : null}
+      {pendingDeleteNodeIds.length > 0 ? (
+        <DesignerDeleteNodeDialog onCancel={dismissDeleteNodes} onConfirm={confirmDeleteNodes} />
       ) : null}
     </div>
   );

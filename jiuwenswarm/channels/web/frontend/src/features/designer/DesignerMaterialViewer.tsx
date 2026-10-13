@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { DesignerTextEditor } from './DesignerTextEditor';
@@ -6,6 +7,9 @@ import {
   isEditableDesignerMaterial,
   type DesignerMaterial,
 } from './designerMaterials';
+
+/** Left and right paging buttons stay hidden in this preview version. */
+const SHOW_VIEWER_PAGING = false;
 
 type DesignerMaterialViewerProps = {
   materials: DesignerMaterial[];
@@ -90,46 +94,31 @@ export function DesignerMaterialViewer({
         aria-label={t('designer.materials.closeViewer')}
         onClick={onClose}
       />
+      {canEdit && !editing ? (
+        <button
+          type="button"
+          className="designer-material-viewer__edit btn"
+          onClick={() => setEditKey((value) => value + 1)}
+          data-testid="designer-material-viewer-edit"
+        >
+          {t('designer.materials.edit')}
+        </button>
+      ) : null}
+      <button
+        type="button"
+        className="designer-material-viewer__close"
+        onClick={onClose}
+        data-testid="designer-material-viewer-close"
+        aria-label={t('designer.materials.closeViewer')}
+      >
+        <X size={18} strokeWidth={2} aria-hidden />
+      </button>
       <div className="designer-material-viewer__panel">
-        <header className="designer-material-viewer__header">
-          <div>
-            <p className="designer-material-viewer__kind">{current.kind}</p>
-            <h2>{current.label}</h2>
-            {viewable.length > 1 ? (
-              <p className="designer-material-viewer__index">
-                {t('designer.materials.viewerIndex', {
-                  current: index + 1,
-                  total: viewable.length,
-                })}
-              </p>
-            ) : null}
-          </div>
-          <div className="designer-material-viewer__actions">
-            {canEdit && !editing ? (
-              <button
-                type="button"
-                className="btn"
-                onClick={() => setEditKey((value) => value + 1)}
-                data-testid="designer-material-viewer-edit"
-              >
-                {t('designer.materials.edit')}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="btn"
-              onClick={onClose}
-              data-testid="designer-material-viewer-close"
-            >
-              {t('designer.materials.closeViewer')}
-            </button>
-          </div>
-        </header>
         <div className="designer-material-viewer__stage" data-testid="designer-material-viewer-stage">
-          {viewable.length > 1 ? (
+          {SHOW_VIEWER_PAGING && viewable.length > 1 ? (
             <button
               type="button"
-              className="designer-material-viewer__nav"
+              className="designer-material-viewer__nav designer-material-viewer__nav--prev"
               onClick={() => go(-1)}
               aria-label={t('designer.materials.previous')}
             >
@@ -164,10 +153,10 @@ export function DesignerMaterialViewer({
               <p>{t('designer.materials.placeholderHint')}</p>
             )}
           </div>
-          {viewable.length > 1 ? (
+          {SHOW_VIEWER_PAGING && viewable.length > 1 ? (
             <button
               type="button"
-              className="designer-material-viewer__nav"
+              className="designer-material-viewer__nav designer-material-viewer__nav--next"
               onClick={() => go(1)}
               aria-label={t('designer.materials.next')}
             >

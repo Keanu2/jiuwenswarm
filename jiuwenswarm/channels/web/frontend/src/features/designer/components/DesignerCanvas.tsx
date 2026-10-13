@@ -173,6 +173,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
   const canvasTool = useDesignerUiStore((state) => state.canvasTool);
   const setCanvasTool = useDesignerUiStore((state) => state.setCanvasTool);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
+  const requestDeleteNodes = useDesignerUiStore((state) => state.requestDeleteNodes);
   const minimapVisible = useDesignerUiStore((state) => state.minimapVisible);
   const layoutRequestId = useDesignerUiStore((state) => state.layoutRequestId);
   const setZoomPercent = useDesignerUiStore((state) => state.setZoomPercent);
@@ -325,6 +326,15 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
     [closeDock, removeNodes],
   );
 
+  const onBeforeDelete = useCallback(
+    async ({ nodes: deleting }: { nodes: Node[] }) => {
+      if (canvasLocked || deleting.length === 0) return true;
+      requestDeleteNodes(deleting.map((node) => node.id));
+      return false;
+    },
+    [canvasLocked, requestDeleteNodes],
+  );
+
   const onDragOver = useCallback((event: DragEvent) => {
     if (![...event.dataTransfer.types].includes(DESIGNER_ASSET_DRAG_MIME)) return;
     event.preventDefault();
@@ -396,6 +406,7 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         onConnect={onConnect}
         onNodeDragStop={onNodeDragStop}
         onNodesDelete={onNodesDelete}
+        onBeforeDelete={onBeforeDelete}
         onDragOver={onDragOver}
         onDrop={onDrop}
         onPaneClick={closeDock}

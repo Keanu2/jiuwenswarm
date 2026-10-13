@@ -17,9 +17,8 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
   const { t } = useTranslation();
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const run = useDesignerRunStore((state) => state.run);
-  const removeNodes = useDesignerStore((state) => state.removeNodes);
   const inspectNode = useDesignerUiStore((state) => state.inspectNode);
-  const closeDock = useDesignerUiStore((state) => state.closeDock);
+  const requestDeleteNodes = useDesignerUiStore((state) => state.requestDeleteNodes);
   const previewLabel = isTextLikeNodeType(nodeType)
     ? t('designer.nodeActions.previewOrEdit')
     : t('designer.nodeActions.preview');
@@ -70,10 +69,9 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
     (event: MouseEvent) => {
       event.stopPropagation();
       event.preventDefault();
-      removeNodes([nodeId]);
-      closeDock();
+      requestDeleteNodes([nodeId]);
     },
-    [closeDock, nodeId, removeNodes],
+    [nodeId, requestDeleteNodes],
   );
 
   return (

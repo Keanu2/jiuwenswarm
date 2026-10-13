@@ -20,7 +20,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AtSign, ChevronRight, CircleX, LayoutTemplate, Loader2, Lock, Mic, Plus, Settings, Square, Workflow, X } from 'lucide-react';
+import { AtSign, ChevronRight, CircleX, LayoutTemplate, Loader2, Lock, Mic, Plus, Settings, Square, SquarePlay, Workflow, X } from 'lucide-react';
 
 // import { stopAllTts } from '../../utils';
 import {
@@ -751,6 +751,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const [speechError, setSpeechError] = useState('');
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
+  const [videoGenerationEnabled, setVideoGenerationEnabled] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>(() =>
     activeSessionId ? (attachmentDraftsBySession.get(activeSessionId) ?? []) : [],
   );
@@ -3621,7 +3622,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     aria-label={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFile')}
                     aria-haspopup="menu"
                     aria-expanded={attachMenuOpen}
-                    data-tooltip={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFileTooltip')}
+                    data-tooltip={
+                      attachTriggerDisabled
+                        ? t('chat.addFileDisabled')
+                        : workMode === 'design' && showWorkContextRow
+                          ? t('chat.addFile')
+                          : t('chat.addFileTooltip')
+                    }
                     {...attachTooltipHandlers}
                   >
                     <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
@@ -3669,6 +3676,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                           </span>
                         </button>
+                        {!(workMode === 'design' && showWorkContextRow) && (
+                        <>
                         <div className="chat-attach-menu-item-anchor">
                           <button
                             type="button"
@@ -4239,10 +4248,33 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             />
                           </div>
                         )}
+                        </>
+                        )}
                       </div>,
                       document.body,
                     )}
                 </div>
+                {(workMode === 'design' || showWorkContextRow) && (
+                  <div className="chat-mode-select" data-testid="chat-panel-video-generation">
+                    <button
+                      type="button"
+                      className={clsx(
+                        'chat-mode-select__trigger',
+                        videoGenerationEnabled && 'chat-mode-select__trigger--feature-on',
+                      )}
+                      data-testid="chat-panel-video-generation-trigger"
+                      aria-pressed={videoGenerationEnabled}
+                      onClick={() => setVideoGenerationEnabled((enabled) => !enabled)}
+                    >
+                      <span className="chat-mode-select__value">
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <SquarePlay className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('chat.videoGeneration')}</span>
+                      </span>
+                    </button>
+                  </div>
+                )}
                 {workMode !== 'design' && (
                 <>
                 <div

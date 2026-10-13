@@ -223,6 +223,10 @@
       "download": "Download",
       "delete": "Delete",
       "deleteHint": "Delete this node and its connections. You can also press Delete / Backspace.",
+      "deleteConfirmTitle": "Delete node",
+      "deleteConfirmMessage": "This node contains generated content. Deleting it cannot be undone. Are you sure you want to delete it?",
+      "deleteConfirmCancel": "Cancel",
+      "deleteConfirmOk": "Confirm",
       "resize": "Resize",
       "resizeHint": "Drag the bottom-right corner to resize this node"
     },
@@ -1107,6 +1111,7 @@
     "modePlan": "Planning Mode",
     "modeAgent": "Performance Mode",
     "modeAgentTeam": "Cluster Mode",
+    "videoGeneration": "Video generation",
     "modeAutoHarness": "Auto-Harness Mode",
     "modeAutoHarnessDesc": "Automatically analyze and optimize target repository",
     "recording": "Recording... (click the microphone again to finish)",

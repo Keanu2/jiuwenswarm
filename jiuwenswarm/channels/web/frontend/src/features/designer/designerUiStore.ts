@@ -23,6 +23,7 @@ type DesignerUiStore = {
   minimapVisible: boolean;
   zoomPercent: number;
   layoutRequestId: number;
+  pendingDeleteNodeIds: string[];
   setCanvasTool: (tool: DesignerCanvasTool) => void;
   setDockPanel: (panel: DesignerDockPanel) => void;
   toggleNodePortMenu: (nodeId: string, side: DesignerNodePortSide) => void;
@@ -34,6 +35,8 @@ type DesignerUiStore = {
   toggleMinimap: () => void;
   setZoomPercent: (percent: number) => void;
   requestAutoLayout: () => void;
+  requestDeleteNodes: (nodeIds: string[]) => void;
+  dismissDeleteNodes: () => void;
   inspectNode: (nodeId: string, materialIndex?: number) => void;
   startEdit: (materialId: string) => void;
   openViewer: (id: string) => void;
@@ -57,6 +60,7 @@ const initialState = {
   minimapVisible: true,
   zoomPercent: 100,
   layoutRequestId: 0,
+  pendingDeleteNodeIds: [] as string[],
 };
 
 export const useDesignerUiStore = create<DesignerUiStore>((set) => ({
@@ -119,6 +123,14 @@ export const useDesignerUiStore = create<DesignerUiStore>((set) => ({
   setZoomPercent: (percent) => set({ zoomPercent: percent }),
 
   requestAutoLayout: () => set((state) => ({ layoutRequestId: state.layoutRequestId + 1 })),
+
+  requestDeleteNodes: (nodeIds) => {
+    const ids = [...new Set(nodeIds.map((id) => id.trim()).filter(Boolean))];
+    if (ids.length === 0) return;
+    set({ pendingDeleteNodeIds: ids });
+  },
+
+  dismissDeleteNodes: () => set({ pendingDeleteNodeIds: [] }),
 
   reset: () => set({ ...initialState }),
 }));

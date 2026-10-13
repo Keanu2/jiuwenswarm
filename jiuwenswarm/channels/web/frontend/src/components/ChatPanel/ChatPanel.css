@@ -1543,7 +1543,8 @@
   box-shadow: 0 0 0 3px rgba(var(--color-action-primary-rgb), 0.18);
 }
 
-.chat-mode-select--open .chat-mode-select__trigger {
+.chat-mode-select--open .chat-mode-select__trigger,
+.chat-mode-select__trigger--feature-on {
   border-color: var(--color-border-strong);
   background: rgba(var(--color-surface-panel-strong-rgb), 0.55);
 }
