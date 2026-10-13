@@ -34,7 +34,7 @@ import {
   DESIGNER_DOC_FIT_MIN_BODY,
   DESIGNER_DOC_FIT_MIN_WIDTH,
   DESIGNER_NODE_HEADER_HEIGHT,
-  contentAspectFromNodeConfig,
+  contentAspectForNode,
   isDesignerNodeUserResized,
   sizeNodeForContentAspect,
   sizeNodeForDocumentContent,
@@ -400,8 +400,14 @@ export function DesignerTableNode({ id, data, selected }: NodeProps<DesignerFlow
   );
 }
 
-function useFitMediaNodeSize(nodeId: string, nodeType: string, config: Record<string, unknown>) {
+function useFitMediaNodeSize(
+  nodeId: string,
+  nodeType: string,
+  config: Record<string, unknown>,
+  hasPreview: boolean,
+) {
   const updateNodeLayoutSize = useDesignerStore((state) => state.updateNodeLayoutSize);
+  const hinted = useDesignerStore((state) => contentAspectForNode(nodeType, config, state.domainGraph?.metadata));
   const applyRatio = useCallback(
     (ratio: number | null | undefined) => {
       if (nodeType !== DESIGNER_NODE_TYPE_IMAGE && nodeType !== DESIGNER_NODE_TYPE_VIDEO) {
@@ -413,10 +419,10 @@ function useFitMediaNodeSize(nodeId: string, nodeType: string, config: Record<st
     },
     [config, nodeId, nodeType, updateNodeLayoutSize],
   );
-  const hinted = contentAspectFromNodeConfig(config);
+  // Before there is output, frame the node at the ratio it will generate; afterwards the media's own size wins.
   useEffect(() => {
-    applyRatio(hinted);
-  }, [applyRatio, hinted]);
+    if (!hasPreview) applyRatio(hinted);
+  }, [applyRatio, hasPreview, hinted]);
   return applyRatio;
 }
 
@@ -427,7 +433,7 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
   const previewUri = useNodePreviewUri(id);
   const previewSrc = designerAssetPreviewUrl(previewUri) || previewUri;
   const hasPreview = Boolean(previewSrc);
-  const applyRatio = useFitMediaNodeSize(id, nodeType, nodeData.config || {});
+  const applyRatio = useFitMediaNodeSize(id, nodeType, nodeData.config || {}, hasPreview);
   const [resolutionLabel, setResolutionLabel] = useState<string | null>(null);
 
   useEffect(() => {

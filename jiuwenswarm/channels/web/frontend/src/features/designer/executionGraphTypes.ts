@@ -86,10 +86,6 @@ export const DESIGNER_NODE_CONFIG_KEYS = [
 export type DesignerMediaGenerateConfig = {
   prompt?: string;
   prompt_origin?: 'storyboard' | 'user';
-  aspect_ratio?: string;
-  resolution?: string;
-  duration?: string;
-  has_audio?: boolean;
   count?: number;
 };
 
@@ -175,6 +171,8 @@ type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
   skip_llm?: boolean;
   /** The upload replaced the generated output. */
   user_replaced_output?: boolean;
+  /** Manual video length in whole seconds; overrides the storyboard timeline. */
+  duration_sec?: number;
 };
 
 export type DesignerNodeConfig =
@@ -211,6 +209,7 @@ export type DesignerNodeConfig =
       force_handler?: boolean;
       skip_llm?: boolean;
       user_replaced_output?: boolean;
+      duration_sec?: number;
     };
 
 export const DESIGNER_EDGE_KIND_DATA = 'data' as const;
@@ -285,7 +284,56 @@ export type DesignerGraphEdge = {
   label?: string;
 };
 
-export type DesignerGraphPatch = {
+/** Canvas-wide; every video node generates with these. Length is per node (`duration_sec` / storyboard). */
+export type DesignerVideoSettings = {
+  aspect_ratio: string;
+  resolution: string;
+};
+
+/** Canvas-wide; every character / scene still generates with this. */
+export type DesignerImageSettings = {
+  aspect_ratio: string;
+  resolution: string;
+};
+
+export type DesignerMediaSettingsPatch = {
+  video_settings?: Partial<DesignerVideoSettings>;
+  image_settings?: Partial<DesignerImageSettings>;
+};
+
+/** Values the configured models accept, from `designer.media.capabilities`. */
+export type DesignerMediaCapabilities = {
+  video: {
+    configured_model: string;
+    /** Native generation backend of the slot; null on the OpenRouter-style path. */
+    backend: string | null;
+    model_id: string;
+    provider: string;
+    ratios: string[];
+    resolutions: string[];
+    default_ratio: string;
+    default_resolution: string;
+    min_sec: number;
+    max_sec: number;
+    default_sec: number;
+  };
+  image: {
+    configured_model: string;
+    backend: string | null;
+    ratios: string[];
+    resolutions: string[];
+    default_ratio: string;
+    default_resolution: string;
+  };
+  settings?: {
+    video: DesignerVideoSettings;
+    image: DesignerImageSettings;
+  };
+  /** Generated video node id → seconds it will be generated at. Present with a graph. */
+  video_durations?: Record<string, number>;
+};
+
+export type DesignerGraphPatch = DesignerMediaSettingsPatch & {
   title?: string;
   description?: string;
   upsert_nodes?: DesignerGraphNode[];

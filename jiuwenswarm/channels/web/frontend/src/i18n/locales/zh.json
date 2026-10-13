@@ -137,7 +137,6 @@
       "aspectRatio": "长宽比",
       "resolution": "分辨率",
       "duration": "时长",
-      "hasAudio": "有声音",
       "count": "生成数量",
       "browseFiles": "浏览文件",
       "dropHint": "或者拖拽到区域内",
@@ -150,6 +149,14 @@
       "regenerate": "重新生成",
       "rerun": "重新生成",
       "rerunHint": "用当前上游产物只重跑这一节点"
+    },
+    "mediaSettings": {
+      "videoTitle": "视频参数",
+      "imageTitle": "图片参数",
+      "durationValue": "{{seconds}} 秒",
+      "loading": "正在读取生成参数…",
+      "loadError": "无法读取生成参数：{{message}}",
+      "saveError": "参数未保存：{{message}}"
     },
     "sidebar": {
       "tabsLabel": "侧栏",

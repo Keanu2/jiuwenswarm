@@ -8,12 +8,14 @@ import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
 import {
   isMediaNodeType,
+  isUploadedMediaNode,
   readMediaConfig,
   writeMediaGeneratePatch,
 } from '../../mediaNodeConfig';
 import type { DesignerComfyuiConfig } from '../../executionGraphTypes';
 import { DesignerComfyuiParamsForm } from './DesignerComfyuiParamsForm';
 import { DesignerMaterialStrip } from './DesignerMaterialStrip';
+import { DesignerMediaSettingsMenu } from './DesignerMediaSettingsMenu';
 
 type DesignerNodeToolbarProps = {
   nodeId: string;
@@ -23,7 +25,11 @@ type DesignerNodeToolbarProps = {
 export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarProps) {
   const { t } = useTranslation();
   const isMedia = isMediaNodeType(nodeType);
-  const canGenerate = nodeType !== 'audio';
+  const uploadedVideo = useDesignerStore((state) => {
+    const node = state.domainGraph?.nodes.find((item) => item.id === nodeId);
+    return nodeType === 'video' && Boolean(node && isUploadedMediaNode(node));
+  });
+  const canGenerate = nodeType !== 'audio' && !uploadedVideo;
   const updateNodeConfig = useDesignerStore((state) => state.updateNodeConfig);
   const rerunNode = useDesignerRunStore((state) => state.rerunNode);
   const isRunning = useDesignerRunStore((state) => state.isRunning);
@@ -128,6 +134,9 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
               onWheel={(event) => event.stopPropagation()}
             />
             <div className="designer-node-toolbar__composer-actions">
+              {!comfyui && (nodeType === 'image' || nodeType === 'video') ? (
+                <DesignerMediaSettingsMenu nodeId={nodeId} nodeType={nodeType} />
+              ) : null}
               <button
                 type="button"
                 className="designer-node-toolbar__send"

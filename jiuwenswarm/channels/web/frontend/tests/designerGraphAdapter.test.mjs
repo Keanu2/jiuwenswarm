@@ -60,34 +60,22 @@ test('fromReactFlowGraph preserves domain semantics while updating layout', () =
   );
 });
 
-test('resolvedNodeCanvasSize turns default landscape media nodes portrait', () => {
-  const portrait = resolvedNodeCanvasSize({
+test('resolvedNodeCanvasSize frames default media nodes at the canvas ratio', () => {
+  const portrait = { video_settings: { aspect_ratio: '9:16' }, image_settings: { aspect_ratio: '16:9' } };
+  const clip = {
     id: 'n_clip_1',
     type: 'video',
     label: 'Clip 1',
-    config: { aspect_lock: { ratio: '9:16', video_size: '1080*1920' } },
+    config: {},
     layout: { x: 0, y: 0, width: 280, height: 160 },
     output_ref: null,
-  });
-  assert.ok(portrait.height > portrait.width);
+  };
+  const video = resolvedNodeCanvasSize(clip, portrait);
+  assert.ok(video.height > video.width);
 
-  const landscape = resolvedNodeCanvasSize({
-    id: 'n_clip_2',
-    type: 'video',
-    label: 'Clip 2',
-    config: { aspect_lock: { ratio: '16:9' } },
-    layout: { x: 0, y: 0, width: 280, height: 160 },
-    output_ref: null,
-  });
-  assert.ok(landscape.width > landscape.height);
+  const image = resolvedNodeCanvasSize({ ...clip, id: 'n_scene', type: 'image' }, portrait);
+  assert.ok(image.width > image.height);
 
-  const text = resolvedNodeCanvasSize({
-    id: 'n_brief',
-    type: 'text',
-    label: 'Brief',
-    config: { aspect_lock: { ratio: '9:16' } },
-    layout: { x: 0, y: 0, width: 280, height: 160 },
-    output_ref: null,
-  });
+  const text = resolvedNodeCanvasSize({ ...clip, id: 'n_brief', type: 'text' }, portrait);
   assert.deepEqual(text, { width: 280, height: 160 });
 });

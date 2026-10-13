@@ -84,7 +84,8 @@ QWEN_IMAGE_PLAYBOOK = """
 Use for character specs and scene specs / images.
 - PROMPT LENGTH: obey the IMAGE PROMPT LIMIT stamped from the configured VISUAL_GEN
   backend (Director / leaf context). Prefer dense shot-ready prose; do not pad.
-- COST: Prefer ~1K resolution (size 1K / 1024x1024 or aspect-matched ~1K). Do not request 2K/4K.
+- FORMAT: the canvas image settings fix the aspect ratio and size of every still; do not
+  write ratios or sizes into prompts.
 - EVERY on-screen character gets character specs before any clip, including an unnamed group that shares one look.
 - First clip of a setting_id: compose_from_character_specs — GENERATE the setting AND place ONLY
     storyboard on_screen cast with cast_actions. Author a detailed SCENE SPECS (objects,
@@ -136,9 +137,9 @@ When correcting leaf agents / drafting node prompts:
   scene prompt handoff — do not edit prior clip images as the primary ref.
 - Clip: DETAILED Wan R2V prompt with the brief/storyboard STYLE LOCK + CONTACT lock
   + set/orientation + cast/prop locks (not STYLE HOLD alone).
-- NON-NEGOTIABLE film-wide locks on EVERY clip: aspect_lock (one ratio;
-  stills at the chosen image size; video at the user or director resolution),
-  style_lock, spatial_lock, costume/identity, occupancy, screen axis.
+- NON-NEGOTIABLE film-wide locks on EVERY clip: style_lock, spatial_lock,
+  costume/identity, occupancy, screen axis. Aspect ratio and resolution come from
+  the canvas video settings and are passed to the model directly.
 - If agents ignore storyboard facing/objects/speech OR drop any lock, rewrite
   director_task / generate.prompt once (no loops).
 """.strip()
@@ -147,9 +148,8 @@ MANAGER_CORRECTION_HINTS = """
 Director one-pass corrections (locks bind ALL agents — leaf rewrites cannot drop them):
 - Reject / rewrite shots that all share the same facing or that omit placement/motion/speech/objects.
 - Require camera_rig + screen_positions + speech_line; stamp setting_id + clip_strategy.
-- BEFORE media calls: gate every clip prompt for aspect_lock, style_lock,
-  spatial_lock, costume/identity, occupancy, and prior continuity; re-inject missing locks.
-- Stamp image_size from aspect_lock on stills and the user or director video_size/video_resolution on clips.
+- BEFORE media calls: gate every clip prompt for style_lock, spatial_lock,
+  costume/identity, occupancy, and prior continuity; re-inject missing locks.
 - Graph = brief→storyboard→character specs→scene specs→R2V clips→compose.
 - Prune only true orphans; every kept node must reach compose.
 """.strip()

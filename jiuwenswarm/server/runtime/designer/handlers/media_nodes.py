@@ -29,6 +29,7 @@ from jiuwenswarm.server.runtime.designer.handlers.common import (
 from jiuwenswarm.server.runtime.designer.handlers.compose import ComposeNodeHandler
 from jiuwenswarm.server.runtime.designer.handlers.image_nodes import _require_image
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
+from jiuwenswarm.server.runtime.designer.media_settings import image_settings, video_settings
 from jiuwenswarm.server.runtime.designer.user_references import (
     user_reference_image_paths,
     user_reference_node_file,
@@ -59,17 +60,6 @@ def _upstream_images(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list
     return paths
 
 
-def _image_size_from_ctx(ctx: NodeExecutionContext, node: DesignerGraphNode) -> str:
-    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-    aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
-    if not aspect:
-        meta = (ctx.graph.get("metadata") or {}) if isinstance(ctx.graph, dict) else {}
-        aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
-    return str(
-        (aspect or {}).get("image_size") or cfg.get("image_size") or "1024x1024"
-    ).strip() or "1024x1024"
-
-
 class ImageNodeHandler:
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
         from jiuwenswarm.server.runtime.designer.handlers.clip import (
@@ -86,7 +76,7 @@ class ImageNodeHandler:
         return await _require_image(
             prompt=prompt,
             stem=f"designer_image_{ctx.run_id}_{ctx.node_id}",
-            size=_image_size_from_ctx(ctx, node),
+            size=image_settings(ctx.graph).size,
             max_tries=4,
             reference_images=[str(path) for path in refs] or None,
             ctx=ctx,
@@ -103,6 +93,7 @@ class VideoNodeHandler:
             edge_text_inputs,
             edge_video_inputs,
             first_connected_video_file,
+            video_duration_seconds,
         )
 
         prompt = node_generate_prompt(node) or graph_prompt(ctx.graph, node)
@@ -112,23 +103,16 @@ class VideoNodeHandler:
         if payload:
             prompt = f"{prompt.rstrip()}\n\n{payload}".strip()
         refs = [str(path) for path in _upstream_images(ctx, node)]
-        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-            video_format_for_node,
-        )
-
-        video_size, video_res = video_format_for_node(
-            ctx.graph if isinstance(ctx.graph, dict) else {},
-            cfg,
-        )
+        video = video_settings(ctx.graph)
         generated = await generate_clip_video(
             prompt,
             save_dir=str(graph_workspace_dir(ctx.graph)),
             reference_images=refs or None,
             reference_file=first_connected_video_file(videos),
             force_reference_mode=bool(refs or videos),
-            size=video_size,
-            resolution=video_res,
+            duration=video_duration_seconds(ctx, node),
+            aspect_ratio=video.aspect_ratio,
+            resolution=video.resolution,
         )
         path = Path(str(generated.get("video_path") or ""))
         if not path.is_file():

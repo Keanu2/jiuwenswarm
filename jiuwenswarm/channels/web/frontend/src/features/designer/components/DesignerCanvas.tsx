@@ -66,7 +66,7 @@ function toPersistableGraph(
 function buildLayoutSyncKey(graph: DesignerExecutionGraph): string {
   const nodesKey = graph.nodes
     .map((node) => {
-      const size = resolvedNodeCanvasSize(node);
+      const size = resolvedNodeCanvasSize(node, graph.metadata);
       const layout = node.layout ?? {};
       return `${node.id}:${node.type}:${layout.x ?? 0}:${layout.y ?? 0}:${size.width}:${size.height}`;
     })

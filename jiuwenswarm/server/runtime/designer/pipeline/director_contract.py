@@ -181,21 +181,8 @@ def count_narrative_beats(prompt: str) -> int:
 
 
 def infer_shot_budget(prompt: str, analysis: dict[str, Any]) -> int:
-    """Domain-agnostic shot budget. Explicit N wins; C slices when runtime > Wan max."""
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
-        WAN_MAX_CLIP_SEC,
-        needs_duration_slicing,
-        requested_film_duration_sec,
-        sequential_shot_count,
-    )
-
+    """Domain-agnostic shot budget. Explicit N wins, then the authored plan."""
     explicit = _explicit_clip_count_from_prompt(prompt)
-    if needs_duration_slicing(prompt):
-        asked = int(requested_film_duration_sec(prompt) or 0)
-        n_c = sequential_shot_count(asked)
-        if explicit >= 1 and explicit * WAN_MAX_CLIP_SEC >= asked:
-            return max(1, explicit)
-        return max(1, max(n_c, explicit))
     if explicit >= 1:
         return max(1, explicit)
     try:

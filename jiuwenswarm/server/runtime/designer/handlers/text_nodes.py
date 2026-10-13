@@ -275,45 +275,9 @@ def sync_shot_nodes_from_storyboard_markdown(
     return notes
 
 
-_DURATION_FIELD_RE = re.compile(
-    r"(?im)^(?:[-*]\s*)?(?:\*\*)?duration(?:\*\*)?\s*:?\s*~?\s*(\d{1,2}(?:\.\d+)?)",
-)
-_DURATION_INLINE_RE = re.compile(
-    r"(\d{1,2}(?:\.\d+)?)\s*-?\s*(?:seconds?|secs?|秒)",
-    re.I,
-)
 _LOGLINE_RE = re.compile(
     r"(?im)^(?:[-*]\s*)?(?:\*\*)?logline(?:\*\*)?\s*:\s*(.+)$",
 )
-
-
-def brief_duration_seconds(text: str, default: int = 5) -> int:
-    """Read an explicit duration from a brief or user request."""
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
-        requested_film_duration_sec,
-    )
-
-    asked = requested_film_duration_sec(text or "")
-    if asked is not None:
-        return int(asked)
-    source = text or ""
-    field = _DURATION_FIELD_RE.search(source)
-    if field:
-        try:
-            sec = int(round(float(field.group(1))))
-        except (TypeError, ValueError):
-            sec = 0
-        if 1 <= sec <= 30:
-            return sec
-    match = _DURATION_INLINE_RE.search(source)
-    if match:
-        try:
-            sec = int(round(float(match.group(1))))
-        except (TypeError, ValueError):
-            sec = 0
-        if 1 <= sec <= 30:
-            return sec
-    return default
 
 
 def brief_logline(brief: str) -> str:

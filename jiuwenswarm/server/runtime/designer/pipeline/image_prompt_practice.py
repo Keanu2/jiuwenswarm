@@ -68,21 +68,6 @@ def _style_is_covered(text: str, look: str) -> bool:
     return bool(cues and any(token in body for token in cues))
 
 
-def _aspect_phrase(cfg: dict[str, Any], graph: dict[str, Any] | None) -> str:
-    aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
-    if not aspect and isinstance(graph, dict):
-        meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-        aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
-    ratio = str((aspect or {}).get("ratio") or "").strip()
-    size = str(cfg.get("image_size") or (aspect or {}).get("image_size") or "").strip()
-    bits = []
-    if ratio:
-        bits.append(f"{ratio} framing")
-    if size:
-        bits.append(f"size {size}")
-    return ", ".join(bits)
-
-
 def _visual_lighting(text: str) -> str:
     """Drop planner clauses. Keep only the light the image can show."""
     body = re.split(r"(?i)\b(?:do not|don't|never|forbid)\b", str(text or ""), maxsplit=1)[0]
@@ -194,12 +179,12 @@ def compose_scene_specs_prompt(
     seed: str = "",
 ) -> str:
     """Positive empty-environment plate for the image model."""
+    del graph
     cfg = _cfg(cfg)
     place = _scene_phrase(cfg)
     tod = _tod_phrase(cfg)
     props = _props_phrase(cfg)
     look = _style_look(cfg)
-    aspect = _aspect_phrase(cfg, graph)
     bits = [f"{place}." if place else "One empty setting."]
     enclosure = _enclosure_phrase(place)
     if enclosure:
@@ -215,8 +200,6 @@ def compose_scene_specs_prompt(
         bits.append(arch.rstrip(".") + ".")
     if look and not _BAD.search(look):
         bits.append(f"{look}.")
-    if aspect:
-        bits.append(f"Framing: {aspect}.")
     bits.append("One clear image.")
     # Optional seed: only keep positive fragments that add place detail.
     seed_text = str(seed or "").strip()
@@ -245,7 +228,6 @@ def compose_character_sheet_prompt(
     costume = re.split(r"(?i)\b(?:do not|don't|never|forbid)\b", costume, maxsplit=1)[0]
     costume = costume.strip(" ,;.—-")[:200]
     look = _style_look(cfg)
-    aspect = _aspect_phrase(cfg, None)
     bits = [
         f"One person only: {name}, full or three-quarter body on a plain empty studio backdrop.",
         "Solid neutral background, identity and costume only.",
@@ -254,8 +236,6 @@ def compose_character_sheet_prompt(
         bits.append(f"Wearing {costume}.")
     if look and not _BAD.search(look):
         bits.append(f"{look}.")
-    if aspect:
-        bits.append(f"Framing: {aspect}.")
     bits.append("One clear image.")
     seed_text = str(seed or "").strip()
     if seed_text and not looks_like_lock_essay(seed_text) and len(seed_text) < 300:

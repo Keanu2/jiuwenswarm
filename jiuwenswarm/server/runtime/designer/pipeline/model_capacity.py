@@ -2,8 +2,9 @@
 """Duration, resolution, and reference limits for the configured video model.
 
 Figures follow the vendor docs as of 2026-09 (Wan 3.0, Seedance 2.5, MiniMax-H3,
-MiniMax-H3-Max). The director uses the active entry to size shots. Whichever
-video model is configured with an API key is the one that applies.
+MiniMax-H3-Max). Canvas video settings are snapped onto the active entry, and
+the Design toolbar only offers its values. Whichever video model is configured
+with an API key is the one that applies.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ class VideoModelCapacity:
     default_resolution: str
     max_reference_images: int
     supports_reference_images: bool
-    ratios: tuple[str, ...] = ("16:9", "9:16", "1:1", "4:3", "3:4")
+    ratios: tuple[str, ...] = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -55,18 +56,17 @@ _WAN3 = VideoModelCapacity(
     supports_reference_images=True,
 )
 
-# Seedance 2.5 (BytePlus / Volcengine, 2026-09): 4–30s, 480p/720p/1080p, 30 reference images.
+# Seedance 2.5 (BytePlus / Volcengine, 2026-09): 4–30s, 480P/720P/1080P, 30 reference images.
 _SEEDANCE_25 = VideoModelCapacity(
     model_id="doubao-seedance-2-5-260628",
     provider="volcengine",
     min_sec=4,
     max_sec=30,
     default_sec=5,
-    resolutions=("480p", "720p", "1080p"),
-    default_resolution="720p",
+    resolutions=("480P", "720P", "1080P"),
+    default_resolution="720P",
     max_reference_images=30,
     supports_reference_images=True,
-    ratios=("21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
 )
 
 # Seedance 2.0 series: 4–15s. 2.5 is the 30s model above.
@@ -76,11 +76,23 @@ _SEEDANCE_20 = VideoModelCapacity(
     min_sec=4,
     max_sec=15,
     default_sec=5,
-    resolutions=("480p", "720p", "1080p"),
-    default_resolution="720p",
+    resolutions=("480P", "720P", "1080P"),
+    default_resolution="720P",
     max_reference_images=9,
     supports_reference_images=True,
-    ratios=("21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
+)
+
+# Seedance 2.0 fast / mini: as 2.0 without 1080P.
+_SEEDANCE_20_FAST = VideoModelCapacity(
+    model_id="dreamina-seedance-2-0-fast-260128",
+    provider="volcengine",
+    min_sec=4,
+    max_sec=15,
+    default_sec=5,
+    resolutions=("480P", "720P"),
+    default_resolution="720P",
+    max_reference_images=9,
+    supports_reference_images=True,
 )
 
 # MiniMax-H3: 4–15s, 768P/2K, up to 9 reference images.
@@ -113,6 +125,7 @@ _CATALOG: tuple[VideoModelCapacity, ...] = (
     _WAN3,
     _SEEDANCE_25,
     _SEEDANCE_20,
+    _SEEDANCE_20_FAST,
     _H3,
     _H3_MAX,
 )
@@ -133,6 +146,8 @@ def capacity_for_model(model_id: str) -> VideoModelCapacity:
         return _H3
     if "seedance" in key and ("25" in key or "260628" in key):
         return _SEEDANCE_25
+    if "seedance20fast" in key or "seedance20mini" in key:
+        return _SEEDANCE_20_FAST
     if key.startswith("wan3") or "wan30" in key:
         return _WAN3
     for item in _CATALOG:
@@ -216,53 +231,25 @@ def snap_resolution(requested: str, capacity: VideoModelCapacity) -> str:
     return capacity.default_resolution
 
 
-def size_for_resolution(resolution: str, ratio: str) -> str:
-    """W*H companion for providers that still take a pixel size."""
-    tier = str(resolution or "").upper().replace(" ", "")
-    aspect = str(ratio or "16:9").strip()
-    table = {
-        ("480P", "16:9"): "832*480",
-        ("480P", "9:16"): "480*832",
-        ("480P", "1:1"): "480*480",
-        ("720P", "16:9"): "1280*720",
-        ("720P", "9:16"): "720*1280",
-        ("720P", "1:1"): "960*960",
-        ("720P", "4:3"): "1088*832",
-        ("720P", "3:4"): "832*1088",
-        ("768P", "16:9"): "1280*768",
-        ("768P", "9:16"): "768*1280",
-        ("768P", "1:1"): "768*768",
-        ("1080P", "16:9"): "1920*1080",
-        ("1080P", "9:16"): "1080*1920",
-        ("1080P", "1:1"): "1440*1440",
-        ("1080P", "4:3"): "1632*1248",
-        ("1080P", "3:4"): "1248*1632",
-        ("1080P", "21:9"): "2560*1080",
-        ("2K", "16:9"): "2560*1440",
-        ("2K", "9:16"): "1440*2560",
-        ("2K", "1:1"): "1440*1440",
-    }
-    if aspect not in {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}:
-        aspect = "16:9"
-    return table.get((tier, aspect)) or table.get((tier, "16:9")) or "1920*1080"
-
-
-_RES_RE = re.compile(
-    r"(?P<tier>480\s*p|720\s*p|768\s*p|1080\s*p|2\s*k|4\s*k)",
-    re.I,
-)
-
-
-def resolution_mentioned(text: str) -> str:
-    """Resolution the user actually asked for, or empty."""
-    match = _RES_RE.search(str(text or ""))
+def ratio_value(ratio: str) -> float | None:
+    """Width / height of a "W:H" ratio, or None when it does not parse."""
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*", str(ratio or ""))
     if not match:
-        return ""
-    token = re.sub(r"\s+", "", match.group("tier")).upper()
-    if token == "4K":
-        return "4K"
-    if token == "2K":
-        return "2K"
-    if token.endswith("P"):
-        return token
-    return ""
+        return None
+    width, height = float(match.group(1)), float(match.group(2))
+    return width / height if width > 0 and height > 0 else None
+
+
+def default_ratio(capacity: VideoModelCapacity) -> str:
+    return "16:9" if "16:9" in capacity.ratios else capacity.ratios[0]
+
+
+def snap_ratio(requested: str, capacity: VideoModelCapacity) -> str:
+    """Map an aspect ratio onto the closest one this model accepts."""
+    raw = str(requested or "").strip()
+    if raw in capacity.ratios:
+        return raw
+    target = ratio_value(raw)
+    if target is None:
+        return default_ratio(capacity)
+    return min(capacity.ratios, key=lambda item: abs((ratio_value(item) or 0.0) - target))

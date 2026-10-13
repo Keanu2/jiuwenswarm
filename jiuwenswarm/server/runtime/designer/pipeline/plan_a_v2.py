@@ -578,15 +578,11 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
             shot["action"] = (str(shot.get("action") or "") + " " + bleed)[:700]
 
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-            infer_aspect_lock,
-            stamp_axis_locks,
-        )
+        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import stamp_axis_locks
 
-        out["aspect_lock"] = infer_aspect_lock(prompt)
         out = stamp_axis_locks(out)
     except Exception:  # noqa: BLE001
-        out.setdefault("aspect_lock", {})
+        pass
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.director_clip_sheet import (
             stamp_director_clip_sheets,
@@ -619,7 +615,6 @@ def apply_plan_a_v2(prompt: str, analysis: dict[str, Any]) -> dict[str, Any]:
         "setting_type": spatial.get("setting_type"),
         "cast_deduped": len(alias) > len(characters),
         "has_continuity_guide": bool(out.get("continuity_guide")),
-        "aspect": (out.get("aspect_lock") or {}).get("ratio"),
         "has_axis_lock": bool(out.get("axis_lock")),
         "clip_policy": out.get("clip_policy"),
         "has_production_specs": bool(out.get("production_specs")),

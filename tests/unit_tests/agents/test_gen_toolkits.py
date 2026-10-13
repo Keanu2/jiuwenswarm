@@ -134,6 +134,15 @@ async def test_minimax_image_success(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_minimax_image_explicit_size_sends_width_and_height(monkeypatch, tmp_path):
+    seen = _patch_client(monkeypatch, lambda r: _mm_ok_image())
+    target = gt.GenerationTarget("minimax", "k", _MM_GLOBAL, "image-01")
+    await gt.generate_image(target, "fox", "16:9", str(tmp_path), gt.ImageOptions(size="1424x800"))
+    body = _body(seen[0])
+    assert (body["width"], body["height"]) == (1424, 800) and "aspect_ratio" not in body
+
+
+@pytest.mark.asyncio
 async def test_minimax_region_failover_and_bad_key(monkeypatch, tmp_path):
     def china_rejects(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_MM_BAD_KEY) if request.url.host == "api.minimaxi.com" else _mm_ok_image()
@@ -397,8 +406,7 @@ async def test_modelark_image_explicit_size_and_references(monkeypatch, tmp_path
     options = gt.ImageOptions(size="1280*720", reference_image_uris=(_REF_A,))
     await gt.generate_image(gt.GenerationTarget("modelark", "k", _ARK_INTL, "m"), "fox", "16:9", str(tmp_path), options)
     body = _body(seen[0])
-    width, height = (int(side) for side in body["size"].split("x"))
-    assert abs(width / height - 16 / 9) < 0.01 and width * height >= 2048 * 2048 * 0.98
+    assert body["size"] == "1280x720"
     assert body["image"] == [_REF_A] and body["prompt"] == "fox"
 
 
@@ -610,3 +618,19 @@ async def test_vllm_omni_check_video_reports_failure(monkeypatch):
     )
     target = gt.GenerationTarget("vllm-omni", "", "http://127.0.0.1:8091/v1", "")
     assert await gt.check_video(target, "vid-1", None) == "[ERROR]: video job vid-1 ended with status failed: OOM"
+
+
+@pytest.mark.parametrize(
+    ("aspect_ratio", "resolution", "expected"),
+    [
+        ("9:16", "720P", "720*1280"),
+        ("16:9", "768P", "1360*768"),
+        ("9:16", "2K", "1440*2560"),
+        ("21:9", "1080p", "2192*944"),
+        ("4:3", "480P", "736*560"),
+        ("16:9", "8K", None),
+    ],
+)
+def test_vllm_omni_size_covers_every_tier_and_ratio(aspect_ratio, resolution, expected):
+    assert gt._vllm_omni_size(None, aspect_ratio, resolution) == expected
+    assert gt._vllm_omni_size("640*480", aspect_ratio, resolution) == "640*480"

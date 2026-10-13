@@ -5,24 +5,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from shutil import copy2
 
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
     NODE_ROLE_CHARACTER,
     NODE_ROLE_SCENE,
-    NODE_ROLE_STORYBOARD,
     NODE_TYPE_IMAGE,
     NODE_TYPE_TEXT,
     DesignerGraphNode,
-    node_clip_index,
 )
 from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
 from jiuwenswarm.server.runtime.designer.handlers.common import (
-    collect_compose_reference_images,
     file_output_ref,
     graph_prompt,
-    role_output_image_paths,
     role_output_text,
     write_workspace_text,
 )
@@ -32,50 +27,8 @@ from jiuwenswarm.server.runtime.designer.user_references import (
     wired_user_reference_images,
 )
 from jiuwenswarm.server.runtime.designer.a2a_collab import collaboration_card
-from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
-    StoryboardShot,
-    parse_storyboard_shots,
-)
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
-
-
-def _resolve_image_size(cfg: dict, graph: dict | None = None) -> str:
-    """Prefer Director-stamped aspect_lock image_size (~1K), then node config."""
-    aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
-    if not aspect and isinstance(graph, dict):
-        meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-        aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
-        if not aspect:
-            analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
-            aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
-    return str(
-        cfg.get("image_size")
-        or (aspect or {}).get("image_size")
-        or "1K"
-    ).strip() or "1K"
-
-
-def _frame_prompt_looks_contaminated(text: str) -> bool:
-    raw = (text or "").upper()
-    needles = (
-        "PRIOR CLIP PROMPT",
-        "PREVIOUS CLIP HAD",
-        "PRIOR SHOT CONSISTENCY",
-        "PREVIOUS CLIP HAD",
-        "YOUR ASSIGNMENT",
-        "STAGING LOCK",
-        "MASTER SCENE PROMPT",
-        "CHARACTER CONSISTENCY (MANAGER)",
-        "LANGUAGE LOCK",
-        "ASPECT LOCK",
-        "STYLE LOCK",
-        "SCENE SPECS",
-        "SPEECH LOCK",
-        "BGM LOCK",
-    )
-    if any(n in raw for n in needles):
-        return True
-    return len(text or "") > 500
+from jiuwenswarm.server.runtime.designer.media_settings import image_settings
 
 
 def _drop_story_context(source: str) -> str:
@@ -124,145 +77,6 @@ def _scene_prompt(source: str, *, derive_from_master: bool = False, composed: bo
             f"{source}"
         )
     return str(source or "").strip()
-
-
-def _strip_markdown_tables(text: str) -> str:
-    """Keep prose from Brief; drop markdown tables so the image model does not paint them."""
-    lines: list[str] = []
-    for line in (text or "").splitlines():
-        stripped = line.strip()
-        if stripped.count("|") >= 2:
-            continue
-        if stripped.startswith("|") or stripped.endswith("|"):
-            continue
-        lines.append(line)
-    return "\n".join(lines).strip()
-
-
-def _shot_frame_prompt(
-    shot: StoryboardShot,
-    brief: str,
-    *,
-    has_character: bool,
-    has_scene: bool,
-    cast_names: list[str] | None = None,
-    character_ref_count: int = 1,
-    combined_cast_ref: bool = False,
-    clip_strategy: str = "",
-    costume_lock: str = "",
-    staging_lock: str = "",
-) -> str:
-    timeline = f" ({shot['timeline']})" if shot["timeline"] else ""
-    comment = str(shot.get("comment") or "").strip()
-    names = [str(n).strip() for n in (cast_names or []) if str(n).strip()]
-    who = ", ".join(names)
-    lead = (
-        f"Cinematic scene spec, one style-consistent image for shot {shot['shot_no']}{timeline}. "
-        "Clear composition, this instant only, no comic grid."
-    )
-    if who:
-        if len(names) > 1:
-            lead += (
-                f" The frame MUST clearly show all of these characters: {who}. "
-                "Do not drop anyone listed."
-            )
-        else:
-            lead += f" Feature this character: {who}."
-    if comment:
-        lead += f" Generate the clip spec from this shot description: {comment}."
-    lead += (
-        " Shot notes: "
-        f"shot {shot['shot_no']}; "
-        f"timeline {shot['timeline'] or 'unspecified'}; "
-        f"camera {shot['camera'] or 'unspecified'}; "
-        f"camera move {shot['move'] or 'unspecified'}; "
-        f"character action {shot['character_action'] or 'unspecified'}; "
-        f"scene change {shot.get('scene_change') or 'unspecified'}."
-    )
-    n_refs = max(1, int(character_ref_count or 1))
-    prior_edit = clip_strategy in {"edit_prior_image"}
-    if has_character and has_scene:
-        if prior_edit:
-            lead += (
-                " This is image-to-image EDIT of the prior clip spec of the SAME setting "
-                "(first reference). Keep architecture, lighting, landmarks, faces, and costumes "
-                f"{f' for {who}' if who else ''}; only change camera/pose/blocking/who is "
-                "on-screen for this shot. Additional refs may include the scene-master compose "
-                "still (architecture lock) and character spec sheets (identity only). "
-                "Never regenerate the set; never jump to another setting."
-            )
-        elif combined_cast_ref or (len(names) > 1 and n_refs == 1):
-            lead += (
-                " This is image-to-image. The first reference is a combined cast postcard "
-                f"(all of {who or 'the cast'} on one sheet); the second is the scene. "
-                "Put ALL of those people into that scene together, matching each identity "
-                "and costume from the postcard, plus location, lighting, and weather."
-            )
-        elif n_refs > 1:
-            lead += (
-                f" This is image-to-image. The first {n_refs} references are CANONICAL character specs "
-                f"cast sheets{f' for {who}' if who else ''}. COMPOSE a new SCENE MASTER image: "
-                "generate the scene AND put every listed on-screen character into it. "
-                "IDENTITY LOCK: same face, hair, body, and costume as each sheet — "
-                "never redesign wardrobe between shots. No empty scene specs."
-            )
-        else:
-            lead += (
-                " This is image-to-image. The first reference is the canonical character sheet. "
-                "Compose a SCENE MASTER image: generate the scene and put that character in it. "
-                "Keep identity and costume from the sheet."
-            )
-    elif has_character:
-        if prior_edit:
-            lead += (
-                " Edit the prior same-setting clip spec (first ref). Keep the scene and identity; "
-                "only update this shot's action/framing."
-            )
-        else:
-            lead += (
-                " Compose SCENE MASTER from character specs(s): generate the setting and put "
-                "the listed on-screen cast. Character look and costume must match the sheet(s)."
-            )
-    elif has_scene:
-        lead += " Location, lighting, and weather must match the scene reference."
-    if costume_lock:
-        try:
-            from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
-                clothing_lock_clause,
-            )
-
-            cloth = clothing_lock_clause(costume_lock, for_clip=False)
-            lead += f" {cloth}" if cloth else f" Costume lock: {costume_lock}."
-        except Exception:  # noqa: BLE001
-            lead += f" Costume lock: {costume_lock}."
-    if staging_lock:
-        lead += f" {staging_lock}"
-    lead += (
-        " The image must be the cinematic scene itself. "
-        "No subtitles, no storyboard grid, no table, no spreadsheet, no cell borders. "
-        "Do not paint words like Shot, Timeline, Camera, Move, Character action, Scene change, or Comment."
-    )
-    lead += (
-        " ANTI-CLONE: exactly one body per named character — never duplicate the same face "
-        "in two places at once."
-    )
-    lead += (
-        " CROWD LOCK: if the brief needs extras, show the SAME group layout "
-        "across shots (same coats/positions). Do not empty the crowd in one "
-        "shot and invent a new crowd in another. Featured cast must stay distinct from extras."
-    )
-    visual = _strip_markdown_tables(brief)
-    if visual:
-        return f"{lead}\nOverall visual style:\n{visual}"
-    return lead
-
-
-def _publish_shot_image(src: Path, *, stem: str) -> Path:
-    dest = handler_io.get_agent_workspace_dir() / f"{stem}{src.suffix or '.png'}"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.resolve() != src.resolve():
-        copy2(src, dest)
-    return dest.resolve()
 
 
 async def _require_image(
@@ -391,7 +205,7 @@ class CharacterDesignNodeHandler:
         focused = str(cfg.get("prompt") or "").strip()
         source = focused or _aligned_source(ctx, NODE_ROLE_CHARACTER, node)
         name = str(cfg.get("character_name") or node.get("label") or "Character")
-        size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
+        size = image_settings(ctx.graph).size
         combined = bool(cfg.get("combined_cast"))
         max_tries = max(2, int(cfg.get("max_image_calls") or 1))
         user_images = [str(path) for path in wired_user_reference_images(ctx, node)]
@@ -448,7 +262,7 @@ class SceneNodeHandler:
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         focused = str(cfg.get("prompt") or "").strip()
         source = focused or _aligned_source(ctx, NODE_ROLE_SCENE, node)
-        size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
+        size = image_settings(ctx.graph).size
         max_tries = max(2, int(cfg.get("max_image_calls") or 1))
         strategy = str(cfg.get("scene_strategy") or "").strip()
         derive = strategy == "edit_master_view"
@@ -529,203 +343,3 @@ class SceneNodeHandler:
             ctx=ctx,
         )
         return _with_card_ref(result, ctx, NODE_ROLE_SCENE)
-
-
-class ClipSpecImageHandler:
-    async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        clip_index = node_clip_index(node)
-        storyboard = role_output_text(ctx, NODE_ROLE_STORYBOARD)
-        all_chars = role_output_image_paths(ctx, NODE_ROLE_CHARACTER)
-        all_scenes = role_output_image_paths(ctx, NODE_ROLE_SCENE)
-        visual = storyboard or graph_prompt(ctx.graph, node)
-        cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-        generate = cfg.get("generate") if isinstance(cfg.get("generate"), dict) else {}
-        identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
-        clip_strategy = str(
-            identity.get("clip_strategy") or cfg.get("clip_strategy") or ""
-        )
-        allow_without_scene = clip_strategy in {
-            "compose_from_character_specs",
-            "edit_prior_image",
-        }
-        if not all_chars or (not all_scenes and not allow_without_scene):
-            missing = []
-            if not all_chars:
-                missing.append("Character")
-            if not all_scenes and not allow_without_scene:
-                missing.append("Scene")
-            raise RuntimeError(
-                "Clip spec generation must send "
-                + " and ".join(missing)
-                + " with this shot. Finish the Character and Scene nodes first."
-            )
-        refs_paths = collect_compose_reference_images(ctx, node)
-        # Never dump every character specs when occupancy is empty/wrong — that paints
-        # off-screen cast into the image. Prefer on_screen identity refs only.
-        preferred_char_nodes = [
-            str(x)
-            for x in (
-                (cfg.get("identity_refs") or {}).get("character_node_ids")
-                if isinstance(cfg.get("identity_refs"), dict)
-                else None
-            )
-            or (cfg.get("character_node_ids") or [])
-            if str(x).strip()
-        ]
-        on_screen_cfg = [
-            str(x)
-            for x in (
-                cfg.get("on_screen")
-                or (identity.get("occupancy") or {}).get("must_appear")
-                or cfg.get("character_ids")
-                or identity.get("character_ids")
-                or []
-            )
-            if str(x).strip()
-        ]
-        if refs_paths:
-            refs = [str(p) for p in refs_paths]
-        elif preferred_char_nodes:
-            from jiuwenswarm.server.runtime.designer.handlers.common import (
-                node_ids_output_image_paths,
-            )
-
-            refs = [str(p) for p in node_ids_output_image_paths(ctx, preferred_char_nodes)]
-        else:
-            # Fail closed: no occupancy → no cast refs (scene specs only if present).
-            refs = [str(p) for p in (all_scenes[:1] if all_scenes else [])]
-        shots = parse_storyboard_shots(storyboard)
-        planned_action = str(cfg.get("clip_action") or generate.get("prompt") or "").strip()
-        cast_names = [
-            str(x).strip()
-            for x in (cfg.get("cast_names") or [])
-            if str(x).strip()
-        ]
-        costume_lock = str(identity.get("costume_lock") or cfg.get("costume_lock") or "")
-        try:
-            from jiuwenswarm.server.runtime.designer.pipeline.clip_staging_lock import (
-                ensure_cfg_staging_locks,
-            )
-
-            analysis_chars = list(
-                ((ctx.graph.get("metadata") or {}).get("script_analysis") or {}).get("characters")
-                or []
-            )
-            staging_lock = ensure_cfg_staging_locks(cfg, characters=analysis_chars)
-        except Exception:  # noqa: BLE001
-            staging_lock = ""
-        # Detect combined cast from attached character nodes when available.
-        combined_cast_ref = False
-        for other in ctx.graph.get("nodes") or []:
-            if not isinstance(other, dict):
-                continue
-            if str(other.get("id") or "") not in preferred_char_nodes:
-                continue
-            oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-            if oc.get("combined_cast"):
-                combined_cast_ref = True
-                if not cast_names:
-                    cast_names = [
-                        str(x).strip()
-                        for x in (oc.get("character_names") or [])
-                        if str(x).strip()
-                    ] or ([str(oc.get("character_name") or "").strip()] if oc.get("character_name") else [])
-        # Ref count follows on_screen / cast_names, not every attached character specs predecessor.
-        char_ref_count = max(
-            1,
-            len(cast_names)
-            or len(on_screen_cfg)
-            or len(preferred_char_nodes)
-            or 1,
-        )
-        if clip_index > len(shots) and planned_action:
-            shot = {
-                "shot_no": str(clip_index),
-                "timeline": "",
-                "camera": str(cfg.get("camera") or "medium / eye-level"),
-                "move": "",
-                "character_action": planned_action,
-                "scene_change": "",
-                "comment": planned_action,
-            }
-        elif clip_index > len(shots):
-            raise RuntimeError(
-                f"Shot {clip_index} is not in the storyboard ({len(shots)} shots)."
-            )
-        else:
-            shot = dict(shots[clip_index - 1])
-        override = handler_io.node_generate_prompt(node)
-        planned = str(planned_action or shot.get("character_action") or shot.get("comment") or "").strip()
-        if override and not _frame_prompt_looks_contaminated(override):
-            shot["comment"] = override
-        elif planned and not str(shot.get("comment") or "").strip():
-            shot["comment"] = planned
-        elif planned and _frame_prompt_looks_contaminated(str(shot.get("comment") or "")):
-            shot["comment"] = planned
-        size = _resolve_image_size(cfg, ctx.graph if isinstance(ctx.graph, dict) else None)
-        max_tries = max(2, int(cfg.get("max_image_calls") or 1))
-        try:
-            from jiuwenswarm.server.runtime.designer.pipeline.video_prompt_practice import (
-                resolve_user_origin_prompt,
-            )
-
-            user_frame = resolve_user_origin_prompt(cfg, "")
-        except Exception:  # noqa: BLE001
-            user_frame = ""
-        if user_frame:
-            frame_prompt = user_frame
-        else:
-            frame_prompt = _shot_frame_prompt(
-                shot,
-                visual,
-                has_character=bool(all_chars),
-                has_scene=bool(all_scenes),
-                cast_names=cast_names,
-                character_ref_count=char_ref_count,
-                combined_cast_ref=combined_cast_ref,
-                clip_strategy=clip_strategy,
-                costume_lock=costume_lock,
-                staging_lock=staging_lock,
-            )
-        from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import (
-            apply_image_call_locks,
-        )
-
-        frame_prompt = apply_image_call_locks(
-            frame_prompt,
-            cfg=cfg,
-            graph=ctx.graph if isinstance(ctx.graph, dict) else {},
-        )
-        roster = prompt_slot_roster(graph_user_references(ctx.graph))
-        if roster:
-            frame_prompt = (
-                f"{frame_prompt}\nUser reference slots (original files are visual authority):\n"
-                f"{roster}"
-            )
-        emit = getattr(ctx, "emit_activity", None)
-        if callable(emit):
-            try:
-                emit("stage", "calling image model", "image_gen")
-            except TypeError:
-                emit("stage", "calling image model", "image_gen")
-        generated = await handler_io.generate_designer_image(
-            frame_prompt,
-            size=size,
-            reference_images=refs,
-            max_tries=max_tries,
-        )
-        if generated and generated.get("image_path"):
-            path = _publish_shot_image(
-                Path(generated["image_path"]),
-                stem=f"designer_frame_{ctx.run_id}_{ctx.node_id}_shot{clip_index}",
-            )
-            ref = file_output_ref(path, kind=NODE_TYPE_IMAGE, mime_type="image/png")
-            return NodeResult(
-                output_ref=ref,
-                output_refs=[ref],
-                message=f"clip spec {clip_index} generated",
-            )
-        last_error = str((generated or {}).get("error") or "").strip()
-        raise RuntimeError(
-            f"clip spec {clip_index} image_gen failed: {last_error or 'no image_path'}"
-        )

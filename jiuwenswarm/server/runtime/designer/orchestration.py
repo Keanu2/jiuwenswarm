@@ -984,7 +984,7 @@ class Director:
                 cfg["director_task"] = (
                     f"User-added {role or node.get('type') or 'node'} agent. "
                     f"Use tools {', '.join(tools)}. "
-                    "Respect film-wide aspect_lock, style_lock, spatial_lock, and "
+                    "Respect film-wide style_lock, spatial_lock, and "
                     "costume/identity locks. Use only the edges the user connected. "
                     "Do not invent upstream or downstream links."
                 )[:800]
@@ -2441,60 +2441,14 @@ class Director:
         except Exception:  # noqa: BLE001
             pass
 
-        # Film-wide aspect + style locks (Director enforces; leaves cannot drop).
+        # Film-wide style lock (Director enforces; leaves cannot drop).
         meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
         analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
-        aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
-        if not aspect:
-            aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
-        if not aspect:
-            aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
-        if not aspect:
-            try:
-                from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-                    infer_aspect_lock,
-                )
-
-                aspect = infer_aspect_lock(
-                    str(graph.get("description") or meta.get("user_prompt") or "")
-                )
-            except Exception:  # noqa: BLE001
-                aspect = {}
         style = cfg.get("style_lock") if isinstance(cfg.get("style_lock"), dict) else {}
         if not style:
             style = meta.get("style_lock") if isinstance(meta.get("style_lock"), dict) else {}
         if not style:
             style = analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else {}
-
-        if aspect:
-            cfg["aspect_lock"] = aspect
-            if role in {"character", "character", "scene"}:
-                img_size = str(aspect.get("image_size") or cfg.get("image_size") or "1K").strip()
-                if str(cfg.get("image_size") or "") != img_size:
-                    cfg["image_size"] = img_size
-                    notes.append("stamp_image_size_aspect")
-                    changed = True
-            if role == "clip":
-                from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-                    video_format_for_node,
-                )
-
-                vsize, vres = video_format_for_node(graph, cfg, aspect if isinstance(aspect, dict) else None)
-                if str(cfg.get("video_size") or "") != vsize or str(cfg.get("video_resolution") or "") != vres:
-                    cfg["video_size"] = vsize
-                    cfg["video_resolution"] = vres
-                    notes.append("stamp_video_resolution")
-                    changed = True
-            ratio = str(aspect.get("ratio") or "").strip()
-            rule = str(aspect.get("rule") or "").strip()
-            if "ASPECT LOCK" not in prompt and (rule or ratio):
-                prompt = (
-                    prompt
-                    + f"\nASPECT LOCK: {ratio or 'film ratio'} — "
-                    + (rule or f"keep {ratio} on every image and clip; never change mid-film.")
-                )
-                notes.append("inject_aspect_lock")
-                changed = True
 
         if style:
             cfg["style_lock"] = style
@@ -3017,12 +2971,7 @@ class Director:
             "clip_strategy": strategy or cfg.get("clip_strategy"),
             "costume_lock": bool(costume_lock),
             "spatial_lock": bool(spatial),
-            "aspect_lock": bool(aspect),
             "style_lock": bool(style),
-            "aspect_ratio": (aspect or {}).get("ratio"),
-            "image_size": cfg.get("image_size"),
-            "video_size": cfg.get("video_size"),
-            "video_resolution": cfg.get("video_resolution"),
             "character_spec_ids": character_spec_ids,
             "prior_clip_node_id": prior_clip_id or None,
             "language_lock": cfg.get("language_lock") or meta.get("language_lock"),
@@ -3076,7 +3025,7 @@ class Director:
         consistency_notes = _spatial_continuity_patch(graph)
         identity_notes = _identity_consistency_patch(graph)
         spatial_notes = _spatial_geography_lock_patch(graph)
-        # Film-wide aspect/style/axis locks on every image + clip node.
+        # Film-wide style/axis locks on every image + clip node.
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
                 apply_axis_locks_to_graph,

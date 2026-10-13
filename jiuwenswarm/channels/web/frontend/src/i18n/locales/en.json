@@ -137,7 +137,6 @@
       "aspectRatio": "Aspect ratio",
       "resolution": "Resolution",
       "duration": "Duration",
-      "hasAudio": "Audio",
       "count": "Count",
       "browseFiles": "Browse files",
       "dropHint": "Or drag into this area",
@@ -150,6 +149,14 @@
       "regenerate": "Regenerate",
       "rerun": "Regenerate",
       "rerunHint": "Rerun only this node with current upstream outputs"
+    },
+    "mediaSettings": {
+      "videoTitle": "Video settings",
+      "imageTitle": "Image settings",
+      "durationValue": "{{seconds}}s",
+      "loading": "Loading generation settings…",
+      "loadError": "Could not load generation settings: {{message}}",
+      "saveError": "Settings not saved: {{message}}"
     },
     "sidebar": {
       "tabsLabel": "Sidebar",

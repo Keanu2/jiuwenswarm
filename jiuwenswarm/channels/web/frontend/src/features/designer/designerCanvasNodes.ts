@@ -122,19 +122,22 @@ export function parseContentAspect(value: unknown): number | null {
   return null;
 }
 
-export function contentAspectFromNodeConfig(
+/** Frame ratio a media node will generate at: its ComfyUI size, else the canvas video / image setting. */
+export function contentAspectForNode(
+  nodeType: string,
   config: Record<string, unknown> | undefined | null,
+  metadata: Record<string, unknown> | undefined | null,
 ): number | null {
-  const lock = config?.aspect_lock;
-  if (lock && typeof lock === 'object') {
-    const rec = lock as Record<string, unknown>;
-    return (
-      parseContentAspect(rec.ratio) ||
-      parseContentAspect(rec.video_size) ||
-      parseContentAspect(rec.image_size)
-    );
+  if (nodeType !== DESIGNER_NODE_TYPE_IMAGE && nodeType !== DESIGNER_NODE_TYPE_VIDEO) return null;
+  const comfyui = config?.comfyui as { fields?: { width?: unknown; height?: unknown } } | undefined;
+  const { width, height } = comfyui?.fields ?? {};
+  if (typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0) {
+    return width / height;
   }
-  return parseContentAspect(config?.video_size) || parseContentAspect(config?.image_size);
+  const settings = metadata?.[nodeType === DESIGNER_NODE_TYPE_VIDEO ? 'video_settings' : 'image_settings'];
+  return settings && typeof settings === 'object'
+    ? parseContentAspect((settings as Record<string, unknown>).aspect_ratio)
+    : null;
 }
 
 export function sizeNodeForContentAspect(ratio: number): { width: number; height: number } {
@@ -199,16 +202,15 @@ export function isDefaultLandscapeNodeSize(width?: number, height?: number): boo
   return ratio > 1.35 && width <= 300 && height <= 180;
 }
 
-export function resolvedNodeCanvasSize(node: DesignerGraphNode): { width: number; height: number } {
+export function resolvedNodeCanvasSize(
+  node: DesignerGraphNode,
+  metadata?: Record<string, unknown> | null,
+): { width: number; height: number } {
   const layout = node.layout;
   const storedWidth = typeof layout?.width === 'number' ? layout.width : undefined;
   const storedHeight = typeof layout?.height === 'number' ? layout.height : undefined;
-  const isMedia = node.type === DESIGNER_NODE_TYPE_IMAGE || node.type === DESIGNER_NODE_TYPE_VIDEO;
-  const aspect = isMedia
-    ? contentAspectFromNodeConfig((node.config ?? {}) as Record<string, unknown>)
-    : null;
+  const aspect = contentAspectForNode(node.type, (node.config ?? {}) as Record<string, unknown>, metadata);
   if (
-    isMedia &&
     aspect &&
     isDefaultLandscapeNodeSize(storedWidth, storedHeight) &&
     !isDesignerNodeUserResized((node.config ?? {}) as Record<string, unknown>)
@@ -261,10 +263,13 @@ function nodesShareColumn(left: { x: number }, right: { x: number }): boolean {
 }
 
 /** Compact helper kept for tests. The canvas does not auto-apply this; click Auto layout to rearrange. */
-export function packDesignerNodeLayouts(nodes: DesignerGraphNode[]): DesignerGraphNode[] {
+export function packDesignerNodeLayouts(
+  nodes: DesignerGraphNode[],
+  metadata?: Record<string, unknown> | null,
+): DesignerGraphNode[] {
   if (nodes.length === 0) return nodes;
   const boxes = nodes.map((node, index) => {
-    const size = resolvedNodeCanvasSize(node);
+    const size = resolvedNodeCanvasSize(node, metadata);
     return {
       index,
       id: node.id,
@@ -498,6 +503,7 @@ function assignAutoLayoutLayers(
 export function autoLayoutDesignerNodes(
   nodes: DesignerGraphNode[],
   edges: DesignerGraphEdge[] = [],
+  metadata?: Record<string, unknown> | null,
 ): DesignerGraphNode[] {
   if (nodes.length === 0) return nodes;
   const incoming = incomingByNode(nodes, edges);
@@ -509,7 +515,7 @@ export function autoLayoutDesignerNodes(
     let cursorY = DESIGNER_LAYOUT_ORIGIN_Y;
     let colWidth = 0;
     for (const node of members) {
-      const size = resolvedNodeCanvasSize(node);
+      const size = resolvedNodeCanvasSize(node, metadata);
       placed.set(node.id, {
         x: Math.round(cursorX),
         y: Math.round(cursorY),
@@ -524,16 +530,20 @@ export function autoLayoutDesignerNodes(
   return applyNodeLayouts(nodes, placed);
 }
 
-export function autoLayoutDesignerGraph<T extends { nodes: DesignerGraphNode[]; edges: DesignerGraphEdge[] }>(
+export function autoLayoutDesignerGraph<
+  T extends { nodes: DesignerGraphNode[]; edges: DesignerGraphEdge[]; metadata?: Record<string, unknown> },
+>(
   graph: T,
 ): T {
-  const nodes = autoLayoutDesignerNodes(graph.nodes, graph.edges);
+  const nodes = autoLayoutDesignerNodes(graph.nodes, graph.edges, graph.metadata);
   if (nodes === graph.nodes) return graph;
   return { ...graph, nodes };
 }
 
-export function packDesignerGraphLayout<T extends { nodes: DesignerGraphNode[] }>(graph: T): T {
-  const nodes = packDesignerNodeLayouts(graph.nodes);
+export function packDesignerGraphLayout<T extends { nodes: DesignerGraphNode[]; metadata?: Record<string, unknown> }>(
+  graph: T,
+): T {
+  const nodes = packDesignerNodeLayouts(graph.nodes, graph.metadata);
   if (nodes === graph.nodes) return graph;
   return { ...graph, nodes };
 }

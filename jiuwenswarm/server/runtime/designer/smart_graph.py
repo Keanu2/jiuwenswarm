@@ -40,18 +40,6 @@ from jiuwenswarm.common.schema.designer_graph import (
 from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
 
 _MAX_SPLIT_CHARS = 12
-_IMAGE_SIZE = "1K"  # cost-save: ~1024 class, not 2K/4K
-
-
-def _duration_sec_for_graph(prompt: str, analysis: dict[str, Any], characters: list[dict[str, Any]]) -> int:
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
-        film_duration_for_graph,
-    )
-
-    stamped = film_duration_for_graph(prompt, analysis)
-    if stamped >= 1:
-        return stamped
-    return max(6, min(24, max(1, len(characters)) * 3 + 4))
 
 
 def default_spatial_lock(scene: dict[str, Any] | None = None) -> dict[str, str]:
@@ -747,40 +735,10 @@ def build_smart_video_graph(
         pass
     # Continuity: scene specs + on-screen character specs; storyboard start/end owns continuity.
     analysis["scene_consistency_mode"] = "scene_specs_plus_clips"
-    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-        infer_aspect_lock,
-        resolve_clip_video_format,
-    )
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        resolution_mentioned,
-    )
-
-    aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
-    if not aspect:
-        aspect = infer_aspect_lock(prompt_text)
-    asked_res = resolution_mentioned(prompt_text)
-    if asked_res:
-        analysis["video_resolution"] = asked_res
-    elif not str(analysis.get("video_resolution") or "").strip():
-        analysis["video_resolution"] = str(aspect.get("video_resolution") or "")
-    film_video_size, film_video_res = resolve_clip_video_format(
-        ratio=str(aspect.get("ratio") or "16:9"),
-        user_resolution=asked_res,
-        director_resolution=str(
-            analysis.get("video_resolution") or aspect.get("video_resolution") or ""
-        ),
-    )
-    analysis["video_resolution"] = film_video_res
-    analysis["video_size"] = film_video_size
-    aspect = dict(aspect)
-    aspect["video_size"] = film_video_size
-    aspect["video_resolution"] = film_video_res
-    analysis["aspect_lock"] = aspect
 
     cast_sheets, shot_cast_nodes, cast_layout = _plan_cast_sheets(
         characters, shots, prompt=prompt_text
     )
-    film_duration = _duration_sec_for_graph(prompt_text, analysis, characters)
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.production_specs import (
             build_production_specs,
@@ -886,7 +844,6 @@ def build_smart_video_graph(
                 "character_name": names[0] if names else display,
                 "character_names": names,
                 "costume_lock": wardrobe or str(sheet.get("costume_lock") or ""),
-                "image_size": _IMAGE_SIZE,
             }
             prompt = compose_character_sheet_prompt(cfg=seed_cfg, graph=None, seed="")
         except Exception:  # noqa: BLE001
@@ -914,7 +871,6 @@ def build_smart_video_graph(
                     "identity_source": True,
                     "costume_lock": str(sheet.get("costume_lock") or ""),
                     "style_lock": dict(film_style),
-                    "image_size": _IMAGE_SIZE,
                     "max_image_calls": 1,
                     "inputs": ["n_brief"],
                     "agent_name": agent,
@@ -925,7 +881,7 @@ def build_smart_video_graph(
                     "director_task": (
                         f"Solo character specs for {display}. "
                         "Write a positive Qwen-ready studio portrait from the locks "
-                        "(face, wardrobe, style, aspect) — no LOCK banners or negatives. "
+                        "(face, wardrobe, style) — no LOCK banners or negatives. "
                         "Then call_image_model with that prompt only."
                     ),
                 },
@@ -1123,7 +1079,6 @@ def build_smart_video_graph(
                 "spatial_lock": shot_spatial_scene,
                 "time_of_day_lock": tod,
                 "style_lock": dict(film_style) if isinstance(film_style, dict) else {},
-                "image_size": _IMAGE_SIZE,
             }
             scene_prompt = compose_scene_specs_prompt(cfg=seed_cfg, graph=None, seed="")
         except Exception:  # noqa: BLE001
@@ -1151,7 +1106,6 @@ def build_smart_video_graph(
                     "is_scene_master": True,
                     "generate": {"prompt": scene_prompt},
                     "prompt": scene_prompt,
-                    "image_size": _IMAGE_SIZE,
                     "max_image_calls": 1,
                     "inputs": scene_inputs,
                     "agent_name": scene_label,
@@ -1162,7 +1116,7 @@ def build_smart_video_graph(
                     "director_task": (
                         f"Empty environment plate for setting {sid}. "
                         "Write a positive Qwen-ready plate prompt from the locks "
-                        "(place, lighting, style, aspect) — no LOCK banners or negatives. "
+                        "(place, lighting, style) — no LOCK banners or negatives. "
                         "Then call_image_model with that prompt only."
                     ),
                 },
@@ -1563,8 +1517,6 @@ def build_smart_video_graph(
             "first_of_setting": first_of_setting,
             "composed_scene": False,
             "style_lock": dict(film_style),
-            "video_size": film_video_size,
-            "video_resolution": film_video_res,
             "generate": {"prompt": shot_prompt_body},
             "max_video_calls": 1,
             "inputs": clip_inputs,
@@ -1742,7 +1694,6 @@ def build_smart_video_graph(
             "spatial_lock_by_setting": spatial_by_setting,
             "max_shots": len(shots),
             "target_clip_count": len(shots),
-            "image_size": _IMAGE_SIZE,
             "max_image_calls_per_node": 1,
         },
         "created_at": now,

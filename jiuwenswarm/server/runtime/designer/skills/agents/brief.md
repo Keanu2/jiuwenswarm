@@ -1,6 +1,6 @@
 # Brief Agent Skill
 Turn user intent into an executable brief: logline, visual style, subjects, setting, duration, audio policy (speech/music/silent), constraints.
-Detect subjects (human/vehicle/product/...) and note aspect guidance.
+Detect subjects (human/vehicle/product/...) and note their framing needs.
 
 When the request is sparse, creatively develop unspecified content instead of repeating the premise.
 Include a coherent narrative/content arc, a timed clip plan spanning the requested runtime, and a

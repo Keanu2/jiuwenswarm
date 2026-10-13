@@ -5,10 +5,6 @@ from __future__ import annotations
 from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
     apply_shot_scope,
     looks_like_full_story_restatement,
-    needs_duration_slicing,
-    requested_film_duration_sec,
-    sequential_shot_count,
-    sequential_windows,
 )
 from jiuwenswarm.server.runtime.designer.pipeline.director_contract import infer_shot_budget
 from jiuwenswarm.server.runtime.designer.handlers.clip import build_clip_prompt
@@ -22,33 +18,10 @@ LONG_STORY = (
 )
 
 
-def test_requested_duration_minutes_and_seconds() -> None:
-    assert requested_film_duration_sec("make a 10-second clip") == 10
-    assert requested_film_duration_sec("5 minute video") == 300
-    assert requested_film_duration_sec("5 mins long") == 300
-    assert requested_film_duration_sec("三分镜15秒竖屏") == 15
-    assert requested_film_duration_sec("no length stated") is None
-    from jiuwenswarm.server.runtime.designer.handlers.text_nodes import brief_duration_seconds
-
-    assert brief_duration_seconds("Generate a 10-second video in a medieval style") == 10
-    assert brief_duration_seconds("no length stated") == 5
-    assert brief_duration_seconds("a 5 minute film") == 300
-
-
-def test_long_runtime_does_not_force_a_clip_split() -> None:
-    assert needs_duration_slicing("10-second video") is False
-    assert needs_duration_slicing("15 second film") is False
-    assert needs_duration_slicing("5 minute video") is False
-    assert needs_duration_slicing(LONG_STORY) is False
-    assert sequential_shot_count(300) == 20
-    assert sequential_shot_count(45) == 3
-
-
 def test_infer_budget_does_not_slice_short_films() -> None:
     assert infer_shot_budget("Make a 3-shot 15 second vertical video", {}) == 3
     n = infer_shot_budget("Create a 5 minute film of a family conversation", {})
     assert n == 1
-    assert n < sequential_shot_count(300)
 
 
 def test_apply_shot_scope_keeps_a_long_runtime_in_one_clip() -> None:
@@ -56,9 +29,7 @@ def test_apply_shot_scope_keeps_a_long_runtime_in_one_clip() -> None:
         {"clips": [{"clip_index": 1, "action": LONG_STORY, "shot_relation": "angle_variant"}]},
         "5 minute video. " + LONG_STORY,
     )
-    assert out["duration_slicing"] is False
     assert len(out["clips"]) == 1
-    assert out["target_duration_sec"] == 300
     assert out["clips"][0]["shot_relation"] != "angle_variant"
 
 
@@ -74,12 +45,10 @@ def test_apply_shot_scope_preserves_richer_authored_plan_for_30_seconds() -> Non
         "Create a 30 second video for a Christmas product celebration.",
     )
 
-    assert out["duration_slicing"] is False
     assert len(out["clips"]) == 4
     assert [shot["action"] for shot in out["clips"]] == [
         shot["action"] for shot in shots
     ]
-    assert out["target_duration_sec"] == 30
 
 
 def test_apply_shot_scope_skips_c_when_under_wan_max() -> None:
@@ -88,7 +57,6 @@ def test_apply_shot_scope_skips_c_when_under_wan_max() -> None:
         {"clip_index": 2, "action": "Child walks to the door", "shot_relation": "angle_variant"},
     ]
     out = apply_shot_scope({"clips": shots}, "10-second scene. Dad sits. Child walks to the door.")
-    assert out.get("duration_slicing") is False
     assert len(out["clips"]) == 2
     assert out["clips"][1]["shot_relation"] == "continuation"
 
@@ -96,16 +64,6 @@ def test_apply_shot_scope_skips_c_when_under_wan_max() -> None:
 def test_restatement_detector() -> None:
     assert looks_like_full_story_restatement(LONG_STORY, LONG_STORY) is True
     assert looks_like_full_story_restatement("Child walks to the door.", LONG_STORY) is False
-
-
-def test_sequential_windows_sum(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.designer.pipeline.model_capacity.configured_video_model_id",
-        lambda: "wan3.0-video",
-    )
-    wins = sequential_windows(45, 3)
-    assert wins[0] == (0, 15)
-    assert wins[-1][1] == 45
 
 
 def test_build_clip_prompt_omits_full_user_story() -> None:
@@ -242,7 +200,6 @@ def test_empty_actions_are_time_windows_not_angle_restages() -> None:
         },
         prompt,
     )
-    assert out.get("duration_slicing") is False
     actions = [str(s.get("action") or "").strip() for s in out["clips"]]
     assert all(actions)
     assert actions[0][:48] != actions[1][:48]

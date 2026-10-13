@@ -2983,6 +2983,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             timeout_seconds=300,
         )
 
+    async def _designer_media_capabilities(ws, req_id, params, session_id, user_id=None):
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=params if isinstance(params, dict) else {},
+            session_id=session_id,
+            user_id=user_id,
+            req_method=ReqMethod.DESIGNER_MEDIA_CAPABILITIES,
+            label="designer.media.capabilities",
+        )
+
     async def _designer_run_start(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.schema.message import ReqMethod
         from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
@@ -5265,6 +5281,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("designer.graph.bootstrap", _designer_graph_bootstrap)
     channel.register_method("designer.graph.patch", _designer_graph_patch)
     channel.register_method("designer.graph.chat", _designer_graph_chat)
+    channel.register_method("designer.media.capabilities", _designer_media_capabilities)
     channel.register_method("designer.run.start", _designer_run_start)
     channel.register_method("designer.run.get", _designer_run_get)
     channel.register_method("designer.run.pause", _designer_run_pause)

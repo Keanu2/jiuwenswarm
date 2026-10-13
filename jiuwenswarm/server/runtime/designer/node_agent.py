@@ -887,11 +887,11 @@ class DesignerGraphToolkit:
         self,
         *,
         prompt: str = "",
-        size: str = "1024x1024",
     ) -> str:
         from jiuwenswarm.server.runtime.designer.handlers.common import (
             generate_designer_image,
         )
+        from jiuwenswarm.server.runtime.designer.media_settings import image_settings
 
         self.raise_media_error()
         self.refresh_canvas()
@@ -981,7 +981,7 @@ class DesignerGraphToolkit:
         try:
             generated = await generate_designer_image(
                 text,
-                size=str(size or "1K"),
+                size=image_settings(self.ctx.graph).size,
                 reference_images=refs[:4] if refs else None,
                 max_tries=2,
             )
@@ -1023,7 +1023,6 @@ class DesignerGraphToolkit:
         self,
         *,
         prompt: str = "",
-        duration: int = 5,
         first_frame: str = "",  # kept for tool schema; Design always uses R2V refs
     ) -> str:
         self.raise_media_error()
@@ -1039,7 +1038,7 @@ class DesignerGraphToolkit:
             edge_video_inputs,
             first_connected_video_file,
             generate_clip_video,
-            parse_shot_duration_seconds,
+            video_duration_seconds,
         )
         from jiuwenswarm.common.schema.designer_graph import node_clip_index
         from jiuwenswarm.server.runtime.designer.pipeline.clip_last_frame_handoff import (
@@ -1235,21 +1234,7 @@ class DesignerGraphToolkit:
                 self.ctx.on_prompt_artifact(text)
             except Exception:  # noqa: BLE001
                 logger.debug("call_video_model early prompt handoff failed", exc_info=True)
-        _, shot = (None, None)
-        try:
-            from jiuwenswarm.server.runtime.designer.handlers.clip import _shot_for_node
-
-            _, shot = _shot_for_node(self.ctx.graph, node, self.ctx)
-        except Exception:  # noqa: BLE001
-            shot = None
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
-            clamp_clip_duration,
-        )
-
-        dur = parse_shot_duration_seconds(
-            (shot or {}).get("timeline") or "",
-            default=clamp_clip_duration(duration or 5),
-        )
+        dur = video_duration_seconds(self.ctx, node)
         from jiuwenswarm.server.runtime.designer.audio_locks import video_gen_family_label
 
         beat = asyncio.create_task(
@@ -1275,15 +1260,9 @@ class DesignerGraphToolkit:
                     else None
                 )
             )
-            from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-                video_format_for_node,
-            )
+            from jiuwenswarm.server.runtime.designer.media_settings import video_settings
 
-            video_size, video_res = video_format_for_node(
-                graph,
-                cfg,
-                meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else None,
-            )
+            video = video_settings(graph)
             from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
                 video_generation_overrides,
             )
@@ -1303,8 +1282,8 @@ class DesignerGraphToolkit:
                 audio=True if want_audio else False,
                 model=None,
                 force_reference_mode=overrides["force_reference_mode"],
-                size=video_size,
-                resolution=video_res,
+                aspect_ratio=video.aspect_ratio,
+                resolution=video.resolution,
             )
         except Exception as exc:  # noqa: BLE001
             self.fail_media(exc)
@@ -1620,18 +1599,12 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
         payload = _payload(**kwargs)
         return await toolkit.call_image_model(
             prompt=str(payload.get("prompt") or ""),
-            size=str(payload.get("size") or "1024x1024"),
         )
 
     async def call_video_model(**kwargs: Any) -> str:
         payload = _payload(**kwargs)
-        try:
-            duration = int(payload.get("duration") or 5)
-        except (TypeError, ValueError):
-            duration = 5
         return await toolkit.call_video_model(
             prompt=str(payload.get("prompt") or ""),
-            duration=duration,
             first_frame=str(payload.get("first_frame") or payload.get("firstFrame") or ""),
         )
 
@@ -1758,7 +1731,6 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
                             "type": "string",
                             "description": image_tool_hint,
                         },
-                        "size": {"type": "string"},
                     },
                     "required": ["prompt"],
                 },
@@ -1803,7 +1775,6 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
                                 "examples. " + video_tool_hint
                             ),
                         },
-                        "duration": {"type": "integer"},
                         "first_frame": {
                             "type": "string",
                             "description": "Optional legacy image. Clip-as-shot uses reference images, not a first frame.",

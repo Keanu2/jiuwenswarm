@@ -4,6 +4,7 @@ import type {
   DesignerExecutionRun,
   DesignerGraphBootstrapResult,
   DesignerGraphPatch,
+  DesignerMediaCapabilities,
   DesignerGraphSummary,
 } from './executionGraphTypes';
 import type { DesignerChatMessage } from './designerChatStore';
@@ -63,6 +64,9 @@ export const designerGraphClient = {
       graph_id: graphId,
       patch,
     }),
+
+  mediaCapabilities: (graphId?: string) =>
+    webRequest<DesignerMediaCapabilities>('designer.media.capabilities', graphId ? { graph_id: graphId } : {}),
 
   chat: (params: { graphId: string; message: string; selectedNodeId?: string; runNewNodes?: boolean }) =>
     webRequest<{

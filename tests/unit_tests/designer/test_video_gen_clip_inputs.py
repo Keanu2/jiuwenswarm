@@ -174,7 +174,7 @@ def test_generate_video_waits_for_the_job(
     request = mg.DesignerVideoRequest(
         prompt="shot 1",
         duration=5,
-        size="720*1280",
+        aspect_ratio="9:16",
         resolution="720P",
         reference_images=(character,),
         reference_file=str(tmp_path / "storyboard.md"),
@@ -199,8 +199,13 @@ def test_generate_video_reports_backend_errors_and_bad_references(
         return "[ERROR]: DashScope video generation submit failed: InvalidParameter: bad size"
 
     monkeypatch.setattr(mg.gen_toolkits, "submit_video", failing_submit)
-    result = asyncio.run(mg.generate_video(mg.DesignerVideoRequest(prompt="shot")))
+    result = asyncio.run(mg.generate_video(mg.DesignerVideoRequest(prompt="shot", aspect_ratio="16:9", resolution="720P")))
     assert result == {"error": "[ERROR]: DashScope video generation submit failed: InvalidParameter: bad size"}
 
-    missing = mg.DesignerVideoRequest(prompt="shot", reference_images=(str(tmp_path / "gone.png"),))
+    missing = mg.DesignerVideoRequest(
+        prompt="shot",
+        aspect_ratio="16:9",
+        resolution="720P",
+        reference_images=(str(tmp_path / "gone.png"),),
+    )
     assert "none could be read" in asyncio.run(mg.generate_video(missing))["error"]

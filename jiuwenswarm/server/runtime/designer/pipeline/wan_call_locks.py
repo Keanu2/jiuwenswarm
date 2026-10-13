@@ -77,17 +77,6 @@ def _style_from(cfg: dict[str, Any], graph: dict[str, Any], analysis: dict[str, 
     return {}
 
 
-def _aspect_from(cfg: dict[str, Any], graph: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
-    for src in (
-        cfg.get("aspect_lock"),
-        (graph.get("metadata") or {}).get("aspect_lock") if isinstance(graph.get("metadata"), dict) else None,
-        analysis.get("aspect_lock"),
-    ):
-        if isinstance(src, dict) and src:
-            return src
-    return {}
-
-
 def set_orientation_lock_clause(*, scene_specs: bool = False) -> str:
     """Keep first-frame room orientation stable (fixes spin/flip drift)."""
     subject = "Scene spec / Image 1" if scene_specs else "Image 1"

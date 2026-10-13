@@ -77,7 +77,14 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
                 return node_prompt
             if clip_assignment_text is not None:
                 dur = 5
-                if duration_from_timeline is not None:
+                override = config.get("duration_sec")
+                if isinstance(override, (int, float)) and not isinstance(override, bool):
+                    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
+                        clamp_clip_duration,
+                    )
+
+                    dur = clamp_clip_duration(override)
+                elif duration_from_timeline is not None:
                     dur = duration_from_timeline(str(config.get("timeline") or ""), default=5)
                 assignment = clip_assignment_text(
                     clip_index=int(config.get("clip_index") or 1),

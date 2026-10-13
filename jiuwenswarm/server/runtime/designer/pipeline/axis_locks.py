@@ -1,10 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Film-wide axis / occupancy / aspect locks — domain-agnostic.
+"""Film-wide axis / occupancy locks — domain-agnostic.
 
 Structural locks derived from analysis blocking / cast (not an LLM substitute):
   - identity under occlusion (partially hidden person must keep sex/age/hair)
   - 180-degree screen L/R (camera pan must not flip who sits left vs right)
-  - same aspect ratio on every image and clip
   - landmark placements stay put; extras do not spawn/vanish
 """
 
@@ -30,128 +29,6 @@ _CROSS_RE = re.compile(
     r"\b(?:cross(?:es|ing)?|walks?\s+to\s+the\s+other|swaps?\s+sides|moves?\s+left|moves?\s+right)\b",
     re.I,
 )
-_VERTICAL_RE = re.compile(
-    r"\b(?:vertical|9\s*[:x]\s*16|tiktok|reels|shorts|portrait\s+video)\b|竖屏",
-    re.I,
-)
-_SQUARE_RE = re.compile(
-    r"\b(?:1\s*[:x]\s*1|square\s+(?:frame|video|format)|square\s+\d{3,4}\s*p)\b",
-    re.I,
-)
-_ULTRAWIDE_RE = re.compile(r"\b(?:21\s*[:x]\s*9|cinemascope|ultrawide)\b", re.I)
-
-
-def infer_aspect_lock(prompt: str) -> dict[str, str]:
-    """One aspect for the film. Resolution is set only when the user asked for one."""
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        resolution_mentioned,
-        size_for_resolution,
-    )
-
-    text = prompt or ""
-    if _VERTICAL_RE.search(text):
-        ratio = "9:16"
-        image_size = "576x1024"
-        rule = "EVERY image and clip MUST be 9:16 portrait. Do not letterbox or crop to 16:9."
-    elif _SQUARE_RE.search(text):
-        ratio = "1:1"
-        image_size = "1K"
-        rule = "EVERY image and clip MUST be 1:1. Do not change aspect mid-film."
-    elif _ULTRAWIDE_RE.search(text):
-        ratio = "21:9"
-        image_size = "1792x768"
-        rule = "EVERY image and clip MUST stay 21:9. Do not crop to 16:9."
-    else:
-        ratio = "16:9"
-        image_size = "1024x576"
-        rule = "EVERY image and clip MUST be 16:9 landscape. Do not square-crop or switch to 9:16."
-    asked = resolution_mentioned(text)
-    lock = {
-        "ratio": ratio,
-        "image_size": image_size,
-        "video_resolution": asked,
-        "rule": rule,
-    }
-    if asked:
-        lock["video_size"] = size_for_resolution(asked if asked != "4K" else "1080P", ratio)
-        lock["video_resolution"] = "1080P" if asked == "4K" else asked
-    return lock
-
-
-def resolve_clip_video_format(
-    *,
-    ratio: str = "16:9",
-    user_resolution: str = "",
-    director_resolution: str = "",
-) -> tuple[str, str]:
-    """Pixel size and tier. User request wins, then the director, then the model default."""
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        active_video_capacity,
-        size_for_resolution,
-        snap_resolution,
-    )
-
-    cap = active_video_capacity()
-    chosen = snap_resolution(user_resolution or director_resolution, cap)
-    return size_for_resolution(chosen, ratio), chosen
-
-
-def resolve_clip_video_duration(
-    requested: int | float | None = None,
-    *,
-    default: int | None = None,
-) -> int:
-    """Clip seconds for the configured video model. Same ownership as resolution."""
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        active_video_capacity,
-        snap_duration,
-    )
-
-    cap = active_video_capacity()
-    value = requested if requested is not None else default
-    return snap_duration(value, cap)
-
-
-def video_format_for_node(
-    graph: dict[str, Any] | None,
-    cfg: dict[str, Any] | None = None,
-    aspect: dict[str, Any] | None = None,
-) -> tuple[str, str]:
-    """Resolution for a shot, clip, or other video node on this graph."""
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        resolution_mentioned,
-    )
-
-    graph = graph if isinstance(graph, dict) else {}
-    cfg = cfg if isinstance(cfg, dict) else {}
-    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
-    chosen_aspect = aspect if isinstance(aspect, dict) else {}
-    if not chosen_aspect:
-        raw = cfg.get("aspect_lock")
-        chosen_aspect = raw if isinstance(raw, dict) else {}
-    if not chosen_aspect:
-        raw = meta.get("aspect_lock")
-        chosen_aspect = raw if isinstance(raw, dict) else {}
-    if not chosen_aspect:
-        raw = analysis.get("aspect_lock")
-        chosen_aspect = raw if isinstance(raw, dict) else {}
-    user_text = str(
-        graph.get("description") or meta.get("user_prompt") or analysis.get("user_prompt") or ""
-    )
-    director = str(
-        cfg.get("video_resolution")
-        or chosen_aspect.get("video_resolution")
-        or analysis.get("video_resolution")
-        or ""
-    )
-    return resolve_clip_video_format(
-        ratio=str(chosen_aspect.get("ratio") or "16:9"),
-        user_resolution=resolution_mentioned(user_text),
-        director_resolution=director,
-    )
-
-
 def infer_time_of_day_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]:
     """Film-wide / per-setting time-of-day + lighting cue (domain-agnostic)."""
     blob = f"{prompt or ''} {scene_desc or ''}".lower()
@@ -380,7 +257,6 @@ def format_style_clause(analysis: dict[str, Any] | None) -> str:
 def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | None) -> str:
     shot = shot if isinstance(shot, dict) else {}
     analysis = analysis if isinstance(analysis, dict) else {}
-    aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
     axis = shot.get("screen_axis") if isinstance(shot.get("screen_axis"), dict) else {}
     occ = shot.get("occupancy") if isinstance(shot.get("occupancy"), dict) else {}
     spatial = analysis.get("spatial_lock") if isinstance(analysis.get("spatial_lock"), dict) else {}
@@ -389,12 +265,6 @@ def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | N
     style_bit = format_style_clause(analysis)
     if style_bit and "STYLE LOCK" in style_bit:
         bits.append(style_bit)
-    if aspect.get("rule"):
-        bits.append(
-            f"ASPECT LOCK: {aspect.get('ratio')} — {aspect.get('rule')} "
-            f"(image_size={aspect.get('image_size') or ''}; "
-            f"video={aspect.get('video_size') or ''} @ {aspect.get('video_resolution') or 'director resolution'})."
-        )
     if axis:
         named = []
         for cid, side in axis.items():
@@ -444,37 +314,12 @@ def format_axis_clause(shot: dict[str, Any] | None, analysis: dict[str, Any] | N
     return " ".join(b for b in bits if str(b).strip())[:1100]
 
 
-def apply_aspect_to_node_config(cfg: dict[str, Any], aspect: dict[str, Any] | None) -> None:
-    if not isinstance(cfg, dict) or not isinstance(aspect, dict):
-        return
-    role = str(cfg.get("role") or "")
-    if role in {"character", "character", "scene"}:
-        if aspect.get("image_size"):
-            cfg["image_size"] = aspect["image_size"]
-    if role == "clip":
-        if aspect.get("video_size"):
-            cfg["video_size"] = aspect["video_size"]
-        if aspect.get("video_resolution"):
-            cfg["video_resolution"] = aspect["video_resolution"]
-
-
-
 def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
-    """Stamp aspect + style + axis clauses onto scene/clip configs."""
+    """Stamp style + axis clauses onto scene/clip configs."""
     notes: list[str] = []
     meta = dict(graph.get("metadata") or {})
     analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
     analysis = stamp_axis_locks(analysis)
-    aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
-    if not aspect:
-        aspect = infer_aspect_lock(str(graph.get("description") or meta.get("user_prompt") or ""))
-        analysis["aspect_lock"] = aspect
-    vsize, vres = video_format_for_node(graph, aspect=aspect)
-    aspect = dict(aspect)
-    aspect["video_size"] = vsize
-    aspect["video_resolution"] = vres
-    analysis["aspect_lock"] = aspect
-    analysis["video_resolution"] = vres
     style = analysis.get("style_lock") if isinstance(analysis.get("style_lock"), dict) else {}
     if not style:
         style = meta.get("style_lock") if isinstance(meta.get("style_lock"), dict) else {}
@@ -515,18 +360,12 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
         elif "scene" in role:
             cfg.setdefault("role", "scene")
             role = "scene"
-        apply_aspect_to_node_config(cfg, aspect)
         idx = int(cfg.get("clip_index") or 0)
         clause = format_axis_clause(shots.get(idx), analysis) if idx else clause_global
         if role in {"scene", "clip", "character", "character"} and clause:
             gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             prev = str(gen.get("prompt") or cfg.get("prompt") or "")
-            needs = (
-                "ASPECT LOCK" not in prev
-                or "STYLE LOCK" not in prev
-                or ("SCREEN AXIS" not in prev and "OCCUPANCY" not in prev)
-            )
-            if needs and ("ASPECT LOCK" not in prev or "STYLE LOCK" not in prev):
+            if "STYLE LOCK" not in prev:
                 stamped = (prev + "\n" + clause).strip()[:6000]
                 if role in {"clip"}:
                     gen["prompt"] = stamped
@@ -538,7 +377,6 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
             if idx and shots.get(idx):
                 cfg["screen_axis"] = shots[idx].get("screen_axis")
                 cfg["occupancy"] = shots[idx].get("occupancy")
-        cfg["aspect_lock"] = aspect
         if style:
             cfg["style_lock"] = style
         # Per-shot or film-wide time-of-day lock on every image/clip.
@@ -563,7 +401,6 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
                 cfg["scene_specs"] = bible
         node["config"] = cfg
     meta["script_analysis"] = analysis
-    meta["aspect_lock"] = aspect
     if style:
         meta["style_lock"] = style
     meta["axis_lock"] = analysis.get("axis_lock")

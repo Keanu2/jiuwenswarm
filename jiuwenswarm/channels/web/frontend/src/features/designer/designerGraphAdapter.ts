@@ -61,7 +61,7 @@ function layoutPosition(layout: NodeLayout | undefined): { x: number; y: number 
 
 export function toReactFlowGraph(graph: DesignerExecutionGraph): DesignerReactFlowGraph {
   const nodes: DesignerReactFlowNode[] = graph.nodes.map((node) => {
-    const size = resolvedNodeCanvasSize(node);
+    const size = resolvedNodeCanvasSize(node, graph.metadata);
     return {
       id: node.id,
       type: node.type,

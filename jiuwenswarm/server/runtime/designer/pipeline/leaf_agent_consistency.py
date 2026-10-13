@@ -75,7 +75,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         "Only name on_screen / returned cast. If someone left the setting, omit them from every "
         "later same-setting prompt until the storyboard returns them. Never spawn unnamed extras.\n"
         "8) LANGUAGE: use storyboard speech_line exactly (empty = silent — do not invent lines).\n"
-        "9) ASPECT: obey film aspect_lock on every image/clip.\n"
+        "9) FORMAT: aspect ratio, size, and resolution are canvas settings; never write them in a prompt.\n"
         "10) IMAGE-N: if references exist, name Image 1, Image 2… in attach order in your prompt.\n"
         "11) Finish with designer_node_complete(text=<FINAL visual-model prompt only>). "
         "The pipeline materializes media from that text — make it shot-ready, not a memo.\n"
@@ -86,7 +86,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         return (
             shared
             + "ROLE=character sheet. Write ONE positive Qwen-ready studio portrait prompt "
-            "from the locks (name, wardrobe, style, aspect). Plain empty backdrop, one person. "
+            "from the locks (name, wardrobe, style). Plain empty backdrop, one person. "
             "Fold wardrobe into 'wearing …' prose — no LOCK banners, no forbid lists, no examples. "
             "Then call_image_model with that prompt only. Finish with designer_node_complete "
             "preferring the PNG uri (text notes are optional debug only)."
@@ -95,7 +95,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         return (
             shared
             + "ROLE=scene specs. Write ONE positive Qwen-ready environment prompt "
-            "from the locks (place, lighting/time-of-day, style, aspect, props). "
+            "from the locks (place, lighting/time-of-day, style, props). "
             "Furniture, walls, windows, light, and props as a clear empty room. "
             "No LOCK banners, no forbid lists, no examples. "
             "Then call_image_model with that prompt only. Finish with designer_node_complete "

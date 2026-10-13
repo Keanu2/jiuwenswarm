@@ -1,22 +1,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Per-clip plot scope: this storyboard window only — never the full user prompt.
 
-A clip keeps the duration of its own timeline, then generation/submit snap that
-length onto the configured video model's ``min_sec``–``max_sec`` (same catalog
-as resolution). Long films are not split to fit a stale 15s cap.
+A clip keeps the duration of its own storyboard timeline, snapped onto the
+configured video model's ``min_sec``–``max_sec``. The film's total runtime is a
+planning target only; compose concatenates whatever the clips add up to.
 """
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
-
-# Historical single-clip cap (DashScope Wan / MiniMax 15s). No longer applied:
-# a clip uses its timeline length, and long films are not split to fit 15s.
-WAN_MAX_CLIP_SEC = 15
-MIN_CLIP_SEC = 2
 
 _STOP = frozenset(
     """
@@ -28,20 +22,6 @@ _STOP = frozenset(
     """.split()
 )
 
-_MIN_RE = re.compile(
-    r"(?P<n>\d{1,3}(?:\.\d+)?)\s*(?:-|–)?\s*(?:minutes?|mins?|min|分钟)",
-    re.I,
-)
-_SEC_RE = re.compile(
-    r"(?P<n>\d{1,4}(?:\.\d+)?)\s*(?:-|–)?\s*(?:seconds?|secs?|sec|秒钟?)",
-    re.I,
-)
-_SEC_COMPACT_RE = re.compile(r"\b(?P<n>\d{1,3})\s*s\b", re.I)
-_RANGE_SEC_RE = re.compile(
-    r"(?P<a>\d{1,4}(?:\.\d+)?)\s*(?:-|–|to)\s*(?P<b>\d{1,4}(?:\.\d+)?)\s*"
-    r"(?:seconds?|secs?|sec|秒钟?)",
-    re.I,
-)
 _COVERAGE_RE = re.compile(
     r"\b(?:multi[- ]cams?|multi[- ]camera|coverage|"
     r"same moment|different angles?|multiple angles?|several angles?)\b|"
@@ -51,16 +31,14 @@ _COVERAGE_RE = re.compile(
 
 
 def clamp_clip_duration(seconds: int | float | None, *, default: int = 5) -> int:
-    """Clamp a clip to the configured video model's duration capacity.
-
-    Narrative helpers still use ``MIN_CLIP_SEC`` as a floor only when capacity
-    is unavailable; generation and submit also snap again via ``snap_duration``.
-    """
-    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-        resolve_clip_video_duration,
+    """Clamp a clip to the configured video model's duration capacity."""
+    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
+        active_video_capacity,
+        snap_duration,
     )
 
-    return resolve_clip_video_duration(seconds, default=default)
+    value = seconds if seconds is not None else default
+    return snap_duration(value, active_video_capacity())
 
 
 def duration_from_timeline(timeline: str, *, default: int = 5) -> int:
@@ -68,77 +46,6 @@ def duration_from_timeline(timeline: str, *, default: int = 5) -> int:
     if len(nums) >= 2 and nums[1] > nums[0]:
         return clamp_clip_duration(nums[1] - nums[0], default=default)
     return clamp_clip_duration(default, default=default)
-
-
-def requested_film_duration_sec(prompt: str) -> int | None:
-    """Explicit user runtime in seconds, or None when unspecified."""
-    text = str(prompt or "").strip()
-    if not text:
-        return None
-    found: list[int] = []
-    for m in _MIN_RE.finditer(text):
-        try:
-            sec = int(round(float(m.group("n")) * 60.0))
-        except (TypeError, ValueError):
-            continue
-        if 60 <= sec <= 3600:
-            found.append(sec)
-    for m in _RANGE_SEC_RE.finditer(text):
-        try:
-            a, b = float(m.group("a")), float(m.group("b"))
-            sec = int(round((a + b) / 2.0)) if b >= a else int(round(b))
-        except (TypeError, ValueError):
-            continue
-        if 1 <= sec <= 3600:
-            found.append(sec)
-    for m in _SEC_RE.finditer(text):
-        try:
-            sec = int(round(float(m.group("n"))))
-        except (TypeError, ValueError):
-            continue
-        if 1 <= sec <= 3600:
-            found.append(sec)
-    if not found:
-        for m in _SEC_COMPACT_RE.finditer(text):
-            try:
-                sec = int(m.group("n"))
-            except (TypeError, ValueError):
-                continue
-            if 2 <= sec <= 120:
-                found.append(sec)
-    if not found:
-        return None
-    return max(found)
-
-
-def needs_duration_slicing(prompt: str, *, wan_max: int = WAN_MAX_CLIP_SEC) -> bool:
-    """Long runtime no longer forces extra clips. The 15s cap is not applied."""
-    del prompt, wan_max
-    return False
-
-
-def sequential_shot_count(
-    total_sec: int,
-    *,
-    wan_max: int = WAN_MAX_CLIP_SEC,
-    max_shots: int | None = None,
-) -> int:
-    """How many clips cover total_sec at wan_max each. max_shots is ignored."""
-    del max_shots
-    span = max(1, int(total_sec or 1))
-    cap = max(1, int(wan_max or WAN_MAX_CLIP_SEC))
-    return max(1, math.ceil(span / cap))
-
-
-def film_duration_for_graph(prompt: str, analysis: dict[str, Any] | None = None) -> int:
-    """Runtime used for brief/storyboard totals. Uses the requested length as-is."""
-    asked = requested_film_duration_sec(prompt)
-    if asked:
-        return int(asked)
-    raw = (analysis or {}).get("target_duration_sec") if isinstance(analysis, dict) else None
-    if isinstance(raw, (int, float)) and 1 <= int(raw) <= 3600:
-        return int(raw)
-    return 0
 
 
 def user_asked_coverage(prompt: str) -> bool:
@@ -184,7 +91,9 @@ def _duration_only_line(text: str) -> bool:
     raw = str(text or "").strip()
     if not raw:
         return True
-    if requested_film_duration_sec(raw) and len(content_tokens(raw)) <= 4:
+    from jiuwenswarm.server.runtime.designer.media_intent import prompt_duration_sec
+
+    if prompt_duration_sec(raw) and len(content_tokens(raw)) <= 4:
         return True
     return False
 
@@ -325,33 +234,6 @@ def storyboard_fallback_beat(sb_text: str, clip_index: int = 1) -> str:
     return pick[:200]
 
 
-def sequential_windows(total_sec: int, n: int, *, wan_max: int | None = None) -> list[tuple[int, int]]:
-    """Contiguous [start, end) seconds summing to min(total, n*model_max)."""
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        active_video_capacity,
-    )
-
-    n = max(1, int(n))
-    cap = active_video_capacity()
-    floor = int(cap.min_sec)
-    model_max = int(wan_max) if wan_max is not None else int(cap.max_sec)
-    model_max = max(1, model_max)
-    total = min(max(1, int(total_sec or 1)), n * model_max)
-    base = min(model_max, max(floor, total // n or floor))
-    leftover = total - base * n
-    out: list[tuple[int, int]] = []
-    t = 0
-    for i in range(n):
-        extra = 1 if leftover > 0 and i >= n - leftover else 0
-        span = min(model_max, base + extra)
-        out.append((t, t + span))
-        t += span
-    if out and t < total:
-        s, _e = out[-1]
-        out[-1] = (s, min(s + model_max, total))
-    return out
-
-
 def _beat_list_from_prompt(prompt: str, n: int) -> list[str]:
     n = max(1, int(n))
     beats: list[str] = []
@@ -389,96 +271,29 @@ def _beat_list_from_prompt(prompt: str, n: int) -> list[str]:
 def apply_shot_scope(
     analysis: dict[str, Any] | None,
     user_prompt: str,
-    *,
-    wan_max: int = WAN_MAX_CLIP_SEC,
 ) -> dict[str, Any]:
-    """Keep each shot's own window. Do not split a long film into ≤15s clips."""
+    """Keep each shot's own window; collapse only verbatim full-prompt restatements."""
     out = dict(analysis or {})
     prompt = str(user_prompt or out.get("user_prompt") or "").strip()
     shots = [dict(s) for s in (out.get("clips") or []) if isinstance(s, dict)]
     coverage = user_asked_coverage(prompt)
-    asked = requested_film_duration_sec(prompt)
-    # The old path split any runtime above wan_max into ≤15s clips. That cap is off.
-    slicing = False and bool(asked is not None and int(asked) > int(wan_max))
-
-    if slicing and asked:
-        # The Wan limit determines the minimum number of clips, not the desired
-        # narrative beat count. Preserve a richer authored plan when every clip
-        # can still satisfy the model's minimum duration.
-        n = sequential_shot_count(int(asked), wan_max=wan_max)
-        explicit = 0
-        try:
-            from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-                _explicit_clip_count_from_prompt,
-            )
-
-            explicit = int(_explicit_clip_count_from_prompt(prompt) or 0)
-        except Exception:  # noqa: BLE001
-            explicit = 0
-        if explicit >= 1 and explicit * int(wan_max) >= int(asked):
-            n = explicit
-        elif shots:
-            max_by_min_duration = max(1, int(asked) // MIN_CLIP_SEC)
-            authored_n = min(
-                len(shots),
-                max_by_min_duration,
-            )
-            n = max(n, authored_n)
-        film_sec = min(int(asked), n * int(wan_max))
-        beats = _beat_list_from_prompt(prompt, n)
-        template = dict(shots[0]) if shots else {}
-        new_shots: list[dict[str, Any]] = []
-        windows = sequential_windows(film_sec, n, wan_max=wan_max)
-        for i, (start, end) in enumerate(windows):
-            if i < len(shots):
-                shot = dict(shots[i])
-            else:
-                shot = dict(template)
-                shot.pop("blocking", None)
-                shot.pop("exiting_character_ids", None)
-                shot.pop("exiting", None)
-            action = str(shot.get("action") or shot.get("character_action") or "").strip()
-            # Keep full per-window detail. Replace only a verbatim full-prompt dump.
-            if not action or action_covers_whole_prompt(action, prompt):
-                action = beats[i] if i < len(beats) else first_sentence(prompt, limit=400)
-            shot["clip_index"] = i + 1
-            shot["action"] = str(action)[:800]
-            if not str(shot.get("character_action") or "").strip():
-                shot["character_action"] = shot["action"][:800]
-            shot["timeline"] = f"{start:.1f}-{end:.1f}s"
-            if not coverage:
-                rel = str(shot.get("shot_relation") or "").strip().lower()
-                if rel == "angle_variant":
-                    shot["shot_relation"] = "continuation" if i else "hard_cut"
-                clear_unrequested_angle_view(shot, coverage=False)
-            elif not shot.get("shot_relation"):
-                shot["shot_relation"] = "hard_cut" if i == 0 else "continuation"
-            new_shots.append(shot)
-        shots = new_shots
-        out["target_duration_sec"] = film_sec
-        out["duration_slicing"] = True
-        out["wan_max_clip_sec"] = int(wan_max)
-    else:
-        out["duration_slicing"] = False
-        beats = _beat_list_from_prompt(prompt, max(1, len(shots)))
-        for i, shot in enumerate(shots):
-            action = str(shot.get("action") or shot.get("character_action") or "").strip()
-            # Keep full storyboard detail (blocking/speech/wardrobe). Only collapse a
-            # verbatim paste of the entire user prompt into this one row.
-            if action and looks_like_full_story_restatement(action, prompt) and i > 0:
-                action = first_sentence(action, limit=400)
-            if not action:
-                action = beats[i] if i < len(beats) else window_beat(prompt, i + 1, len(shots))
-            if action:
-                shot["action"] = action[:800]
-                shot["character_action"] = action[:800]
-            if not coverage:
-                rel = str(shot.get("shot_relation") or "").strip().lower()
-                if rel == "angle_variant":
-                    shot["shot_relation"] = "continuation" if i else "hard_cut"
-                clear_unrequested_angle_view(shot, coverage=False)
-        if asked:
-            out["target_duration_sec"] = int(asked)
+    beats = _beat_list_from_prompt(prompt, max(1, len(shots)))
+    for i, shot in enumerate(shots):
+        action = str(shot.get("action") or shot.get("character_action") or "").strip()
+        # Keep full storyboard detail (blocking/speech/wardrobe). Only collapse a
+        # verbatim paste of the entire user prompt into this one row.
+        if action and looks_like_full_story_restatement(action, prompt) and i > 0:
+            action = first_sentence(action, limit=400)
+        if not action:
+            action = beats[i] if i < len(beats) else window_beat(prompt, i + 1, len(shots))
+        if action:
+            shot["action"] = action[:800]
+            shot["character_action"] = action[:800]
+        if not coverage:
+            rel = str(shot.get("shot_relation") or "").strip().lower()
+            if rel == "angle_variant":
+                shot["shot_relation"] = "continuation" if i else "hard_cut"
+            clear_unrequested_angle_view(shot, coverage=False)
 
     for i, shot in enumerate(shots, start=1):
         shot["clip_index"] = i

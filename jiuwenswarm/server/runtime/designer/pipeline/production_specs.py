@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Film-wide production lock bible — stamped into brief/storyboard and leaf prompts.
 
-Domain-agnostic: style, landmarks, lighting, crowd, speech, axis, aspect.
+Domain-agnostic: style, landmarks, lighting, crowd, speech, axis.
 Leaves MUST read this before calling image/video models. Director may rewrite
 generate.prompt to stay faithful to brief + storyboard + user prompt.
 """
@@ -89,7 +89,6 @@ def build_production_specs(
     style = a.get("style_lock") if isinstance(a.get("style_lock"), dict) else {}
     spatial = a.get("spatial_lock") if isinstance(a.get("spatial_lock"), dict) else {}
     axis = a.get("axis_lock") if isinstance(a.get("axis_lock"), dict) else {}
-    aspect = a.get("aspect_lock") if isinstance(a.get("aspect_lock"), dict) else {}
     shots = [s for s in (a.get("clips") or []) if isinstance(s, dict)]
     characters = [c for c in (a.get("characters") or []) if isinstance(c, dict)]
 
@@ -119,10 +118,6 @@ def build_production_specs(
         "style, landmarks) into every leaf prompt. Do not drop locks. Do not paste "
         "later shots or the full remaining plot into this Wan call.",
         _style_block(style),
-        (
-            f"ASPECT LOCK: ratio={aspect.get('ratio') or 'per brief'}; "
-            f"image={aspect.get('image_size') or ''}; video={aspect.get('video_size') or ''}."
-        ),
         (
             "AXIS LOCK: "
             + str(axis.get("rule") or "180-degree screen L/R stable across pans/cuts.")

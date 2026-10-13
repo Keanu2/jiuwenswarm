@@ -266,6 +266,8 @@ async def test_video_backend_records_effective_tool_input(
     ):
         result = await generate_clip_video(
             "exact video prompt",
+            aspect_ratio="9:16",
+            resolution="720P",
             reference_images=["character.png", "scene.png"],
             duration=7,
             audio=True,
@@ -286,8 +288,8 @@ async def test_video_backend_records_effective_tool_input(
     assert recorded["duration"] == request.duration == 7
     assert recorded["audio"] is request.audio is True
     assert recorded["force_reference_mode"] is request.reference_mode is True
-    assert recorded["size"] == request.size
-    assert recorded["resolution"] == request.resolution
+    assert recorded["aspect_ratio"] == request.aspect_ratio == "9:16"
+    assert recorded["resolution"] == request.resolution == "720P"
 
 
 def test_feedback_store_has_no_latest_pointer(

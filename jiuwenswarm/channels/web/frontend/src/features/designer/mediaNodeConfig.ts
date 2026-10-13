@@ -5,10 +5,6 @@ export type MediaInteractionMode = 'generate' | 'upload' | 'edit';
 export type MediaGenerateConfig = {
   prompt?: string;
   prompt_origin?: 'storyboard' | 'user';
-  aspect_ratio?: string;
-  resolution?: string;
-  duration?: string;
-  has_audio?: boolean;
   count?: number;
 };
 
@@ -53,6 +49,18 @@ export function supportsNodeToolbar(nodeType: string): boolean {
 
 export function isTextLikeNodeType(nodeType: string): boolean {
   return nodeType === 'text' || nodeType === 'table';
+}
+
+/** Mirrors the server's ``is_uploaded_media_node``: the node's output is a user upload, never generated. */
+export function isUploadedMediaNode(node: {
+  config?: Record<string, unknown> | object;
+  output_ref?: { uri?: string } | null;
+}): boolean {
+  const config = (node.config ?? {}) as Record<string, unknown>;
+  if (String(config.user_reference_id ?? '').trim()) return true;
+  if (config.interaction_mode !== 'upload') return false;
+  const upload = (config.upload ?? {}) as { uri?: unknown };
+  return Boolean(String(upload.uri ?? '').trim() || String(node.output_ref?.uri ?? '').trim());
 }
 
 function normalizeInteractionMode(
@@ -178,10 +186,6 @@ export function readMediaConfig(
     generate: {
       prompt: resolvedPrompt,
       prompt_origin: raw.generate?.prompt_origin,
-      aspect_ratio: raw.generate?.aspect_ratio ?? '16:9',
-      resolution: raw.generate?.resolution ?? '1080p',
-      duration: raw.generate?.duration ?? '5s',
-      has_audio: raw.generate?.has_audio ?? true,
       count: raw.generate?.count ?? 1,
     },
     upload: {

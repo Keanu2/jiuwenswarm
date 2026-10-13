@@ -988,21 +988,6 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _prompt_mentions_duration(prompt: str) -> tuple[bool, int | None]:
-    """Detect duration cues; return (has_explicit_runtime, target_duration_sec)."""
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
-        requested_film_duration_sec,
-    )
-
-    dur = requested_film_duration_sec(prompt)
-    if dur is not None:
-        return True, dur
-    low = (prompt or "").lower()
-    if re.search(r"\b(short|one[- ]shot|single[- ]shot|movie clip|6s)\b", low):
-        return True, 6
-    return False, None
-
-
 _REFERENCE_SUBJECTS = {
     "character": "character",
     "person": "character",
@@ -1364,8 +1349,13 @@ async def analyze_creative_brief(
     *,
     timeout_sec: float = _DEFAULT_LLM_TIMEOUT_SEC,
     reference_images: list[str] | None = None,
+    film_duration_sec: int | None = None,
 ) -> dict[str, Any]:
-    """LLM cast/shot analysis. Designer requires a configured chat model."""
+    """LLM cast/shot analysis. Designer requires a configured chat model.
+
+    ``film_duration_sec`` is the runtime the user asked for (see ``media_intent``).
+    It only steers how many shots the plan spans; clips keep their own timelines.
+    """
     from jiuwenswarm.server.runtime.designer.model_tools import (
         DesignerLlmError,
         LLM_API_ERROR,
@@ -1381,8 +1371,7 @@ async def analyze_creative_brief(
         "audio": {},
     }
 
-    short_clip, target_duration_sec = _prompt_mentions_duration(prompt)
-    duration_sec = target_duration_sec or 6
+    duration_sec = int(film_duration_sec or 0)
     try:
 
         story_enrichment_rule = (
@@ -1412,7 +1401,7 @@ async def analyze_creative_brief(
             "Explicit user N-shot / N分镜 is the only shot ceiling. "
             "Do not drop shots to fit a fixed count. "
         )
-        if target_duration_sec:
+        if duration_sec:
             duration_rule = (
                 f"Film ~{duration_sec}s total: set target_duration_sec={duration_sec}. "
                 "Each clip covers only its own advancing story window and may be as long as that window."
@@ -1463,7 +1452,7 @@ async def analyze_creative_brief(
             '"emotion":"setup","irreversible":"what is newly true at the end",'
             '"cast_states":{"char_1":{"wardrobe":"","emotion":"","presence":"on_screen"}}}],'
             '"target_clip_count":N'
-            + (f',"target_duration_sec":{duration_sec}' if target_duration_sec else "")
+            + (f',"target_duration_sec":{duration_sec}' if duration_sec else "")
             + (
                 ',"reference_reads":[{"slot":1,"subject":"character",'
                 '"character_id":"char_1","setting_id":""}]'
@@ -1533,14 +1522,14 @@ async def analyze_creative_brief(
             if placeholder or (not chars and not allow_empty_cast):
                 logger.info("LLM script analysis looked like schema echo; soft-fail")
                 return None
-            if short_clip:
+            if duration_sec:
                 parsed.setdefault("target_duration_sec", duration_sec)
             normalized = _normalize_llm_analysis(
                 parsed, base, allow_empty_cast=allow_empty_cast
             )
             if not normalized:
                 return None
-            if short_clip and normalized.get("clips"):
+            if duration_sec and normalized.get("clips"):
                 shots_n = list(normalized["clips"])
                 n = max(1, len(shots_n))
                 for i, shot in enumerate(shots_n, start=1):

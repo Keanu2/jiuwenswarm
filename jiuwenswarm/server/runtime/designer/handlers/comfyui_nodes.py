@@ -7,7 +7,7 @@
 Those values reach vLLM-Omni the same way the ComfyUI plugin sends them:
 node fields and sampling params as top-level request fields, model params as
 top-level fields except MiniMax-H3 ``audio_flow_shift``, which rides
-``extra_params``. The canvas-wide aspect / style locks never apply here.
+``extra_params``. Canvas media settings and the style lock never apply here.
 """
 
 from __future__ import annotations

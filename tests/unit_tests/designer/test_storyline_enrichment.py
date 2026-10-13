@@ -54,6 +54,7 @@ async def test_script_analysis_prompt_develops_sparse_requests(
     result = await script_analysis.analyze_creative_brief(
         "Create a 30 second video for Christmas celebration.",
         timeout_sec=5,
+        film_duration_sec=30,
     )
 
     system = captured["system"]

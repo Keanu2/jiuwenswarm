@@ -1728,6 +1728,8 @@ class GraphExecutor:
                 "approved_storyboard",
                 "user_prompt",
                 "director_lock_ack",
+                "video_settings",
+                "image_settings",
             ):
                 if key in meta and meta.get(key) is not None:
                     rmeta[key] = meta.get(key)
@@ -1819,6 +1821,8 @@ class GraphExecutor:
             "approved_storyboard",
             "user_prompt",
             "director_lock_ack",
+            "video_settings",
+            "image_settings",
         ):
             if key in meta and meta.get(key) is not None:
                 rmeta[key] = meta.get(key)

@@ -356,7 +356,7 @@ def ensure_story_lock_coverage(
     """Append missing film-lock *content* as positive story sentences (clip-safe).
 
     Does not paste LOCK essays — those get scrubbed by story-form practice.
-    Aspect / full cast bible stay on config + stills, not in Wan prose.
+    The full cast bible stays on config + stills, not in Wan prose.
     """
     del graph  # reserved for future cast-aware checks
     cfg = cfg if isinstance(cfg, dict) else {}

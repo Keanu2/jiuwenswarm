@@ -831,16 +831,27 @@ def test_bootstrap_treats_default_project_as_create(designer_store: DesignerGrap
         ],
         "target_clip_count": 1,
     }
+    from jiuwenswarm.server.runtime.designer.media_intent import MediaIntent
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.designer.pipeline.model_capacity.configured_video_model_id",
+        lambda: "wan3.0-video",
+    )
     payload, error, code = adapter._bootstrap_graph(
-        {"prompt": "火车站短片", "project_id": "default"},
+        {"prompt": "火车站短片，竖屏", "project_id": "default"},
         "web",
         analysis,
+        None,
+        MediaIntent(aspect_ratio="9:16", film_duration_sec=20),
     )
     assert error is None
     assert code is None
     assert payload is not None
     assert payload["project_id"] == "proj_created01"
-    assert payload["graph"]["title"] == "火车站短片"
+    assert payload["graph"]["title"] == "火车站短片，竖屏"
+    meta = payload["graph"]["metadata"]
+    assert meta["video_settings"] == {"aspect_ratio": "9:16", "resolution": "1080P"}
+    assert meta["image_settings"] == {"aspect_ratio": "9:16", "resolution": "1K"}
     assert created
 
 

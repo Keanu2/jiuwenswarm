@@ -104,6 +104,8 @@ _POLL_INTERVAL_SECONDS = 10
 _PENDING_STATUSES = ("queued", "running")
 
 _MINIMAX_IMAGE_ASPECT_RATIOS = {"1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"}
+_MINIMAX_IMAGE_MIN_SIDE = 512
+_MINIMAX_IMAGE_MAX_SIDE = 2048
 _MINIMAX_VIDEO_RATIOS = {"16:9", "21:9", "4:3", "1:1", "3:4", "9:16"}
 _MINIMAX_MAX_POLL_SECONDS = 120
 _MINIMAX_IMAGE_PROMPT_LIMIT = 1500
@@ -128,9 +130,6 @@ _MODELARK_VIDEO_RATIOS = {"16:9", "4:3", "1:1", "3:4", "9:16", "21:9"}
 _MODELARK_VIDEO_RESOLUTIONS = {"480p", "720p", "1080p"}
 # A 5 s Seedance clip takes ~2.5 min to render; wait long enough that one call usually finishes.
 _MODELARK_MAX_POLL_SECONDS = 300
-_MODELARK_IMAGE_AREA = 2048 * 2048
-_MODELARK_IMAGE_MAX_SIDE = 4096
-_MODELARK_IMAGE_SIDE_STEP = 8
 _MODELARK_MAX_REFERENCE_IMAGES = 14
 
 _DASHSCOPE_HOST = re.compile(r"^dashscope(-intl)?\.aliyuncs\.com$", re.IGNORECASE)
@@ -218,9 +217,10 @@ class VideoRequest:
 class ImageOptions:
     """Optional image inputs beyond prompt and aspect ratio.
 
-    ``size`` ("W*H" / "WxH" / "1K"/"2K") overrides the aspect-ratio default where the
-    backend takes explicit dimensions. ``reference_image_uris`` (http(s) URLs or data:
-    URIs) are honoured by ModelArk, DashScope and vLLM-Omni and ignored by MiniMax.
+    ``size`` ("W*H" / "WxH" / "1K"/"2K") overrides the aspect-ratio default; every native
+    backend sends an explicit WxH as the output dimensions. ``reference_image_uris``
+    (http(s) URLs or data: URIs) are honoured by ModelArk, DashScope and vLLM-Omni and
+    ignored by MiniMax.
     ``extra`` holds vLLM-Omni request fields.
     """
 
@@ -265,7 +265,7 @@ async def generate_image(
         if opts.reference_image_uris:
             logger.warning("[generate_visual] MiniMax image-01 ignores %d reference image(s)",
                            len(opts.reference_image_uris))
-        return await _minimax_generate_image(target, prompt, aspect_ratio, save_dir)
+        return await _minimax_generate_image(target, prompt, aspect_ratio, save_dir, opts)
     if target.backend == MODELARK:
         return await _modelark_generate_image(target, prompt, aspect_ratio, save_dir, opts)
     if target.backend == DASHSCOPE:
@@ -464,17 +464,24 @@ def _minimax_base_error(payload: Any) -> str | None:
 
 
 async def _minimax_generate_image(
-    target: GenerationTarget, prompt: str, aspect_ratio: str, save_dir: str | None
+    target: GenerationTarget, prompt: str, aspect_ratio: str, save_dir: str | None, options: ImageOptions
 ) -> str:
     api_key, api_base, model = target.api_key, target.api_base, target.model
     aspect = aspect_ratio if aspect_ratio in _MINIMAX_IMAGE_ASPECT_RATIOS else "1:1"
-    body = {
+    body: dict[str, Any] = {
         "model": model,
         "prompt": prompt[:_MINIMAX_IMAGE_PROMPT_LIMIT],
-        "aspect_ratio": aspect,
         "response_format": "base64",
         "n": 1,
     }
+    parsed = parse_size(options.size)
+    if parsed:
+        # image-01 takes width/height in place of aspect_ratio: 512-2048 px, multiples of 8.
+        body["width"], body["height"] = (
+            min(_MINIMAX_IMAGE_MAX_SIDE, max(_MINIMAX_IMAGE_MIN_SIDE, side // 8 * 8)) for side in parsed
+        )
+    else:
+        body["aspect_ratio"] = aspect
     roots = _minimax_candidate_roots(api_base)
     payload: Any = None
     try:
@@ -733,31 +740,17 @@ async def _modelark_post(
     return base, resp, payload, None
 
 
-def _modelark_image_size(size: str | None) -> str | None:
-    """An explicit WxH scaled onto the "2k" pixel budget (same aspect ratio), or None."""
-    parsed = parse_size(size)
-    if parsed is None:
-        return None
-    scale = (_MODELARK_IMAGE_AREA / (parsed[0] * parsed[1])) ** 0.5
-    step = _MODELARK_IMAGE_SIDE_STEP
-
-    def fit(side: int) -> int:
-        return min(_MODELARK_IMAGE_MAX_SIDE, max(step, round(side * scale / step) * step))
-
-    return f"{fit(parsed[0])}x{fit(parsed[1])}"
-
-
 async def _modelark_generate_image(
     target: GenerationTarget, prompt: str, aspect_ratio: str, save_dir: str | None, options: ImageOptions
 ) -> str:
     api_key, api_base, model = target.api_key, target.api_base, target.model
-    explicit_size = _modelark_image_size(options.size)
+    parsed = parse_size(options.size)
+    explicit_size = f"{parsed[0]}x{parsed[1]}" if parsed else None
     body: dict[str, Any] = {
         "model": model,
-        # Seedream takes a size tier rather than an aspect ratio, so the ratio is stated in the
-        # prompt. "2k" is the one tier every Seedream 5.x model accepts (the lite model rejects
-        # "1K": size must be WIDTHxHEIGHT, 2k, 3k or 4k), so it is used regardless of the
-        # tool's resolution argument. An explicit WxH is kept at the same pixel budget.
+        # Seedream takes a size tier rather than an aspect ratio. Without an explicit WxH the
+        # ratio is stated in the prompt and "2k" is used: it is the one tier every Seedream 5.x
+        # model accepts (the lite model rejects "1K": size must be WIDTHxHEIGHT, 2k, 3k or 4k).
         "prompt": prompt if explicit_size else f"{prompt}\n\n(Aspect ratio: {aspect_ratio})",
         "size": explicit_size or "2k",
         "response_format": "b64_json",
@@ -1239,12 +1232,26 @@ async def _dashscope_check_video(target: GenerationTarget, task_id: str, save_di
 # vLLM-Omni
 # --------------------------------------------------------------------------- #
 
+_TIER_SHORT_SIDE = {"480p": 480, "720p": 720, "768p": 768, "1080p": 1080, "2k": 1440, "4k": 2160}
+
+
 def _vllm_omni_size(size: str | None, aspect_ratio: str, resolution: str) -> str | None:
+    """Explicit size, else the documented tier size, else a 16-aligned size with the tier's 16:9 area."""
     if parse_size(size):
         return size
-    tier = re.sub(r"\D", "", resolution or "")
-    sizes = _VIDEO_SIZES.get(f"{tier}p") if tier else None
-    return (sizes or {}).get(aspect_ratio)
+    tier = re.sub(r"\s", "", resolution or "").lower()
+    listed = _VIDEO_SIZES.get(tier, {}).get(aspect_ratio)
+    if listed:
+        return listed
+    short = _TIER_SHORT_SIDE.get(tier)
+    ratio = re.fullmatch(r"(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)", (aspect_ratio or "").strip())
+    if short is None or ratio is None or float(ratio.group(2)) <= 0:
+        return None
+    area = short * short * 16 / 9
+    value = float(ratio.group(1)) / float(ratio.group(2))
+    width = max(16, round((area * value) ** 0.5 / 16) * 16)
+    height = max(16, round((area / value) ** 0.5 / 16) * 16)
+    return f"{width}*{height}"
 
 
 async def _vllm_omni_generate_image(

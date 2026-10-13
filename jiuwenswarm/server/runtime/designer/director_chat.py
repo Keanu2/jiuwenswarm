@@ -57,7 +57,7 @@ _RUN_HINT = re.compile(
 _DIRECTOR_CHAT_SYSTEM = """You are the Designer Director. You authored this project's brief, storyboard and
 execution graph; now you handle the user's follow-up requests on the canvas. Reply with a JSON object only.
 director_context holds your earlier decisions (director skill, scenario skill, brief notes,
-spatial, style, aspect, and language locks). Keep edits consistent with them unless the user asks to change them.
+spatial, style, and language locks, and the canvas video_settings / image_settings). Keep edits consistent with them unless the user asks to change them.
 Canvas node type and config.role must be one of: text, table, image, video, audio.
 Character/Scene/Clip/Film are pipelines, never node kinds.
 Do not rebuild the whole graph. Patch only what the user asked.
@@ -95,6 +95,7 @@ Rules:
   update it there. The server also updates the execution prompt from that value. pipeline and
   review_fields_if_action_changes describe the input; do not copy them into the output node.
 - Preserve existing node IDs and unrelated content. Renumber clip_index consecutively after inserting/deleting a clip; update each affected timeline, action, camera and prompt.
+- A video node's length is config.duration_sec (integer seconds) when present, else its storyboard timeline. To change a clip's length, set config.duration_sec on that clip and update its timeline to match. Leave duration_sec out for clips whose length you do not change.
 - Set edit_documents=true for content edits, including requests that only change prose. A separate document editor will receive the original documents and the applied graph changes. Do not return text replacements in this plan.
 - Resolve the requested object before editing. Singular referents and background collections are distinct: e.g. changing one bicycle does not change other parked bicycles of the same color. Do not globally substitute color/material words in a sentence or record. In thinking, identify specific similar objects/details you will preserve.
 - For deleting an ENTIRE CLIP, put an existing clip ID in remove_shot_ids. Use the
@@ -122,7 +123,7 @@ _ACTION_DEPENDENT_FIELDS = (
 )
 
 _CHAT_EDITABLE_CONFIG_FIELDS = {
-    "prompt", "clip_index", "clip_action", "camera", "timeline", "shot_title",
+    "prompt", "clip_index", "clip_action", "camera", "timeline", "duration_sec", "shot_title",
     "character_id", "character_ids", "setting_id", "on_screen", "offscreen",
     "cast_actions", "scene_specs", "speech_line", "continuity_lock",
     "blocking", "start_state", "end_state", "pose_holds", "spatial_lock",
@@ -214,7 +215,11 @@ def _merge_prompt_updates(graph: DesignerExecutionGraph, plan: dict[str, Any]) -
         node_id = update.get("node_id")
         if node_id not in existing and not any(n.get("id") == node_id for n in upserts):
             raise DesignerGraphValidationError(f"Unknown prompt update node: {node_id}")
-        config = {key: update[key] for key in ("prompt", "clip_index", "clip_action", "camera", "timeline") if key in update}
+        config = {
+            key: update[key]
+            for key in ("prompt", "clip_index", "clip_action", "camera", "timeline", "duration_sec")
+            if key in update
+        }
         upserts.append({"id": node_id, "config": config})
     merged: dict[str, Any] = {}
     supplied: dict[str, set[str]] = {}
@@ -236,6 +241,13 @@ def _merge_prompt_updates(graph: DesignerExecutionGraph, plan: dict[str, Any]) -
     for node_id, node in merged.items():
         old_cfg = existing.get(node_id, {}).get("config") or {}
         cfg = node["config"]
+        if (
+            "timeline" in supplied[node_id]
+            and "duration_sec" not in supplied[node_id]
+            and cfg.get("timeline") != old_cfg.get("timeline")
+        ):
+            # A retimed shot follows its new timeline, not a stale manual length.
+            cfg.pop("duration_sec", None)
         required = set()
         if cfg.get("clip_action") != old_cfg.get("clip_action"):
             required.update(_action_review_fields(old_cfg))
@@ -336,12 +348,16 @@ def director_chat_context(graph: DesignerExecutionGraph) -> dict[str, Any]:
         text = next((str(meta.get(key) or "").strip() for key in keys if str(meta.get(key) or "").strip()), "")
         if text:
             context[name] = text[:limit]
-    for lock_name in ("spatial_lock", "style_lock", "aspect_lock"):
+    for lock_name in ("spatial_lock", "style_lock"):
         lock = meta.get(lock_name)
         if not isinstance(lock, dict) or not lock:
             lock = analysis.get(lock_name)
         if isinstance(lock, dict) and lock:
             context[lock_name] = lock
+    from jiuwenswarm.server.runtime.designer.media_settings import image_settings, video_settings
+
+    context["video_settings"] = video_settings(graph).as_dict()
+    context["image_settings"] = image_settings(graph).as_dict()
     language_lock = str(meta.get("language_lock") or analysis.get("language_lock") or "").strip()
     if language_lock:
         context["language_lock"] = language_lock
