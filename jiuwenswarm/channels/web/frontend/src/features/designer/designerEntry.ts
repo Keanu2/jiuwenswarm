@@ -128,7 +128,6 @@ export async function launchDesignerFromTask(params: LaunchDesignerFromTaskParam
     useDesignerRunStore.getState().applyLeaderActivity(null);
     useDesignerChatStore.getState().removeMessage(thinkingId);
     useDesignerChatStore.getState().bindGraph(graph.graph_id);
-    void useWorkspaceStore.getState().loadDesignerGraphs();
     const scenario = String(graph.metadata?.scenario || 'auto');
     const nodeCount = graph.nodes.length;
     useDesignerChatStore.getState().appendMessage({

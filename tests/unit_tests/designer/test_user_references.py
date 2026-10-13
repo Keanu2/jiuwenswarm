@@ -1032,4 +1032,3 @@ def test_analysis_prompt_reference_roster_is_not_a_shot() -> None:
     assert "pulpit" not in blob
     assert "pew" not in blob
     assert "mountain pass" in blob
-

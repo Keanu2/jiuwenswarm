@@ -1033,4 +1033,3 @@ def validate_director_contract(analysis: dict[str, Any]) -> list[str]:
         for cid in shot.get("exiting_character_ids") or []:
             exited.add(str(cid))
     return errors
-

@@ -41,8 +41,8 @@ def load_node_catalog() -> dict[str, Any]:
             )
             return data
     raise FileNotFoundError(
-        "designer_node_catalog.json not found under designer_catalog_skills_reports_trajectory/; "
-        "run scripts/generate_designer_node_catalog.py"
+        "designer_node_catalog.json not found; looked in: "
+        + ", ".join(str(path) for path in _candidate_paths())
     )
 
 

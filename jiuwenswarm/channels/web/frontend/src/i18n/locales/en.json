@@ -72,9 +72,6 @@
     "emptyDescription": "Describe a project to create a dedicated Design workspace and workflow.",
     "loadErrorTitle": "Failed to load",
     "loadErrorFallback": "Could not load the design workflow. Please try again later.",
-    "toggleLabel": "Design",
-    "toolbarTag": "Design",
-    "closeTag": "Cancel design",
     "attachmentsBlocked": "Design mode does not support attachments yet. Remove attachments and try again.",
     "activity": {
       "thinking": "Thinking",
@@ -245,8 +242,6 @@
     "edge": {
       "delete": "Delete connection"
     },
-    "recentGraphs": "Recent graphs",
-    "hasVideo": "Has finished clip",
     "revision": {
       "title": "Choose which version to keep",
       "hint": "{{label}} was regenerated. The original is still here — pick which one to keep.",

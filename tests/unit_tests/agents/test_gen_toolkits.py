@@ -182,7 +182,7 @@ def _mm_video_handler(statuses: list[str], *, error: Any = None) -> Handler:
 async def test_minimax_video_submit_poll_download(monkeypatch, tmp_path):
     seen = _patch_client(monkeypatch, _mm_video_handler(["queued", "running", "succeeded"]))
     result = await _submit(
-        "minimax", "k", _MM_GLOBAL, "MiniMax-H3", "fox", "9:16", "1080p", 99, True,
+        "minimax", "k", _MM_GLOBAL, "MiniMax-H3", "fox", "9:16", "1080p", 15, True,
         "data:image/png;base64,AAA", str(tmp_path),
     )
     assert result.startswith("Video generated successfully!")
@@ -191,27 +191,6 @@ async def test_minimax_video_submit_poll_download(monkeypatch, tmp_path):
     assert body["resolution"] == "2K" and body["duration"] == 15 and body["ratio"] == "9:16"
     assert body["content"][1]["role"] == "first_frame"
     assert "authorization" not in seen[-1].headers  # the pre-signed download must not carry the key
-
-
-@pytest.mark.asyncio
-async def test_minimax_h3_max_snaps_duration_4_to_5(monkeypatch, tmp_path):
-    seen = _patch_client(monkeypatch, _mm_video_handler(["succeeded"]))
-    result = await _submit(
-        "minimax", "k", _MM_GLOBAL, "MiniMax-H3-Max", "fox", "16:9", "768P", 4, False,
-        None, str(tmp_path),
-    )
-    assert result.startswith("Video generated successfully!")
-    assert _body(seen[0])["duration"] == 5
-
-
-@pytest.mark.asyncio
-async def test_minimax_h3_keeps_duration_4(monkeypatch, tmp_path):
-    seen = _patch_client(monkeypatch, _mm_video_handler(["succeeded"]))
-    await _submit(
-        "minimax", "k", _MM_GLOBAL, "MiniMax-H3", "fox", "16:9", "768P", 4, False,
-        None, str(tmp_path),
-    )
-    assert _body(seen[0])["duration"] == 4
 
 
 @pytest.mark.asyncio
@@ -506,12 +485,6 @@ def test_dashscope_video_body_modes(model, first_frame, reference_uris, expected
     body = gt._dashscope_video_body(model, request, None)
     assert body["input"] == {"prompt": "fox", **expected_input}
     assert body["parameters"] == expected_parameters
-
-
-def test_dashscope_wan_snaps_duration_below_min():
-    request = gt.VideoRequest("fox", "16:9", "720p", 1)
-    body = gt._dashscope_video_body("wan3.0-video", request, None)
-    assert body["parameters"]["duration"] == 2
 
 
 def test_dashscope_video_size_snaps_480p():

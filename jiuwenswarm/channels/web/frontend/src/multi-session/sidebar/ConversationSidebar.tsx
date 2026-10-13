@@ -89,7 +89,6 @@ interface ConversationSidebarProps {
   activeSessionId: string | null;
   onNew: (options?: NewConversationOptions) => void;
   onSelect: (session: Session) => void;
-  onSelectDesignProject?: (project: ProjectInfo) => void;
   onSelectDesignSession?: (project: ProjectInfo, sessionId: string) => void;
   activeDesignSessionId?: string;
   /** 项目软删除成功后回调；上层可按 workMode 决定是否需要路由回退等 */
@@ -297,6 +296,7 @@ function ProjectEntityRow({
   onToggle,
   onNew,
   newLabel,
+  onRemoved,
 }: {
   project: ProjectInfo;
   title: string;
@@ -307,6 +307,7 @@ function ProjectEntityRow({
   onToggle: () => void;
   onNew: () => void;
   newLabel?: string;
+  onRemoved?: (projectId: string) => void;
 }) {
   const { t } = useTranslation();
   const mainRef = useRef<HTMLButtonElement>(null);
@@ -394,6 +395,7 @@ function ProjectEntityRow({
         type="project"
         project={project}
         archiveSessionsDisabled={archiveSessionsDisabled}
+        onRemoved={onRemoved}
         onOpenChange={setMenuOpen}
         triggerTooltipHandlers={rowTooltipHandlers}
       />
@@ -681,7 +683,6 @@ export function ConversationSidebar({
     sessionVisibility,
     pinnedSessions,
     expandedProjectIds,
-    selectedProject,
     setSelectedProject,
     toggleProjectExpanded,
     createProject,
@@ -1067,6 +1068,7 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
             setSelectedProject(project);
             onNew({ preserveProject: true, project });
           }}
+          onRemoved={(projectId) => onProjectRemoved?.(projectId, workMode)}
         />
         {expanded ? (
           <div className="conversation-sidebar__group-list" data-testid="multi-session-project-group-list">

@@ -6,10 +6,10 @@
 
 ### 已实现功能
 
-#### 🎬 Designer（短片流水线）
-- **AI-first Play**：用户提示 → Brief → Storyboard → 角色单人板 → 空场景板 → R2V 镜头（无 keyframe）→ ffmpeg 合成
+#### 🎬 设计
+- **工作流画布**：用户提示 → 简报 → 分镜 → 角色与场景设定 → R2V 镜头 → 合成，支持逐节点修改与重跑
 - **智能体**：唯一的 Director，以及各节点 Leaf DeepAgent
-- 文档见仓库根目录 `README.md` / `DETAIL.md` / `a.md` 与 `jiuwenswarm/server/runtime/designer/README.md`
+- 文档见 [`docs/zh/设计.md`](../../../../docs/zh/设计.md)
 
 #### 💬 聊天交互
 - **实时对话**：WebSocket 双向通信，支持流式输出

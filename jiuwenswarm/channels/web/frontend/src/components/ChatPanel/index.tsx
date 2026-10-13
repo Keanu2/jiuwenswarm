@@ -189,8 +189,6 @@ interface ChatPanelProps {
    * 仅在停靠模式下回调；收起时上报 0。
    */
   onComposerHeightChange?: (height: number) => void;
-  /** 任务页选「设计」后发送：跳转设计栏并 bootstrap */
-  onLaunchDesign?: (prompt: string, mediaItems?: MediaItem[]) => void;
 }
 
 // 邀请指令只对 human_agent 成员存在（见 upsertHumanShareCommandFromEvent 的
@@ -1074,7 +1072,6 @@ export const ChatPanel = React.memo(function ChatPanel({
   composerCollapsed = false,
   onToggleComposerCollapsed,
   onComposerHeightChange,
-  onLaunchDesign,
 }: ChatPanelProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -2040,7 +2037,6 @@ export const ChatPanel = React.memo(function ChatPanel({
                   onResumeGoal={onResumeGoal}
                   onRefreshGoal={onRefreshGoal}
                   onClearGoal={onClearGoal}
-                  onLaunchDesign={onLaunchDesign}
                 />
               </div>
               {isGroupCreateWelcome && (
@@ -2117,7 +2113,6 @@ export const ChatPanel = React.memo(function ChatPanel({
             onRefreshGoal={onRefreshGoal}
             onClearGoal={onClearGoal}
             onDrainTaskQueueIfIdle={onDrainTaskQueueIfIdle}
-            onLaunchDesign={onLaunchDesign}
           />
         </div>
       )}

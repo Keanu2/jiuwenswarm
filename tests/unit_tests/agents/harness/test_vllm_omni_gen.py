@@ -19,7 +19,7 @@ from jiuwenswarm.agents.harness.common.tools.vllm_omni_gen import (
         ("MiniMaxAI/MiniMax-H3", "minimax-h3"),
         ("/models/MiniMax-H3", "minimax-h3"),
         ("/models/MiniMax-H3/FL2VA", "minimax-h3"),
-        ("minimax-h3-max", "minimax-h3"),
+        ("minimax-h3-max", "minimax-h3-max"),
         ("Qwen/Qwen-Image", None),
         ("Wan-AI/Wan2.2-T2V-A14B-Diffusers", None),
         ("", None),
@@ -81,11 +81,11 @@ def test_minimax_h3_ref2va_form_without_size_uses_adaptive_canvas() -> None:
     assert form.fields["aspect_ratio"] == "adaptive"
     assert form.fields["short_edge"] == "768"
     assert form.extra_params is not None
-    # Unspecified duration uses the catalog default (H3 default_sec=5).
+    # Unspecified duration uses the H3 default of 5 s.
     assert form.extra_params["duration"] == 5.0
 
 
-def test_minimax_h3_duration_keeps_the_4s_floor_and_snaps_to_catalog_max() -> None:
+def test_minimax_h3_duration_keeps_the_4s_floor_and_15s_max() -> None:
     spec = _h3_spec()
     low = spec.build(
         VllmOmniVideoInputs(

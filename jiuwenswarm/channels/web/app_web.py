@@ -303,6 +303,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     api_target = ""
     ws_target = ""
     ws_disable_compress = False
+    # (projects.json mtime, resolved project_dir list)
+    _registered_project_dir_cache: tuple[float, list[Path]] | None = None
 
     # --- 桌面对话页面限制: 启动 token + HttpOnly Cookie ---
     # 仅保护 SPA 文档入口; 静态资源/API/WS 保持原有访问规则。
@@ -990,8 +992,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             mtime = projects_file.stat().st_mtime
         except OSError:
             return []
-        cache = getattr(cls, "_registered_project_dir_cache", None)
-        if isinstance(cache, tuple) and cache[0] == mtime:
+        cache = cls._registered_project_dir_cache
+        if cache is not None and cache[0] == mtime:
             return cache[1]
         try:
             payload = json.loads(projects_file.read_text(encoding="utf-8"))

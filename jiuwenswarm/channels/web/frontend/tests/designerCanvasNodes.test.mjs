@@ -530,7 +530,6 @@ test('autoLayoutDesignerNodes does not put scene specs in the clip column', () =
   }
 });
 
-
 test('portAddTemplatesFor limits port menus to the allowed node types', () => {
   const types = (nodeType, side) => portAddTemplatesFor(nodeType, side).map((item) => item.type);
   for (const docType of ['text', 'table']) {

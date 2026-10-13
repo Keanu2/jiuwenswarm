@@ -72,9 +72,6 @@
     "emptyDescription": "描述你的项目，创建独立的设计工作区与工作流。",
     "loadErrorTitle": "加载失败",
     "loadErrorFallback": "无法读取设计工作流，请稍后重试。",
-    "toggleLabel": "设计",
-    "toolbarTag": "设计",
-    "closeTag": "取消设计",
     "attachmentsBlocked": "设计模式暂不支持附件，请先移除附件后再发送。",
     "activity": {
       "thinking": "思考中",
@@ -245,8 +242,6 @@
     "edge": {
       "delete": "删除连线"
     },
-    "recentGraphs": "最近设计图",
-    "hasVideo": "已有成片",
     "revision": {
       "title": "选择要保留的版本",
       "hint": "{{label}} 已重新生成。原版还在，请选择保留哪一份。",

@@ -269,13 +269,24 @@ def _matches_minimax_h3(served_model_id: str) -> bool:
     return "minimax-h3" in normalized
 
 
-def _snap_vllm_duration(model_id: str | None, duration: int | float | None) -> int:
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        capacity_for_model,
-        snap_duration,
-    )
+# (min, max, default) seconds per the MiniMax-H3 / H3-Max model cards.
+_MINIMAX_H3_DURATION_RANGE = (4, 15, 5)
+_MINIMAX_H3_MAX_DURATION_RANGE = (5, 15, 6)
 
-    return snap_duration(duration, capacity_for_model(model_id or ""))
+
+def _snap_minimax_h3_duration(model_id: str | None, duration: int | float | None) -> int:
+    lo, hi, default = (
+        _MINIMAX_H3_MAX_DURATION_RANGE
+        if _matches_minimax_h3_max(model_id or "")
+        else _MINIMAX_H3_DURATION_RANGE
+    )
+    try:
+        raw = int(round(float(duration))) if duration is not None else 0
+    except (TypeError, ValueError):
+        raw = 0
+    if raw <= 0:
+        return default
+    return max(lo, min(hi, raw))
 
 
 def _snap_to_canvas_multiple(value: int, multiple: int = 32) -> int:
@@ -315,9 +326,7 @@ def _build_minimax_h3_video_form(inputs: VllmOmniVideoInputs) -> VllmOmniVideoFo
         fields["short_edge"] = str(_MINIMAX_H3_SHORT_EDGE)
     # H3 has no resolution knob beyond the fixed 768px canvas; ``resolution``
     # is intentionally not forwarded.
-    duration = float(
-        _snap_vllm_duration(inputs.model_id or "MiniMax-H3", inputs.duration)
-    )
+    duration = float(_snap_minimax_h3_duration(inputs.model_id, inputs.duration))
     extra_params = {
         "task": task,
         "duration": duration,
@@ -360,14 +369,12 @@ def _build_generic_video_form(inputs: VllmOmniVideoInputs) -> VllmOmniVideoForm:
             fields["width"] = str(parsed[0])
             fields["height"] = str(parsed[1])
         if inputs.duration:
-            fields["num_frames"] = str(
-                max(1, round(float(_snap_vllm_duration(inputs.model_id, inputs.duration)) * inputs.fps))
-            )
+            fields["num_frames"] = str(max(1, round(float(inputs.duration) * inputs.fps)))
         return VllmOmniVideoForm(fields=fields, extra_params=None)
     if parsed is not None:
         fields["size"] = f"{parsed[0]}x{parsed[1]}"
     if inputs.duration:
-        fields["seconds"] = str(_snap_vllm_duration(inputs.model_id, inputs.duration))
+        fields["seconds"] = str(max(1, int(round(float(inputs.duration)))))
     return VllmOmniVideoForm(fields=fields, extra_params=None)
 
 

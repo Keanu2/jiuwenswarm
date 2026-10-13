@@ -30,6 +30,7 @@ from jiuwenswarm.agents.harness.common.tools import gen_toolkits
 from jiuwenswarm.agents.harness.common.tools.video_gen_tools import video_gen_enabled
 from jiuwenswarm.agents.harness.common.tools.visual_gen_tools import visual_gen_enabled
 from jiuwenswarm.server.runtime.designer.pipeline.image_capacity import IMAGE_RATIOS
+from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import capacity_for_model, snap_duration
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +223,7 @@ async def generate_video(request: DesignerVideoRequest, *, save_dir: str | None 
         prompt=request.prompt,
         aspect_ratio=request.aspect_ratio,
         resolution=request.resolution.strip().lower(),
-        duration_seconds=int(request.duration),
+        duration_seconds=snap_duration(request.duration, capacity_for_model(target.model)),
         generate_audio=bool(request.audio),
         first_frame_data_uri=first_frame,
         reference_image_uris=refs,

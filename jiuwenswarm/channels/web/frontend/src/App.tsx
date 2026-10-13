@@ -3522,11 +3522,6 @@ function AppContent({
     void handleRestoreSession(target.session_id, target.mode, target);
   }, [enterNewConversation, handleRestoreSession, isToolPanelAutoHideViewport, mode, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden]);
 
-  const handleSelectDesignProject = useCallback((project: ProjectInfo) => {
-    setSelectedProject(project);
-    navigate({ kind: 'design-project', projectId: project.project_id });
-  }, [navigate, setSelectedProject]);
-
   const handleSelectDesignSession = useCallback((project: ProjectInfo, nextSessionId: string) => {
     setSelectedProject(project);
     setActiveNav('chat');
@@ -3816,7 +3811,6 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
-                onSelectDesignProject={handleSelectDesignProject}
                 onSelectDesignSession={handleSelectDesignSession}
                 activeDesignSessionId={route.kind === 'design-project' ? route.sessionId : undefined}
                 onProjectRemoved={handleProjectRemoved}
@@ -3871,7 +3865,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                   } as CSSProperties}
                   data-testid="app-chat-surface"
                 >
-                  <SingleAgentSurface
+<SingleAgentSurface
                     activeView={chatSurfaceView}
                     chat={(
                       <ChatPanel
@@ -4056,7 +4050,6 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               activeSessionId={null}
               onNew={(options) => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
-              onSelectDesignProject={handleSelectDesignProject}
               onSelectDesignSession={handleSelectDesignSession}
               onOpenCron={() => handleNavigate('cron')}
               isCronActive

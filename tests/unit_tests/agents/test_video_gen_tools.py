@@ -474,6 +474,34 @@ async def test_generate_video_forwards_references_to_native_backend(monkeypatch:
     assert len(request.reference_image_uris) == 1 and request.reference_image_uris[0].startswith("data:image/png")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol,model,requested,expected",
+    [
+        ("minimax", "MiniMax-H3", 99, 15),
+        ("minimax", "MiniMax-H3", 1, 4),
+        ("minimax", "MiniMax-H3-Max", 4, 5),
+        ("modelark", "doubao-seedance-2-5-260628", 25, 15),
+        ("vllm-omni", "MiniMax-H3", 2, 2),
+    ],
+)
+async def test_generate_video_clamps_duration_for_native_backends(
+    monkeypatch: pytest.MonkeyPatch, protocol: str, model: str, requested: int, expected: int
+):
+    _set_video_model_config(monkeypatch)
+    monkeypatch.setenv("VIDEO_GEN_PROTOCOL", protocol)
+    monkeypatch.setenv("VIDEO_GEN_MODEL_NAME", model)
+    captured: dict[str, Any] = {}
+
+    async def fake_submit(target: Any, request: Any, save_dir: str | None) -> str:
+        captured.update(request=request)
+        return "Video generated successfully!\nSaved to: /tmp/v.mp4"
+
+    monkeypatch.setattr(vg.gen_toolkits, "submit_video", fake_submit)
+    await generate_video(prompt="fox", duration_seconds=requested)
+    assert captured["request"].duration_seconds == expected
+
+
 def test_vllm_omni_is_configured_without_key_or_model(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VIDEO_GEN_API_BASE", "http://127.0.0.1:8091/v1")
     assert vg.video_gen_configured() is False

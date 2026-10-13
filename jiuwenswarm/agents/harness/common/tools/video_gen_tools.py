@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 _POLL_INTERVAL_SECONDS = 10
 _MAX_POLL_SECONDS = 120
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "expired"}
+_VIDEO_MIN_SECONDS = 4
+_VIDEO_MAX_SECONDS = 15
+# MiniMax-H3-Max rejects clips shorter than 5 s.
+_H3_MAX_MIN_SECONDS = 5
 
 
 def video_gen_enabled() -> bool:
@@ -83,6 +87,12 @@ def _credentials_complete(api_key: str, api_base: str, model: str) -> bool:
     if gen_toolkits.detect_backend("VIDEO_GEN_PROTOCOL", api_base) in gen_toolkits.KEYLESS_BACKENDS:
         return bool(api_base)
     return bool(api_key and api_base and model)
+
+
+def _clamp_duration(model: str, duration_seconds: int) -> int:
+    compact = "".join(ch for ch in model.lower() if ch.isalnum())
+    low = _H3_MAX_MIN_SECONDS if "h3max" in compact else _VIDEO_MIN_SECONDS
+    return max(low, min(_VIDEO_MAX_SECONDS, int(duration_seconds)))
 
 
 def _resolve_frame_reference(path_or_url: str, arg_name: str = "first_frame_path") -> tuple[str | None, str | None]:
@@ -280,6 +290,8 @@ async def generate_video(  # pylint: disable=huawei-too-many-arguments
     backend = gen_toolkits.detect_backend("VIDEO_GEN_PROTOCOL", api_base)
     if backend:
         target = gen_toolkits.GenerationTarget(backend, api_key, api_base, model)
+        if backend != gen_toolkits.VLLM_OMNI:
+            duration_seconds = _clamp_duration(model, duration_seconds)
         request = gen_toolkits.VideoRequest(
             prompt, aspect_ratio, resolution, duration_seconds, generate_audio, frame_data_uri,
             reference_image_uris=tuple(reference_uris), reference_mode=reference_mode,

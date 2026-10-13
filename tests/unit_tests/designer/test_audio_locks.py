@@ -312,4 +312,3 @@ def test_speech_is_default_unless_mime_or_silence() -> None:
     )
     assert opened["include_speech"] is True
     assert opened["policy"] == "speech_and_music"
-

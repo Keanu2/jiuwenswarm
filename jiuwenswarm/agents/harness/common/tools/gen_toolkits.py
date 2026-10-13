@@ -327,16 +327,6 @@ def _image_filename(index: int, data: bytes) -> str:
     return f"image_{int(time.time())}_{index}_{secrets.token_hex(4)}.{_image_extension(data)}"
 
 
-def _snap_request_duration(model: str, duration_seconds: int | float | None) -> int:
-    """Clamp duration to the catalog for ``model`` (same table as resolution)."""
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        capacity_for_model,
-        snap_duration,
-    )
-
-    return snap_duration(duration_seconds, capacity_for_model(model))
-
-
 def parse_size(size: str | None) -> tuple[int, int] | None:
     """(width, height) of a "W*H" / "WxH" size, or None."""
     match = re.fullmatch(r"\s*(\d+)\s*[x*]\s*(\d+)\s*", str(size or ""), flags=re.IGNORECASE)
@@ -545,7 +535,7 @@ async def _minimax_submit_video(target: GenerationTarget, request: VideoRequest,
         "model": model,
         "content": content,
         "resolution": _minimax_video_resolution(resolution),
-        "duration": _snap_request_duration(model, duration_seconds),
+        "duration": int(duration_seconds),
         "ratio": aspect_ratio if aspect_ratio in _MINIMAX_VIDEO_RATIOS else "16:9",
     }
     roots = _minimax_candidate_roots(api_base)
@@ -812,7 +802,7 @@ async def _modelark_submit_video(target: GenerationTarget, request: VideoRequest
         "ratio": (
             "adaptive" if frame else (aspect_ratio if aspect_ratio in _MODELARK_VIDEO_RATIOS else "16:9")
         ),
-        "duration": _snap_request_duration(model, duration_seconds),
+        "duration": int(duration_seconds),
         "generate_audio": bool(generate_audio),
         "watermark": False,
     }
@@ -1075,7 +1065,7 @@ def _dashscope_video_body(model: str, request: VideoRequest, file_url: str | Non
     resolution = _dashscope_resolution_tier(request).upper()
     inputs: dict[str, Any] = {"prompt": request.prompt}
     parameters: dict[str, Any] = {
-        "duration": _snap_request_duration(model, request.duration_seconds),
+        "duration": int(request.duration_seconds),
     }
     if _is_wan3(model):
         parameters["audio"] = bool(request.generate_audio)

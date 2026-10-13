@@ -209,3 +209,30 @@ def test_generate_video_reports_backend_errors_and_bad_references(
         reference_images=(str(tmp_path / "gone.png"),),
     )
     assert "none could be read" in asyncio.run(mg.generate_video(missing))["error"]
+
+
+@pytest.mark.parametrize(
+    "model,requested,expected",
+    [
+        ("MiniMax-H3-Max", 4, 5),
+        ("MiniMax-H3", 4, 4),
+        ("MiniMax-H3", 30, 15),
+        ("doubao-seedance-2-5-260628", 25, 25),
+        ("wan3.0-video", 1, 2),
+    ],
+)
+def test_generate_video_snaps_duration_to_the_called_model(
+    monkeypatch: pytest.MonkeyPatch, dashscope_video_slot: None, model: str, requested: int, expected: int
+) -> None:
+    submitted: list[gt.VideoRequest] = []
+
+    async def fake_submit(target: gt.GenerationTarget, request: gt.VideoRequest, save_dir: str | None) -> str:
+        submitted.append(request)
+        return "Video generated successfully!\nSaved to: /tmp/v.mp4"
+
+    monkeypatch.setattr(mg.gen_toolkits, "submit_video", fake_submit)
+    request = mg.DesignerVideoRequest(
+        prompt="shot", aspect_ratio="16:9", resolution="720P", duration=requested, model=model
+    )
+    asyncio.run(mg.generate_video(request))
+    assert submitted[0].duration_seconds == expected

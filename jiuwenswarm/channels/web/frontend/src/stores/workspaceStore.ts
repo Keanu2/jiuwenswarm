@@ -1,8 +1,5 @@
 import { create } from 'zustand';
 import i18n from '../i18n';
-import { designerGraphClient } from '../features/designer/designerGraphClient';
-import { summariesFromGraphList } from '../features/designer/designerGraphLoad';
-import type { DesignerGraphSummary } from '../features/designer/executionGraphTypes';
 import { projectRegistryClient, ProjectRemoveResult } from '../features/workspace/projectRegistryClient';
 import { archivedTaskClient, findBatchSessionResult } from '../features/workspace/archivedTaskClient';
 import { persistWorkMode, readStoredWorkMode } from '../features/workspace/workModeStorage';
@@ -48,8 +45,6 @@ interface WorkspaceState {
   pinnedSessions: Session[];
   selectedProject: ProjectInfo | null;
   expandedProjectIds: Record<string, boolean>;
-  designerGraphs: DesignerGraphSummary[];
-  pendingDesignerGraphId: string | null;
   isLoadingProjects: boolean;
   error: string | null;
   setWorkMode: (workMode: WorkMode) => Promise<void>;
@@ -59,8 +54,6 @@ interface WorkspaceState {
   collapseSessions: (projectId: string) => Promise<void>;
   loadPinnedSessions: (refreshEpoch?: number) => Promise<void>;
   setSelectedProject: (project: ProjectInfo | null) => void;
-  setPendingDesignerGraphId: (graphId: string | null) => void;
-  loadDesignerGraphs: () => Promise<void>;
   toggleProjectExpanded: (projectId: string) => void;
   createProject: (name: string, projectDir: string) => Promise<ProjectInfo>;
   renameProject: (projectId: string, name: string) => Promise<void>;
@@ -331,8 +324,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   pinnedSessions: [],
   selectedProject: null,
   expandedProjectIds: {},
-  designerGraphs: [],
-  pendingDesignerGraphId: null,
   isLoadingProjects: false,
   error: null,
 
@@ -348,8 +339,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       pinnedSessions: [],
       selectedProject: null,
       expandedProjectIds: {},
-      designerGraphs: [],
-      pendingDesignerGraphId: null,
       error: null,
     });
     await get().loadProjects();
@@ -387,7 +376,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           isLoadingProjects: false,
         };
       });
-      await Promise.all([get().loadPinnedSessions(refreshEpoch), get().loadDesignerGraphs()]);
+      await get().loadPinnedSessions(refreshEpoch);
       return true;
     } catch (error) {
       set({ isLoadingProjects: false, error: error instanceof Error ? error.message : String(error) });
@@ -463,16 +452,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   setSelectedProject: (project) => set({ selectedProject: project }),
-  setPendingDesignerGraphId: (graphId) => set({ pendingDesignerGraphId: graphId }),
-  loadDesignerGraphs: async () => {
-    try {
-      const payload = await designerGraphClient.list();
-      const designerGraphs = summariesFromGraphList(payload);
-      set({ designerGraphs });
-    } catch {
-      set({ designerGraphs: [] });
-    }
-  },
   toggleProjectExpanded: (projectId) => set((state) => ({
     expandedProjectIds: {
       ...state.expandedProjectIds,

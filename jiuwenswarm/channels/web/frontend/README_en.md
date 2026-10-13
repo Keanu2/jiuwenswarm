@@ -6,13 +6,11 @@ AI coding assistant web UI built with React + TypeScript + Tailwind CSS, with de
 
 ### Implemented
 
-#### 🎬 Designer (short film)
-- **AI-first Play path**: user prompt → Brief → Storyboard → character solos →
-  scene specs → R2V shots (no keyframes) → ffmpeg compose
+#### 🎬 Design
+- **Workflow canvas**: user prompt → Brief → Storyboard → character and scene specs →
+  R2V clips → compose, with per-node editing and re-runs
 - **Agents**: one Director, plus leaf DeepAgents per node
-- **Docs**: repo `README.md`, `DETAIL.md`, `a.md`,
-  `jiuwenswarm/server/runtime/designer/README.md`
-- See also Chat / Tool Calls features below for the shared WebSocket shell
+- **Docs**: [`docs/en/Design.md`](../../../../docs/en/Design.md)
 
 #### 💬 Chat
 - **Real-time conversation**: WebSocket bidirectional communication with streaming output

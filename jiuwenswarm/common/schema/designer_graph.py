@@ -2128,4 +2128,3 @@ def filter_ready_by_dependency_order(
         selected.append(nid)
         selected_set.add(nid)
     return selected
-
