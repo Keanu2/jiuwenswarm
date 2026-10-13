@@ -1,9 +1,9 @@
 import {
   FolderOpen,
   Hand,
-  Headphones,
   Image as ImageIcon,
   MousePointer2,
+  Upload,
   Video,
   Workflow,
 } from 'lucide-react';
@@ -16,13 +16,21 @@ import {
   offsetCanvasPosition,
   type DesignerAddTemplate,
 } from '../designerCanvasNodes';
+import {
+  DESIGNER_UPLOAD_ACCEPT,
+  buildUploadedDesignerNode,
+  storeDesignerUpload,
+  uploadKindFromMime,
+} from '../designerNodeUpload';
+import { useDesignerRunStore } from '../designerRunStore';
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
 import { useComfyuiImport } from '../useComfyuiImport';
 
+const DOCK_ADD_TEMPLATES = DESIGNER_ADD_TEMPLATES.filter((item) => item.type !== 'audio');
+
 function TypeIcon({ type }: { type: string }) {
   if (type === 'video') return <Video size={18} aria-hidden />;
-  if (type === 'audio') return <Headphones size={18} aria-hidden />;
   return <ImageIcon size={18} aria-hidden />;
 }
 
@@ -38,6 +46,7 @@ export function DesignerCanvasDock() {
   const closeDock = useDesignerUiStore((state) => state.closeDock);
   const importComfyui = useComfyuiImport();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const canvasCenter = useCallback(() => {
     const pane = document.querySelector('.designer-page__canvas');
@@ -80,10 +89,38 @@ export function DesignerCanvasDock() {
     [placeComfyui],
   );
 
+  const placeUpload = useCallback(
+    async (file: File) => {
+      const kind = uploadKindFromMime(file.type);
+      if (!kind) return;
+      const position = offsetCanvasPosition(canvasCenter(), domainGraph?.nodes.length ?? 0);
+      closeDock();
+      try {
+        const stored = await storeDesignerUpload(file);
+        const existing = useDesignerStore.getState().domainGraph?.nodes ?? [];
+        addNode(buildUploadedDesignerNode({ kind, stored, existing, position }));
+      } catch (error) {
+        useDesignerRunStore.setState({
+          runError: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [addNode, canvasCenter, closeDock, domainGraph?.nodes.length],
+  );
+
+  const onUploadChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (file) void placeUpload(file);
+    },
+    [placeUpload],
+  );
+
   return (
     <div className="designer-canvas-dock" data-testid="designer-canvas-dock">
       <div className="designer-canvas-dock__bar" role="toolbar" aria-label={t('designer.dock.label')}>
-        {DESIGNER_ADD_TEMPLATES.map((item) => (
+        {DOCK_ADD_TEMPLATES.map((item) => (
           <button
             key={item.id}
             type="button"
@@ -150,6 +187,24 @@ export function DesignerCanvasDock() {
         >
           <FolderOpen size={18} aria-hidden />
         </button>
+        <button
+          type="button"
+          className="designer-canvas-dock__btn"
+          aria-label={t('designer.dock.upload')}
+          title={t('designer.dock.uploadHint')}
+          data-testid="designer-canvas-dock-upload-btn"
+          onClick={() => uploadInputRef.current?.click()}
+        >
+          <Upload size={18} aria-hidden />
+        </button>
+        <input
+          ref={uploadInputRef}
+          type="file"
+          accept={DESIGNER_UPLOAD_ACCEPT}
+          hidden
+          data-testid="designer-canvas-dock-upload-input"
+          onChange={onUploadChange}
+        />
       </div>
     </div>
   );

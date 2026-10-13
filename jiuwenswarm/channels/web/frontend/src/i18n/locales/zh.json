@@ -206,6 +206,8 @@
       "assets": "素材库",
       "assetsTitle": "当前画布",
       "assetsHint": "打开当前画布素材列表。",
+      "upload": "上传",
+      "uploadHint": "上传图片、视频或音频文件，作为新节点添加到画布。",
       "comfyuiHint": "导入 ComfyUI 工作流（.json）。仅添加 vLLM-Omni 的 Generate Image / Generate Video 节点。",
       "group": {
         "image": "图片",
@@ -230,6 +232,8 @@
       "previewOrEdit": "预览或编辑",
       "download": "下载",
       "delete": "删除",
+      "replace": "上传替换",
+      "replaceHint": "上传新文件替换此节点的内容。",
       "deleteHint": "删除此节点及其连线。也可选中后按 Delete / Backspace。",
       "deleteConfirmTitle": "删除节点",
       "deleteConfirmMessage": "该节点包含已生成的内容，删除后不可恢复。是否确定删除？",

@@ -22,7 +22,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { DesignerExecutionGraph } from '../executionGraphTypes';
+import type { DesignerExecutionGraph, DesignerGraphNode } from '../executionGraphTypes';
 import { resolvedNodeCanvasSize, toReactFlowGraph, type DesignerReactFlowEdge, type DesignerReactFlowNode } from '../designerGraphAdapter';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
 import { useDesignerStore } from '../designerStore';
@@ -38,7 +38,7 @@ import {
   offsetCanvasPosition,
 } from '../designerCanvasNodes';
 import { useDesignerAssetLibraryStore } from '../designerAssetLibraryStore';
-import { localPathToFileUri, uploadDesignerAsset } from '../designerAssetUrl';
+import { storeDesignerUpload, uploadOutputRef, uploadedNodeConfig } from '../designerNodeUpload';
 import { useDesignerUiStore, type DesignerZoomKind } from '../designerUiStore';
 import { isMacPlatform } from './DesignerZoomMenu';
 import { DESIGNER_FIT_VIEW_PADDING } from '../designerFitView';
@@ -413,29 +413,18 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
         try {
           const blob = await fetch(asset.objectUrl).then((response) => response.blob());
           const file = new File([blob], asset.filename, { type: asset.mime_type || blob.type });
-          const stored = await uploadDesignerAsset(file);
-          const uri = localPathToFileUri(stored.path);
+          const stored = await storeDesignerUpload(file);
           const node = buildNodeFromLibraryAsset({
             asset,
             existing: graphRef.current.nodes,
             position,
           });
-          node.output_ref = {
-            kind: node.type,
-            uri,
-            mime_type: stored.mime_type || asset.mime_type,
-            label: stored.filename || asset.filename,
-          };
-          node.config = {
-            ...(node.config ?? {}),
-            user_replaced_output: true,
-            upload: {
-              ...(node.config?.upload ?? {}),
-              filename: stored.filename || asset.filename,
-              uri,
-              mime_type: stored.mime_type || asset.mime_type,
-            },
-          };
+          node.output_ref = uploadOutputRef(node.type, stored);
+          node.config = uploadedNodeConfig(
+            node.config as Record<string, unknown>,
+            stored,
+            asset.id,
+          ) as DesignerGraphNode['config'];
           addDomainNode(node);
           await useDesignerStore.getState().flushSave();
         } catch (error) {

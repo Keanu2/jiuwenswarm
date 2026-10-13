@@ -1,8 +1,16 @@
-import { Download, ScanSearch, Trash } from 'lucide-react';
-import { useCallback, type MouseEvent } from 'react';
+import { Download, Replace, ScanSearch, Trash } from 'lucide-react';
+import { useCallback, useRef, useState, type ChangeEvent, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { downloadPreviewFile } from '../../../../components/ui/FilePreviewPanel/filePreviewShared';
 import { collectDesignerMaterials } from '../../designerMaterials';
+import {
+  canReplaceUploadedNode,
+  storeDesignerUpload,
+  uploadAcceptForNodeType,
+  uploadKindFromMime,
+  uploadOutputRef,
+  uploadedNodeConfig,
+} from '../../designerNodeUpload';
 import { isTextLikeNodeType } from '../../mediaNodeConfig';
 import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
@@ -17,6 +25,12 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
   const { t } = useTranslation();
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const run = useDesignerRunStore((state) => state.run);
+  const updateNodeConfig = useDesignerStore((state) => state.updateNodeConfig);
+  const setNodeOutputRef = useDesignerStore((state) => state.setNodeOutputRef);
+  const applyUploadedOutput = useDesignerRunStore((state) => state.applyUploadedOutput);
+  const canReplace = canReplaceUploadedNode(domainGraph?.nodes.find((node) => node.id === nodeId));
+  const replaceInputRef = useRef<HTMLInputElement>(null);
+  const [replacing, setReplacing] = useState(false);
   const inspectNode = useDesignerUiStore((state) => state.inspectNode);
   const requestDeleteNodes = useDesignerUiStore((state) => state.requestDeleteNodes);
   const previewLabel = isTextLikeNodeType(nodeType)
@@ -65,6 +79,29 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
     [hasOutput, material, nodeId],
   );
 
+  const onReplaceChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file || uploadKindFromMime(file.type) !== nodeType) return;
+      setReplacing(true);
+      try {
+        const stored = await storeDesignerUpload(file);
+        const outputRef = uploadOutputRef(nodeType, stored);
+        updateNodeConfig(nodeId, (config) => uploadedNodeConfig(config, stored));
+        setNodeOutputRef(nodeId, outputRef);
+        applyUploadedOutput(nodeId, outputRef);
+      } catch (error) {
+        useDesignerRunStore.setState({
+          runError: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setReplacing(false);
+      }
+    },
+    [applyUploadedOutput, nodeId, nodeType, setNodeOutputRef, updateNodeConfig],
+  );
+
   const onDelete = useCallback(
     (event: MouseEvent) => {
       event.stopPropagation();
@@ -105,6 +142,34 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
         <Download size={14} aria-hidden />
         <span>{t('designer.nodeActions.download')}</span>
       </button>
+      {canReplace ? (
+        <>
+          <button
+            type="button"
+            className="designer-node-action-bar__btn"
+            data-testid="designer-node-action-replace"
+            title={t('designer.nodeActions.replaceHint')}
+            disabled={replacing}
+            onClick={(event) => {
+              event.stopPropagation();
+              replaceInputRef.current?.click();
+            }}
+          >
+            <Replace size={14} aria-hidden />
+            <span>{t('designer.nodeActions.replace')}</span>
+          </button>
+          <input
+            ref={replaceInputRef}
+            type="file"
+            accept={uploadAcceptForNodeType(nodeType)}
+            hidden
+            data-testid="designer-node-action-replace-input"
+            onChange={(event) => {
+              void onReplaceChange(event);
+            }}
+          />
+        </>
+      ) : null}
       <button
         type="button"
         className="designer-node-action-bar__btn"

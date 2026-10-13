@@ -1,7 +1,7 @@
 import { Headphones, Image as ImageIcon, Video, Workflow } from 'lucide-react';
 import { useRef, type ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { DESIGNER_ADD_TEMPLATES, type DesignerAddTemplate } from '../designerCanvasNodes';
+import type { DesignerAddTemplate } from '../designerCanvasNodes';
 
 function TypeIcon({ type }: { type: string }) {
   if (type === 'video') return <Video size={14} aria-hidden />;
@@ -12,12 +12,22 @@ function TypeIcon({ type }: { type: string }) {
 type DesignerAddNodeMenuProps = {
   title?: string;
   testIdPrefix: string;
+  templates: DesignerAddTemplate[];
+  /** ComfyUI import may yield both image and video nodes. */
+  showComfyui: boolean;
   onPick: (template: DesignerAddTemplate) => void;
   /** Chosen ComfyUI workflow JSON files. */
   onImportComfyui: (files: File[]) => void;
 };
 
-export function DesignerAddNodeMenu({ title, testIdPrefix, onPick, onImportComfyui }: DesignerAddNodeMenuProps) {
+export function DesignerAddNodeMenu({
+  title,
+  testIdPrefix,
+  templates,
+  showComfyui,
+  onPick,
+  onImportComfyui,
+}: DesignerAddNodeMenuProps) {
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -34,7 +44,7 @@ export function DesignerAddNodeMenu({ title, testIdPrefix, onPick, onImportComfy
           {title}
         </p>
       ) : null}
-      {DESIGNER_ADD_TEMPLATES.map((item) => (
+      {templates.map((item) => (
         <button
           key={item.id}
           type="button"
@@ -51,30 +61,34 @@ export function DesignerAddNodeMenu({ title, testIdPrefix, onPick, onImportComfy
           </span>
         </button>
       ))}
-      <button
-        type="button"
-        className="chat-mode-select__option"
-        role="menuitem"
-        title={t('designer.dock.comfyuiHint')}
-        data-testid={`${testIdPrefix}-comfyui`}
-        onClick={() => fileInputRef.current?.click()}
-      >
-        <span className="chat-mode-select__option-main">
-          <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden>
-            <Workflow size={14} />
-          </span>
-          <span className="chat-mode-select__label">{t('designer.dock.node.comfyui')}</span>
-        </span>
-      </button>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".json,application/json"
-        multiple
-        hidden
-        data-testid={`${testIdPrefix}-comfyui-input`}
-        onChange={onFileChange}
-      />
+      {showComfyui ? (
+        <>
+          <button
+            type="button"
+            className="chat-mode-select__option"
+            role="menuitem"
+            title={t('designer.dock.comfyuiHint')}
+            data-testid={`${testIdPrefix}-comfyui`}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <span className="chat-mode-select__option-main">
+              <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden>
+                <Workflow size={14} />
+              </span>
+              <span className="chat-mode-select__label">{t('designer.dock.node.comfyui')}</span>
+            </span>
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            multiple
+            hidden
+            data-testid={`${testIdPrefix}-comfyui-input`}
+            onChange={onFileChange}
+          />
+        </>
+      ) : null}
     </>
   );
 }

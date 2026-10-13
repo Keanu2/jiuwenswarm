@@ -25,11 +25,11 @@ type DesignerNodeToolbarProps = {
 export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarProps) {
   const { t } = useTranslation();
   const isMedia = isMediaNodeType(nodeType);
-  const uploadedVideo = useDesignerStore((state) => {
+  const uploadedMedia = useDesignerStore((state) => {
     const node = state.domainGraph?.nodes.find((item) => item.id === nodeId);
-    return nodeType === 'video' && Boolean(node && isUploadedMediaNode(node));
+    return isMedia && Boolean(node && isUploadedMediaNode(node));
   });
-  const canGenerate = nodeType !== 'audio' && !uploadedVideo;
+  const canGenerate = nodeType !== 'audio' && !uploadedMedia;
   const updateNodeConfig = useDesignerStore((state) => state.updateNodeConfig);
   const rerunNode = useDesignerRunStore((state) => state.rerunNode);
   const isRunning = useDesignerRunStore((state) => state.isRunning);

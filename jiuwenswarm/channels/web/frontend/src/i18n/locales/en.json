@@ -206,6 +206,8 @@
       "assets": "Asset library",
       "assetsTitle": "Current canvas",
       "assetsHint": "Toggle the current-canvas asset list.",
+      "upload": "Upload",
+      "uploadHint": "Upload an image, video, or audio file as a new canvas node.",
       "comfyuiHint": "Import a ComfyUI workflow (.json). Only vLLM-Omni Generate Image / Generate Video nodes are added.",
       "group": {
         "image": "Image",
@@ -230,6 +232,8 @@
       "previewOrEdit": "Preview or edit",
       "download": "Download",
       "delete": "Delete",
+      "replace": "Upload & Replace",
+      "replaceHint": "Upload a new file to replace this node's content.",
       "deleteHint": "Delete this node and its connections. You can also press Delete / Backspace.",
       "deleteConfirmTitle": "Delete node",
       "deleteConfirmMessage": "This node contains generated content. Deleting it cannot be undone. Are you sure you want to delete it?",

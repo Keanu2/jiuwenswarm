@@ -1,10 +1,12 @@
 import { CirclePlus } from 'lucide-react';
-import { useCallback, useRef, type MouseEvent } from 'react';
+import { useCallback, useMemo, useRef, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Handle, Position } from '@xyflow/react';
 import {
   buildManualDesignerNode,
   positionLeftOfNode,
+  portAddTemplatesFor,
+  portAllowsComfyui,
   positionRightOfNode,
   type DesignerAddTemplate,
   type DesignerNodePortSide,
@@ -25,11 +27,17 @@ type DesignerNodePortControlProps = {
 export function DesignerNodePortControl({ nodeId, side }: DesignerNodePortControlProps) {
   const { t } = useTranslation();
   const domainGraph = useDesignerStore((state) => state.domainGraph);
+  const nodeType = useDesignerStore(
+    (state) => state.domainGraph?.nodes.find((node) => node.id === nodeId)?.type ?? '',
+  );
+  const templates = useMemo(() => portAddTemplatesFor(nodeType, side), [nodeType, side]);
+  const showComfyui = portAllowsComfyui(nodeType, side);
+  const hasOptions = templates.length > 0 || showComfyui;
   const addNode = useDesignerStore((state) => state.addNode);
   const nodePortMenu = useDesignerUiStore((state) => state.nodePortMenu);
   const toggleNodePortMenu = useDesignerUiStore((state) => state.toggleNodePortMenu);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
-  const menuOpen = nodePortMenu?.nodeId === nodeId && nodePortMenu.side === side;
+  const menuOpen = hasOptions && nodePortMenu?.nodeId === nodeId && nodePortMenu.side === side;
   const importComfyui = useComfyuiImport();
   const suppressClickRef = useRef(false);
   const isSuccessor = side === 'successor';
@@ -77,10 +85,10 @@ export function DesignerNodePortControl({ nodeId, side }: DesignerNodePortContro
     (event: MouseEvent) => {
       event.stopPropagation();
       event.preventDefault();
-      if (suppressClickRef.current) return;
+      if (suppressClickRef.current || !hasOptions) return;
       toggleNodePortMenu(nodeId, side);
     },
-    [nodeId, side, toggleNodePortMenu],
+    [hasOptions, nodeId, side, toggleNodePortMenu],
   );
 
   const onPick = useCallback(
@@ -115,17 +123,22 @@ export function DesignerNodePortControl({ nodeId, side }: DesignerNodePortContro
         type={isSuccessor ? 'source' : 'target'}
         position={isSuccessor ? Position.Right : Position.Left}
         className={`designer-node__port designer-node__port--${side}${menuOpen ? ' is-open' : ''}`}
-        aria-label={ariaLabel}
-        title={ariaLabel}
-        aria-expanded={menuOpen}
+        aria-label={hasOptions ? ariaLabel : undefined}
+        title={hasOptions ? ariaLabel : undefined}
+        aria-expanded={hasOptions ? menuOpen : undefined}
+        // Kept mounted (just inert) so existing edges still dock to this side.
+        isConnectable={hasOptions}
         data-testid={testId}
+        data-variant={hasOptions ? 'menu' : 'empty'}
         onClick={onClick}
         onMouseDown={onMouseDown}
       >
         {/* Icon is offset from the handle box so edges still dock to the node border. */}
-        <span className="designer-node__port-icon" aria-hidden>
-          <CirclePlus size={22} strokeWidth={1.75} />
-        </span>
+        {hasOptions ? (
+          <span className="designer-node__port-icon" aria-hidden>
+            <CirclePlus size={22} strokeWidth={1.75} />
+          </span>
+        ) : null}
       </Handle>
       {menuOpen ? (
         <div
@@ -143,6 +156,8 @@ export function DesignerNodePortControl({ nodeId, side }: DesignerNodePortContro
                 : 'designer.nodeActions.predecessorMenuTitle',
             )}
             testIdPrefix={testIdPrefix}
+            templates={templates}
+            showComfyui={showComfyui}
             onPick={onPick}
             onImportComfyui={onImportComfyui}
           />
