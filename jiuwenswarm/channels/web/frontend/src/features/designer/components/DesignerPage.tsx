@@ -1,7 +1,8 @@
-import { LayoutGrid, Loader2, Map as MapIcon, MessageSquare } from 'lucide-react';
+import { LayoutPanelTop, Loader2, MapPinned, Route, RouteOff } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import PanelCollapseIcon from '../../../assets/panel-collapse.svg?react';
+import chatOrbIcon from '../../../assets/designer-chat-orb.png';
 import {
   collectDesignerMaterials,
   collectPendingRevisions,
@@ -14,6 +15,7 @@ import { useDesignerUiStore } from '../designerUiStore';
 import { DesignerMaterialViewer } from '../DesignerMaterialViewer';
 import { DesignerRevisionChooser } from '../DesignerRevisionChooser';
 import { DesignerDeleteNodeDialog } from './controls/DesignerDeleteNodeDialog';
+import { DesignerZoomMenu } from './DesignerZoomMenu';
 import { DesignerAssetsSidebar } from './DesignerAssetsSidebar';
 import { DesignerCanvas } from './DesignerCanvas';
 import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
@@ -101,9 +103,10 @@ export function DesignerPage({
   const chatSidebarOpen = useDesignerUiStore((state) => state.chatSidebarOpen);
   const assetsSidebarOpen = useDesignerUiStore((state) => state.assetsSidebarOpen);
   const minimapVisible = useDesignerUiStore((state) => state.minimapVisible);
-  const zoomPercent = useDesignerUiStore((state) => state.zoomPercent);
+  const edgesVisible = useDesignerUiStore((state) => state.edgesVisible);
   const toggleChatSidebar = useDesignerUiStore((state) => state.toggleChatSidebar);
   const toggleMinimap = useDesignerUiStore((state) => state.toggleMinimap);
+  const toggleEdges = useDesignerUiStore((state) => state.toggleEdges);
   const requestAutoLayout = useDesignerUiStore((state) => state.requestAutoLayout);
   const pendingDeleteNodeIds = useDesignerUiStore((state) => state.pendingDeleteNodeIds);
   const dismissDeleteNodes = useDesignerUiStore((state) => state.dismissDeleteNodes);
@@ -252,24 +255,34 @@ export function DesignerPage({
             ) : null}
           </div>
           <div className="designer-page__toolbar-actions">
-            <span className="designer-page__zoom" data-testid="designer-page-zoom">
-              {zoomPercent}%
-            </span>
+            <DesignerZoomMenu />
             <span className="designer-page__toolbar-split" aria-hidden />
             <button
               type="button"
               className="designer-page__toolbar-icon-btn"
-              aria-label={t('designer.dock.layout')}
+              aria-label={edgesVisible ? t('designer.toolbar.hideEdges') : t('designer.toolbar.showEdges')}
+              aria-pressed={edgesVisible}
+              title={edgesVisible ? t('designer.toolbar.hideEdges') : t('designer.toolbar.showEdges')}
+              data-testid="designer-page-edges-toggle"
+              disabled={!canvasInteractive}
+              onClick={toggleEdges}
+            >
+              {edgesVisible ? <Route size={18} aria-hidden /> : <RouteOff size={18} aria-hidden />}
+            </button>
+            <button
+              type="button"
+              className="designer-page__toolbar-icon-btn"
+              aria-label={t('designer.toolbar.layoutNodes')}
               title={t('designer.dock.layoutHint')}
               data-testid="designer-page-layout"
               disabled={!canvasInteractive || !domainGraph?.nodes.length}
               onClick={requestAutoLayout}
             >
-              <LayoutGrid size={18} aria-hidden />
+              <LayoutPanelTop size={18} aria-hidden />
             </button>
             <button
               type="button"
-              className={`designer-page__toolbar-text-btn${minimapVisible ? ' is-active' : ''}`}
+              className={`designer-page__toolbar-icon-btn${minimapVisible ? ' is-active' : ''}`}
               aria-label={t('designer.toolbar.minimap')}
               aria-pressed={minimapVisible}
               title={t('designer.toolbar.minimap')}
@@ -277,19 +290,18 @@ export function DesignerPage({
               disabled={!canvasInteractive}
               onClick={toggleMinimap}
             >
-              <MapIcon size={16} aria-hidden />
-              <span>{t('designer.toolbar.minimap')}</span>
+              <MapPinned size={18} aria-hidden />
             </button>
             <button
               type="button"
-              className={`designer-page__toolbar-outline-btn${chatSidebarOpen ? ' is-active' : ''}`}
+              className="designer-page__chat-btn"
               aria-label={t('designer.toolbar.openChat')}
               aria-pressed={chatSidebarOpen}
               title={t('designer.toolbar.openChat')}
               data-testid="designer-page-chat-toggle"
               onClick={toggleChatSidebar}
             >
-              <MessageSquare size={16} aria-hidden />
+              <img src={chatOrbIcon} alt="" width={20} height={20} />
               <span>{t('designer.toolbar.openChat')}</span>
             </button>
             <DesignerRunControl

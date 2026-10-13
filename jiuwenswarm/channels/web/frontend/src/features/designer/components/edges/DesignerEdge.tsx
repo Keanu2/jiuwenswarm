@@ -9,6 +9,7 @@ import { Trash2 } from 'lucide-react';
 import { useCallback, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useDesignerStore } from '../../designerStore';
+import { useDesignerUiStore } from '../../designerUiStore';
 
 export type DesignerEdgeType = Edge<{ label?: string }>;
 
@@ -26,6 +27,7 @@ export function DesignerEdge({
 }: EdgeProps<DesignerEdgeType>) {
   const { t } = useTranslation();
   const removeEdges = useDesignerStore((state) => state.removeEdges);
+  const edgesVisible = useDesignerUiStore((state) => state.edgesVisible);
   const [edgePath, centerX, centerY] = getBezierPath({
     sourceX,
     sourceY,
@@ -43,6 +45,17 @@ export function DesignerEdge({
     },
     [id, removeEdges],
   );
+
+  if (!edgesVisible) {
+    return (
+      <BaseEdge
+        id={id}
+        path={edgePath}
+        style={{ opacity: 0 }}
+        interactionWidth={0}
+      />
+    );
+  }
 
   return (
     <>

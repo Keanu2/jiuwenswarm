@@ -10,6 +10,13 @@ export type DesignerNodePortMenu = {
   side: DesignerNodePortSide;
 };
 
+export type DesignerZoomKind = 'in' | 'out' | 'fit' | '50' | '100' | '200';
+
+export type DesignerZoomRequest = {
+  id: number;
+  kind: DesignerZoomKind;
+};
+
 type DesignerUiStore = {
   selectedMaterialId: string;
   viewerOpen: boolean;
@@ -21,7 +28,9 @@ type DesignerUiStore = {
   chatSidebarOpen: boolean;
   assetsSidebarOpen: boolean;
   minimapVisible: boolean;
+  edgesVisible: boolean;
   zoomPercent: number;
+  zoomRequest: DesignerZoomRequest | null;
   layoutRequestId: number;
   pendingDeleteNodeIds: string[];
   setCanvasTool: (tool: DesignerCanvasTool) => void;
@@ -33,7 +42,9 @@ type DesignerUiStore = {
   toggleAssetsSidebar: () => void;
   setAssetsSidebarOpen: (open: boolean) => void;
   toggleMinimap: () => void;
+  toggleEdges: () => void;
   setZoomPercent: (percent: number) => void;
+  requestZoom: (kind: DesignerZoomKind) => void;
   requestAutoLayout: () => void;
   requestDeleteNodes: (nodeIds: string[]) => void;
   dismissDeleteNodes: () => void;
@@ -58,7 +69,9 @@ const initialState = {
   chatSidebarOpen: true,
   assetsSidebarOpen: false,
   minimapVisible: true,
+  edgesVisible: true,
   zoomPercent: 100,
+  zoomRequest: null as DesignerZoomRequest | null,
   layoutRequestId: 0,
   pendingDeleteNodeIds: [] as string[],
 };
@@ -120,7 +133,14 @@ export const useDesignerUiStore = create<DesignerUiStore>((set) => ({
 
   toggleMinimap: () => set((state) => ({ minimapVisible: !state.minimapVisible })),
 
+  toggleEdges: () => set((state) => ({ edgesVisible: !state.edgesVisible })),
+
   setZoomPercent: (percent) => set({ zoomPercent: percent }),
+
+  requestZoom: (kind) =>
+    set((state) => ({
+      zoomRequest: { id: (state.zoomRequest?.id ?? 0) + 1, kind },
+    })),
 
   requestAutoLayout: () => set((state) => ({ layoutRequestId: state.layoutRequestId + 1 })),
 
