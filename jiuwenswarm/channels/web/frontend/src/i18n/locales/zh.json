@@ -202,7 +202,6 @@
       "hand": "平移画布",
       "handHint": "拖动画布。快捷键 H。",
       "layout": "整理",
-      "layoutHint": "按连线重新排列节点，避免重叠并靠近摆放。",
       "assets": "素材库",
       "assetsTitle": "当前画布",
       "assetsHint": "打开当前画布素材列表。",

@@ -202,7 +202,6 @@
       "hand": "Pan canvas",
       "handHint": "Drag to pan. Shortcut H.",
       "layout": "Organize",
-      "layoutHint": "Rearrange nodes by connections so they sit close without overlapping.",
       "assets": "Asset library",
       "assetsTitle": "Current canvas",
       "assetsHint": "Toggle the current-canvas asset list.",

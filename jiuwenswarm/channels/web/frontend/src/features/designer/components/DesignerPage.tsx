@@ -273,7 +273,7 @@ export function DesignerPage({
               type="button"
               className="designer-page__toolbar-icon-btn"
               aria-label={t('designer.toolbar.layoutNodes')}
-              title={t('designer.dock.layoutHint')}
+              title={t('designer.toolbar.layoutNodes')}
               data-testid="designer-page-layout"
               disabled={!canvasInteractive || !domainGraph?.nodes.length}
               onClick={requestAutoLayout}
