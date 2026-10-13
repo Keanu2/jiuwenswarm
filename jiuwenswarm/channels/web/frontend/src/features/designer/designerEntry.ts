@@ -1,10 +1,17 @@
 import { useWorkspaceStore } from '../../stores';
+import { useChatStore } from '../../stores/chatStore';
+import { resolveChatModelSelection, useSessionStore } from '../../stores/sessionStore';
 import { useDesignerStore } from './designerStore';
 import { useDesignerChatStore } from './designerChatStore';
-import { designerGraphClient } from './designerGraphClient';
+import { designerGraphClient, designerWorkspaceClient } from './designerGraphClient';
 import { DESIGNER_MATERIAL_SAVED_EVENT } from './designerMaterials';
 import { useDesignerRunStore } from './designerRunStore';
-import type { DesignerBootstrapReference, DesignerStoredReference } from './designerReferences';
+import {
+  mediaItemsToBootstrapReferences,
+  type DesignerBootstrapReference,
+  type DesignerStoredReference,
+} from './designerReferences';
+import type { MediaItem } from '../../types';
 
 export const DESIGNER_BOOTSTRAP_THINKING_MS = 0;
 
@@ -194,6 +201,134 @@ export async function chatDesignerGraph(params: {
       role: 'assistant',
       content: `${params.errorText || 'Could not update the workflow.'}${message ? ` (${message})` : ''}`,
       kind: 'chat_error',
+    });
+  }
+}
+
+const DEFAULT_DESIGN_PROJECT_ID = 'default';
+
+export function resolveDesignComposerProjectId(): string {
+  const { selectedProject, projects } = useWorkspaceStore.getState();
+  if (
+    selectedProject
+    && !selectedProject.is_default
+    && selectedProject.project_id !== DEFAULT_DESIGN_PROJECT_ID
+    && selectedProject.project_id !== 'default_code'
+  ) {
+    return selectedProject.project_id;
+  }
+  return projects.find((project) => project.is_default || project.project_id === DEFAULT_DESIGN_PROJECT_ID)?.project_id
+    || DEFAULT_DESIGN_PROJECT_ID;
+}
+
+/** New design task from the shared composer. No directory selection uses the default project. */
+export async function submitDesignComposer(params: {
+  prompt: string;
+  mediaItems?: MediaItem[];
+}): Promise<{ projectId: string; sessionId: string }> {
+  const prompt = params.prompt.trim();
+  const checked = mediaItemsToBootstrapReferences(params.mediaItems);
+  if (checked.error) {
+    throw new Error(checked.error);
+  }
+  if (!prompt && checked.refs.length === 0) {
+    throw new Error('empty');
+  }
+  const projectId = resolveDesignComposerProjectId();
+  const created = await designerWorkspaceClient.createSession({ projectId });
+  const sessionId = String(created.session?.session_id || '');
+  if (!sessionId) throw new Error('missing session');
+  const converted = checked;
+  const activeSessionId = useChatStore.getState().activeSessionId;
+  const sessionState = useSessionStore.getState();
+  const selectedModel = resolveChatModelSelection(
+    sessionState.chatAvailableModels,
+    sessionState.runtimes[activeSessionId ?? '']?.selectedModelName ?? null,
+    sessionState.defaultModelName,
+  );
+  const workspace = await designerWorkspaceClient.composeSession({
+    projectId,
+    sessionId,
+    prompt: prompt || '根据参考素材创作',
+    modelName: selectedModel?.model_name,
+    references: converted.refs,
+  });
+  useDesignerStore.getState().applyGraph(workspace.graph);
+  useDesignerChatStore.getState().replaceMessages(
+    workspace.graph.graph_id,
+    workspace.messages,
+  );
+  return { projectId, sessionId };
+}
+
+/** First message on an empty session canvas. Stays inside the project. */
+export async function composeDesignerSession(params: {
+  projectId: string;
+  sessionId: string;
+  prompt: string;
+  references?: DesignerBootstrapReference[];
+  thinkingText?: string;
+  errorText?: string;
+}): Promise<void> {
+  const prompt = params.prompt.trim();
+  const references = params.references || [];
+  if (!prompt && references.length === 0) return;
+  const chatStore = useDesignerChatStore.getState();
+  const chatReferences: DesignerStoredReference[] = references.map((item, index) => ({
+    kind: item.kind,
+    filename: item.filename,
+    mime_type: item.mime_type,
+    path: item.path,
+    uri: item.uri || item.path,
+    role: item.role || 'reference',
+    order: index + 1,
+  }));
+  chatStore.appendMessage({
+    role: 'user',
+    content: prompt,
+    kind: 'user',
+    ...(chatReferences.length > 0 ? { references: chatReferences } : {}),
+  });
+  const thinkingText = params.thinkingText || 'Decomposing your request into an agentic design graph…';
+  const thinkingId = chatStore.appendMessage({
+    role: 'assistant',
+    content: thinkingText,
+    kind: 'thinking',
+  });
+  useDesignerRunStore.getState().applyLeaderActivity({
+    kind: 'thinking',
+    text: thinkingText,
+    at: Date.now(),
+  });
+  try {
+    const activeSessionId = useChatStore.getState().activeSessionId;
+    const sessionState = useSessionStore.getState();
+    const selectedModel = resolveChatModelSelection(
+      sessionState.chatAvailableModels,
+      sessionState.runtimes[activeSessionId ?? '']?.selectedModelName ?? null,
+      sessionState.defaultModelName,
+    );
+    const workspace = await designerWorkspaceClient.composeSession({
+      projectId: params.projectId,
+      sessionId: params.sessionId,
+      prompt,
+      modelName: selectedModel?.model_name,
+      references,
+    });
+    useDesignerStore.getState().applyGraph(workspace.graph);
+    useDesignerRunStore.getState().applyLeaderActivity(null);
+    useDesignerChatStore.getState().replaceMessages(
+      workspace.graph.graph_id,
+      workspace.messages,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    useDesignerRunStore.getState().applyLeaderActivity(null);
+    chatStore.removeMessage(thinkingId);
+    chatStore.appendMessage({
+      role: 'assistant',
+      content: `${params.errorText || 'Failed to compose the design workflow.'}${message ? ` (${message})` : ''}`,
+      kind: 'bootstrap_error',
     });
   }
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +38,221 @@ def _workspace_payload(project_dir: str) -> dict:
     }
 
 
+def test_pair_design_canvases_keeps_chat_canvases_separate():
+    sessions = [
+        {"session_id": "s1", "created_at": 1, "title": "One"},
+        {"session_id": "s2", "created_at": 2, "title": "Two"},
+    ]
+    graphs = [
+        {"graph_id": "g1", "updated_at": 10, "metadata": {"session_id": "s1"}},
+        {"graph_id": "g1-old", "updated_at": 5, "metadata": {"session_id": "s1"}},
+        {"graph_id": "g2", "updated_at": 30, "metadata": {"session_id": "s2"}},
+    ]
+
+    pairs = designer_adapter._pair_design_canvases(sessions, graphs)
+
+    assert [
+        (item["session"]["session_id"], item["graph"]["graph_id"]) for item in pairs
+    ] == [("s1", "g1"), ("s2", "g2")]
+
+
+def test_pair_design_canvases_adopts_a_legacy_graph():
+    pairs = designer_adapter._pair_design_canvases(
+        [{"session_id": "s1", "created_at": 1, "title": "Legacy"}],
+        [{"graph_id": "g-legacy", "created_at": 4, "updated_at": 4, "metadata": {}}],
+    )
+
+    assert pairs[0]["graph"]["graph_id"] == "g-legacy"
+
+
+def test_get_design_workspace_returns_only_the_requested_session(monkeypatch):
+    project = Project(
+        project_id="proj_design",
+        name="Design",
+        project_dir="D:/design",
+        work_mode="design",
+    )
+    sessions = [
+        {
+            "session_id": "s1",
+            "project_id": "proj_design",
+            "work_mode": "design",
+            "created_at": 1,
+            "title": "One",
+        },
+        {
+            "session_id": "s2",
+            "project_id": "proj_design",
+            "work_mode": "design",
+            "created_at": 2,
+            "title": "Two",
+        },
+    ]
+    graphs = [
+        {
+            "graph_id": "g1",
+            "project_id": "proj_design",
+            "title": "One",
+            "updated_at": 10,
+            "nodes": [],
+            "metadata": {"session_id": "s1"},
+        },
+        {
+            "graph_id": "g2",
+            "project_id": "proj_design",
+            "title": "Two",
+            "updated_at": 20,
+            "nodes": [],
+            "metadata": {"session_id": "s2"},
+        },
+    ]
+    monkeypatch.setattr(
+        designer_adapter.project_store,
+        "get_project_by_id",
+        lambda project_id, cache_bust=False: project if project_id == project.project_id else None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.collect_all_sessions_metadata",
+        lambda: sessions,
+    )
+    monkeypatch.setattr(designer_adapter._store, "list_graphs_for_project", lambda project_id: graphs)
+    monkeypatch.setattr(designer_adapter._store, "get_latest_run_for_graph", lambda graph_id: None)
+    monkeypatch.setattr(
+        designer_adapter,
+        "_design_workspace_messages",
+        lambda session_id: [{"id": session_id, "content": session_id}],
+    )
+
+    payload, error, code = designer_adapter._get_design_workspace(
+        {"project_id": "proj_design", "session_id": "s2"}
+    )
+
+    assert error is None
+    assert code is None
+    assert payload is not None
+    assert payload["session"]["session_id"] == "s2"
+    assert payload["graph"]["graph_id"] == "g2"
+    assert payload["messages"] == [{"id": "s2", "content": "s2"}]
+    assert [item["session_id"] for item in payload["sessions"]] == ["s1", "s2"]
+
+
+def test_default_project_can_host_a_design_canvas(monkeypatch):
+    sessions = [
+        {
+            "session_id": "design_default",
+            "project_id": "default",
+            "work_mode": "design",
+            "created_at": 1,
+            "title": "画布 1",
+        }
+    ]
+    graphs = [
+        {
+            "graph_id": "g-default",
+            "project_id": "default",
+            "title": "画布 1",
+            "updated_at": 10,
+            "nodes": [],
+            "metadata": {"session_id": "design_default"},
+        }
+    ]
+    monkeypatch.setattr(
+        designer_adapter.project_store,
+        "get_project_by_id",
+        lambda project_id, cache_bust=False: None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.collect_all_sessions_metadata",
+        lambda: sessions,
+    )
+    monkeypatch.setattr(
+        designer_adapter._store,
+        "list_graphs_for_project",
+        lambda project_id: graphs if project_id == "default" else [],
+    )
+    monkeypatch.setattr(designer_adapter._store, "get_latest_run_for_graph", lambda graph_id: None)
+    monkeypatch.setattr(designer_adapter, "_design_workspace_messages", lambda session_id: [])
+
+    payload, error, code = designer_adapter._get_design_workspace(
+        {"project_id": "default", "session_id": "design_default"}
+    )
+
+    assert error is None
+    assert code is None
+    assert payload is not None
+    assert payload["project"]["project_id"] == "default"
+    assert payload["session"]["session_id"] == "design_default"
+    assert payload["graph"]["graph_id"] == "g-default"
+
+
+def test_default_session_rehomes_a_graph_saved_under_another_project(monkeypatch):
+    sessions = [
+        {
+            "session_id": "design_default",
+            "project_id": "default",
+            "work_mode": "design",
+            "created_at": 1,
+            "title": "晨光咖啡",
+        }
+    ]
+    foreign = {
+        "graph_id": "g-foreign",
+        "project_id": "proj_stray",
+        "title": "晨光咖啡",
+        "updated_at": 10,
+        "nodes": [{"id": "n1"}],
+        "metadata": {"session_id": "design_default"},
+    }
+    saved: list[dict] = []
+    hidden: list[str] = []
+    stray = Project(
+        project_id="proj_stray",
+        name="stray",
+        project_dir="",
+        work_mode="design",
+    )
+
+    monkeypatch.setattr(
+        designer_adapter.project_store,
+        "get_project_by_id",
+        lambda project_id, cache_bust=False: stray if project_id == "proj_stray" else None,
+    )
+    monkeypatch.setattr(
+        designer_adapter.project_store,
+        "hide_project",
+        lambda project_id: hidden.append(project_id),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.collect_all_sessions_metadata",
+        lambda: sessions,
+    )
+    monkeypatch.setattr(
+        designer_adapter._store,
+        "list_graphs_for_project",
+        lambda project_id: [],
+    )
+    monkeypatch.setattr(designer_adapter._store, "list_graphs", lambda: [foreign])
+    monkeypatch.setattr(
+        designer_adapter._store,
+        "save_graph",
+        lambda graph: saved.append(dict(graph)) or dict(graph),
+    )
+    monkeypatch.setattr(designer_adapter._store, "get_latest_run_for_graph", lambda graph_id: None)
+    monkeypatch.setattr(designer_adapter, "_design_workspace_messages", lambda session_id: [])
+
+    payload, error, code = designer_adapter._get_design_workspace(
+        {"project_id": "default", "session_id": "design_default"}
+    )
+
+    assert error is None
+    assert code is None
+    assert payload is not None
+    assert payload["graph"]["graph_id"] == "g-foreign"
+    assert payload["graph"]["project_id"] == "default"
+    assert saved and saved[0]["project_id"] == "default"
+    assert hidden == ["proj_stray"]
+
+
 def test_graph_workspace_uses_authoritative_project_directory(tmp_path, monkeypatch):
     root = tmp_path / "agent"
     project_dir = root / "workspace" / "design" / "managed-project"
@@ -47,7 +263,6 @@ def test_graph_workspace_uses_authoritative_project_directory(tmp_path, monkeypa
         project_dir=str(project_dir),
         work_mode="design",
     )
-    monkeypatch.setattr(common, "get_agent_root_dir", lambda: root)
     monkeypatch.setattr(
         common.project_store,
         "get_project_by_id",
@@ -61,27 +276,115 @@ def test_graph_workspace_uses_authoritative_project_directory(tmp_path, monkeypa
         }
     )
 
-    assert directory == project_dir / "assets"
+    assert directory == project_dir.resolve()
     assert directory.is_dir()
 
 
-def test_graph_workspace_rejects_design_project_outside_managed_root(tmp_path, monkeypatch):
-    root = tmp_path / "agent"
+def test_graph_workspace_uses_a_user_chosen_project_directory(tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
     project = Project(
         project_id="proj_design",
         name="Design",
-        project_dir=str(tmp_path / "outside"),
+        project_dir=str(outside),
         work_mode="design",
     )
-    monkeypatch.setattr(common, "get_agent_root_dir", lambda: root)
     monkeypatch.setattr(
         common.project_store,
         "get_project_by_id",
         lambda project_id, cache_bust=False: project,
     )
 
-    with pytest.raises(ValueError, match="outside the managed root"):
-        common.graph_workspace_dir({"project_id": project.project_id})
+    directory = common.graph_workspace_dir({"project_id": project.project_id})
+
+    assert directory == outside.resolve()
+    assert directory.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_generated_image_is_saved_in_the_project_directory(tmp_path, monkeypatch):
+    from jiuwenswarm.server.runtime.designer import media_generation
+    from jiuwenswarm.server.runtime.designer.handlers import image_nodes
+    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
+
+    project_dir = tmp_path / "film"
+    project_dir.mkdir()
+    project = Project(
+        project_id="proj_design",
+        name="Design",
+        project_dir=str(project_dir),
+        work_mode="design",
+    )
+    monkeypatch.setattr(
+        common.project_store,
+        "get_project_by_id",
+        lambda project_id, cache_bust=False: project if project_id == project.project_id else None,
+    )
+    seen: dict[str, str | None] = {}
+
+    async def fake_generate(prompt, *, size=None, reference_images=None, save_dir=None):
+        seen["save_dir"] = save_dir
+        dest = Path(save_dir) / "image_test.jpg"
+        dest.write_bytes(b"jpg")
+        return {"image_path": str(dest)}
+
+    monkeypatch.setattr(media_generation, "generation_enabled", lambda _kind: True)
+    monkeypatch.setattr(media_generation, "generate_image", fake_generate)
+    graph = {
+        "project_id": project.project_id,
+        "metadata": {"session_id": "design_1"},
+        "nodes": [],
+        "edges": [],
+    }
+    result = await image_nodes._require_image(
+        prompt="a still",
+        stem="designer_image_run_n",
+        ctx=NodeExecutionContext(graph=graph, run_id="run", node_id="n_image", run={}),
+    )
+
+    assert Path(seen["save_dir"]) == project_dir.resolve()
+    assert (project_dir / "image_test.jpg").is_file()
+    assert result.output_ref["label"] == "image_test.jpg"
+
+
+@pytest.mark.asyncio
+async def test_generated_image_without_a_project_uses_the_session_workspace(tmp_path, monkeypatch):
+    from jiuwenswarm.server.runtime.designer import media_generation
+    from jiuwenswarm.server.runtime.designer.handlers import image_nodes
+    from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
+
+    session_dir = tmp_path / "design_abc"
+    monkeypatch.setattr(
+        common,
+        "get_default_project_session_workspace_dir",
+        lambda session_id: session_dir,
+    )
+    seen: dict[str, str | None] = {}
+
+    async def fake_generate(prompt, *, size=None, reference_images=None, save_dir=None):
+        seen["save_dir"] = save_dir
+        dest = Path(save_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / "image_test.jpg"
+        path.write_bytes(b"jpg")
+        return {"image_path": str(path)}
+
+    monkeypatch.setattr(media_generation, "generation_enabled", lambda _kind: True)
+    monkeypatch.setattr(media_generation, "generate_image", fake_generate)
+    graph = {
+        "project_id": "default",
+        "metadata": {"session_id": "design_abc"},
+        "nodes": [],
+        "edges": [],
+    }
+    await image_nodes._require_image(
+        prompt="a still",
+        stem="designer_image_run_n",
+        ctx=NodeExecutionContext(graph=graph, run_id="run", node_id="n_image", run={}),
+    )
+
+    assert Path(seen["save_dir"]) == session_dir
+    assert (session_dir / "image_test.jpg").is_file()
 
 
 @pytest.mark.asyncio
@@ -270,5 +573,33 @@ def test_bootstrap_rejects_project_dir_outside_the_design_root(tmp_path, monkeyp
 
     assert payload is None
     assert code == "BAD_REQUEST"
-    assert "managed workspace" in str(error)
+    assert "matching project_id" in str(error)
     assert created == []
+
+
+def test_canvas_title_uses_model_phrase_not_the_prompt():
+    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+
+    prompt = "帮我做一支雨夜里侦探追凶的短片，要有三个镜头和结尾反转"
+    assert usable_story_title("雨夜追凶", prompt) == "雨夜追凶"
+    assert usable_story_title(prompt, prompt) == ""
+    assert usable_story_title(prompt[:40], prompt) == ""
+
+    graph = {
+        "title": prompt[:80],
+        "metadata": {"script_analysis": {"story_name": "雨夜追凶"}},
+    }
+    assert designer_adapter._stamp_canvas_title(graph, prompt) == "雨夜追凶"
+    assert graph["title"] == "雨夜追凶"
+
+    echoed = {"title": prompt[:80], "metadata": {"script_analysis": {"story_name": prompt}}}
+    assert designer_adapter._stamp_canvas_title(echoed, prompt) == ""
+    assert echoed["title"] == "设计项目"
+    assert designer_adapter._replacement_display_title(
+        "AT10 第3镜首次生成",
+        prompt,
+        "雨夜追凶",
+    ) == ""
+    assert designer_adapter._replacement_display_title(prompt, prompt, "雨夜追凶") == "雨夜追凶"
+    assert designer_adapter._replacement_display_title("A" * 50, "", "雨夜追凶") == "雨夜追凶"
+    assert designer_adapter._replacement_display_title("AT10", "", "雨夜追凶") == ""

@@ -39,7 +39,7 @@ import {
 import { ConnectorMarketPanel } from './components/ConnectorMarket';
 import { LoginDialog } from './components/LoginDialog';
 import { DesignerPage } from './features/designer/components/DesignerPage';
-import { DesignerLanding } from './features/designer/components/DesignerLanding';
+import { submitDesignComposer } from './features/designer/designerEntry';
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI, FEATURE_PERSONAL_CONTEXT_UI } from './featureFlags';
@@ -2905,6 +2905,47 @@ function AppContent({
       if (creatingSessionRef.current) return;
       creatingSessionRef.current = true;
       useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, true);
+      if (useWorkspaceStore.getState().workMode === 'design') {
+        try {
+          const created = await submitDesignComposer({
+            prompt: messageContent,
+            mediaItems,
+          });
+          const store = useWorkspaceStore.getState();
+          if (!store.expandedProjectIds[created.projectId]) {
+            store.toggleProjectExpanded(created.projectId);
+          }
+          await store.loadProjects();
+          await store.loadProjectSessions(created.projectId);
+          const project = useWorkspaceStore.getState().projects.find(
+            (item) => item.project_id === created.projectId,
+          );
+          if (project && !project.is_default) store.setSelectedProject(project);
+          navigate({
+            kind: 'design-project',
+            projectId: created.projectId,
+            sessionId: created.sessionId,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : '';
+          const referenceError = code === 'image_limit'
+            ? t('designer.chat.limitImages')
+            : code === 'video_limit'
+              ? t('designer.chat.limitVideo')
+              : code === 'audio_limit'
+                ? t('designer.chat.limitAudio')
+                : code === 'too_large'
+                  ? t('designer.chat.tooLarge')
+                  : code === 'unsupported'
+                    ? t('designer.chat.unsupported')
+                    : '';
+          window.alert(referenceError || (code && code !== 'empty' ? code : t('designer.chat.bootstrapError')));
+        } finally {
+          creatingSessionRef.current = false;
+          useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
+        }
+        return;
+      }
       const newRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
       const runtimeSettings = {
         mode: newRuntime?.mode ?? mode,
@@ -3436,6 +3477,16 @@ function AppContent({
     navigate({ kind: 'design-project', projectId: project.project_id });
   }, [navigate, setSelectedProject]);
 
+  const handleSelectDesignSession = useCallback((project: ProjectInfo, nextSessionId: string) => {
+    setSelectedProject(project);
+    setActiveNav('chat');
+    navigate({
+      kind: 'design-project',
+      projectId: project.project_id,
+      sessionId: nextSessionId,
+    });
+  }, [navigate, setSelectedProject]);
+
   const handleProjectRemoved = useCallback((projectId: string, removedWorkMode: WorkMode) => {
     // 目前Design功能页是唯一需要处理项目软删除的场景
     // 打开项目的URL是 `/design/<id>`，但是回到上层是`/chat/new`
@@ -3447,12 +3498,6 @@ function AppContent({
       navigate({ kind: 'chat-new' });
     }
   }, [navigate, route]);
-
-  const handleDesignWorkspaceCreated = useCallback((projectId: string, createdSessionId: string) => {
-    sessionIdRef.current = createdSessionId;
-    setSessionId(createdSessionId);
-    navigate({ kind: 'design-project', projectId });
-  }, [navigate]);
 
   const handleNavigate = useCallback(
     (nav: MainNavKey) => {
@@ -3705,6 +3750,8 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onSelectDesignProject={handleSelectDesignProject}
+                onSelectDesignSession={handleSelectDesignSession}
+                activeDesignSessionId={route.kind === 'design-project' ? route.sessionId : undefined}
                 onProjectRemoved={handleProjectRemoved}
                 onOpenCron={() => handleNavigate('cron')}
                 isCronActive={false}
@@ -3715,18 +3762,21 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                   workspaceWorkMode === 'design' && route.kind === 'design-project'
                 }
               />
-              {workspaceWorkMode === 'design' ? (
-                route.kind === 'design-project' ? (
+              {workspaceWorkMode === 'design' && route.kind === 'design-project' ? (
                   <DesignerPage
                     projectId={route.projectId}
+                    sessionId={route.sessionId}
                     sidebarCollapsed={conversationSidebarCollapsed}
                     onToggleSidebarCollapse={() =>
                       setConversationSidebarCollapsed((v) => !v)
                     }
+                    onOpenSession={(nextProjectId, nextSessionId, options) => {
+                      navigate(
+                        { kind: 'design-project', projectId: nextProjectId, sessionId: nextSessionId },
+                        options,
+                      );
+                    }}
                   />
-                ) : (
-                  <DesignerLanding onCreated={handleDesignWorkspaceCreated} />
-                )
               ) : (
               <div
                 className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
@@ -3939,6 +3989,8 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               activeSessionId={null}
               onNew={(options) => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
+              onSelectDesignProject={handleSelectDesignProject}
+              onSelectDesignSession={handleSelectDesignSession}
               onOpenCron={() => handleNavigate('cron')}
               isCronActive
               collapsed={conversationSidebarCollapsed}

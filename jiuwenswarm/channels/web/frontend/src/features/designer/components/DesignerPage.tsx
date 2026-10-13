@@ -18,10 +18,13 @@ import { DesignerCanvas } from './DesignerCanvas';
 import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
 import { DesignerRunControl } from './DesignerRunControl';
 import { designerWorkspaceClient } from '../designerGraphClient';
+import { useWorkspaceStore } from '../../../stores/workspaceStore';
 import './DesignerPage.css';
 
 type DesignerPageProps = {
   projectId?: string;
+  sessionId?: string;
+  onOpenSession?: (projectId: string, sessionId: string, options?: { replace?: boolean }) => void;
   sidebarCollapsed?: boolean;
   onToggleSidebarCollapse?: () => void;
 };
@@ -67,6 +70,8 @@ function formatModifiedAt(
 
 export function DesignerPage({
   projectId,
+  sessionId,
+  onOpenSession,
   sidebarCollapsed = false,
   onToggleSidebarCollapse,
 }: DesignerPageProps) {
@@ -100,20 +105,30 @@ export function DesignerPage({
   const toggleMinimap = useDesignerUiStore((state) => state.toggleMinimap);
   const requestAutoLayout = useDesignerUiStore((state) => state.requestAutoLayout);
   const workspaceLoadSeqRef = useRef(0);
+  const loadedKeyRef = useRef('');
+  const onOpenSessionRef = useRef(onOpenSession);
+  onOpenSessionRef.current = onOpenSession;
   useEffect(() => bindDesignerRuntime(), []);
 
   useEffect(() => {
-    const loadSeq = ++workspaceLoadSeqRef.current;
     if (!effectiveProjectId || bootstrapInProgress) return;
+    const requestedKey = `${effectiveProjectId}:${sessionId || ''}`;
+    if (sessionId && loadedKeyRef.current === requestedKey) return;
+    const loadSeq = ++workspaceLoadSeqRef.current;
     useDesignerStore.getState().reset();
-    void designerWorkspaceClient.get(effectiveProjectId)
+    void designerWorkspaceClient.get(effectiveProjectId, sessionId)
       .then((workspace) => {
         if (workspaceLoadSeqRef.current !== loadSeq) return;
+        const opened = String(workspace.session?.session_id || '');
+        loadedKeyRef.current = `${effectiveProjectId}:${opened}`;
         useDesignerStore.getState().applyGraph(workspace.graph);
         useDesignerChatStore.getState().replaceMessages(
           workspace.graph.graph_id,
           workspace.messages,
         );
+        if (opened && opened !== sessionId) {
+          onOpenSessionRef.current?.(effectiveProjectId, opened, { replace: true });
+        }
       })
       .catch((reason) => {
         if (workspaceLoadSeqRef.current !== loadSeq) return;
@@ -128,6 +143,7 @@ export function DesignerPage({
   }, [
     bootstrapInProgress,
     effectiveProjectId,
+    sessionId,
   ]);
 
   useEffect(() => {
@@ -143,6 +159,13 @@ export function DesignerPage({
       });
     }
   }, [boundGraphId, domainGraph, resetForGraph, resetUi, t]);
+
+  useEffect(() => {
+    if (!effectiveProjectId) return;
+    const workspace = useWorkspaceStore.getState();
+    void workspace.loadProjectSessions(effectiveProjectId);
+    void workspace.loadProjects();
+  }, [domainGraph?.graph_id, domainGraph?.title, effectiveProjectId]);
 
   const materials = useMemo(
     () => collectDesignerMaterials(domainGraph, run),

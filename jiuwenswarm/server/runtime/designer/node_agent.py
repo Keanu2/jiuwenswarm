@@ -879,9 +879,12 @@ class DesignerGraphToolkit:
         return json.dumps(_upstream_outputs(self.ctx, preds), ensure_ascii=False)
 
     def _media_save_dir(self) -> Path:
-        root = get_agent_workspace_dir() / "designer_media" / self.ctx.run_id
-        root.mkdir(parents=True, exist_ok=True)
-        return root
+        from jiuwenswarm.server.runtime.designer.handlers.common import (
+            canvas_output_dir,
+        )
+
+        graph = self.ctx.graph if isinstance(self.ctx.graph, dict) else None
+        return canvas_output_dir(graph)
 
     async def call_image_model(
         self,
@@ -889,6 +892,7 @@ class DesignerGraphToolkit:
         prompt: str = "",
     ) -> str:
         from jiuwenswarm.server.runtime.designer.handlers.common import (
+            canvas_output_dir,
             generate_designer_image,
         )
         from jiuwenswarm.server.runtime.designer.media_settings import image_settings
@@ -984,6 +988,9 @@ class DesignerGraphToolkit:
                 size=image_settings(self.ctx.graph).size,
                 reference_images=refs[:4] if refs else None,
                 max_tries=2,
+                save_dir=str(
+                    canvas_output_dir(self.ctx.graph if isinstance(self.ctx.graph, dict) else None)
+                ),
             )
             path = str((generated or {}).get("image_path") or "").strip()
             if not path:

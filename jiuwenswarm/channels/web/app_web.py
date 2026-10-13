@@ -971,22 +971,55 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         return ext in {".md", ".mdx"}
 
     @classmethod
-    def _is_path_under_allowed_root(cls, target: Path) -> bool:
-        target_resolved = target.resolve()
+    def _registered_project_dirs(cls) -> list[Path]:
+        """Directories the user chose as projects, so canvas previews can read them."""
+        projects_file = Path(cls.workspace_root) / "projects.json"
         try:
-            in_workspace = (
-                os.path.commonpath([str(cls.workspace_root), str(target_resolved)])
-                == str(cls.workspace_root)
-            )
-            in_agent_teams = (
-                os.path.commonpath([str(cls.agent_teams_root), str(target_resolved)]) == str(cls.agent_teams_root)
-            )
-            in_logs = os.path.commonpath([str(cls.logs_root), str(target_resolved)]) == str(cls.logs_root)
-            in_auto_harness = \
-                os.path.commonpath([str(cls.auto_harness_root), str(target_resolved)]) == str(cls.auto_harness_root)
-            return in_workspace or in_agent_teams or in_logs or in_auto_harness
+            mtime = projects_file.stat().st_mtime
+        except OSError:
+            return []
+        cache = getattr(cls, "_registered_project_dir_cache", None)
+        if isinstance(cache, tuple) and cache[0] == mtime:
+            return cache[1]
+        try:
+            payload = json.loads(projects_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return []
+        projects = payload.get("projects") if isinstance(payload, dict) else None
+        dirs: list[Path] = []
+        if isinstance(projects, list):
+            for item in projects:
+                if not isinstance(item, dict):
+                    continue
+                raw = str(item.get("project_dir") or "").strip()
+                if not raw:
+                    continue
+                try:
+                    resolved = Path(raw).expanduser().resolve()
+                except (OSError, RuntimeError):
+                    continue
+                if resolved.is_absolute():
+                    dirs.append(resolved)
+        cls._registered_project_dir_cache = (mtime, dirs)
+        return dirs
+
+    @staticmethod
+    def _is_path_under(root: Path, target: Path) -> bool:
+        try:
+            return os.path.commonpath([str(root), str(target)]) == str(root)
         except ValueError:
             return False
+
+    @classmethod
+    def _is_path_under_allowed_root(cls, target: Path) -> bool:
+        target_resolved = target.resolve()
+        return (
+            cls._is_path_under(Path(cls.workspace_root), target_resolved)
+            or cls._is_path_under(Path(cls.agent_teams_root), target_resolved)
+            or cls._is_path_under(Path(cls.logs_root), target_resolved)
+            or cls._is_path_under(Path(cls.auto_harness_root), target_resolved)
+            or any(cls._is_path_under(root, target_resolved) for root in cls._registered_project_dirs())
+        )
 
     def _write_json(self, status: int, payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

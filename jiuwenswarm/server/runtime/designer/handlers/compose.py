@@ -785,7 +785,9 @@ class ComposeNodeHandler:
             len(paths),
             ctx.run_id,
         )
-        dest = handler_io.get_agent_workspace_dir() / f"designer_compose_{ctx.run_id}.mp4"
+        dest = handler_io.canvas_output_dir(
+            ctx.graph if isinstance(ctx.graph, dict) else None
+        ) / f"designer_compose_{ctx.run_id}.mp4"
         merged = concatenate_clip_videos(paths, dest)
         scored = mix_compose_soundtrack(
             merged,

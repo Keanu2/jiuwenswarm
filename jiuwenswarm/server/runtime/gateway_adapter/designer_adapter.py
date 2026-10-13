@@ -23,8 +23,11 @@ from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 
 from jiuwenswarm.common.schema.designer_graph import (
     CONFIG_DELEGATE_HANDLER,
+    GRAPH_SOURCE_MANUAL,
+    SCHEMA_VERSION,
     DesignerGraphValidationError,
     apply_graph_patch,
+    new_graph_id,
     node_pipeline,
     node_role,
     NODE_ROLE_COMPOSE,
@@ -34,7 +37,7 @@ from jiuwenswarm.common.schema.designer_graph import (
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import get_agent_root_dir, get_agent_sessions_dir
 from jiuwenswarm.common.work_mode import (
-    DEFAULT_WEB_WORK_MODE,
+    DEFAULT_PROJECT_ID_WORK,
     DESIGN_WORK_MODE,
     is_default_project_id,
 )
@@ -51,8 +54,6 @@ from jiuwenswarm.server.runtime.gateway_adapter.base import (
     build_error_response,
 )
 from jiuwenswarm.server.runtime.session import project_store
-from jiuwenswarm.server.runtime.session.work_mode import resolve_request_work_mode
-
 logger = logging.getLogger(__name__)
 
 _store = DesignerGraphStore()
@@ -253,6 +254,113 @@ def _design_title(prompt: str) -> str:
     return sanitize_project_dir_name(prompt, max_len=80)
 
 
+_DESIGN_PLACEHOLDER_TITLE = "设计项目"
+
+
+_retitled_design_projects: set[str] = set()
+
+
+def _replacement_display_title(current: str, prompt: str, story_name: str) -> str:
+    """Short model title when the current label is still the user prompt."""
+    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+
+    reference = prompt or current
+    summary = usable_story_title(story_name, reference)
+    if not summary:
+        return ""
+    current_flat = " ".join(str(current or "").split())
+    if usable_story_title(current, reference) and len(current_flat) <= 40:
+        return ""
+    if prompt or len(current_flat) > 40:
+        return summary
+    return ""
+
+
+def _graph_story_prompt(graph: dict[str, Any]) -> tuple[str, str]:
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    return str(analysis.get("story_name") or ""), str(graph.get("description") or "")
+
+
+def sync_design_display_name(project: Any) -> Any:
+    """Rename a design project and its canvases from the stored model title."""
+    project_id = str(getattr(project, "project_id", "") or "")
+    if not project_id or project_id in _retitled_design_projects:
+        return project
+    if str(getattr(project, "work_mode", "") or "") != DESIGN_WORK_MODE:
+        return project
+    try:
+        pairs = _pair_design_canvases(
+            _design_sessions(project_id),
+            _store.list_graphs_for_project(project_id),
+        )
+    except Exception:
+        logger.debug("Skip design title sync for %s", project_id, exc_info=True)
+        return project
+    _retitled_design_projects.add(project_id)
+    if not pairs:
+        return project
+    from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
+
+    ordered = sorted(pairs, key=lambda item: int(item["graph"].get("updated_at") or 0))
+    project_summary = ""
+    for pair in ordered:
+        graph = pair["graph"]
+        story_name, prompt = _graph_story_prompt(graph)
+        if not project_summary:
+            project_summary = _replacement_display_title(
+                str(getattr(project, "name", "") or ""),
+                prompt,
+                story_name,
+            )
+        session = pair["session"]
+        session_id = str(session.get("session_id") or "")
+        session_title = _replacement_display_title(
+            str(session.get("title") or ""),
+            prompt,
+            story_name,
+        )
+        if session_id and session_title and session_title != str(session.get("title") or ""):
+            update_session_metadata(
+                session_id=session_id,
+                title=session_title,
+                touch_last_message_at=False,
+                sync_write=True,
+            )
+    if project_summary:
+        renamed_name = _design_title(project_summary) or project_summary
+        if renamed_name and renamed_name != project.name:
+            try:
+                renamed = project_store.rename_project(project_id, renamed_name)
+                if renamed is not None:
+                    return renamed
+            except (project_store.ProjectNameConflict, ValueError):
+                logger.debug(
+                    "Design project %s kept its name; %r is taken",
+                    project_id,
+                    renamed_name,
+                    exc_info=True,
+                )
+    return project
+
+
+def sync_design_display_names(projects: list[Any]) -> list[Any]:
+    return [sync_design_display_name(project) for project in projects]
+
+
+def _stamp_canvas_title(graph: dict[str, Any], prompt: str) -> str:
+    """Set the canvas title from the model's short name, never the raw prompt."""
+    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    name = usable_story_title(analysis.get("story_name"), prompt) or usable_story_title(
+        graph.get("title"), prompt
+    )
+    graph["title"] = name or _DESIGN_PLACEHOLDER_TITLE
+    return name
+
+
 def _design_workspace_messages(session_id: str) -> list[dict[str, Any]]:
     from jiuwenswarm.server.runtime.session.session_history import load_history_records
 
@@ -286,35 +394,81 @@ def _design_workspace_messages(session_id: str) -> list[dict[str, Any]]:
     return messages
 
 
-def _get_design_workspace(
-    params: dict[str, Any],
-) -> tuple[dict[str, Any] | None, str | None, str | None]:
+def _graph_session_id(graph: dict[str, Any]) -> str:
+    metadata = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    return str((metadata or {}).get("session_id") or "").strip()
+
+
+def _design_sessions(project_id: str) -> list[dict[str, Any]]:
     from jiuwenswarm.server.runtime.session.session_metadata import (
         collect_all_sessions_metadata,
     )
 
-    project_id = str(params.get("project_id") or "").strip()
-    if not project_id:
-        return None, "project_id is required", "BAD_REQUEST"
-    project = project_store.get_project_by_id(project_id, cache_bust=True)
-    if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
-        return None, "design project not found", "NOT_FOUND"
-    sessions = [
+    return [
         item
         for item in collect_all_sessions_metadata()
         if str(item.get("project_id") or "") == project_id
         and str(item.get("work_mode") or "") == DESIGN_WORK_MODE
     ]
-    sessions.sort(key=lambda item: float(item.get("created_at") or 0))
-    graphs = _store.list_graphs_for_project(project_id)
-    if len(sessions) != 1 or len(graphs) != 1:
-        return None, "design workspace invariant is not satisfied", "CONFLICT"
-    session = sessions[0]
-    graph = graphs[0]
+
+
+def _pair_design_canvases(
+    sessions: list[dict[str, Any]],
+    graphs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bind each design session to one canvas.
+
+    A project may hold many sessions. Chat history stays on the session, and
+    the canvas is the graph whose metadata.session_id matches it. Graphs saved
+    before sessions were explicit fill sessions that do not yet have one.
+    """
+    ordered = sorted(sessions, key=lambda item: float(item.get("created_at") or 0))
+    owned: dict[str, list[dict[str, Any]]] = {}
+    unmatched: list[dict[str, Any]] = []
+    for graph in graphs:
+        session_id = _graph_session_id(graph)
+        if session_id:
+            owned.setdefault(session_id, []).append(graph)
+        else:
+            unmatched.append(graph)
+    unmatched.sort(key=lambda item: int(item.get("created_at") or item.get("updated_at") or 0))
+    pairs: list[dict[str, Any]] = []
+    for session in ordered:
+        session_id = str(session.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        candidates = list(owned.get(session_id) or [])
+        if not candidates and unmatched:
+            candidates = [unmatched.pop(0)]
+        if not candidates:
+            continue
+        graph = max(candidates, key=lambda item: int(item.get("updated_at") or 0))
+        pairs.append({"session": session, "graph": graph})
+    return pairs
+
+
+def _canvas_summary(session: dict[str, Any], graph: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_id": str(session.get("session_id") or ""),
+        "title": str(session.get("title") or graph.get("title") or "画布"),
+        "graph_id": str(graph.get("graph_id") or ""),
+        "project_id": str(graph.get("project_id") or session.get("project_id") or ""),
+        "updated_at": int(graph.get("updated_at") or 0),
+    }
+
+
+def _workspace_from_pair(
+    project: Any,
+    pair: dict[str, Any],
+    pairs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    session = pair["session"]
+    graph = pair["graph"]
+    project_id = str(project.project_id)
     run = _store.get_latest_run_for_graph(str(graph.get("graph_id") or ""))
     return {
         "project": {
-            "project_id": project.project_id,
+            "project_id": project_id,
             "name": project.name,
             "project_dir": project.project_dir,
             "work_mode": project.work_mode,
@@ -328,7 +482,148 @@ def _get_design_workspace(
         },
         "graph": dict(hydrate_graph_node_outputs(graph, run)),
         "messages": _design_workspace_messages(str(session.get("session_id") or "")),
-    }, None, None
+        "sessions": [
+            _canvas_summary(item["session"], item["graph"])
+            for item in pairs
+        ],
+    }
+
+
+def _virtual_default_design_project() -> Any:
+    """Design tasks with no chosen directory live on the shared default project."""
+    return project_store.Project(
+        project_id=DEFAULT_PROJECT_ID_WORK,
+        name="默认项目",
+        project_dir="",
+        work_mode=DESIGN_WORK_MODE,
+    )
+
+
+def _hide_abandoned_design_project(project_id: str, keep_project_id: str) -> None:
+    """Hide a project that bootstrap created and then left without a canvas."""
+    if (
+        not project_id
+        or project_id == keep_project_id
+        or is_default_project_id(project_id)
+    ):
+        return
+    project = project_store.get_project_by_id(project_id, cache_bust=True)
+    if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
+        return
+    if _design_sessions(project_id) or _store.list_graphs_for_project(project_id):
+        return
+    try:
+        project_store.hide_project(project_id)
+    except Exception:
+        logger.warning(
+            "Failed to hide abandoned design project %s",
+            project_id,
+            exc_info=True,
+        )
+
+
+def _graphs_for_design_project(
+    project_id: str,
+    sessions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return canvases for these sessions, including ones saved under another project.
+
+    Composing a default-project session used to clear the project id and create
+    a new design project. The session stayed on ``default`` while the graph
+    was stored on that new id, so opening the session found no canvas.
+    """
+    graphs = list(_store.list_graphs_for_project(project_id))
+    session_ids = {
+        str(item.get("session_id") or "").strip()
+        for item in sessions
+        if str(item.get("session_id") or "").strip()
+    }
+    covered = {_graph_session_id(graph) for graph in graphs}
+    missing = session_ids - covered
+    if not missing:
+        return graphs
+    known_ids = {str(graph.get("graph_id") or "") for graph in graphs}
+    for graph in _store.list_graphs():
+        session_id = _graph_session_id(graph)
+        graph_id = str(graph.get("graph_id") or "")
+        if session_id not in missing or not graph_id or graph_id in known_ids:
+            continue
+        previous_project_id = str(graph.get("project_id") or "")
+        repaired = dict(graph)
+        repaired["project_id"] = project_id
+        try:
+            repaired = dict(_store.save_graph(repaired))
+        except Exception:
+            logger.warning(
+                "Failed to move design graph %s onto %s",
+                graph_id,
+                project_id,
+                exc_info=True,
+            )
+        graphs.append(repaired)
+        known_ids.add(graph_id)
+        missing.discard(session_id)
+        _hide_abandoned_design_project(previous_project_id, project_id)
+    return graphs
+
+
+def _design_pairs(
+    project_id: str,
+) -> tuple[Any, list[dict[str, Any]], str | None, str | None]:
+    if is_default_project_id(project_id):
+        project = _virtual_default_design_project()
+        project_id = project.project_id
+    else:
+        project = project_store.get_project_by_id(project_id, cache_bust=True)
+        if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
+            return None, [], "design project not found", "NOT_FOUND"
+    sessions = _design_sessions(project_id)
+    pairs = _pair_design_canvases(
+        sessions,
+        _graphs_for_design_project(project_id, sessions),
+    )
+    return project, pairs, None, None
+
+
+def _select_design_pair(
+    pairs: list[dict[str, Any]],
+    session_id: str,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    if not pairs:
+        return None, "design session not found", "NOT_FOUND"
+    wanted = str(session_id or "").strip()
+    if wanted:
+        pair = next(
+            (
+                item
+                for item in pairs
+                if str(item["session"].get("session_id") or "") == wanted
+            ),
+            None,
+        )
+        if pair is None:
+            return None, "design session not found", "NOT_FOUND"
+        return pair, None, None
+    pair = max(pairs, key=lambda item: int(item["graph"].get("updated_at") or 0))
+    return pair, None, None
+
+
+def _get_design_workspace(
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    project_id = str(params.get("project_id") or "").strip()
+    if not project_id:
+        return None, "project_id is required", "BAD_REQUEST"
+    project, pairs, error, code = _design_pairs(project_id)
+    if error is not None or project is None:
+        return None, error, code
+    pair, error, code = _select_design_pair(
+        pairs,
+        str(params.get("session_id") or ""),
+    )
+    if error is not None or pair is None:
+        return None, error, code
+    return _workspace_from_pair(project, pair, pairs), None, None
 
 
 def _rollback_design_workspace(
@@ -342,12 +637,12 @@ def _rollback_design_workspace(
         _store.delete_graph(graph_id)
     if session_id:
         shutil.rmtree(get_agent_sessions_dir() / session_id, ignore_errors=True)
-    if project_id:
+    if project_id and not is_default_project_id(project_id):
         try:
             project_store.purge_project(project_id)
         except Exception:
             logger.warning("Failed to roll back design project %s", project_id, exc_info=True)
-    if project_dir:
+    if project_dir and not is_default_project_id(project_id):
         shutil.rmtree(project_dir, ignore_errors=True)
 
 
@@ -365,36 +660,18 @@ async def _create_design_workspace_once(
     if not prompt:
         return None, "prompt is required", "BAD_REQUEST"
     model_name = str(params.get("model_name") or "").strip()
-    short_id = uuid.uuid4().hex[:8]
-    title = _design_title(prompt)
-    directory_name = f"{_design_title(prompt)}-{short_id}"
-    project_dir = str(get_agent_root_dir() / "workspace" / DESIGN_WORK_MODE / directory_name)
-    project_id = ""
+    project_id = DEFAULT_PROJECT_ID_WORK
     session_id = f"design_{uuid.uuid4().hex}"
     graph_id = ""
     committed = False
     try:
-        Path(project_dir).mkdir(parents=True, exist_ok=False)
-        try:
-            project, _ = project_store.create_project_checked(
-                title,
-                project_dir,
-                DESIGN_WORK_MODE,
-            )
-        except project_store.ProjectNameConflict:
-            project, _ = project_store.create_project_checked(
-                f"{title}-{short_id}",
-                project_dir,
-                DESIGN_WORK_MODE,
-            )
-        project_id = project.project_id
         init_session_metadata(
             session_id=session_id,
             channel_id=request.channel_id or "web",
             user_id=str(request.user_id or ""),
-            title=title,
+            title="画布 1",
             mode="designer",
-            project_dir=project_dir,
+            project_dir="",
             project_id=project_id,
             persist_session=True,
             model=model_name,
@@ -430,17 +707,9 @@ async def _create_design_workspace_once(
         if model_name:
             metadata["model_name"] = model_name
         graph["metadata"] = metadata
+        summary = _stamp_canvas_title(graph, prompt)
         graph = dict(_store.save_graph(graph))
-
-        generated_title = _design_title(str(graph.get("title") or title))
-        if generated_title and generated_title != project.name:
-            try:
-                renamed = project_store.rename_project(project_id, generated_title)
-                if renamed is not None:
-                    project = renamed
-                    title = generated_title
-            except (project_store.ProjectNameConflict, ValueError):
-                pass
+        session_title = summary or "画布 1"
 
         now = time.time()
         records = [
@@ -474,7 +743,7 @@ async def _create_design_workspace_once(
         write_history_records(session_id, records, preserve_existing_format=False)
         update_session_metadata(
             session_id=session_id,
-            title=title,
+            title=session_title,
             set_message_count=2,
             last_user_message_at=now,
             touch_last_message_at=True,
@@ -484,31 +753,28 @@ async def _create_design_workspace_once(
         return {
             "project": {
                 "project_id": project_id,
-                "name": title,
-                "project_dir": project_dir,
+                "name": "默认项目",
+                "project_dir": "",
                 "work_mode": DESIGN_WORK_MODE,
             },
             "session": {
                 "session_id": session_id,
-                "title": title,
+                "title": session_title,
                 "project_id": project_id,
-                "project_dir": project_dir,
+                "project_dir": "",
                 "work_mode": DESIGN_WORK_MODE,
             },
             "graph": graph,
             "messages": _design_workspace_messages(session_id),
         }, None, None
-    except FileExistsError:
-        return None, "design workspace directory already exists", "CONFLICT"
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to create design workspace")
         return None, str(exc), "INTERNAL_ERROR"
     finally:
-        # A workspace is committed only when all four durable resources exist.
         if not committed:
             _rollback_design_workspace(
-                project_id=project_id,
-                project_dir=project_dir,
+                project_id="",
+                project_dir="",
                 session_id=session_id,
                 graph_id=graph_id,
             )
@@ -573,6 +839,176 @@ async def _create_design_workspace(
             logger.exception("Failed to persist Design idempotency receipt")
             return None, f"failed to persist workspace receipt: {exc}", "INTERNAL_ERROR"
         return result
+
+
+def _session_title(raw: Any, fallback: str) -> str:
+    title = " ".join(str(raw or "").split())
+    if not title:
+        title = fallback
+    return title[:80]
+
+
+def _create_design_session(
+    request: AgentRequest,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Open another canvas under an existing design project."""
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        init_session_metadata,
+    )
+
+    project_id = str(params.get("project_id") or "").strip()
+    if not project_id:
+        return None, "project_id is required", "BAD_REQUEST"
+    project, _pairs, error, code = _design_pairs(project_id)
+    if error is not None or project is None:
+        return None, error, code
+    existing = _design_sessions(project_id)
+    title = _session_title(params.get("title"), f"画布 {len(existing) + 1}")
+    session_id = f"design_{uuid.uuid4().hex}"
+    init_session_metadata(
+        session_id=session_id,
+        channel_id=request.channel_id or "web",
+        user_id=str(request.user_id or ""),
+        title=title,
+        mode="designer",
+        project_dir=str(project.project_dir or ""),
+        project_id=project_id,
+        persist_session=True,
+        work_mode=DESIGN_WORK_MODE,
+    )
+    try:
+        graph = normalize_execution_graph(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "graph_id": new_graph_id(),
+                "project_id": project_id,
+                "title": title,
+                "source": GRAPH_SOURCE_MANUAL,
+                "nodes": [],
+                "edges": [],
+                "metadata": {
+                    "session_id": session_id,
+                    "work_mode": DESIGN_WORK_MODE,
+                    "project_dir": str(project.project_dir or ""),
+                },
+            }
+        )
+        _store.save_graph(graph)
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(get_agent_sessions_dir() / session_id, ignore_errors=True)
+        logger.exception("Failed to create design session")
+        return None, str(exc), "INTERNAL_ERROR"
+    return _get_design_workspace({"project_id": project_id, "session_id": session_id})
+
+
+async def _compose_design_session(
+    request: AgentRequest,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Turn an empty session canvas into a directed graph without a new project."""
+    from jiuwenswarm.server.runtime.session.session_history import write_history_records
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        update_session_metadata,
+    )
+
+    project_id = str(params.get("project_id") or "").strip()
+    session_id = str(params.get("session_id") or "").strip()
+    prompt = str(params.get("prompt") or "").strip()
+    if not project_id or not session_id:
+        return None, "project_id and session_id are required", "BAD_REQUEST"
+    if not prompt and not (
+        isinstance(params.get("references"), list) and params.get("references")
+    ):
+        return None, "prompt is required", "BAD_REQUEST"
+    current, error, code = _get_design_workspace(
+        {"project_id": project_id, "session_id": session_id}
+    )
+    if error is not None or current is None:
+        return None, error, code
+    previous = current.get("graph") if isinstance(current.get("graph"), dict) else {}
+    previous_id = str(previous.get("graph_id") or "")
+    if previous.get("nodes"):
+        return None, "design session already has a canvas", "CONFLICT"
+    model_name = str(params.get("model_name") or "").strip()
+    bootstrap_params = {
+        "prompt": prompt or "根据参考素材创作",
+        "project_id": project_id,
+        "work_mode": DESIGN_WORK_MODE,
+        "optimize_for": "quality",
+        "session_id": session_id,
+        **({"model_name": model_name} if model_name else {}),
+        **(
+            {"references": params["references"]}
+            if isinstance(params.get("references"), list)
+            else {}
+        ),
+    }
+    bootstrap, error, code = await _bootstrap_graph_with_director(
+        bootstrap_params,
+        request.channel_id or "web",
+        _leader_progress_callback(request),
+        allow_additional_session=True,
+    )
+    if error is not None or not isinstance(bootstrap, dict):
+        return None, error or "failed to create graph", code or "INTERNAL_ERROR"
+    graph = bootstrap.get("graph")
+    if not isinstance(graph, dict) or not graph.get("graph_id"):
+        return None, "bootstrap response missing graph", "INTERNAL_ERROR"
+    graph = dict(graph)
+    metadata = dict(graph.get("metadata") or {})
+    metadata["session_id"] = session_id
+    metadata["work_mode"] = DESIGN_WORK_MODE
+    graph["metadata"] = metadata
+    graph["project_id"] = project_id
+    summary = _stamp_canvas_title(graph, prompt)
+    try:
+        graph = dict(_store.save_graph(graph))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to save composed design session")
+        return None, str(exc), "INTERNAL_ERROR"
+    new_id = str(graph.get("graph_id") or "")
+    if previous_id and previous_id != new_id:
+        _store.delete_graph(previous_id)
+    now = time.time()
+    records = [
+        {
+            "id": f"{uuid.uuid4()}:user",
+            "role": "user",
+            "request_id": request.request_id,
+            "channel_id": request.channel_id or "web",
+            "timestamp": now,
+            "content": prompt,
+            "event_type": "design.user",
+            "design_kind": "user",
+            **(
+                {"references": params["references"]}
+                if isinstance(params.get("references"), list)
+                else {}
+            ),
+        },
+        {
+            "id": f"{uuid.uuid4()}:assistant",
+            "role": "assistant",
+            "request_id": request.request_id,
+            "channel_id": request.channel_id or "web",
+            "timestamp": now + 0.001,
+            "content": "Director composed the workflow.",
+            "event_type": "design.bootstrap_completed",
+            "design_kind": "bootstrap_done",
+            "graph_id": new_id,
+        },
+    ]
+    write_history_records(session_id, records, preserve_existing_format=False)
+    update_session_metadata(
+        session_id=session_id,
+        title=summary or None,
+        set_message_count=2,
+        last_user_message_at=now,
+        touch_last_message_at=True,
+        sync_write=True,
+    )
+    return _get_design_workspace({"project_id": project_id, "session_id": session_id})
 
 
 def _list_graphs(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -819,7 +1255,7 @@ def _is_managed_design_project_dir(project_dir: str) -> bool:
 
 def _bootstrap_graph(
     params: dict[str, Any],
-    channel_id: str,
+    _channel_id: str,
     analysis: dict[str, Any] | None = None,
     on_progress: Any | None = None,
     media_intent: Any | None = None,
@@ -835,82 +1271,23 @@ def _bootstrap_graph(
         prompt = "根据参考素材创作"
 
     project_id = str(params.get("project_id") or "").strip()
-    if is_default_project_id(project_id):
-        project_id = ""
+    requested_project_dir = str(params.get("project_dir") or "").strip()
+    # Same rule as work: a canvas does not create a project. No selection, or
+    # the virtual default id, stays on ``default``.
     project_payload: dict[str, Any] | None = None
     resolved_project_dir = ""
 
-    if project_id:
+    if is_default_project_id(project_id):
+        if requested_project_dir:
+            return None, "project_dir requires a matching project_id", "BAD_REQUEST"
+        project_id = DEFAULT_PROJECT_ID_WORK
+    else:
         project = project_store.get_project_by_id(project_id, cache_bust=True)
         if project is None or project.hidden:
             return None, "project not found", "NOT_FOUND"
-        if (
-            project.work_mode == DESIGN_WORK_MODE
-            and _store.list_graphs_for_project(project_id)
-        ):
-            return None, "design workspace already has a graph", "CONFLICT"
         resolved_project_dir = str(project.project_dir or "")
-    else:
-        name = str(params.get("name") or "").strip()
-        if not name:
-            from jiuwenswarm.server.runtime.session.project_store import (
-                sanitize_project_dir_name,
-            )
-
-            name = sanitize_project_dir_name(prompt[:80] or "Designer Project")
-        else:
-            from jiuwenswarm.server.runtime.session.project_store import (
-                sanitize_project_dir_name,
-            )
-
-            name = sanitize_project_dir_name(name)
-        work_mode, mode_error = resolve_request_work_mode(params, channel_id)
-        if mode_error is not None:
-            return None, f"invalid work_mode: {params.get('work_mode')!r}", mode_error
-        project_dir = str(params.get("project_dir") or "").strip()
-        if project_dir and not os.path.isabs(project_dir):
-            return None, "project_dir must be an absolute path", "BAD_REQUEST"
-        if project_dir and not os.path.isdir(project_dir):
-            return None, "project directory does not exist", "PROJECT_DIR_MISSING"
-        if project_dir and not _is_managed_design_project_dir(project_dir):
-            return None, "project_dir must be within the managed workspace", "BAD_REQUEST"
-        if not project_dir:
-            try:
-                project_dir = project_store.resolve_default_project_dir(name, work_mode)
-            except ValueError as exc:
-                return None, str(exc), "BAD_REQUEST"
-            try:
-                os.makedirs(project_dir, exist_ok=True)
-            except OSError as exc:
-                return None, f"failed to create project directory: {exc}", "INTERNAL_ERROR"
-        try:
-            project, restored = project_store.create_project_checked(
-                name,
-                project_dir,
-                work_mode,
-            )
-        except project_store.ProjectDirConflict:
-            existing = project_store.get_project_by_dir_and_mode(
-                project_dir, work_mode, cache_bust=True
-            )
-            if existing is None or existing.hidden:
-                return None, "project_dir already exists", "CONFLICT"
-            project, restored = existing, True
-        except project_store.ProjectNameConflict:
-            return None, "project name already exists", "CONFLICT"
-        except ValueError as exc:
-            return None, str(exc), "BAD_REQUEST"
-        project_id = project.project_id
-        resolved_project_dir = str(project.project_dir or "")
-        project_payload = {
-            "project_id": project.project_id,
-            "project_dir": project.project_dir,
-            "restored": restored,
-            "work_mode": project.work_mode or DEFAULT_WEB_WORK_MODE,
-        }
 
     title = params.get("title")
-    from pathlib import Path as _Path
 
     from jiuwenswarm.server.runtime.designer.model_tools import (
         DesignerLlmError,
@@ -932,10 +1309,11 @@ def _bootstrap_graph(
     )
 
     try:
+        session_id = str(params.get("session_id") or "").strip()
         refs_dir = (
-            _Path(resolved_project_dir) / ".designer" / "refs"
+            Path(resolved_project_dir) / ".designer" / "refs"
             if resolved_project_dir
-            else _Path(".") / ".designer" / "refs"
+            else Path(".") / ".designer" / "refs"
         )
         user_refs = normalize_user_references(raw_references, dest_dir=refs_dir)
     except UserReferenceError as exc:
@@ -1363,6 +1741,7 @@ async def _bootstrap_graph_with_director(
     params: dict[str, Any],
     channel_id: str,
     on_progress: Any | None = None,
+    allow_additional_session: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     from jiuwenswarm.server.runtime.designer.model_tools import (
         use_preferred_designer_model,
@@ -1373,6 +1752,7 @@ async def _bootstrap_graph_with_director(
             params,
             channel_id,
             on_progress,
+            allow_additional_session=allow_additional_session,
         )
 
 
@@ -1380,6 +1760,7 @@ async def _bootstrap_graph_with_director_impl(
     params: dict[str, Any],
     channel_id: str,
     on_progress: Any | None = None,
+    allow_additional_session: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     """Enter: seed cast → Brief/Director → Storyboard/Director → Graph/Director.
 
@@ -1557,6 +1938,8 @@ class DesignerAdapter(GatewayAdapter):
         {
             ReqMethod.DESIGNER_WORKSPACE_CREATE.value,
             ReqMethod.DESIGNER_WORKSPACE_GET.value,
+            ReqMethod.DESIGNER_WORKSPACE_SESSION_CREATE.value,
+            ReqMethod.DESIGNER_WORKSPACE_SESSION_COMPOSE.value,
             ReqMethod.DESIGNER_GRAPH_GET.value,
             ReqMethod.DESIGNER_GRAPH_LIST.value,
             ReqMethod.DESIGNER_GRAPH_SAVE.value,
@@ -1582,6 +1965,12 @@ class DesignerAdapter(GatewayAdapter):
                 payload, error, code = await asyncio.to_thread(
                     _get_design_workspace, params
                 )
+            elif method == ReqMethod.DESIGNER_WORKSPACE_SESSION_CREATE:
+                payload, error, code = await asyncio.to_thread(
+                    _create_design_session, request, params
+                )
+            elif method == ReqMethod.DESIGNER_WORKSPACE_SESSION_COMPOSE:
+                payload, error, code = await _compose_design_session(request, params)
             elif method == ReqMethod.DESIGNER_GRAPH_GET:
                 payload, error, code = await asyncio.to_thread(_get_graph, params)
             elif method == ReqMethod.DESIGNER_GRAPH_LIST:

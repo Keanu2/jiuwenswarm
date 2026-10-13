@@ -90,6 +90,8 @@ interface ConversationSidebarProps {
   onNew: (options?: NewConversationOptions) => void;
   onSelect: (session: Session) => void;
   onSelectDesignProject?: (project: ProjectInfo) => void;
+  onSelectDesignSession?: (project: ProjectInfo, sessionId: string) => void;
+  activeDesignSessionId?: string;
   /** 项目软删除成功后回调；上层可按 workMode 决定是否需要路由回退等 */
   onProjectRemoved?: (projectId: string, workMode: WorkMode) => void;
   /** 跳转到"定时任务"主面板；该入口原来在最左侧图标栏，现移到工作小窗口的"新建任务"下方 */
@@ -281,47 +283,6 @@ function ConversationListItem({
       </button>
       {itemTooltip}
       {truncationTooltip}
-    </div>
-  );
-}
-
-function DesignProjectRow({
-  project,
-  active,
-  onSelect,
-  onRemoved,
-}: {
-  project: ProjectInfo;
-  active: boolean;
-  onSelect: () => void;
-  onRemoved: (projectId: string) => void;
-}) {
-  const [menuOpen, setMenuOpen] = useState(false);
-
-  return (
-    <div
-      className={`conversation-sidebar__design-project-row${active ? ' is-active' : ''}${menuOpen ? ' is-menu-open' : ''}`}
-      data-testid="design-sidebar-project"
-      data-variant={project.project_id}
-    >
-      <button
-        type="button"
-        className="conversation-sidebar__design-project"
-        onClick={onSelect}
-        title={project.name}
-        data-testid="design-sidebar-project-main"
-      >
-        <Palette size={16} aria-hidden />
-        <span className="conversation-sidebar__design-project-title">{project.name}</span>
-        {project.pinned ? <PinIcon className="conversation-sidebar__design-project-pin" aria-hidden /> : null}
-      </button>
-      <SidebarMenu
-        type="project"
-        project={project}
-        onRemoved={onRemoved}
-        onOpenChange={setMenuOpen}
-        triggerTestId="design-sidebar-project-more"
-      />
     </div>
   );
 }
@@ -679,7 +640,8 @@ export function ConversationSidebar({
   onNew,
   onSelect,
   onOpenCron,
-  onSelectDesignProject,
+  onSelectDesignSession,
+  activeDesignSessionId,
   onProjectRemoved,
   isCronActive,
   collapsed = false,
@@ -935,36 +897,36 @@ export function ConversationSidebar({
     }
   }
 
-  function renderDesignProject(project: ProjectInfo) {
-    return (
-      <DesignProjectRow
-        key={project.project_id}
-        project={project}
-        active={project.project_id === selectedProject?.project_id}
-        onSelect={() => {
-          setSelectedProject(project);
-          onSelectDesignProject?.(project);
-        }}
-        onRemoved={(projectId) => onProjectRemoved?.(projectId, workMode)}
-      />
-    );
+function openListedSession(session: Session) {
+    if (workMode !== 'design') {
+      onSelect(session);
+      return;
+    }
+    const project = projects.find((item) => item.project_id === session.project_id) || defaultProject;
+    if (!project || !onSelectDesignSession) {
+      onSelect(session);
+      return;
+    }
+    setSelectedProject(project.is_default ? null : project);
+    onSelectDesignSession(project, session.session_id);
   }
 
 function renderSession(session: Session, options: { nested?: boolean; projectMenu?: boolean } = {}) {
     const nested = options.nested === true;
     const projectMenu = options.projectMenu === true;
+    const designActive = workMode === 'design' && activeDesignSessionId === session.session_id;
     return (
       <ConversationListItem
         key={session.session_id}
         session={session}
         runtime={runtimes[session.session_id]}
-        active={activeSessionId === session.session_id}
+        active={workMode === 'design' ? designActive : activeSessionId === session.session_id}
         nested={nested}
         unread={unreadSessions.has(session.session_id)}
         now={relativeTimeNow}
-        onSelect={() => onSelect(session)}
+        onSelect={() => openListedSession(session)}
         menuScope={projectMenu ? 'project' : 'conversation'}
-        activeSessionId={activeSessionId}
+        activeSessionId={workMode === 'design' ? (activeDesignSessionId ?? null) : activeSessionId}
         onLeaveActiveSession={leaveActiveSession}
       />
     );
@@ -1063,6 +1025,7 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
   }
 
   function renderProject(project: ProjectInfo) {
+    const sessionsLoaded = Object.prototype.hasOwnProperty.call(projectSessions, project.project_id);
     const sessionsForProject = sortedProjectSessions[project.project_id] || [];
     const expanded = Boolean(expandedProjectIds[project.project_id]);
     const hasUnreadCronResult = (jobsByProject.get(project.project_id) || []).some(
@@ -1107,9 +1070,9 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
         />
         {expanded ? (
           <div className="conversation-sidebar__group-list" data-testid="multi-session-project-group-list">
-            {(jobsByProject.get(project.project_id) || []).map((job) => renderCronJob(job, project.project_id, true))}
+            {workMode !== 'design' ? (jobsByProject.get(project.project_id) || []).map((job) => renderCronJob(job, project.project_id, true)) : null}
             {sessionsForProject.length > 0 ? sessionsForProject.map((session) => renderSession(session, { nested: true, projectMenu: true })) : (
-              (jobsByProject.get(project.project_id) || []).length === 0 ? <div className="conversation-sidebar__empty" data-testid="multi-session-project-group-empty">{t('multiSession.project.noConversations')}</div> : null
+              sessionsLoaded && (workMode === 'design' || (jobsByProject.get(project.project_id) || []).length === 0) ? <div className="conversation-sidebar__empty" data-testid="multi-session-project-group-empty">{t('multiSession.project.noConversations')}</div> : null
             )}
             {renderSessionPagination(project.project_id, true)}
           </div>
@@ -1204,51 +1167,7 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
           </button>
         )}
         </div>
-        {workMode === 'design' ? (
-          <>
-            <div className="conversation-sidebar__operations" data-testid="design-sidebar-operations">
-              <button
-                type="button"
-                className="conversation-sidebar__new"
-                onClick={() => {
-                  setSelectedProject(null);
-                  onNew();
-                }}
-                data-testid="design-sidebar-new-project"
-              >
-                <NewTaskIcon aria-hidden />
-                <span>{t('multiSession.project.newProject')}</span>
-              </button>
-            </div>
-            <div className="conversation-sidebar__body" data-testid="design-sidebar-projects">
-              {pinnedProjects.length > 0 ? (
-                <div className="conversation-sidebar__group conversation-sidebar__group--pinned" data-testid="design-sidebar-pinned-group">
-                  <div className="conversation-sidebar__section-heading">
-                    <span className="conversation-sidebar__label">{t('multiSession.project.pinned')}</span>
-                  </div>
-                  <div className="conversation-sidebar__group-list">
-                    {pinnedProjects.map((project) => renderDesignProject(project))}
-                  </div>
-                </div>
-              ) : null}
-              <div className="conversation-sidebar__group">
-                <div className="conversation-sidebar__section-heading">
-                  <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
-                </div>
-                <div className="conversation-sidebar__group-list">
-                  {regularProjects.length === 0 ? (
-                    pinnedProjects.length === 0 ? (
-                      <div className="conversation-sidebar__empty">{t('multiSession.project.noProjects')}</div>
-                    ) : null
-                  ) : (
-                    regularProjects.map((project) => renderDesignProject(project))
-                  )}
-                </div>
-              </div>
-            </div>
-          </>
-        ) : null}
-        <div className="conversation-sidebar__operations" data-testid="multi-session-operations" style={workMode === 'design' ? { display: 'none' } : undefined}>
+        <div className="conversation-sidebar__operations" data-testid="multi-session-operations">
         <button type="button" className="conversation-sidebar__new" onClick={() => {
           setSelectedProject(null);
           onNew();
@@ -1257,6 +1176,7 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
           <NewTaskIcon aria-hidden />
           <span data-testid="multi-session-new-conversation-label">{t('multiSession.newConversation')}</span>
         </button>
+        {workMode !== 'design' ? (
         <button
           type="button"
           className={`conversation-sidebar__new${isCronActive ? ' is-active' : ''}`}
@@ -1266,8 +1186,9 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
           <CronIcon aria-hidden />
           <span data-testid="multi-session-open-cron-label">{t('nav.cron')}</span>
         </button>
+        ) : null}
         </div>
-        <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body" style={workMode === 'design' ? { display: 'none' } : undefined}>
+        <div className="conversation-sidebar__body" data-testid="multi-session-sidebar-body">
         {hasPinnedSection ? (
           <div className="conversation-sidebar__group conversation-sidebar__group--pinned" data-testid="multi-session-pinned-group">
             <div className="conversation-sidebar__section-heading" data-testid="multi-session-pinned-group-heading">
@@ -1353,9 +1274,9 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
             </button>
           </div>
           <div className="conversation-sidebar__group-list" data-testid="multi-session-conversations-list">
-            {defaultProject ? (jobsByProject.get(defaultProject.project_id) || []).map((job) => renderCronJob(job, defaultProject.project_id)) : null}
+            {workMode !== 'design' && defaultProject ? (jobsByProject.get(defaultProject.project_id) || []).map((job) => renderCronJob(job, defaultProject.project_id)) : null}
             {conversationSessions.length > 0 ? conversationSessions.map((session) => renderSession(session)) : (
-              (!defaultProject || (jobsByProject.get(defaultProject.project_id) || []).length === 0) ? <div className="conversation-sidebar__empty" data-testid="multi-session-conversations-empty">{t('multiSession.project.noConversations')}</div> : null
+              (workMode === 'design' || !defaultProject || (jobsByProject.get(defaultProject.project_id) || []).length === 0) ? <div className="conversation-sidebar__empty" data-testid="multi-session-conversations-empty">{t('multiSession.project.noConversations')}</div> : null
             )}
             {defaultProject ? renderSessionPagination(defaultProject.project_id, false) : null}
           </div>

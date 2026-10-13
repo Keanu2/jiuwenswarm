@@ -35,6 +35,19 @@ def designer_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> DesignerG
     return DesignerGraphStore()
 
 
+def test_normalize_keeps_file_already_in_destination(tmp_path: Path) -> None:
+    dest = tmp_path / "uploads"
+    dest.mkdir()
+    source = dest / "face.png"
+    source.write_bytes(_png_bytes())
+    refs = normalize_user_references(
+        [{"kind": "image", "path": str(source), "filename": "face.png", "mime_type": "image/png"}],
+        dest_dir=dest,
+    )
+    assert Path(refs[0]["path"]) == source.resolve()
+    assert list(dest.iterdir()) == [source]
+
+
 def test_normalize_copies_path_and_assigns_ordered_slots(tmp_path: Path) -> None:
     source = tmp_path / "face.png"
     source.write_bytes(_png_bytes())

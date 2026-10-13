@@ -120,7 +120,7 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
       <div className="designer-landing__content">
         <h1 className="designer-landing__heading">
           <span className="chat-welcome__heading-highlight">WorkSwarm</span>
-          <span>{isZh ? "轻松提供设计创意！" : "makes design easier!"}</span>
+          <span>{isZh ? "轻松解决每个设计问题！" : "solves every design problem!"}</span>
         </h1>
         <div className="designer-landing__composer-stage">
           <img

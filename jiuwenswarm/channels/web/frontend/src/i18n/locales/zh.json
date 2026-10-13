@@ -163,10 +163,22 @@
       "assistant": "助手",
       "conversation": "对话",
       "assets": "素材",
-      "canvas": "当前画布"
+      "canvas": "当前画布",
+      "project": "项目素材",
+      "create": "新建"
+    },
+    "sessions": {
+      "label": "画布",
+      "new": "新画布",
+      "create": "新建会话",
+      "project": "所属项目",
+      "pickProject": "请选择项目",
+      "needProject": "请先新建一个项目，再在其中新建会话。",
+      "createFailed": "新建会话失败，请稍后重试。"
     },
     "assets": {
-      "empty": "还没有素材。创建任务时附上图片/视频/音频，或在节点上上传、生成后会显示在这里。",
+      "empty": "这个画布还没有素材。上传或生成后会显示在这里。",
+      "emptyProject": "这个项目还没有共用素材。任意画布上传或生成后，都会出现在这里。",
       "onCanvas": "画布中",
       "libraryOnly": "仅素材库",
       "delete": "删除素材",

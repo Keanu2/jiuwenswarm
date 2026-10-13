@@ -9,6 +9,14 @@ import type {
 } from './executionGraphTypes';
 import type { DesignerChatMessage } from './designerChatStore';
 
+export type DesignerSessionSummary = {
+  session_id: string;
+  title: string;
+  graph_id: string;
+  project_id: string;
+  updated_at?: number;
+};
+
 export type DesignerWorkspace = {
   project: {
     project_id: string;
@@ -25,6 +33,7 @@ export type DesignerWorkspace = {
   };
   graph: DesignerExecutionGraph;
   messages: DesignerChatMessage[];
+  sessions?: DesignerSessionSummary[];
 };
 
 export const designerWorkspaceClient = {
@@ -44,7 +53,34 @@ export const designerWorkspaceClient = {
       },
       { timeoutMs: 20 * 60 * 1000 },
     ),
-  get: (projectId: string) => webRequest<DesignerWorkspace>('designer.workspace.get', { project_id: projectId }),
+  get: (projectId: string, sessionId?: string) =>
+    webRequest<DesignerWorkspace>('designer.workspace.get', {
+      project_id: projectId,
+      ...(sessionId ? { session_id: sessionId } : {}),
+    }),
+  createSession: (params: { projectId: string; title?: string }) =>
+    webRequest<DesignerWorkspace>('designer.workspace.session.create', {
+      project_id: params.projectId,
+      ...(params.title ? { title: params.title } : {}),
+    }),
+  composeSession: (params: {
+    projectId: string;
+    sessionId: string;
+    prompt: string;
+    modelName?: string;
+    references?: Array<Record<string, unknown>>;
+  }) =>
+    webRequest<DesignerWorkspace>(
+      'designer.workspace.session.compose',
+      {
+        project_id: params.projectId,
+        session_id: params.sessionId,
+        prompt: params.prompt,
+        ...(params.modelName ? { model_name: params.modelName } : {}),
+        ...(params.references?.length ? { references: params.references } : {}),
+      },
+      { timeoutMs: 20 * 60 * 1000 },
+    ),
 };
 
 export const designerGraphClient = {

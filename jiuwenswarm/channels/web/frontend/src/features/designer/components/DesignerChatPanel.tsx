@@ -1,7 +1,7 @@
 import { Loader2, SendHorizontal, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { chatDesignerGraph } from '../designerEntry';
+import { chatDesignerGraph, composeDesignerSession } from '../designerEntry';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
 import { useDesignerStore } from '../designerStore';
 import { designerActivityText } from '../designerActivity';
@@ -177,7 +177,7 @@ export function DesignerChatPanel() {
     setSending(true);
     const files = attachments.map((item) => item.file);
     void filesToBootstrapReferences(files)
-      .then((converted) => {
+      .then(async (converted) => {
         if (converted.error) {
           const map: Record<string, string> = {
             image_limit: t('designer.chat.limitImages'),
@@ -195,6 +195,19 @@ export function DesignerChatPanel() {
         });
         setAttachments([]);
         const existingGraph = domainGraph && !isDesignerPreviewGraph(domainGraph) ? domainGraph : null;
+        const sessionId = String(existingGraph?.metadata?.session_id || '');
+        const projectId = String(existingGraph?.project_id || '');
+        const references = converted.refs;
+        if (existingGraph?.graph_id && existingGraph.nodes.length === 0 && sessionId && projectId) {
+          return composeDesignerSession({
+            projectId,
+            sessionId,
+            prompt: content,
+            references,
+            thinkingText: t('designer.chat.thinking'),
+            errorText: t('designer.chat.bootstrapError'),
+          });
+        }
         if (existingGraph?.graph_id) {
           return chatDesignerGraph({
             graphId: existingGraph.graph_id,

@@ -23,8 +23,11 @@ from jiuwenswarm.common.schema.designer_graph import (
     node_config,
     node_pipeline,
 )
-from jiuwenswarm.common.utils import get_agent_root_dir, get_agent_workspace_dir
-from jiuwenswarm.common.work_mode import DESIGN_WORK_MODE
+from jiuwenswarm.common.utils import (
+    get_agent_workspace_dir,  # re-exported; image/compose handlers call it on this module
+    get_default_project_session_workspace_dir,
+)
+from jiuwenswarm.common.work_mode import is_default_project_id
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 from jiuwenswarm.server.runtime.designer.user_references import user_reference_image_paths
 from jiuwenswarm.server.runtime.session import project_store
@@ -149,28 +152,52 @@ def path_from_uri(uri: str) -> Path | None:
             path = path[1:]
         return Path(path)
     candidate = Path(value)
-    return candidate if candidate.exists() else None
+    if candidate.exists():
+        return candidate
+    return None
 
 
 def graph_workspace_dir(graph: DesignerExecutionGraph | None = None) -> Path:
-    """Return the asset directory owned by a Design project graph."""
+    """Return the directory for this canvas's generated files.
+
+    A selected project uses that project's own directory, the same folder a
+    work session would use. No project uses the per-session workspace under
+    ``agent/workspace/projects/<session_id>``. A canvas without a session id
+    does not use that shared projects root.
+    """
+    metadata = graph.get("metadata") if isinstance(graph, dict) and isinstance(graph.get("metadata"), dict) else {}
     project_id = str(graph.get("project_id") or "").strip() if isinstance(graph, dict) else ""
-    if not project_id:
+    session_id = str((metadata or {}).get("session_id") or "").strip()
+    project_dir = ""
+    if project_id and not is_default_project_id(project_id):
+        project = project_store.get_project_by_id(project_id, cache_bust=True)
+        if project is None or project.hidden:
+            raise ValueError(f"Design project not found for graph: {project_id!r}")
+        project_dir = str(project.project_dir or "").strip()
+    if project_dir:
+        directory = Path(project_dir).expanduser().resolve()
+    elif isinstance(graph, dict) and session_id:
+        directory = get_default_project_session_workspace_dir(session_id)
+    else:
+        directory = get_agent_workspace_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def canvas_output_dir(graph: DesignerExecutionGraph | None = None) -> Path:
+    """Directory for generated image, video, and audio on this canvas.
+
+    A stored project uses that project's own directory. No project uses the
+    per-session workspace. A project id that is not in the registry keeps the
+    agent workspace so generation can still write a file.
+    """
+    try:
+        return graph_workspace_dir(graph)
+    except ValueError:
+        logger.info("Design project directory unavailable; using the agent workspace")
         directory = get_agent_workspace_dir()
         directory.mkdir(parents=True, exist_ok=True)
         return directory
-
-    project = project_store.get_project_by_id(project_id, cache_bust=True)
-    if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
-        raise ValueError(f"Design project not found for graph: {project_id!r}")
-
-    design_root = (get_agent_root_dir() / "workspace" / DESIGN_WORK_MODE).resolve()
-    project_dir = Path(project.project_dir).expanduser().resolve()
-    if project_dir.parent != design_root:
-        raise ValueError(f"Design project directory is outside the managed root: {project_id!r}")
-    directory = project_dir / "assets"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
 
 
 def write_workspace_text(
@@ -872,6 +899,7 @@ async def generate_designer_image(
     reference_images: list[str] | None = None,
     max_tries: int = 2,
     timeout_sec: float = 1200.0,
+    save_dir: str | None = None,
 ) -> dict[str, str] | None:
     """Call the Settings > Agent image model when enabled. Tests monkeypatch this function.
 
@@ -927,6 +955,7 @@ async def generate_designer_image(
                             prompt,
                             size=size,
                             reference_images=refs or None,
+                            save_dir=save_dir,
                         ),
                         timeout=max(60.0, float(timeout_sec or 1200.0)),
                     )

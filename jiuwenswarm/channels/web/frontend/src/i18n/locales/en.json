@@ -163,10 +163,22 @@
       "assistant": "Assistant",
       "conversation": "Chat",
       "assets": "Assets",
-      "canvas": "Current canvas"
+      "canvas": "Current canvas",
+      "project": "Project assets",
+      "create": "New"
+    },
+    "sessions": {
+      "label": "Canvas",
+      "new": "New canvas",
+      "create": "New session",
+      "project": "Project",
+      "pickProject": "Select a project",
+      "needProject": "Create a project first, then add a session to it.",
+      "createFailed": "Could not create the session. Try again."
     },
     "assets": {
-      "empty": "No assets yet. Attach image, video, or audio when creating a task, or upload/generate on the canvas.",
+      "empty": "This canvas has no assets yet. Upload or generate some and they will show up here.",
+      "emptyProject": "This project has no shared assets yet. Uploads and generations from any canvas appear here.",
       "onCanvas": "On canvas",
       "libraryOnly": "Library only",
       "delete": "Delete asset",

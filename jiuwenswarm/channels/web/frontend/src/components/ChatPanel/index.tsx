@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
-import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
+import { useChatStore, useHarnessStore, useSessionStore, useTodoStore, useWorkspaceStore } from '../../stores';
 import {
   AgentMode,
   MediaItem,
@@ -667,21 +667,16 @@ function getTeamMessageIdentity(message: Message): string {
 
 function WelcomeHeading() {
   const { i18n } = useTranslation();
+  const workMode = useWorkspaceStore((state) => state.workMode);
   const isZh = i18n.language.startsWith('zh');
-
-  if (isZh) {
-    return (
-      <>
-        <span className="chat-welcome__heading-highlight">WorkSwarm</span>
-        <span>轻松解决工作每个问题！</span>
-      </>
-    );
-  }
+  const suffix = workMode === 'design'
+    ? (isZh ? '轻松解决每个设计问题！' : 'solves every design problem!')
+    : (isZh ? '轻松解决工作每个问题！' : 'makes work easier!');
 
   return (
     <>
       <span className="chat-welcome__heading-highlight">WorkSwarm</span>
-      <span>makes work easier!</span>
+      <span>{suffix}</span>
     </>
   );
 }

@@ -132,6 +132,31 @@ def derive_story_name(
     return _clean(candidate, limit=48) or "Untitled"
 
 
+_GENERIC_DISPLAY_TITLES = {
+    "untitled",
+    "design",
+    "video",
+    "film",
+    "设计项目",
+    "designer project",
+}
+
+
+def usable_story_title(name: object, prompt: str = "") -> str:
+    """Short display title from the model, empty when it is only the prompt."""
+    cleaned = _clean(name, limit=32)
+    if not cleaned or cleaned.casefold() in _GENERIC_DISPLAY_TITLES:
+        return ""
+    prompt_flat = _clean(prompt, limit=4000)
+    if not prompt_flat:
+        return cleaned
+    if cleaned == prompt_flat or cleaned == _clean(prompt_flat, limit=32):
+        return ""
+    if len(cleaned) >= 20 and prompt_flat.startswith(cleaned):
+        return ""
+    return cleaned
+
+
 def derive_clip_name(clip: dict[str, Any] | None, *, fallback_index: int = 1) -> str:
     """2–4 word clip display name from title or action (any language)."""
     sh = clip if isinstance(clip, dict) else {}

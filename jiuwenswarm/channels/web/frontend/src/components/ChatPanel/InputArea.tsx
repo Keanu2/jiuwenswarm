@@ -4243,6 +4243,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       document.body,
                     )}
                 </div>
+                {workMode !== 'design' && (
+                <>
                 <div
                   ref={modeMenuRef}
                   className={clsx('chat-mode-select', isModeMenuOpen && 'chat-mode-select--open')}
@@ -4381,6 +4383,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     permissionProfile={permissionProfile}
                     onSavePermission={onSavePermission}
                   />
+                )}
+                </>
                 )}
 
                 {selectedAgentId && (

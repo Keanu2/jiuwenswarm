@@ -603,6 +603,28 @@ function devFileContentApi(): Plugin {
     const ext = path.extname(targetPath).toLowerCase()
     return ext === '.md' || ext === '.mdx'
   }
+  let registeredProjectDirCache: { mtimeMs: number; dirs: string[] } = { mtimeMs: -1, dirs: [] }
+  const registeredProjectDirs = () => {
+    const file = path.join(workspaceRootDir, 'projects.json')
+    try {
+      const stat = fs.statSync(file)
+      if (stat.mtimeMs === registeredProjectDirCache.mtimeMs) return registeredProjectDirCache.dirs
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { projects?: Array<{ project_dir?: string }> }
+      const projects = raw && Array.isArray(raw.projects) ? raw.projects : []
+      const dirs = projects
+        .map((item) => (item && typeof item.project_dir === 'string' ? item.project_dir.trim() : ''))
+        .filter(Boolean)
+        .map((dir) => path.resolve(dir))
+      registeredProjectDirCache = { mtimeMs: stat.mtimeMs, dirs }
+      return dirs
+    } catch {
+      return []
+    }
+  }
+  const isInsideRoot = (root: string, targetPath: string) => {
+    const relative = path.relative(root, targetPath)
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+  }
   const isPathUnderAllowedRoot = (targetPath: string) => {
     const relativeWorkspacePath = path.relative(workspaceRootDir, targetPath)
     const inWorkspace = !relativeWorkspacePath.startsWith('..') && !path.isAbsolute(relativeWorkspacePath)
@@ -613,6 +635,7 @@ function devFileContentApi(): Plugin {
     const relativeAutoHarnessPath = path.relative(autoHarnessDir, targetPath)
     const inAutoHarness = !relativeAutoHarnessPath.startsWith('..') && !path.isAbsolute(relativeAutoHarnessPath)
     return inWorkspace || inAgentTeams || inWebLogs || inAutoHarness
+      || registeredProjectDirs().some((dir) => isInsideRoot(dir, targetPath))
   }
 
   return {

@@ -25,6 +25,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     video_concat_source_ids,
 )
 from jiuwenswarm.server.runtime.designer.handlers.common import (
+    canvas_output_dir,
     node_output_image_paths,
     role_output_image_path,
     role_output_text,
@@ -1063,6 +1064,7 @@ class ClipNodeHandler:
         try:
             result = await generate_clip_video(
                 prompt,
+                save_dir=str(canvas_output_dir(graph if isinstance(graph, dict) else None)),
                 first_frame=overrides["first_frame"],
                 reference_images=overrides["reference_images"],
                 reference_file=reference_file,
