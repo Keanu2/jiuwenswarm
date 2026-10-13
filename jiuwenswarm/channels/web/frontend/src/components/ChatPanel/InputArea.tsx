@@ -904,7 +904,24 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const runs = s.runtimes[activeSessionId ?? '']?.workflowRuns ?? [];
     return runs.some((run) => run.phases?.some((phase) => phase.agents?.some((agent) => agent.status === 'running')));
   });
-  const composerDisabled = agentGroupUnavailable || isCompactRunning || (hasPendingQuestion && !hasRunningAgent);
+  const workMode = useWorkspaceStore((state) => state.workMode);
+  // Design mode reuses this composer for the old DesignerLanding page. The first
+  // prompt is a one-shot compose: no abort, and no second prompt while it runs.
+  const isDesignLanding = workMode === 'design' && activeSessionId === NEW_CONVERSATION_ID;
+  const designLandingSubmitting = isDesignLanding && isProcessing;
+  const composerDisabled =
+    agentGroupUnavailable ||
+    isCompactRunning ||
+    (hasPendingQuestion && !hasRunningAgent) ||
+    designLandingSubmitting;
+
+  useEffect(() => {
+    if (!designLandingSubmitting) return;
+    setAttachMenuOpen(false);
+    setAgentPickerOpen(false);
+    setExtensionPanelOpen(false);
+    setSkillPanelOpen(false);
+  }, [designLandingSubmitting]);
   const selectedAgentId = useSessionStore((s) => {
     const runtime = s.runtimes[activeSessionId ?? ''];
     if (runtime?.mode !== 'agent') return null;
@@ -1036,7 +1053,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     return s.sessions.find((session) => session.session_id === activeSessionId) ?? null;
   });
   const canPersistAttachments = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
-  const { workMode, projects, selectedProject, setSelectedProject, createProject } = useWorkspaceStore();
+  const { projects, selectedProject, setSelectedProject, createProject } = useWorkspaceStore();
   const loadedMsgLen = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages?.length ?? 0);
   const hasHistory = (currentSession?.message_count ?? 0) > 0 || loadedMsgLen > 0;
   const goalArmed = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.armed ?? false);
@@ -1472,13 +1489,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   });
   const taskAsrEnabled = useTaskAsrEnabled();
 
-  const imageInputDisabled = isImageInputDisabled({
-    isListening: isListening || isTranscribing,
-    isCompactRunning,
-    isInterruptible,
-    isTeamMode,
-    isAgentMode,
-  });
+  const imageInputDisabled =
+    designLandingSubmitting ||
+    isImageInputDisabled({
+      isListening: isListening || isTranscribing,
+      isCompactRunning,
+      isInterruptible,
+      isTeamMode,
+      isAgentMode,
+    });
   const isDesktopBridgeReady = useDesktopLocalFilePickerReady();
   const uploadLimitsTooltip = [
     t('chat.inputAttachment.imageLimitTooltip', { limit: MAX_IMAGE_BYTES / (1024 * 1024) }),
@@ -2612,7 +2631,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   // preparing a follow-up. A pending approval keeps Stop available and blocks Send.
   const hasDraft = hasTextDraft || attachments.length > 0 || isListening || isTranscribing;
   const isImageInterruptBlocked = isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
-  const showStop = isProcessing && !isPaused && (!hasDraft || hasPendingQuestion);
+  const showStop =
+    !designLandingSubmitting && isProcessing && !isPaused && (!hasDraft || hasPendingQuestion);
   const hasReadyMedia = readyMediaItems.length > 0;
   const canSubmit =
     showStop ||
@@ -2624,13 +2644,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       !hasAttachmentErrors);
 
   const handleSendButtonClick = useCallback(() => {
+    if (designLandingSubmitting) return;
     if (showStop) {
       onCancel();
       return;
     }
 
     handleSubmit();
-  }, [handleSubmit, showStop, onCancel]);
+  }, [designLandingSubmitting, handleSubmit, showStop, onCancel]);
 
   const fullDuplexActionEligible =
     !showStop &&
@@ -3880,10 +3901,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     ? t('chat.placeholderAwaitingApproval')
                     : isListening
                       ? t('chat.placeholderVoice')
-                      : isTeamMode
-                        ? isInterruptible && !isPaused
-                          ? t('chat.placeholderTeamModeProcessing')
-                          : t('chat.placeholderTeamMode')
+                      : designLandingSubmitting
+                        ? t('chat.placeholder')
+                        : isTeamMode
+                          ? isInterruptible && !isPaused
+                            ? t('chat.placeholderTeamModeProcessing')
+                            : t('chat.placeholderTeamMode')
                         : isAutoHarnessMode
                           ? t('autoHarness.inputPlaceholder')
                           : isAgentMode && isInterruptible
@@ -3941,7 +3964,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     data-tooltip={
                       attachTriggerDisabled
                         ? t('chat.addFileDisabled')
-                        : workMode === 'design' && showWorkContextRow
+                        : isDesignLanding
                           ? t('chat.addFile')
                           : t('chat.addFileTooltip')
                     }
@@ -3994,7 +4017,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                           </span>
                         </button>
-                        {!(workMode === 'design' && showWorkContextRow) && (
+                        {!isDesignLanding && (
                         <>
                         <div className="chat-attach-menu-item-anchor">
                           <button
@@ -5039,12 +5062,18 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                           showStop && 'chat-input-btn--stop',
                           canSubmit ? 'chat-input-btn--send-active' : 'chat-input-btn--disabled',
                         )}
-                        data-tooltip={showStop ? t('chat.stop') : t('chat.send')}
+                        data-tooltip={designLandingSubmitting ? undefined : showStop ? t('chat.stop') : t('chat.send')}
                         {...sendTooltipHandlers}
                         data-testid="chat-panel-input-send"
-                        data-variant={showStop ? 'stop' : 'send'}
+                        data-variant={designLandingSubmitting ? 'submitting' : showStop ? 'stop' : 'send'}
                       >
-                        {showStop ? (
+                        {designLandingSubmitting ? (
+                          <Loader2
+                            className="chat-input-btn-icon chat-input-btn-icon--spin"
+                            strokeWidth={1.8}
+                            aria-hidden="true"
+                          />
+                        ) : showStop ? (
                           <Square
                             className="chat-input-btn-icon"
                             fill="currentColor"

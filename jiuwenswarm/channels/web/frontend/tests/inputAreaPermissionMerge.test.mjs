@@ -644,3 +644,80 @@ test('composer exposes Full-duplex only when idle with no text or attachments', 
     assert.ok(byId('chat-panel-input-send'));
   });
 });
+
+test('design landing plus menu only offers file attachment', async () => {
+  await mount({ sessionId: 'new' }, async () => {
+    await act(async () => {
+      useWorkspaceStore.setState({ workMode: 'design' });
+    });
+    await click(byId('chat-panel-input-attach-trigger'));
+    assert.ok(document.querySelector('[data-testid="chat-panel-input-attach-menu-file"]'));
+    for (const id of ['agent', 'skill', 'extension', 'design', 'plan', 'swarmflow', 'goal', 'personal-context']) {
+      assert.equal(
+        document.querySelector(`[data-testid="chat-panel-input-attach-menu-${id}"]`),
+        null,
+        `${id} stays hidden on the design landing`,
+      );
+    }
+  });
+});
+
+test('work landing plus menu still offers more than file attachment', async () => {
+  await mount({ sessionId: 'new' }, async () => {
+    await click(byId('chat-panel-input-attach-trigger'));
+    assert.ok(document.querySelector('[data-testid="chat-panel-input-attach-menu-file"]'));
+    assert.ok(document.querySelector('[data-testid="chat-panel-input-attach-menu-agent"]'));
+  });
+});
+
+test('design landing submit hides stop and refuses a follow-up prompt', async () => {
+  await mount({ sessionId: 'new' }, async ({ props, render, sessionId }) => {
+    const cancelled = [];
+    const sent = [];
+    props.onCancel = () => cancelled.push('cancel');
+    props.onSubmit = (...args) => sent.push(args);
+    props.onInterrupt = () => sent.push('interrupt');
+    props.isProcessing = true;
+    await act(async () => {
+      useWorkspaceStore.setState({ workMode: 'design' });
+      useChatStore.getState().setProcessing(sessionId, true);
+    });
+    await render();
+
+    const editor = byId('chat-panel-input');
+    const send = byId('chat-panel-input-send');
+    assert.equal(send.dataset.variant, 'submitting');
+    assert.equal(send.disabled, true);
+    assert.equal(editor.getAttribute('contenteditable'), 'false');
+    assert.equal(editor.getAttribute('aria-disabled'), 'true');
+    assert.equal(editor.getAttribute('data-placeholder'), i18n.t('chat.placeholder'));
+    assert.notEqual(editor.getAttribute('data-placeholder'), i18n.t('chat.placeholderProcessingQueue'));
+    assert.equal(byId('chat-panel-input-attach-trigger').disabled, true);
+
+    editor.textContent = 'send another prompt';
+    await act(async () => {
+      editor.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      editor.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await act(async () => {
+      send.click();
+    });
+    assert.deepEqual(cancelled, []);
+    assert.deepEqual(sent, []);
+    assert.deepEqual(useChatStore.getState().getRuntime(sessionId).taskQueue, []);
+  });
+});
+
+test('work landing still offers stop and a follow-up queue while processing', async () => {
+  await mount({ sessionId: 'new' }, async ({ props, render, sessionId }) => {
+    props.isProcessing = true;
+    await act(async () => {
+      useChatStore.getState().setProcessing(sessionId, true);
+    });
+    await render();
+    const editor = byId('chat-panel-input');
+    assert.equal(byId('chat-panel-input-send').dataset.variant, 'stop');
+    assert.equal(editor.getAttribute('data-placeholder'), i18n.t('chat.placeholderProcessingQueue'));
+    assert.equal(editor.getAttribute('contenteditable'), 'true');
+  });
+});
