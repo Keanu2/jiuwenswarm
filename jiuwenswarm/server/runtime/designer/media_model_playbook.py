@@ -160,7 +160,7 @@ def playbook_for_role(role: str) -> str:
     chunks = [STORYBOARD_DETAIL_RULES]
     if role_l in {"storyboard", "brief", "director"}:
         chunks.extend([QWEN_IMAGE_PLAYBOOK, WAN3_VIDEO_PLAYBOOK])
-    if role_l in {"scene", "character", "character", "image"}:
+    if role_l in {"scene", "character", "image"}:
         chunks.append(QWEN_IMAGE_PLAYBOOK)
     if role_l in {"clip", "video"}:
         chunks.append(WAN3_VIDEO_PLAYBOOK)
@@ -380,7 +380,7 @@ def synchronize_graph_style_from_brief(
             continue
         cfg = dict(node.get("config") or {})
         role = str(cfg.get("role") or cfg.get("pipeline") or "").lower()
-        if role in {"character", "character", "scene", "clip"}:
+        if role in {"character", "scene", "clip"}:
             cfg["style_lock"] = dict(style)
             node["config"] = cfg
     return style

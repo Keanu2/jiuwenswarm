@@ -61,9 +61,9 @@ def _merge_user_seed_facts(approved: str, seed: str) -> str:
     hit = sum(1 for w in words if w.casefold() in hay)
     if hit >= max(2, int(len(words) * 0.4)):
         return text
-    clause = beat if len(beat) <= 280 else beat[:277].rstrip() + "..."
+    clause = beat
     merged = f"{text.rstrip('. ')}. Also: {clause}."
-    return merged[:2200]
+    return merged
 
 
 def _style_from(cfg: dict[str, Any], graph: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
@@ -107,7 +107,7 @@ def apply_image_call_locks(
     )
 
     user_text = resolve_user_origin_prompt(cfg_map, "")
-    text = (user_text or str(prompt or "").strip())[:6000]
+    text = user_text or str(prompt or "").strip()
     if text:
         # Stamp last_* with what we send; keep durable user surfaces intact.
         _stamp_sent_prompt(
@@ -141,13 +141,13 @@ def _stamp_sent_prompt(
         return
     edit = str(user_edit or cfg.get("user_edit_prompt") or "").strip()
     if user_origin and edit:
-        cfg["user_edit_prompt"] = edit[:4000]
+        cfg["user_edit_prompt"] = edit
         packet = (
             dict(cfg["regenerate_packet"])
             if isinstance(cfg.get("regenerate_packet"), dict)
             else {}
         )
-        packet["prompt"] = edit[:4000]
+        packet["prompt"] = edit
         cfg["regenerate_packet"] = packet
     cfg["prompt"] = text
     generate = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
@@ -155,8 +155,8 @@ def _stamp_sent_prompt(
     if user_origin:
         generate["prompt_origin"] = "user"
     cfg["generate"] = generate
-    cfg["last_wan_prompt"] = text[:4000]
-    cfg["last_approved_prompt"] = text[:4000]
+    cfg["last_wan_prompt"] = text
+    cfg["last_approved_prompt"] = text
 
 
 def apply_wan_call_locks(

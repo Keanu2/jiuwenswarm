@@ -206,7 +206,7 @@ def compose_scene_specs_prompt(
     if seed_text and not looks_like_lock_essay(seed_text) and len(seed_text) < 400:
         bits.insert(1, seed_text.rstrip(".") + ".")
     text = " ".join(b for b in bits if b)
-    return re.sub(r"\s+", " ", text).strip()[:2200]
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def compose_character_sheet_prompt(
@@ -241,7 +241,7 @@ def compose_character_sheet_prompt(
     if seed_text and not looks_like_lock_essay(seed_text) and len(seed_text) < 300:
         bits.insert(1, seed_text.rstrip(".") + ".")
     text = " ".join(b for b in bits if b)
-    return re.sub(r"\s+", " ", text).strip()[:2200]
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def ensure_still_tool_prompt(
@@ -266,7 +266,7 @@ def ensure_still_tool_prompt(
 
         user = resolve_user_origin_prompt(cfg, "")
         if user:
-            return user[:2200], ["image_user_authority"]
+            return user, ["image_user_authority"]
     except Exception:  # noqa: BLE001
         pass
     role_l = str(role or cfg.get("role") or "").lower()
@@ -288,7 +288,7 @@ def ensure_still_tool_prompt(
             if look and not _style_is_covered(text, look):
                 text = (text.rstrip(".") + f". {look}.").strip()
                 notes.append("still_cover_style")
-    elif role_l in {"character", "character"} or "character" in role_l:
+    elif role_l in {"character"} or "character" in role_l:
         if looks_like_lock_essay(text) or not text:
             text = compose_character_sheet_prompt(cfg=cfg, graph=graph, seed="")
             notes.append("still_rewrote_character_sheet")
@@ -297,4 +297,4 @@ def ensure_still_tool_prompt(
             if look and not _style_is_covered(text, look):
                 text = (text.rstrip(".") + f". {look}.").strip()
                 notes.append("still_cover_style")
-    return text[:2200], notes
+    return text, notes

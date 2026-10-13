@@ -987,7 +987,7 @@ def compose_practice_prompt(
             text = re.sub(rf"(?i)\b{re.escape(gone_name)}\b[^.]*\.?", "", text)
     text = re.sub(r"\s{2,}", " ", text).strip()
     text, _cov_notes = ensure_story_lock_coverage(text, cfg, graph=graph)
-    return text[:2200]
+    return text
 
 
 def _covers_beat(prompt: str, action: str) -> bool:
@@ -1260,8 +1260,8 @@ def director_prepare_video_prompt(
         reasons = reference_prompt_issues(raw, cfg)
         if not reasons:
             note = "kept_user_prompt" if honor_user else "kept_reference_led_prompt"
-            return raw[:2200], [note]
-        return compose_reference_clip_prompt(cfg)[:2200], ["rewritten_reference_led", *reasons]
+            return raw, [note]
+        return compose_reference_clip_prompt(cfg), ["rewritten_reference_led", *reasons]
     reasons = prompt_respects_practice(
         prompt, cfg=cfg, graph=graph, honor_user_origin=honor_user,
     )
@@ -1275,10 +1275,8 @@ def director_prepare_video_prompt(
                 reasons.append(r)
     except Exception:  # noqa: BLE001
         pass
-    # Conciseness: lock essays / labeled banners are not story form.
+    # Lock essays / labeled banners are not story form.
     raw = str(prompt or "").strip()
-    if raw and len(raw) > 1600:
-        reasons = [*reasons, "not_concise"]
     if extra_image_labels:
         reasons = [*reasons, "wired_user_images"]
     if raw and re.search(
@@ -1290,7 +1288,7 @@ def director_prepare_video_prompt(
         reasons = [*reasons, "lock_banner_not_story"]
     if not reasons:
         note = "kept_user_prompt" if honor_user else "kept_agent_prompt"
-        return raw[:2200], [note]
+        return raw, [note]
     # User-origin rewrites seed action/camera from the user surface, not stale beats.
     if honor_user:
         mined_action = (
@@ -1416,4 +1414,4 @@ def director_approve_video_prompt(
         reasons = [tag, *reasons]
     else:
         reasons = ["director_checked", *reasons]
-    return approved.strip()[:2200], reasons
+    return approved.strip(), reasons

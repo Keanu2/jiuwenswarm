@@ -119,11 +119,11 @@ def positive_continuity_clause(
     if holds:
         lines.append("SEAT HOLDS: " + "; ".join(holds[:8]) + ".")
     if action:
-        lines.append(f"This window: {action[:400]}.")
+        lines.append(f"This window: {action}.")
     if camera:
-        lines.append(f"Camera this window: {camera[:120]}.")
+        lines.append(f"Camera this window: {camera}.")
     if speech:
-        lines.append(f"Spoken words in this window: {speech[:200]}.")
+        lines.append(f"Spoken words in this window: {speech}.")
     else:
         lines.append("This window has no new spoken line.")
     lines.append(
@@ -208,7 +208,7 @@ def capture_regenerate_packet(
             "node_id": nid,
             "status": state.get("status"),
             "output_ref": ref,
-            "prompt": other_prompt[:4000],
+            "prompt": other_prompt,
             "style_lock": other_cfg.get("style_lock") if isinstance(other_cfg.get("style_lock"), dict) else None,
             "path": path,
         }
@@ -222,18 +222,18 @@ def capture_regenerate_packet(
             image_paths.append(text)
     return {
         "node_id": str(node.get("id") or ""),
-        "prompt": stored_prompt[:4000],
-        "clip_action": str(cfg.get("clip_action") or "")[:500],
-        "speech_line": str(cfg.get("speech_line") or "")[:280],
-        "camera": str(cfg.get("camera") or "")[:160],
+        "prompt": stored_prompt,
+        "clip_action": str(cfg.get("clip_action") or ""),
+        "speech_line": str(cfg.get("speech_line") or ""),
+        "camera": str(cfg.get("camera") or ""),
         "style_lock": cfg.get("style_lock") if isinstance(cfg.get("style_lock"), dict) else None,
-        "costume_lock": str(cfg.get("costume_lock") or "")[:800],
+        "costume_lock": str(cfg.get("costume_lock") or ""),
         "character_node_ids": [str(x) for x in (cfg.get("character_node_ids") or []) if str(x)],
         "scene_node_id": str(cfg.get("scene_node_id") or ""),
         "on_screen": [str(x) for x in (cfg.get("on_screen") or []) if str(x)],
         "seat_anchors": cfg.get("seat_anchors") if isinstance(cfg.get("seat_anchors"), dict) else None,
-        "previous_clip_action": str(cfg.get("previous_clip_action") or "")[:300],
-        "previous_clip_wan_prompt": str(cfg.get("previous_clip_wan_prompt") or "")[:2500],
+        "previous_clip_action": str(cfg.get("previous_clip_action") or ""),
+        "previous_clip_wan_prompt": str(cfg.get("previous_clip_wan_prompt") or ""),
         "reference_images": image_paths[:8],
         "upstream": upstream,
     }
@@ -261,8 +261,8 @@ def remember_generation(
         reference_images=reference_images,
     )
     cfg["regenerate_packet"] = packet
-    cfg["last_wan_prompt"] = str(prompt or "")[:4000]
-    cfg["last_approved_prompt"] = str(prompt or "")[:4000]
+    cfg["last_wan_prompt"] = str(prompt or "")
+    cfg["last_approved_prompt"] = str(prompt or "")
     node["config"] = cfg
     return packet
 

@@ -191,10 +191,10 @@ class GraphExecutor:
                 continue
             c = dict(n.get("config") or {})
             c["handoff_artifact_ready"] = True
-            c["last_approved_prompt"] = text[:4000]
+            c["last_approved_prompt"] = text
             if role in {NODE_ROLE_CLIP, "clip", "video"}:
-                c["last_wan_prompt"] = text[:4000]
-                c["clip_prompt_preview"] = text[:1200]
+                c["last_wan_prompt"] = text
+                c["clip_prompt_preview"] = text
             if role in {NODE_ROLE_CLIP} and bool(c.get("is_scene_master")):
                 from jiuwenswarm.server.runtime.designer.pipeline.character_consistency import (
                     architecture_clause_from_bible,
@@ -202,8 +202,8 @@ class GraphExecutor:
 
                 specs_m = c.get("scene_specs") if isinstance(c.get("scene_specs"), dict) else None
                 arch_m = architecture_clause_from_bible(specs_m)
-                c["scene_architecture_clause"] = arch_m or text[:900]
-                c["scene_master_prompt"] = (arch_m or text)[:900]
+                c["scene_architecture_clause"] = arch_m or text
+                c["scene_master_prompt"] = arch_m or text
             if role in {NODE_ROLE_SCENE, "scene"} or (
                 node_id.startswith("n_scene_") and bool(c.get("is_scene_master"))
             ):
@@ -213,8 +213,8 @@ class GraphExecutor:
 
                 specs_m = c.get("scene_specs") if isinstance(c.get("scene_specs"), dict) else None
                 arch_m = architecture_clause_from_bible(specs_m)
-                c["scene_architecture_clause"] = arch_m or text[:900]
-                c["scene_master_prompt"] = (arch_m or text)[:900]
+                c["scene_architecture_clause"] = arch_m or text
+                c["scene_master_prompt"] = arch_m or text
                 c["handoff_artifact_ready"] = True
             n["config"] = c
             node = n
@@ -263,7 +263,7 @@ class GraphExecutor:
                     c["scene_architecture_clause"] = arch
                     changed = True
                 if node_id in needs and arch and not str(c.get("scene_master_prompt") or "").strip():
-                    c["scene_master_prompt"] = arch[:900]
+                    c["scene_master_prompt"] = arch
                     changed = True
                 # Consecutive prior stamp — always overwrite for N→N+1 (fixes parallel clip race).
                 if nid in next_ids:
@@ -271,11 +271,11 @@ class GraphExecutor:
                         cfg.get("clip_action") or cfg.get("character_action") or ""
                     ).strip()
                     if not action_snip:
-                        action_snip = text[:220]
-                    c["previous_clip_action"] = action_snip[:300]
+                        action_snip = text
+                    c["previous_clip_action"] = action_snip
                     c["previous_clip_node_id"] = node_id
-                    # Soft-dep readiness; keep short so handlers don't dump full prior.
-                    c["previous_clip_prompt"] = text[:800]
+                    # Soft-dep readiness; full prior text for the next clip's context.
+                    c["previous_clip_prompt"] = text
                     changed = True
                 if changed:
                     n["config"] = c
@@ -1890,7 +1890,7 @@ class GraphExecutor:
         gen_src = dict(scfg.get("generate") or {}) if isinstance(scfg.get("generate"), dict) else {}
         master_prompt = str(
             scfg.get("scene_master_prompt") or gen_src.get("prompt") or arch or ""
-        ).strip()[:900]
+        ).strip()
         if not arch and not specs and not master_prompt:
             return
         changed = False
@@ -1913,8 +1913,8 @@ class GraphExecutor:
             if specs:
                 cfg["scene_specs"] = dict(specs)
             if arch or master_prompt:
-                cfg["scene_architecture_clause"] = arch or master_prompt[:900]
-                cfg["scene_master_prompt"] = master_prompt or (arch[:900] if arch else "")
+                cfg["scene_architecture_clause"] = arch or master_prompt
+                cfg["scene_master_prompt"] = master_prompt or arch
             gen2 = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             prompt = str(gen2.get("prompt") or "")
             marker = "SCENE PROMPT HANDOFF"
@@ -1924,7 +1924,7 @@ class GraphExecutor:
                     f"{marker} from {src_id} (same setting `{setting_id}`): "
                     f"{handoff_arch} Change ONLY camera view + on-screen cast/actions for This shot."
                 )
-                gen2["prompt"] = (prompt + "\n" + handoff_bit).strip()[:2200]
+                gen2["prompt"] = (prompt + "\n" + handoff_bit).strip()
                 cfg["generate"] = gen2
             irefs = dict(cfg.get("identity_refs") or {})
             irefs["scene_prompt_handoff_from"] = src_id
@@ -2081,7 +2081,7 @@ class GraphExecutor:
                 cfg["skill_excerpt"] = skill
                 node["config"] = cfg
         # Optional tiny subject hint for character/scene only (not full encyclopedia).
-        if role in {"character", "character", "scene"}:
+        if role in {"character", "scene"}:
             subjects = list((graph.get("metadata") or {}).get("subject_keys") or [])[:1]
             if subjects:
                 bit = load_subject_skill(subjects[0])
@@ -2372,10 +2372,10 @@ class GraphExecutor:
                         if str(n.get("id") or "") != node_id:
                             continue
                         c = dict(n.get("config") or {})
-                        c["last_approved_prompt"] = approved[:4000]
+                        c["last_approved_prompt"] = approved
                         if node_pipeline(node) == NODE_ROLE_CLIP:
-                            c["last_wan_prompt"] = approved[:4000]
-                            c["clip_prompt_preview"] = approved[:1200]
+                            c["last_wan_prompt"] = approved
+                            c["clip_prompt_preview"] = approved
                         n["config"] = c
                         break
                     if node_pipeline(node) == NODE_ROLE_CLIP and clip_index >= 1:
@@ -2384,15 +2384,15 @@ class GraphExecutor:
                             cfg_done.get("clip_action")
                             or cfg_done.get("character_action")
                             or ""
-                        ).strip() or approved[:220]
+                        ).strip() or approved
                         for n in live_graph.get("nodes") or []:
                             nid = str(n.get("id") or "")
                             if nid != next_clip:
                                 continue
                             c = dict(n.get("config") or {})
                             # Always overwrite consecutive stamp (parallel clip race fix).
-                            c["previous_clip_action"] = action_snip[:300]
-                            c["previous_clip_prompt"] = approved[:800]
+                            c["previous_clip_action"] = action_snip
+                            c["previous_clip_prompt"] = approved
                             c["previous_clip_node_id"] = node_id
                             n["config"] = c
                     if node_pipeline(node) == NODE_ROLE_CLIP and clip_index >= 1:

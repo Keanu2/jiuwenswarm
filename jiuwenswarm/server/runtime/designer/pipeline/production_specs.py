@@ -73,8 +73,8 @@ def _speech_table(shots: list[dict[str, Any]], characters: list[dict[str, Any]])
         on = [str(x) for x in (sh.get("on_camera_cast_ids") or sh.get("character_ids") or []) if str(x)]
         names = ", ".join(by_id.get(c, c) for c in on) or "—"
         speech = str(sh.get("speech_line") or "").strip() or "(silent)"
-        motion = str(sh.get("motion_detail") or sh.get("action") or "")[:90]
-        rows.append(f"| {idx} | {names} | {speech[:120]} | {motion} |")
+        motion = str(sh.get("motion_detail") or sh.get("action") or "")
+        rows.append(f"| {idx} | {names} | {speech} | {motion} |")
     return "LANGUAGE / SPEECH LOCK (use these exact lines at leaf nodes):\n" + "\n".join(rows)
 
 
@@ -82,7 +82,6 @@ def build_production_specs(
     analysis: dict[str, Any] | None,
     *,
     user_prompt: str = "",
-    max_chars: int = 4500,
 ) -> str:
     """Compact LOCK BIBLE for brief + storyboard + leaf context."""
     a = analysis if isinstance(analysis, dict) else {}
@@ -96,7 +95,7 @@ def build_production_specs(
     for ch in characters:
         cid = str(ch.get("id") or "")
         name = str(ch.get("name") or cid)
-        desc = str(ch.get("description") or ch.get("costume_lock") or "")[:160]
+        desc = str(ch.get("description") or ch.get("costume_lock") or "")
         attrs = ch.get("identity_attrs") if isinstance(ch.get("identity_attrs"), dict) else {}
         micro = ", ".join(
             f"{k}={v}"
@@ -111,7 +110,7 @@ def build_production_specs(
         (
             "USER INTENT (lock cue — keep character / wardrobe / place / language / "
             "opening blocking; Wan still films only THIS storyboard window): "
-            + (intent[:500] if intent else "see brief")
+            + (intent if intent else "see brief")
         ),
         "PLOT RULE: each clip's MOTION is only its storyboard row / timeline window. "
         "Copy ALL locks below (cast, clothing, first-clip positions, language, speech, "
@@ -145,7 +144,7 @@ def build_production_specs(
         "=== END LOCK BIBLE ===",
     ]
     text = "\n".join(parts)
-    return text[: max(800, int(max_chars))]
+    return text
 
 
 def leaf_lock_packet(
@@ -200,13 +199,13 @@ def leaf_lock_packet(
             }
         },
         "speech_line": str(shot.get("speech_line") or ""),
-        "motion_detail": str(shot.get("motion_detail") or "")[:400],
+        "motion_detail": str(shot.get("motion_detail") or ""),
         "wardrobe_lock": str(shot.get("wardrobe_lock") or ""),
         "camera_framing_rule": str(shot.get("camera_framing_rule") or ""),
         "on_camera_cast_ids": list(shot.get("on_camera_cast_ids") or shot.get("character_ids") or []),
         "off_camera_cast_ids": list(shot.get("off_camera_cast_ids") or []),
         "blocking": shot.get("blocking") if isinstance(shot.get("blocking"), dict) else {},
-        "production_specs_excerpt": bible[:2800],
+        "production_specs_excerpt": bible,
     }
 
 
@@ -218,104 +217,3 @@ def append_specs_to_markdown(md: str, bible: str) -> str:
     if "PRODUCTION LOCK BIBLE" in body:
         return body
     return (body + "\n\n## Production Lock Bible\n\n" + b + "\n")[:12000]
-
-
-def enforce_locks_on_generate_prompt(
-    prompt: str,
-    *,
-    style_lock: dict[str, Any] | None = None,
-    spatial_lock: dict[str, Any] | None = None,
-    speech_line: str = "",
-    motion_detail: str = "",
-    wardrobe_lock: str = "",
-    framing_rule: str = "",
-    landmark_clause: str = "",
-    role: str = "",
-    max_chars: int = 3200,
-) -> str:
-    """Director: fold missing locks into a leaf generate.prompt (deterministic)."""
-    p = (prompt or "").strip()
-    additions: list[str] = []
-
-    style_bit = _style_block(style_lock)
-    if style_bit and "STYLE LOCK" not in p and "STYLE HOLD" not in p:
-        if str(role or "").lower() == "clip":
-            medium = str((style_lock or {}).get("medium") or "")
-            look = str((style_lock or {}).get("look") or "")[:120]
-            additions.append(
-                f"STYLE HOLD (non-negotiable): match Image 1 art medium exactly "
-                f"({medium or look or 'brief style'}). FORBIDDEN: mid-clip restyle."
-            )
-        else:
-            additions.append(style_bit)
-
-    sp = spatial_lock if isinstance(spatial_lock, dict) else {}
-    static = str(sp.get("static_rule") or "").strip()
-    if static and "STATIC OBJECTS" not in p and "SPATIAL LOCK" not in p:
-        additions.append(static[:280])
-    crowd = str(sp.get("crowd_rule") or "").strip()
-    if crowd and "CROWD" not in p.upper() and "congregation" not in p.lower():
-        additions.append(f"CROWD/EXTRAS: {crowd[:220]}")
-    lighting = sp.get("lighting_lock") if isinstance(sp.get("lighting_lock"), dict) else {}
-    if lighting and "LIGHTING LOCK" not in p and "key_direction" not in p:
-        additions.append(
-            "LIGHTING LOCK: "
-            + "; ".join(f"{k}={v}" for k, v in lighting.items() if str(v).strip())[:240]
-        )
-    light = str(sp.get("light") or "").strip()
-    if light and "LIGHTING LOCK" not in " ".join(additions) and "light direction" not in p.lower():
-        additions.append(f"LIGHT: {light[:160]}")
-
-    if landmark_clause and landmark_clause[:40] not in p:
-        additions.append(landmark_clause[:280])
-    elif sp.get("landmarks") or sp.get("landmark_placements"):
-        clause = "LANDMARK LOCK: keep named landmarks fixed vs scene specs (no teleport)."
-        if "LANDMARK" not in p:
-            additions.append(clause)
-
-    if framing_rule and framing_rule[:36] not in p:
-        additions.append(framing_rule[:280])
-    if wardrobe_lock and "WARDROBE" not in p and "Costume lock" not in p:
-        additions.append(f"WARDROBE/FACE: {wardrobe_lock[:240]}")
-    if motion_detail and "MOTION:" not in p and str(role or "").lower() == "clip":
-        additions.append(f"MOTION: {motion_detail[:240]}")
-    if speech_line and "SPEECH:" not in p:
-        additions.append(f"SPEECH (exact): {speech_line[:200]}")
-    elif str(role or "").lower() in {"clip", "speech"} and not speech_line and "SPEECH:" not in p:
-        additions.append("SPEECH: silent beat (do not invent dialogue).")
-
-    if not additions:
-        return p[:max_chars]
-    return (p + "\n" + "\n".join(additions)).strip()[:max_chars]
-
-
-def landmark_clause_from_analysis(
-    analysis: dict[str, Any] | None, shot: dict[str, Any] | None = None
-) -> str:
-    a = analysis if isinstance(analysis, dict) else {}
-    sp = a.get("spatial_lock") if isinstance(a.get("spatial_lock"), dict) else {}
-    shot = shot if isinstance(shot, dict) else {}
-    blk = shot.get("blocking") if isinstance(shot.get("blocking"), dict) else {}
-    primary = str(blk.get("landmark") or "").strip()
-    places = sp.get("landmark_placements") if isinstance(sp.get("landmark_placements"), list) else []
-    bits: list[str] = []
-    if primary:
-        bits.append(f"primary landmark='{primary}' stays fixed in place/screen-side")
-    for item in places[:6]:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        where = str(item.get("where") or item.get("zone") or "").strip()
-        if name:
-            bits.append(f"{name}@{where or 'fixed'}")
-    lms = sp.get("landmarks") if isinstance(sp.get("landmarks"), list) else []
-    for lm in lms[:4]:
-        if str(lm).strip() and str(lm) not in " ".join(bits):
-            bits.append(f"{lm}@locked")
-    if not bits:
-        return ""
-    return (
-        "LANDMARK LOCK: "
-        + "; ".join(bits)
-        + " — do not move/resize/teleport these across same-setting clip specs/clips."
-    )

@@ -35,9 +35,9 @@ def _same_setting(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
     return bool(sa and sb and sa == sb)
 
 
-def _short(text: str, *, limit: int = 180) -> str:
+def _short(text: str) -> str:
     raw = re.sub(r"\s+", " ", str(text or "").strip())
-    return raw[:limit]
+    return raw
 
 
 def collect_same_setting_prior_clips(
@@ -73,9 +73,9 @@ def collect_same_setting_prior_clips(
             {
                 "node_id": str(node.get("id") or ""),
                 "clip_index": idx,
-                "clip_action": _short(action, limit=220),
-                "speech_line": _short(speech, limit=200),
-                "camera": _short(camera, limit=120),
+                "clip_action": _short(action),
+                "speech_line": _short(speech),
+                "camera": _short(camera),
                 "setting_id": str(cfg.get("setting_id") or "").strip(),
             }
         )
@@ -89,8 +89,8 @@ def storyboard_already_done_notes(priors: list[dict[str, Any]] | None) -> list[s
         if not isinstance(p, dict):
             continue
         idx = int(p.get("clip_index") or 0) or "?"
-        action = _short(str(p.get("clip_action") or ""), limit=120)
-        speech = _short(str(p.get("speech_line") or ""), limit=100)
+        action = _short(str(p.get("clip_action") or ""))
+        speech = _short(str(p.get("speech_line") or ""))
         if action:
             note = f"shot {idx} already filmed: {action}"
             if note not in notes:
@@ -222,7 +222,7 @@ def merge_storyboard_consistency(
     beat_done = [str(x).strip() for x in (out.get("beat_done") or []) if str(x).strip()]
     holds = [str(x).strip() for x in (out.get("pose_holds") or []) if str(x).strip()]
     for p in priors:
-        action = _short(str(p.get("clip_action") or ""), limit=140)
+        action = _short(str(p.get("clip_action") or ""))
         if not action:
             continue
         beat_note = f"shot {p.get('clip_index')}: {action}"
@@ -236,9 +236,9 @@ def merge_storyboard_consistency(
     latest = priors[-1]
     out["previous_clip_action"] = str(
         out.get("previous_clip_action") or latest.get("clip_action") or ""
-    )[:220]
+    )
     if latest.get("speech_line") and not str(out.get("previous_clip_speech") or "").strip():
-        out["previous_clip_speech"] = str(latest.get("speech_line"))[:200]
+        out["previous_clip_speech"] = str(latest.get("speech_line"))
     if not out.get("previous_clip_clip_index"):
         out["previous_clip_clip_index"] = int(latest.get("clip_index") or 0)
     out["previous_clip_handoff_ready"] = True
@@ -246,9 +246,9 @@ def merge_storyboard_consistency(
     # Structured end_state for leaf/Director — never the full prior Wan body.
     out["end_state"] = {
         "from_clip_index": int(latest.get("clip_index") or 0),
-        "action_done": _short(str(latest.get("clip_action") or ""), limit=160),
-        "speech_done": _short(str(latest.get("speech_line") or ""), limit=120),
-        "camera_was": _short(str(latest.get("camera") or ""), limit=100),
+        "action_done": _short(str(latest.get("clip_action") or "")),
+        "speech_done": _short(str(latest.get("speech_line") or "")),
+        "camera_was": _short(str(latest.get("camera") or "")),
         "already_done": list(out.get("already_done") or [])[:12],
         "pose_holds": list(out.get("pose_holds") or [])[:6],
         "seat_anchors": out.get("seat_anchors") if isinstance(out.get("seat_anchors"), dict) else {},
@@ -327,7 +327,7 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
     if forbid:
         lines.append(
             "- Forbidden speech (do not restate): "
-            + "; ".join(f'"{x[:80]}"' for x in forbid[:4])
+            + "; ".join(f'"{x}"' for x in forbid[:4])
         )
     this_action = str(cfg.get("clip_action") or "").strip()
     this_cam = str(cfg.get("camera") or "").strip()
@@ -335,9 +335,9 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
     if this_action or this_cam or this_speech:
         assign = f"- THIS shot assignment: action={_short(this_action) or '(see storyboard)'}"
         if this_cam:
-            assign += f"; camera={_short(this_cam, limit=80)}"
+            assign += f"; camera={_short(this_cam)}"
         if this_speech:
-            assign += '; speech="' + _short(this_speech, limit=100) + '"'
+            assign += '; speech="' + _short(this_speech) + '"'
         else:
             assign += "; speech=(silent)"
         lines.append(assign)

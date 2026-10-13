@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 # Roles that must emit real media (handlers are the generation backends).
 _MEDIA_MATERIALIZE_ROLES = {
     "character",
-    "character",
     "scene",
     "clip",
     "compose",
@@ -51,7 +50,6 @@ _MEDIA_URI_SUFFIXES = _IMAGE_URI_SUFFIXES + _VIDEO_URI_SUFFIXES + _AUDIO_URI_SUF
 # Role → required media family for handler materialization.
 # Clip/compose must not treat a character/scene image as "done" (agents often attach images).
 _ROLE_REQUIRED_MEDIA: dict[str, str] = {
-    "character": "image",
     "character": "image",
     "scene": "image",
     "clip": "video",
@@ -203,7 +201,6 @@ def _result_satisfies_required_media(
     if required == "image" and role in {
         "scene",
         "character",
-        "character",
     }:
         primary = result.output_ref if result is not None else None
         if _ref_media_family(primary) != "image":
@@ -292,10 +289,10 @@ def _agent_text_from_result(result: NodeResult | None) -> str:
             continue
         try:
             if path.is_file():
-                return path.read_text(encoding="utf-8", errors="replace")[:8000]
+                return path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-    return str(getattr(result, "message", "") or "")[:2000]
+    return str(getattr(result, "message", "") or "")
 
 
 def _seed_handler_prompt(node: DesignerGraphNode, agent_result: NodeResult | None) -> None:
@@ -310,7 +307,7 @@ def _seed_handler_prompt(node: DesignerGraphNode, agent_result: NodeResult | Non
     # Prefer agent brief/spec when handler prompt is empty or generic.
     existing = str(cfg.get("prompt") or "").strip()
     if not existing or len(text) > len(existing):
-        cfg["prompt"] = text[:6000]
+        cfg["prompt"] = text
 
 
 def _prefer_media_primary(
@@ -564,7 +561,7 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         extra["hollywood_instructions"] = hollywood_leaf_instructions(role)
         extra["media_prompt_limits"] = limits
         kind = "video" if role in {"clip", "video"} else "image"
-        if role in {"scene", "character", "character", "clip", "video"}:
+        if role in {"scene", "character", "clip", "video"}:
             lim = resolve_prompt_limit("video" if kind == "video" else "image")
             extra["prompt_char_limit"] = lim.max_chars
             extra["prompt_limit_guidance"] = lim.guidance()
@@ -605,16 +602,16 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "type": node.get("type"),
         "prompt": graph_prompt(graph, node),
         "clip_index": cfg.get("clip_index"),
-        "clip_action": str(cfg.get("clip_action") or "")[:500],
-        "camera": str(cfg.get("camera") or "")[:120],
-        "speech_line": str(cfg.get("speech_line") or "")[:200],
+        "clip_action": str(cfg.get("clip_action") or ""),
+        "camera": str(cfg.get("camera") or ""),
+        "speech_line": str(cfg.get("speech_line") or ""),
         "agent_template": node_agent_template(node),
         "upstream_node_ids": preds,
         "suggested_next_node_ids": [item for item in suggested if isinstance(item, str)],
         "upstream_outputs": _upstream_outputs(ctx, preds),
         "user_canvas_edits": list(
             (graph.get("metadata") or {}).get("user_canvas_edits") or []
-        )[-20:]
+        )
         if isinstance(graph.get("metadata"), dict)
         else [],
         "setting_id": locks["setting_id"],
@@ -627,12 +624,11 @@ def build_node_user_query(node: DesignerGraphNode, ctx: NodeExecutionContext) ->
         "forbidden_speech": cfg.get("forbidden_speech"),
         "end_state": cfg.get("end_state"),
         "scene_specs": cfg.get("scene_specs"),
-        "previous_clip_prompt": str(cfg.get("previous_clip_prompt") or "")[:800],
-        "previous_clip_action": str(cfg.get("previous_clip_action") or "")[:300],
+        "previous_clip_prompt": str(cfg.get("previous_clip_prompt") or ""),
         # Do NOT pass raw previous_clip_wan_prompt to the leaf — contamination source.
-        "previous_clip_action": str(cfg.get("previous_clip_action") or "")[:300],
+        "previous_clip_action": str(cfg.get("previous_clip_action") or ""),
         "previous_clip_finished_events": cfg.get("previous_clip_finished_events"),
-        "scene_architecture_clause": str(cfg.get("scene_architecture_clause") or "")[:900],
+        "scene_architecture_clause": str(cfg.get("scene_architecture_clause") or ""),
         "locks": locks,
         "director_prompt_reviewed": locks["director_prompt_reviewed"],
     }
@@ -861,8 +857,8 @@ class DesignerGraphToolkit:
         node = _node_from_ctx(self.ctx)
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         result = await call_model_tool(
-            prompt=str(prompt or graph_prompt(self.ctx.graph, node) or "")[:6000],
-            system=str(system or cfg.get("director_task") or "You are a Designer node agent.")[:4000],
+            prompt=str(prompt or graph_prompt(self.ctx.graph, node) or ""),
+            system=str(system or cfg.get("director_task") or "You are a Designer node agent."),
             max_tokens=16384,
         )
         return model_text_or_raise(result)
@@ -939,11 +935,7 @@ class DesignerGraphToolkit:
                 text = user_surface
         except Exception:  # noqa: BLE001
             pass
-        if role in {
-            "scene",
-            "character",
-            "character",
-        }:
+        if role in {"scene", "character"}:
             try:
                 from jiuwenswarm.server.runtime.designer.pipeline.wan_call_locks import (
                     apply_image_call_locks,
@@ -955,30 +947,21 @@ class DesignerGraphToolkit:
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
-                trim_prompt_to_limit,
             )
 
             lim = resolve_prompt_limit("image")
             cfg["prompt_char_limit"] = lim.max_chars
-            text, trimmed = trim_prompt_to_limit(text, lim)
-            if trimmed:
+            if lim.max_chars and len(text) > lim.max_chars:
                 logger.warning(
-                    "call_image_model trimmed prompt to %s chars (model=%s source=%s)",
-                    lim.max_chars,
-                    lim.model,
-                    lim.source,
-                )
-            elif lim.max_chars and len(text) > lim.max_chars:
-                logger.warning(
-                    "call_image_model prompt length=%s exceeds advisory %s (model=%s)",
+                    "call_image_model prompt length=%s exceeds limit %s (model=%s); "
+                    "passing as-is — the agent is asked to self-limit",
                     len(text),
                     lim.max_chars,
                     lim.model,
                 )
         except Exception:  # noqa: BLE001
             pass
-        store_cap = max(6000, int(cfg.get("prompt_char_limit") or 6000))
-        cfg["prompt"] = text[:store_cap]
+        cfg["prompt"] = text
         beat = asyncio.create_task(
             _heartbeat_while(self.ctx, "call_image_model", "image model running")
         )
@@ -1167,35 +1150,22 @@ class DesignerGraphToolkit:
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
-                trim_prompt_to_limit,
             )
 
             vlim = resolve_prompt_limit("video")
             cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
             cfg["prompt_char_limit"] = vlim.max_chars
             node["config"] = cfg
-            text, trimmed = trim_prompt_to_limit(text, vlim)
-            if trimmed:
+            if vlim.max_chars and len(text) > vlim.max_chars:
                 logger.warning(
-                    "call_video_model trimmed prompt to %s chars (model=%s source=%s)",
-                    vlim.max_chars,
-                    vlim.model,
-                    vlim.source,
-                )
-            elif vlim.max_chars and len(text) > vlim.max_chars:
-                logger.warning(
-                    "call_video_model prompt length=%s exceeds advisory %s (model=%s); "
-                    "sending full text (LLM should self-limit)",
+                    "call_video_model prompt length=%s exceeds limit %s (model=%s); "
+                    "passing as-is — the agent is asked to self-limit",
                     len(text),
                     vlim.max_chars,
                     vlim.model,
                 )
         except Exception:  # noqa: BLE001
-            if len(text) > 4000:
-                logger.warning(
-                    "call_video_model prompt length=%s (>4000); sending full text",
-                    len(text),
-                )
+            pass
         cfg = node.get("config") if isinstance(node.get("config"), dict) else cfg
         cfg = scrub_restated_speech(dict(cfg))
         node["config"] = cfg
@@ -1304,9 +1274,9 @@ class DesignerGraphToolkit:
             self.fail_media(error)
             raise error
         path = Path(video_path)
-        cfg["last_wan_prompt"] = str(text)[:4000]
-        cfg["last_approved_prompt"] = str(text)[:4000]
-        cfg["clip_prompt_preview"] = str(text)[:1200]
+        cfg["last_wan_prompt"] = str(text)
+        cfg["last_approved_prompt"] = str(text)
+        cfg["clip_prompt_preview"] = str(text)
         node["config"] = cfg
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
@@ -1413,7 +1383,7 @@ class DesignerGraphToolkit:
             if not isinstance(cfg, dict):
                 cfg = {}
                 node["config"] = cfg
-            cfg["prompt"] = prompt.strip()[:4000]
+            cfg["prompt"] = prompt.strip()
         try:
             media = await get_node_handler(node).execute(node, self.ctx)
         except Exception as exc:  # noqa: BLE001

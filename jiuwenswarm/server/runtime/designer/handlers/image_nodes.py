@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from jiuwenswarm.common.schema.designer_graph import (
@@ -29,6 +30,9 @@ from jiuwenswarm.server.runtime.designer.user_references import (
 from jiuwenswarm.server.runtime.designer.a2a_collab import collaboration_card
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
 from jiuwenswarm.server.runtime.designer.media_settings import image_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def _drop_story_context(source: str) -> str:
@@ -109,11 +113,17 @@ async def _require_image(
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
             resolve_prompt_limit,
-            trim_prompt_to_limit,
         )
 
         lim = resolve_prompt_limit("image")
-        prompt, _ = trim_prompt_to_limit(str(prompt or ""), lim)
+        text_len = len(str(prompt or ""))
+        if lim.max_chars and text_len > lim.max_chars:
+            logger.warning(
+                "image prompt length=%s exceeds limit %s (model=%s); passing as-is",
+                text_len,
+                lim.max_chars,
+                lim.model,
+            )
     except Exception:  # noqa: BLE001
         pass
 

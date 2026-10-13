@@ -113,7 +113,7 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
         clause = _continuity_prompt_clause(lock)
         prompt = str(shot.get("clip_prompt") or action)
         if clause and "CONSISTENCY LOCK" not in prompt:
-            shot["clip_prompt"] = (prompt[:500] + clause)[:700]
+            shot["clip_prompt"] = prompt + clause
             notes.append(f"analysis shot {idx}: consistency lock stamped")
 
     if analysis.get("clips"):
@@ -142,7 +142,7 @@ def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
             if not prompt:
                 camera = str(cfg.get("camera") or "medium / eye-level")
                 prompt = f"Film shot {idx or '?'} only. Camera {camera}. Action: {action}."
-            gen["prompt"] = (prompt + clause)[:1200]
+            gen["prompt"] = prompt + clause
             cfg["generate"] = gen
             notes.append(f"{node.get('id')}: consistency lock in generate.prompt")
         elif role == "storyboard":
@@ -1008,7 +1008,6 @@ class Director:
             if _role_key(node) not in {
                 "clip",
                 "character",
-                "character",
                 "scene",
                 "image",
                 "video",
@@ -1582,12 +1581,12 @@ class Director:
                         )
                     if isinstance(shot.get("speech_by_character"), dict):
                         shot["speech_by_character"] = {
-                            str(k): str(v)[:280]
+                            str(k): str(v)
                             for k, v in shot["speech_by_character"].items()
                             if str(v).strip()
                         }
                     if shot.get("speech_line"):
-                        shot["speech_line"] = str(shot.get("speech_line"))[:500]
+                        shot["speech_line"] = str(shot.get("speech_line"))
                     cleaned.append(shot)
                 if cleaned:
                     shots = cleaned
@@ -1714,11 +1713,11 @@ class Director:
                 if int(shot.get("clip_index") or 0) != idx:
                     continue
                 if shot.get("action"):
-                    cfg["clip_action"] = str(shot["action"])[:500]
+                    cfg["clip_action"] = str(shot["action"])
                 if shot.get("camera"):
-                    cfg["camera"] = str(shot["camera"])[:120]
+                    cfg["camera"] = str(shot["camera"])
                 if shot.get("timeline"):
-                    cfg["timeline"] = str(shot["timeline"])[:40]
+                    cfg["timeline"] = str(shot["timeline"])
                 if isinstance(shot.get("continuity_lock"), dict):
                     cfg["continuity_lock"] = shot["continuity_lock"]
                 if isinstance(shot.get("character_ids"), list):
@@ -1734,7 +1733,7 @@ class Director:
                     )
                 else:
                     if shot.get("speech_line"):
-                        cfg["speech_line"] = str(shot.get("speech_line"))[:500]
+                        cfg["speech_line"] = str(shot.get("speech_line"))
                     if isinstance(shot.get("speech_by_character"), dict):
                         cfg["speech_by_character"] = shot["speech_by_character"]
                     cfg["language_lock"] = str(
@@ -2227,10 +2226,10 @@ class Director:
                 ).strip()
                 if prior_clip_action or prior_prompt:
                     if prior_clip_action:
-                        cfg["previous_clip_action"] = prior_clip_action[:300]
-                    # Soft-dep readiness marker — do not inject full text into prompt.
+                        cfg["previous_clip_action"] = prior_clip_action
+                    # Readiness marker only; the gate note carries the prior beat.
                     if prior_prompt and not str(cfg.get("previous_clip_prompt") or "").strip():
-                        cfg["previous_clip_prompt"] = prior_prompt[:800]
+                        cfg["previous_clip_prompt"] = prior_prompt
                     cfg["previous_clip_node_id"] = prev_id
                     notes.append("pull_prior_clip_action")
                     changed = True
@@ -2248,7 +2247,7 @@ class Director:
                 clip_index=clip_index,
                 this_action=str(cfg.get("clip_action") or cfg.get("character_action") or ""),
                 this_camera=str(cfg.get("camera") or ""),
-                prior_action=prior_clip_action or prior_prompt[:220],
+                prior_action=prior_clip_action or prior_prompt,
                 prior_clip_index=clip_index - 1 if clip_index > 1 else None,
             )
             if prior_note:
@@ -2333,7 +2332,7 @@ class Director:
                 if not isinstance(other, dict):
                     continue
                 oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-                if _role_key(other) not in {"character", "character"}:
+                if _role_key(other) not in {"character"}:
                     continue
                 if oc.get("combined_cast"):
                     continue
@@ -2872,7 +2871,7 @@ class Director:
 
         # Always stamp Director lock gate; patched=True when prompt text changed.
         # Images + clips: positive practice prompts only (no LOCK essays on tool body).
-        if role in {"scene", "character", "character"}:
+        if role in {"scene", "character"}:
             meta_l = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             analysis_l = (
                 meta_l.get("script_analysis")
@@ -2937,12 +2936,11 @@ class Director:
             except Exception:  # noqa: BLE001
                 pass
 
-        # Stamp configured backend prompt budgets onto the leaf (never forces a model).
+        # Stamp configured backend prompt budgets onto the leaf (advisory only — never truncates).
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 media_prompt_limit_packet,
                 resolve_prompt_limit,
-                trim_prompt_to_limit,
             )
 
             packet = media_prompt_limit_packet()
@@ -2952,15 +2950,9 @@ class Director:
             cfg["prompt_char_limit"] = lim.max_chars
             cfg["prompt_limit_guidance"] = lim.guidance()
             if lim.max_chars and len(prompt) > lim.max_chars:
-                trimmed, did = trim_prompt_to_limit(prompt, lim)
-                if did:
-                    prompt = trimmed
-                    notes.append(f"trim_to_prompt_limit:{lim.max_chars}")
-                    changed = True
-                else:
-                    notes.append(
-                        f"prompt_over_advisory_limit:{len(prompt)}>{lim.max_chars}"
-                    )
+                notes.append(
+                    f"prompt_over_limit:{len(prompt)}>{lim.max_chars}"
+                )
         except Exception:  # noqa: BLE001
             packet = {}
             lim = None
@@ -2993,14 +2985,12 @@ class Director:
         gen["prompt"] = prompt.strip()
         cfg["generate"] = gen
         # Character/scene leaves read cfg.prompt; keep both in sync after Director gate.
-        store_cap = max(6000, int(cfg.get("prompt_char_limit") or 6000))
-        if role in {"character", "character", "scene"} or not str(cfg.get("prompt") or "").strip():
-            cfg["prompt"] = prompt.strip()[:store_cap]
-        approved_cap = max(4000, int(cfg.get("prompt_char_limit") or 4000))
+        if role in {"character", "scene"} or not str(cfg.get("prompt") or "").strip():
+            cfg["prompt"] = prompt.strip()
         if changed:
-            cfg["last_approved_prompt"] = prompt.strip()[:approved_cap]
+            cfg["last_approved_prompt"] = prompt.strip()
         else:
-            cfg.setdefault("last_approved_prompt", prompt.strip()[:approved_cap])
+            cfg.setdefault("last_approved_prompt", prompt.strip())
         node["config"] = cfg
         nid = str(node.get("id") or "")
         for n in graph.get("nodes") or []:
@@ -3254,6 +3244,21 @@ class Director:
                 cfg.pop("force_handler", None)
                 cfg.pop("skip_llm", None)
                 cfg["delegate"] = "agent"
+            try:
+                role_key = _role_key(node)
+                if role_key in {"clip", "video", "scene", "character"}:
+                    from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
+                        media_prompt_limit_packet,
+                        resolve_prompt_limit,
+                    )
+
+                    kind = "video" if role_key in {"clip", "video"} else "image"
+                    lim = resolve_prompt_limit(kind)
+                    cfg["prompt_char_limit"] = lim.max_chars
+                    cfg["prompt_limit_guidance"] = lim.guidance()
+                    cfg.setdefault("media_prompt_limits", media_prompt_limit_packet())
+            except Exception:  # noqa: BLE001
+                pass
             node["config"] = cfg
         return notes
 
@@ -3595,11 +3600,11 @@ class Director:
                         if int(shot.get("clip_index") or 0) != idx:
                             continue
                         if shot.get("action"):
-                            cfg["clip_action"] = str(shot["action"])[:500]
+                            cfg["clip_action"] = str(shot["action"])
                         if shot.get("camera"):
-                            cfg["camera"] = str(shot["camera"])[:120]
+                            cfg["camera"] = str(shot["camera"])
                         if shot.get("timeline"):
-                            cfg["timeline"] = str(shot["timeline"])[:40]
+                            cfg["timeline"] = str(shot["timeline"])
                         if isinstance(shot.get("continuity_lock"), dict):
                             cfg["continuity_lock"] = shot["continuity_lock"]
                         if role == "clip":
@@ -3778,18 +3783,18 @@ class Director:
                 if cids:
                     shot["character_ids"] = cids
                 if action:
-                    shot["action"] = action[:500]
-                    shot["clip_prompt"] = action[:600]
+                    shot["action"] = action
+                    shot["clip_prompt"] = action
                 if lock:
                     shot["continuity_lock"] = {str(k): str(v) for k, v in lock.items()}
                     clause = _continuity_prompt_clause(shot["continuity_lock"])
                     prompt = str(shot.get("clip_prompt") or "")
                     if clause and "CONSISTENCY LOCK" not in prompt:
-                        shot["clip_prompt"] = (prompt + clause)[:700]
+                        shot["clip_prompt"] = prompt + clause
                 if camera:
-                    shot["camera"] = camera[:120]
+                    shot["camera"] = camera
                 if costume:
-                    shot["costume_lock"] = costume[:480]
+                    shot["costume_lock"] = costume
                 applied.append(f"shot {idx} llm-fix")
             for node in graph.get("nodes") or []:
                 cfg = dict(node.get("config") or {})
@@ -3801,18 +3806,18 @@ class Director:
                     cfg["character_ids"] = cids
                     cfg["cast_names"] = [id_to_name.get(cid, cid) for cid in cids]
                 if action:
-                    cfg["clip_action"] = action[:500]
+                    cfg["clip_action"] = action
                 if camera:
-                    cfg["camera"] = camera[:120]
+                    cfg["camera"] = camera
                 if costume:
-                    cfg["costume_lock"] = costume[:480]
+                    cfg["costume_lock"] = costume
                 if lock:
                     cfg["continuity_lock"] = {str(k): str(v) for k, v in lock.items()}
                     gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
                     prompt = str(gen.get("prompt") or cfg.get("clip_action") or "")
                     clause = _continuity_prompt_clause(cfg["continuity_lock"])
                     if clause and "CONSISTENCY LOCK" not in prompt:
-                        gen["prompt"] = (prompt + clause)[:1200]
+                        gen["prompt"] = prompt + clause
                         cfg["generate"] = gen
                 node["config"] = cfg
         if shots:
@@ -4336,7 +4341,7 @@ def _shot_distinctness_patch(graph: DesignerExecutionGraph) -> list[str]:
             cfg["generate"] = gen
             notes.append(f"{node.get('id')}: refreshed generate.prompt")
         elif clause and "CONSISTENCY LOCK" not in prompt:
-            gen["prompt"] = (prompt + clause)[:1200]
+            gen["prompt"] = prompt + clause
             cfg["generate"] = gen
             notes.append(f"{node.get('id')}: appended consistency lock")
         if role == "clip":
@@ -4477,11 +4482,11 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
                             ),
                             "",
                         )
-                    )[:120],
+                    ),
                 )
                 for cid in focus
             ]
-            costume_lock = "; ".join(p for p in costume_parts if p).strip("; ")[:480]
+            costume_lock = "; ".join(p for p in costume_parts if p).strip("; ")
             identity_refs = {
                 "character_ids": list(focus),
                 "character_node_ids": list(cfg.get("character_node_ids") or []),
@@ -4824,7 +4829,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
                 f"SCENE PROMPT HANDOFF from {handoff_from} — keep architecture; change view/cast only."
             )
         if lock_bits:
-            gen["prompt"] = (prompt + " " + " ".join(lock_bits)).strip()[:1800]
+            gen["prompt"] = (prompt + " " + " ".join(lock_bits)).strip()
             cfg["generate"] = gen
             notes.append(f"{node.get('id')}: identity/scene lock clause in generate.prompt")
         node["config"] = cfg

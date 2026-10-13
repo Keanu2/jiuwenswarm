@@ -362,11 +362,11 @@ def apply_axis_locks_to_graph(graph: dict[str, Any]) -> list[str]:
             role = "scene"
         idx = int(cfg.get("clip_index") or 0)
         clause = format_axis_clause(shots.get(idx), analysis) if idx else clause_global
-        if role in {"scene", "clip", "character", "character"} and clause:
+        if role in {"scene", "clip", "character"} and clause:
             gen = dict(cfg.get("generate") or {}) if isinstance(cfg.get("generate"), dict) else {}
             prev = str(gen.get("prompt") or cfg.get("prompt") or "")
             if "STYLE LOCK" not in prev:
-                stamped = (prev + "\n" + clause).strip()[:6000]
+                stamped = (prev + "\n" + clause).strip()
                 if role in {"clip"}:
                     gen["prompt"] = stamped
                     cfg["generate"] = gen

@@ -4,6 +4,10 @@
 Resolves limits from the user's VISUAL_GEN / VIDEO_GEN model + provider hints.
 Never forces a specific model. Unknown backends get a soft advisory only.
 
+Limits are advisory labels only: the pipeline never truncates a prompt.
+Leaf agents are asked to keep their tool prompts within the resolved limit,
+and callers may log a warning when a prompt runs over.
+
 Sources are vendor docs / common API contracts (chars unless noted). Token
 limits are converted with a conservative chars≈tokens*4 estimate for LLM
 guidance. Override at runtime with VISUAL_GEN_PROMPT_MAX_CHARS /
@@ -249,29 +253,8 @@ def media_prompt_limit_packet() -> dict[str, Any]:
     }
 
 
-def prompt_within_limit(text: str, limit: PromptLimit) -> bool:
+def prompt_over_limit(text: str, limit: PromptLimit) -> bool:
+    """Advisory check for logs/notes — the pipeline never truncates prompts."""
     if not limit.max_chars or limit.max_chars <= 0:
-        return True
-    return len(str(text or "")) <= int(limit.max_chars)
-
-
-def trim_prompt_to_limit(text: str, limit: PromptLimit) -> tuple[str, bool]:
-    """Optional soft trim only when a known hard cap is exceeded.
-
-    Prefer leaf self-limit; this is a last-resort safety for documented caps.
-    Soft/unknown limits are never truncated here.
-    """
-    raw = str(text or "").strip()
-    if not limit.known or limit.soft or not limit.max_chars:
-        return raw, False
-    if len(raw) <= limit.max_chars:
-        return raw, False
-    budget = max(1, int(limit.max_chars) - 1)
-    cut = raw[:budget]
-    if budget >= 40:
-        for sep in (". ", "。", "! ", "? ", "\n"):
-            idx = cut.rfind(sep)
-            if idx >= budget // 2:
-                cut = cut[: idx + len(sep)].rstrip()
-                break
-    return cut.strip(), True
+        return False
+    return len(str(text or "")) > int(limit.max_chars)

@@ -181,7 +181,7 @@ def edge_text_inputs(
             continue
         body = item.text.strip()
         if body:
-            texts.append((item.label, body[:4000]))
+            texts.append((item.label, body))
     return texts
 
 
@@ -1017,12 +1017,17 @@ class ClipNodeHandler:
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
-                trim_prompt_to_limit,
             )
 
             vlim = resolve_prompt_limit("video")
             cfg["prompt_char_limit"] = vlim.max_chars
-            prompt, _ = trim_prompt_to_limit(prompt, vlim)
+            if vlim.max_chars and len(prompt) > vlim.max_chars:
+                logger.warning(
+                    "clip prompt length=%s exceeds limit %s (model=%s); passing as-is",
+                    len(prompt),
+                    vlim.max_chars,
+                    vlim.model,
+                )
         except Exception:  # noqa: BLE001
             pass
         if ctx is not None and callable(getattr(ctx, "on_prompt_artifact", None)):
@@ -1077,9 +1082,9 @@ class ClipNodeHandler:
             )
             path = Path(str(result["video_path"]))
             message = f"clip {clip_index} generated" + (" (with audio)" if want_audio else "")
-            cfg["last_wan_prompt"] = str(prompt)[:4000]
-            cfg["last_approved_prompt"] = str(prompt)[:4000]
-            cfg["clip_prompt_preview"] = str(prompt)[:1200]
+            cfg["last_wan_prompt"] = str(prompt)
+            cfg["last_approved_prompt"] = str(prompt)
+            cfg["clip_prompt_preview"] = str(prompt)
             node["config"] = cfg
             try:
                 from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (

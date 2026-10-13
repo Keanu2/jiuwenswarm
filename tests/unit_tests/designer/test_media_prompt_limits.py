@@ -103,10 +103,11 @@ def test_env_override_wins(monkeypatch) -> None:
     monkeypatch.delenv("VIDEO_GEN_PROMPT_MAX_CHARS", raising=False)
 
 
-def test_trim_only_for_known_hard_cap() -> None:
+def test_prompts_are_never_truncated() -> None:
+    """Limits are advisory labels — the pipeline never truncates a prompt."""
     from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
         PromptLimit,
-        trim_prompt_to_limit,
+        prompt_over_limit,
     )
 
     hard = PromptLimit(
@@ -119,9 +120,9 @@ def test_trim_only_for_known_hard_cap() -> None:
         soft=False,
         source="test",
     )
-    text, did = trim_prompt_to_limit("a" * 50 + ". more text here.", hard)
-    assert did
-    assert len(text) <= 20
+    text = "a" * 50 + ". more text here."
+    assert prompt_over_limit(text, hard)
+    assert len(text) == len("a" * 50 + ". more text here.")
 
     soft = PromptLimit(
         kind="image",
@@ -133,9 +134,8 @@ def test_trim_only_for_known_hard_cap() -> None:
         soft=True,
         source="soft",
     )
-    text2, did2 = trim_prompt_to_limit("a" * 50, soft)
-    assert not did2
-    assert len(text2) == 50
+    assert prompt_over_limit("a" * 50, soft)
+    assert not prompt_over_limit("short", soft)
 
 
 def test_audio_locks_delegates_guidance(monkeypatch) -> None:

@@ -38,7 +38,7 @@ def wan_prompt_from_clip_node(node: dict[str, Any] | None) -> str:
     return str(gen.get("prompt") or cfg.get("prompt") or "").strip()
 
 
-def _short_action(text: str, *, limit: int = 220) -> str:
+def _short_action(text: str) -> str:
     raw = re.sub(r"\s+", " ", (text or "").strip())
     for marker in (
         "PRIOR CLIP",
@@ -63,7 +63,7 @@ def _short_action(text: str, *, limit: int = 220) -> str:
         if m:
             raw = m.group(1).strip()
             break
-    return raw[:limit]
+    return raw
 
 
 def _action_from_clip_node(node: dict[str, Any] | None) -> str:
@@ -81,11 +81,9 @@ def collect_prior_clip_prompts(
     graph: dict[str, Any],
     *,
     clip_index: int,
-    max_chars_each: int = 1600,
     max_clips: int = 6,
 ) -> list[dict[str, Any]]:
-    """Earlier clips as short storyboard shots (oldest → newest)."""
-    del max_chars_each
+    """Earlier clips as storyboard shots (oldest → newest)."""
     out: list[dict[str, Any]] = []
     for node in _clip_nodes(graph):
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
@@ -100,10 +98,10 @@ def collect_prior_clip_prompts(
             {
                 "node_id": str(node.get("id") or ""),
                 "clip_index": idx,
-                "wan_prompt": (prompt or "")[:400],  # readiness/debug only
-                "clip_action": (action or "")[:220],
-                "speech_line": str(cfg.get("speech_line") or "")[:200],
-                "camera": str(cfg.get("camera") or "")[:120],
+                "wan_prompt": prompt or "",
+                "clip_action": action or "",
+                "speech_line": str(cfg.get("speech_line") or ""),
+                "camera": str(cfg.get("camera") or ""),
             }
         )
     return out[-max(1, int(max_clips)) :]
@@ -135,9 +133,9 @@ def stamp_wan_prompt_handoff(
     speech = (speech_line or str((src_cfg or {}).get("speech_line") or "")).strip()
     log[key] = {
         "clip_index": int(clip_index or 0),
-        "prompt": text[:4000],
-        "clip_action": action[:220],
-        "speech_line": speech[:200],
+        "prompt": text,
+        "clip_action": action,
+        "speech_line": speech,
     }
     meta["clip_wan_prompt_log"] = log
     graph["metadata"] = meta
@@ -148,10 +146,10 @@ def stamp_wan_prompt_handoff(
         nid = str(node.get("id") or "")
         if idx == int(clip_index or 0) or nid == key:
             if text:
-                cfg["last_wan_prompt"] = text[:4000]
-                cfg["clip_prompt_preview"] = text[:1200]
+                cfg["last_wan_prompt"] = text
+                cfg["clip_prompt_preview"] = text
             if action:
-                cfg["clip_action"] = cfg.get("clip_action") or action[:300]
+                cfg["clip_action"] = cfg.get("clip_action") or action
             cfg["handoff_artifact_ready"] = True
             # Drop legacy prior-clip schedule wiring if present on older graphs.
             cfg.pop("continuity_clip_node_id", None)
@@ -174,8 +172,8 @@ def same_scene_prompt_gate_clause(
         "SAME-SCENE CONSISTENCY GATE (write the Wan prompt to this contract):",
         f"1) THIS storyboard shot {int(clip_index or 0) or 'N'} is the plot authority "
         f"— action: {_short_action(this_action) or '(this row)'}"
-        + (f"; camera: {str(this_camera).strip()[:120]}" if str(this_camera or "").strip() else "")
-        + (f"; speech: {str(this_speech).strip()[:160]}" if str(this_speech or "").strip() else "")
+        + (f"; camera: {str(this_camera).strip()}" if str(this_camera or "").strip() else "")
+        + (f"; speech: {str(this_speech).strip()}" if str(this_speech or "").strip() else "")
         + ".",
         "2) The Wan prompt MUST agree with that row (blocking, who is on screen, what "
         "happens in THIS window). Do not film another shot's beat.",
@@ -317,9 +315,9 @@ def this_shot_assignment_clause(
         f"- Action: {_short_action(action) or '(follow this shot clip spec + storyboard shot)'}",
     ]
     if str(camera or "").strip():
-        lines.append(f"- Camera: {str(camera).strip()[:160]}")
+        lines.append(f"- Camera: {str(camera).strip()}")
     if str(speech_line or "").strip():
-        lines.append(f"- Speech this shot: {str(speech_line).strip()[:200]}")
+        lines.append(f"- Speech this shot: {str(speech_line).strip()}")
     done = [str(x) for x in (already_done or []) if str(x).strip()]
     if done:
         lines.append("- Already finished earlier (do not redo): " + "; ".join(done[:8]))
@@ -342,7 +340,7 @@ def previous_clip_had_clause(prior: list[dict[str, Any]] | None) -> str:
     if latest.get("speech_line"):
         lines.append(
             f"- Prior speech already delivered (do NOT restate): "
-            f"\"{str(latest.get('speech_line'))[:160]}\""
+            f"\"{str(latest.get('speech_line'))}\""
         )
         lines.append(
             "Dialogue continuity: do not restart that line; only speak NEW words for This shot "
@@ -350,7 +348,7 @@ def previous_clip_had_clause(prior: list[dict[str, Any]] | None) -> str:
         )
     if len(items) > 1:
         earlier = "; ".join(
-            f"shot {p.get('clip_index')}: {_short_action(str(p.get('clip_action') or ''), limit=80)}"
+            f"shot {p.get('clip_index')}: {_short_action(str(p.get('clip_action') or ''))}"
             for p in items[:-1]
             if p.get("clip_action") or p.get("clip_index")
         )

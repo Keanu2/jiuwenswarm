@@ -296,7 +296,6 @@ def decide_modality_plan(graph: DesignerExecutionGraph) -> dict[str, Any]:
         )
         if can_vision and role in {
             "character",
-            "character",
             "scene",
             "clip",
             "compose",
@@ -400,7 +399,6 @@ def collect_rateable_image_paths(
         nid = str(node.get("id") or "")
         role = str(node_pipeline(node) or node_role(node) or "")
         if role not in {
-            "character",
             "character",
             "scene",
             "image",

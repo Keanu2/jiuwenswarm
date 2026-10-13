@@ -93,7 +93,7 @@ def extract_finished_events(
             {
                 "type": kind,
                 "character_id": cid,
-                "already_done": f"{prefix}{note}"[:220],
+                "already_done": f"{prefix}{note}",
             }
         )
 
@@ -117,7 +117,7 @@ def extract_finished_events(
             matched_exit = True
         if _ONSET_RE.search(local) or _BEAT_RE.search(local):
             # Prefer a concrete clause from the prior sentence over a generic onset note.
-            clause = hits[0][:160].rstrip(".")
+            clause = hits[0].rstrip(".")
             add(
                 "beat",
                 f"{who} already finished: {clause} — open this shot already past that beat",
@@ -133,7 +133,7 @@ def extract_finished_events(
     if _BEAT_RE.search(blob) and not any(e["type"] == "beat" for e in events):
         # Generic beat without a matched name — still block restage.
         clause = next(
-            (s[:160].rstrip(".") for s in sentences if _BEAT_RE.search(s)),
+            (s.rstrip(".") for s in sentences if _BEAT_RE.search(s)),
             "prior beat",
         )
         add("beat", f"already finished: {clause} — open this shot past that beat")
@@ -339,7 +339,7 @@ def agent_prior_story_block(cfg: dict[str, Any] | None) -> str:
         idx = cfg.get("previous_clip_clip_index") or ""
         return (
             f"CONTINUITY STATE (prior shot {idx} finished — structured only):\n"
-            f"- Prior action finished: {action[:220]}"
+            f"- Prior action finished: {action}"
         )
 
 
@@ -414,9 +414,9 @@ def apply_story_state_to_next_cfg(
     if narrative:
         cfg["previous_clip_wan_prompt"] = narrative
     elif action:
-        cfg["previous_clip_wan_prompt"] = action[:2500]
+        cfg["previous_clip_wan_prompt"] = action
     if action:
-        cfg["previous_clip_action"] = action[:220]
+        cfg["previous_clip_action"] = action
     if from_clip_index:
         cfg["previous_clip_clip_index"] = int(from_clip_index)
 
@@ -505,7 +505,7 @@ def _hold_from_beat_note(note: str) -> str:
         return ""
     if "already" not in body.lower():
         body = "Already past: " + body
-    return body[:200].rstrip(".") + "."
+    return body.rstrip(".") + "."
 
 
 def pose_holds_from_events(
@@ -613,9 +613,9 @@ def infer_crowd_state(
     return {
         "disposition": disposition,
         "present": bool(present),
-        "density": density[:80],
-        "rule": rule[:280],
-        "hold": hold[:280],
+        "density": density,
+        "rule": rule,
+        "hold": hold,
     }
 
 

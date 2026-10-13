@@ -82,7 +82,7 @@ def hollywood_leaf_instructions(role: str) -> str:
         f"12) {_image_limit_clause()}\n"
         f"13) {_video_limit_clause()}\n"
     )
-    if r in {"character", "character"}:
+    if r in {"character"}:
         return (
             shared
             + "ROLE=character sheet. Write ONE positive Qwen-ready studio portrait prompt "
@@ -147,57 +147,6 @@ def _wan_leaf_extra() -> str:
             "CONTACT: bodies never intersect furniture/props; when the shot uses a support "
             "surface, weight rests ON it. Solo sheets are identity — repose for the shot."
         )
-
-
-def collect_production_context(
-    *,
-    brief_text: str = "",
-    storyboard_text: str = "",
-    continuity_guide: str = "",
-    skill_excerpt: str = "",
-    generate_prompt: str = "",
-    max_chars: int = 4500,
-) -> dict[str, str]:
-    """Trim production texts for leaf agent JSON context."""
-
-    def _trim(s: str, n: int) -> str:
-        t = (s or "").strip()
-        return t[:n] if t else ""
-
-    return {
-        "brief_excerpt": _trim(brief_text, 2800),
-        "storyboard_excerpt": _trim(storyboard_text, 3200),
-        "continuity_guide": _trim(continuity_guide, 1200),
-        "skill_excerpt": _trim(skill_excerpt, 900),
-        "current_generate_prompt": _trim(generate_prompt, 1200),
-        "hollywood_instructions": hollywood_leaf_instructions(""),
-    }
-
-
-def merge_director_task(existing: str, planned: str) -> str:
-    """Keep graph-built Hollywood tasks; append planner task if useful."""
-    old = (existing or "").strip()
-    new = (planned or "").strip()
-    if not old:
-        return new
-    if not new:
-        return old
-    markers = (
-        "MOVIE CONTINUITY",
-        "Image 1",
-        "STYLE LOCK",
-        "scene spec",
-        "character spec",
-        "R2V",
-        "clip spec",
-    )
-    if any(m.lower() in old.lower() for m in markers):
-        if new and new not in old and "Execute " in new:
-            return old
-        if new and new not in old:
-            return f"{old}\nPlanner note: {new}"[:2000]
-        return old
-    return new or old
 
 
 def upstream_image_paths(
