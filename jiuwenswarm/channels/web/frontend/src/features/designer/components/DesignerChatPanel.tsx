@@ -1,12 +1,17 @@
-import { Loader2, SendHorizontal, X } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { Loader2, PanelRight, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import SendPlaneIcon from '../../../assets/send_plane.svg?react';
+import { ModelProviderIcon } from '../../../components/ModelProviderIcon';
+import { useChatStore } from '../../../stores/chatStore';
+import { resolveChatModelSelection, useSessionStore } from '../../../stores/sessionStore';
 import { chatDesignerGraph, composeDesignerSession } from '../designerEntry';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
 import { useDesignerStore } from '../designerStore';
 import { designerActivityText } from '../designerActivity';
 import { selectLeaderPeek, useDesignerRunStore } from '../designerRunStore';
 import { useDesignerChatStore } from '../designerChatStore';
+import { useDesignerUiStore } from '../designerUiStore';
 import {
   DESIGNER_REF_LIMITS,
   designerReferenceKindFromMime,
@@ -89,12 +94,24 @@ export function DesignerChatPanel() {
   const bootstrapPhase = useDesignerChatStore((state) => state.bootstrapPhase);
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const selectedNodeId = useDesignerStore((state) => state.selectedNodeId);
+  const toggleChatSidebar = useDesignerUiStore((state) => state.toggleChatSidebar);
   const bodyRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<ComposerDraft[]>([]);
   const [attachError, setAttachError] = useState('');
   const [sending, setSending] = useState(false);
+  const activeSessionId = useChatStore((state) => state.activeSessionId);
+  const chatAvailableModels = useSessionStore((state) => state.chatAvailableModels);
+  const selectedModelName = useSessionStore(
+    (state) => state.runtimes[activeSessionId ?? '']?.selectedModelName ?? null,
+  );
+  const defaultModelName = useSessionStore((state) => state.defaultModelName);
+  const selectedModel = useMemo(
+    () => resolveChatModelSelection(chatAvailableModels, selectedModelName, defaultModelName),
+    [chatAvailableModels, defaultModelName, selectedModelName],
+  );
+  const modelLabel = selectedModel?.alias || selectedModel?.model_name || '';
 
   const chatBusy = bootstrapPhase === 'thinking' || bootstrapPhase === 'bootstrapping' || sending;
   const canSend = Boolean(draft.trim() || attachments.length > 0);
@@ -245,6 +262,16 @@ export function DesignerChatPanel() {
         <h2 className="designer-chat-panel__title" data-testid="designer-chat-panel-title">
           {t('designer.sidebar.conversation')}
         </h2>
+        <button
+          type="button"
+          className="designer-chat-panel__collapse"
+          onClick={toggleChatSidebar}
+          aria-label={t('designer.chat.collapse')}
+          title={t('designer.chat.collapse')}
+          data-testid="designer-chat-panel-collapse"
+        >
+          <PanelRight size={18} aria-hidden />
+        </button>
       </div>
 
       <div className="designer-chat-panel__body" ref={bodyRef} data-testid="designer-chat-panel-body">
@@ -294,20 +321,20 @@ export function DesignerChatPanel() {
             {attachError}
           </p>
         ) : null}
-        <div className="designer-chat-panel__composer-row">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*,video/*,audio/*"
-            multiple
-            hidden
-            data-testid="designer-chat-panel-file"
-            onChange={(event) => {
-              if (event.target.files) addFiles(event.target.files);
-              event.target.value = '';
-            }}
-          />
-          {/* Canvas chat sidebar: hide attach control; landing prompt keeps its own attach UI. */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*,video/*,audio/*"
+          multiple
+          hidden
+          data-testid="designer-chat-panel-file"
+          onChange={(event) => {
+            if (event.target.files) addFiles(event.target.files);
+            event.target.value = '';
+          }}
+        />
+        {/* Canvas chat sidebar: hide attach control; landing prompt keeps its own attach UI. */}
+        <div className="designer-chat-panel__composer-box">
           <textarea
             className="designer-chat-panel__input"
             placeholder={t('designer.chat.inputPlaceholder')}
@@ -317,16 +344,32 @@ export function DesignerChatPanel() {
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onKeyDown}
           />
-          <button
-            type="button"
-            className="designer-chat-panel__send"
-            disabled={chatBusy || !canSend}
-            onClick={handleSend}
-            aria-label={t('designer.chat.send')}
-            data-testid="designer-chat-panel-send"
-          >
-            <SendHorizontal size={16} aria-hidden />
-          </button>
+          <div className="designer-chat-panel__composer-actions">
+            {modelLabel ? (
+              <span
+                className="designer-chat-panel__model"
+                title={modelLabel}
+                data-testid="designer-chat-panel-model"
+              >
+                {selectedModel ? (
+                  <span className="designer-chat-panel__model-icon" aria-hidden>
+                    <ModelProviderIcon model={selectedModel} />
+                  </span>
+                ) : null}
+                <span className="designer-chat-panel__model-label">{modelLabel}</span>
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className="designer-chat-panel__send"
+              disabled={chatBusy || !canSend}
+              onClick={handleSend}
+              aria-label={t('designer.chat.send')}
+              data-testid="designer-chat-panel-send"
+            >
+              <SendPlaneIcon className="designer-chat-panel__send-icon" aria-hidden />
+            </button>
+          </div>
         </div>
       </div>
     </aside>

@@ -1,7 +1,6 @@
-import { LayoutPanelTop, Loader2, MapPinned, Route, RouteOff } from 'lucide-react';
+import { LayoutPanelTop, Loader2, MapPinned, PanelLeft, Route, RouteOff } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import PanelCollapseIcon from '../../../assets/panel-collapse.svg?react';
 import chatOrbIcon from '../../../assets/designer/xiaoyi-app-icon.png';
 import {
   collectDesignerMaterials,
@@ -242,7 +241,7 @@ export function DesignerPage({
               data-testid="designer-page-sidebar-collapse"
               data-variant={sidebarCollapsed ? 'expand' : 'collapse'}
             >
-              <PanelCollapseIcon aria-hidden />
+              <PanelLeft size={18} aria-hidden />
             </button>
           ) : null}
           <div className="designer-page__heading">
