@@ -381,11 +381,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           isLoadingProjects: false,
         };
       });
-      // designer graphs are only consumed by the design canvas (recent-graphs
-      // dropdown loads them itself); skip the extra RPC in work/code modes.
-      if (requestedWorkMode === 'design') {
-        await get().loadDesignerGraphs();
-      }
       await get().loadPinnedSessions(refreshEpoch);
       return true;
     } catch (error) {
