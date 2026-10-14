@@ -2,37 +2,46 @@
 """Design leader surface sanitizer (team.design only, single-repo policy).
 
 The design leader is assembled through the standard agent-core configurator,
-which unconditionally mounts a few capability surfaces the design canvas has
-no use for. Rather than patching agent-core, this rail **subtracts** them
-after the fact — all removal happens in jiuwenswarm, so tuning the design
-leader's surface is a single-repo change.
+which unconditionally mounts capability surfaces the design canvas has no use
+for (team collaboration/task tools, org control, workspace_meta, a build_team
+bootstrap prompt section). Rather than patching agent-core, this rail keeps
+only what the design profile and its base support explicitly need and
+**subtracts everything else** after the fact — a keep-list walked over the
+live surface, not a removal list that has to track every tool agent-core
+adds. All removal happens in jiuwenswarm, so tuning the design leader's
+surface is a single-repo change.
 
-What it strips and why (verified against the real leader surface probe,
-2026-10-10):
+Tools kept (card names as registered by ability_manager.add_ability):
 
-* ``workspace_meta`` — appended by ``TeamToolRail.init`` *after*
-  ``create_team_tools`` already applied ``exclude_tools``, so the team-level
-  exclude list (``TeamAgentSpec.team_tool_exclude``) cannot reach it. The
-  design leader never manages the shared deliverables workspace.
-* ``org_*`` control tools — mounted by
-  ``TeamRuntimeManager.activate → OrganizationRuntimeManager.ensure_control_tools``
-  onto every running leader (harness.add_tool), bypassing the tool factory
-  entirely. The design leader has no organization surface.
-* ``group_send_message`` — the group-chat tool whose card name differs from
-  the plain ``send_message`` entry already in the exclude list. Covered here
-  too (belt and braces) so the design exclude list stays a plain name set.
+* the design canvas toolset — designer_graph_* (design profile), the
+  authoring/execution tools (designer_graph_autorun / designer_run_graph),
+  and the picked model/media tools (call_model / read_upstream /
+  call_image_model / call_video_model / ffmpeg_compose / mix_audio).
+* ``ask_user`` — the structured-question contract with the user.
+* vision / audio tools (image_ocr / visual_question_answering /
+  audio_transcription / audio_question_answering / audio_metadata).
+* base sys_operation support (list_files / glob / bash / grep / read_file —
+  kept per user decision 2026-10-10; the skill rail reads SKILL.md front
+  matter through the sys_operation engine).
+* ``tool_search`` (progressive-disclosure discovery).
+
+Everything else — team collaboration (build_team / send_message / spawn_* /
+task tools / swarmflow …), org_* control tools, ``workspace_meta``, or any
+tool a future agent-core build mounts unconditionally — is dropped.
+
+Prompt sections are subtracted by name instead: the leader's section set is
+stable (core harness sections + the team/design policy sections), and only
+``team_bootstrap`` — the build_team instruction — must never reach the
+model, so a one-entry removal list stays correct. Tools use the opposite
+strategy precisely because the tool surface is *not* stable: agent-core adds
+collaboration tools over time, and a keep-list drops any future one without
+a name change here.
 
 Timing (why init is enough):
   rails initialize lazily in priority-descending order on the first stream
   use — *after* activate() already mounted the org tools. This rail uses a
   low priority (10) so it initializes last and sees every polluted surface.
   Native rebuilds re-run init, and the removals are idempotent.
-
-It also defensively drops the ``team_bootstrap`` prompt section on every
-``before_model_call``: agent-core's ``leader_bootstrap=False`` spec flag
-already keeps it off, but TeamPolicyRail re-adds its sections each model
-call, and a future agent-core change re-introducing the section would
-instruct the design leader to call ``build_team`` — a tool it does not have.
 """
 
 from __future__ import annotations
@@ -44,47 +53,50 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 
 logger = logging.getLogger(__name__)
 
-# Tools removed from the design leader's surface. Every name is a tool *card
-# name* as registered by ability_manager.add_ability.
-_REMOVED_TOOL_NAMES: tuple[str, ...] = (
-    # Shared-workspace management (appended post-factory in TeamToolRail).
-    "workspace_meta",
-    # Group chat (companion of the already-excluded send_message).
-    "group_send_message",
-    # Organization bootstrap control (mounted by ensure_control_tools).
-    "org_create_organization",
-    "org_invite_team",
-    "org_dissolve_organization",
-    "org_list_available_teams",
-    "org_list_configured_teams",
-    "org_activate_and_invite_team",
-    "org_list_expert_groups",
-    "org_create_and_invite_expert_team",
-    "org_view_organization",
-)
+# Tool *card names* kept on the design leader's surface. The leader is a pure
+# conversation surface over the canvas: only the design profile's own tools,
+# the ask-user contract, and the base sys_operation support survive. Anything
+# else mounted by agent-core's team path — or by a future build — is dropped
+# wholesale by walking the ability manager and removing every card not on
+# this list.
+_KEEP_TOOL_NAMES: frozenset[str] = frozenset({
+    # Design canvas (design profile / designer rails).
+    "designer_graph_get",
+    "designer_graph_patch",
+    "designer_node_run",
+    "designer_node_complete",
+    "designer_graph_autorun",
+    "designer_run_graph",
+    "call_model",
+    "read_upstream",
+    "call_image_model",
+    "call_video_model",
+    "ffmpeg_compose",
+    "mix_audio",
+    # Conversation contract.
+    "ask_user",
+    # Vision / audio (design profile tool group).
+    "image_ocr",
+    "visual_question_answering",
+    "audio_transcription",
+    "audio_question_answering",
+    "audio_metadata",
+    # Base sys_operation support (user decision 2026-10-10).
+    "list_files",
+    "glob",
+    "bash",
+    "grep",
+    "read_file",
+    # Progressive-disclosure discovery.
+    "tool_search",
+})
 
-# Organization collaboration tools (leader toolset from create_org_leader_tools
-# when an org_task_manager is bound; same bypass concern as above).
-_ORG_LEADER_TOOL_NAMES: tuple[str, ...] = (
-    "org_view_tasks",
-    "org_create_task",
-    "org_claim_task",
-    "org_delegate_task",
-    "org_update_task",
-    "org_send_leader_message",
-    "org_get_leader_message",
-    "org_list_leader_messages",
-    "org_ack_leader_message",
-    "org_view_child_tasks",
-    "org_view_pending_reviews",
-    "org_review_task",
-    "org_create_summary_execution",
-    "org_summary_get_inputs",
-    "org_summary_complete",
-)
-
-# Prompt sections defensively removed on every model call. ``team_bootstrap``
-# is the build_team instruction — the design leader has no build_team tool.
+# Prompt sections removed on every model call. ``team_bootstrap`` is the
+# build_team instruction — the design leader has no build_team tool, so it
+# must never reach the model (agent-core spec flag removed 2026-10; this is
+# the only mechanism keeping it off). The section set is stable, so a
+# one-entry removal list stays correct — unlike tools, which use a keep-list
+# because the tool surface keeps growing.
 _REMOVED_SECTIONS: tuple[str, ...] = ("team_bootstrap",)
 
 
@@ -107,16 +119,20 @@ class DesignerSurfaceSanitizerRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     def _remove_tools(self, agent: Any) -> None:
-        """Drop every listed tool card from the ability manager (idempotent)."""
+        """Drop every tool card outside the keep-list from the ability manager."""
+        from openjiuwen.core.foundation.tool import ToolCard
+
         ability_manager = getattr(agent, "ability_manager", None)
         if ability_manager is None:
             return
-        for name in (*_REMOVED_TOOL_NAMES, *_ORG_LEADER_TOOL_NAMES):
+        for card in ability_manager.list():
+            if not isinstance(card, ToolCard):
+                continue
+            name = card.name
+            if not name or name in _KEEP_TOOL_NAMES:
+                continue
             try:
-                if getattr(ability_manager, "remove_ability", None) is not None:
-                    ability_manager.remove_ability(name)
-                else:  # older cores without remove_ability
-                    ability_manager.remove(name)
+                ability_manager.remove_ability(name)
             except Exception:  # noqa: BLE001
                 logger.debug(
                     "[DesignerSurfaceSanitizer] tool %s already absent", name
@@ -152,10 +168,9 @@ class DesignerSurfaceSanitizerRail(DeepAgentRail):
     async def before_model_call(self, ctx: Any) -> None:
         _ = ctx
         # Defensive re-removal: a native rebuild re-mounts the dynamic tool
-        # registry (TeamHarness._remount_dynamic_tools restores org_* tools)
-        # before this rail re-initializes; if any mounting path slipped a
-        # polluted tool back in between init and this model call, drop it
-        # again. Idempotent and cheap (dict lookups).
+        # registry before this rail re-initializes; if any mounting path
+        # slipped a polluted tool back in between init and this model call,
+        # drop it again. Idempotent and cheap (dict lookups).
         if self._agent is not None:
             self._remove_tools(self._agent)
         builder = self.system_prompt_builder

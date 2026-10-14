@@ -303,23 +303,6 @@ def _is_design_team_mode(mode: str) -> bool:
     return str(mode or "") == NEW_TEAM_DESIGN
 
 
-# Collaboration / task / swarmflow tool names stripped from the design leader
-# (agent-core ``core.team.tool`` rail exclude set). The design leader is a pure
-# conversation surface: execution is service-side (RunCoordinator) and the
-# canvas is the only work surface. ``group_send_message`` is the group-chat
-# companion of ``send_message`` (its card name differs from the plain entry).
-# Tools mounted *outside* the factory's exclude reach (workspace_meta, org_*)
-# are removed by DesignerSurfaceSanitizerRail instead.
-_DESIGN_LEADER_TOOL_EXCLUDE = [
-    "build_team", "clean_team", "spawn_teammate", "checkpoint",
-    "list_checkpoints", "spawn_human_agent", "spawn_passive_human",
-    "spawn_bridge_agent", "spawn_external_cli", "shutdown_member",
-    "set_member_model", "approve_plan", "approve_tool", "create_task",
-    "update_task", "view_task", "claim_task", "submit_plan",
-    "verify_task", "member_complete_task", "send_message", "swarmflow",
-    "async_tasks_list", "async_task_output", "async_task_cancel",
-    "group_send_message",
-]
 
 # Non-negotiable canvas rules for the design leader. Carried as the
 # DeepAgentSpec ``system_prompt`` so TEAM_POLICY mounts them as the static
@@ -345,8 +328,9 @@ def _apply_design_agent_group(spec: Any, agent_group_name: str) -> None:
     Design teams (``team.design``) apply the leader template only: the member
     templates stay in the package as worker bases consumed per node by
     ``TeamWorkerBackend`` — they never enter the spawn roster — and the
-    leader's collaboration toolset is stripped via ``team_tool_exclude``
-    (execution is service-driven; the leader has no run-control surface).
+    leader's collaboration toolset is stripped by
+    ``DesignerSurfaceSanitizerRail`` (execution is service-driven; the leader
+    has no run-control surface).
     """
     from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package
     from jiuwenswarm.server.runtime.extension_package_manager import (
@@ -419,15 +403,8 @@ def _apply_design_agent_group(spec: Any, agent_group_name: str) -> None:
         }
     )
     spec.agents["leader"] = leader_spec
-    spec.team_tool_exclude = _DESIGN_LEADER_TOOL_EXCLUDE
     spec.enable_swarmflow = False
     spec.predefined_members = []
-    # The design leader holds no build_team tool (team_tool_exclude strips
-    # the whole collaboration set), so the build_team bootstrap section —
-    # whose entire body is "call build_team first" — is dropped from its
-    # prefix. The leader's system prompt (channel A) already carries the
-    # design hard rules; persona/context ride the dynamic lanes.
-    spec.leader_bootstrap = False
 
 def enrich_team_spec_for_swarm(
     spec: Any,
