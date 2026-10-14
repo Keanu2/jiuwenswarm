@@ -49,6 +49,8 @@ from jiuwenswarm.agents.swarm.providers import (
     builtin_rails as _builtin_rails,
     code_rails as _code_rails,
     code_subagents as _code_subagents,
+    design_rails as _design_rails,
+    designer_tools as _designer_tools,
     evolution_rails as _evolution_rails,
     member_rails as _member_rails,
     runtime_tools as _runtime_tools,
@@ -69,6 +71,10 @@ VISUAL_GEN = _tools.VISUAL_GEN
 XIAOYI_PHONE = _tools.XIAOYI_PHONE
 SYMPHONY_TOOLKIT = _tools.SYMPHONY_TOOLKIT
 A4P_INTENT_AUTHORIZATION = _tools.A4P_INTENT_AUTHORIZATION
+DESIGNER_GRAPH_TOOLS = "swarm.designer_graph_tools"
+DESIGNER_AUTHORING = _design_rails.DESIGNER_AUTHORING
+DESIGNER_EXECUTION = _design_rails.DESIGNER_EXECUTION
+DESIGNER_SURFACE_SANITIZER = _design_rails.DESIGNER_SURFACE_SANITIZER
 CRON_TOOLS = _runtime_tools.CRON_TOOLS
 SEND_FILE = _runtime_tools.SEND_FILE
 MEMBER_SKILL_TOOLKIT = _skills.MEMBER_SKILL_TOOLKIT

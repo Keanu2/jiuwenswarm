@@ -24,7 +24,8 @@ EXECUTION_WORK_MODES: frozenset[str] = frozenset({"code", "work"})
 
 DEFAULT_PROJECT_ID_WORK: str = "default"
 DEFAULT_PROJECT_ID_CODE: str = "default_code"
-DEFAULT_PROJECT_IDS: frozenset[str] = frozenset({DEFAULT_PROJECT_ID_WORK, DEFAULT_PROJECT_ID_CODE})
+DEFAULT_PROJECT_ID_DESIGN: str = "default_design"
+DEFAULT_PROJECT_IDS: frozenset[str] = frozenset({DEFAULT_PROJECT_ID_WORK, DEFAULT_PROJECT_ID_CODE, DEFAULT_PROJECT_ID_DESIGN})
 
 
 def normalize_work_mode(raw: Any, *, default: str = DEFAULT_WEB_WORK_MODE) -> str:
@@ -50,7 +51,10 @@ def is_default_project_id(project_id: str | None) -> bool:
 
 
 def resolve_default_project_id(work_mode: str) -> str:
-    """按 ``work_mode`` 返回默认项目 ID:``work``→``default``,``code``→``default_code``。"""
-    if isinstance(work_mode, str) and work_mode.strip().lower() == DEFAULT_TUI_WORK_MODE:
+    """按 ``work_mode`` 返回默认项目 ID:``work``→``default``,``code``→``default_code``,``design``→``default_design``。"""
+    mode = work_mode.strip().lower()
+    if mode == DEFAULT_TUI_WORK_MODE:
         return DEFAULT_PROJECT_ID_CODE
+    if mode == DESIGN_WORK_MODE:
+        return DEFAULT_PROJECT_ID_DESIGN
     return DEFAULT_PROJECT_ID_WORK

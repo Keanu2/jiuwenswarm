@@ -1,0 +1,35 @@
+{
+  "version": "1.0.0",
+  "package_type": "agent_template",
+  "name": "designer-clip",
+  "description": "视频镜头师：把分镜表的一行转成参考图驱动的短视频镜头，严格服从锁与连续性",
+  "persona": {
+    "dir": "./persona"
+  },
+  "display_name": {
+    "zh": "视频镜头师",
+    "en": "Video Shot Artist"
+  },
+  "tools": [
+    {
+      "file": "./tools.py",
+      "class": "ReadNodeContextTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "CallModelTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "GenerateImageTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "GenerateVideoTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "SubmitNodeOutputTool"
+    }
+  ]
+}

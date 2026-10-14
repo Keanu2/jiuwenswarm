@@ -1,0 +1,258 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Unit tests for the designer graph → swarmflow script compiler.
+
+Covers the three compile-time behaviours that the system tests exercise only
+end-to-end:
+
+* wave scheduling (F15 §12) — serial chains stay serial, fan-out compiles to
+  one engine ``parallel([...])`` block with per-branch gates, and the compiled
+  fan-out script actually runs through the engine with the old-executor
+  failure semantics (branch failure → None → downstream gated off);
+* ``options.agent_template`` (F15 §13) — every agent() call carries the
+  node's AgentGroup member template reference, the engine option whitelist
+  accepts it against ``DesignerWorkerBackend.KNOWN_OPTIONS`` and rejects it
+  against a bare backend;
+* version-in-phase regression — the node version still rides ``phase="v{n}"``
+  and frozen nodes contribute literals (no agent call).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from jiuwenswarm.server.runtime.design.graph_compiler import GraphScriptCompiler
+from jiuwenswarm.server.runtime.design.worker_backend import DesignerWorkerBackend
+
+
+def _chain_graph():
+    return {
+        "graph_id": "g_chain",
+        "nodes": [
+            {"id": "n1", "type": "text", "label": "A", "config": {"prompt": "a"}},
+            {"id": "n2", "type": "text", "label": "B", "config": {"prompt": "b"}},
+        ],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+    }
+
+
+def _fanout_graph():
+    return {
+        "graph_id": "g_fan",
+        "nodes": [
+            {"id": "n0", "type": "text", "label": "outline", "config": {"prompt": "o"}},
+            {"id": "n1", "type": "text", "label": "B1", "config": {"prompt": "b1"}},
+            {"id": "n2", "type": "text", "label": "B2", "config": {"prompt": "b2"}},
+            {"id": "n3", "type": "text", "label": "C", "config": {"prompt": "c"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n0", "target": "n1"},
+            {"id": "e2", "source": "n0", "target": "n2"},
+            {"id": "e3", "source": "n1", "target": "n3"},
+            {"id": "e4", "source": "n2", "target": "n3"},
+        ],
+    }
+
+
+# ── wave scheduling: source form ──────────────────────────────────
+
+
+def test_chain_stays_serial():
+    src = GraphScriptCompiler().compile(_chain_graph(), {})
+    assert "parallel([" not in src
+    assert "await agent(" in src
+
+
+def test_fanout_compiles_to_parallel():
+    src = GraphScriptCompiler().compile(_fanout_graph(), {})
+    assert "await parallel([" in src
+    # wave 1 (single node) stays serial, before the barrier
+    assert src.index("r_n0 = await agent(") < src.index("await parallel(")
+    # wave 3 (join) runs after the barrier
+    assert src.index("r_n3 = await agent(") > src.index("])")
+    # wave results destructured
+    assert "_wave[0]" in src and "_wave[1]" in src
+
+
+def test_frozen_root_first_wave_is_parallel():
+    src = GraphScriptCompiler().compile(
+        _fanout_graph(), {"n0": {"text": "frozen outline"}}
+    )
+    assert '"frozen outline"' in src
+    assert "await parallel([" in src
+
+
+def test_explicit_agent_template_wins():
+    g = {
+        "graph_id": "g_explicit",
+        "nodes": [
+            {
+                "id": "n1",
+                "type": "text",
+                "label": "角色",
+                "config": {
+                    "prompt": "x",
+                    "agent_template": "designer/agents/character",
+                },
+            }
+        ],
+        "edges": [],
+    }
+    src = GraphScriptCompiler().compile(g, {})
+    assert "'agent_template': 'designer/agents/character'" in src.replace('"', "'")
+
+
+def test_default_template_per_type():
+    src = GraphScriptCompiler().compile(_chain_graph(), {})
+    # text nodes default to the designer leader template (quoted either way)
+    normalized = src.replace('"', "'")
+    assert "'agent_template': 'designer/leader'" in normalized
+
+
+def test_version_in_phase_and_frozen_literal():
+    g = _fanout_graph()
+    # n1 frozen (literal), n2 carries version 3 → its live call encodes v3.
+    src = GraphScriptCompiler().compile(
+        g, {"n1": {"text": "frozen"}, "n2": {"version": 3}}
+    )
+    assert 'phase="v3"' in src
+    agent_lines = [ln for ln in src.splitlines() if "await agent(" in ln]
+    assert 'label="n1"' not in " ".join(agent_lines)  # frozen → no call
+    assert '"frozen"' in src  # n1 contributes its text as a literal
+
+
+# ── engine option whitelist ───────────────────────────────────────
+
+
+class _RT:
+    backend = DesignerWorkerBackend.__new__(DesignerWorkerBackend)
+
+
+class _BareRT:
+    class backend:
+        KNOWN_OPTIONS = frozenset()
+
+
+def test_whitelist_accepts_agent_template():
+    from openjiuwen.agent_teams.workflow.engine.primitives import _build_opts
+
+    opts = _build_opts(
+        _RT(), {"label": "n2"}, {"agent_template": "designer/agents/storyboard"}
+    )
+    assert opts.get("agent_template") == "designer/agents/storyboard"
+
+
+def test_bare_backend_rejects_agent_template():
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
+    from openjiuwen.agent_teams.workflow.engine.primitives import _build_opts
+
+    with pytest.raises(EngineError):
+        _build_opts(_BareRT(), {"label": "x"}, {"agent_template": "y"})
+
+
+# ── compiled fan-out executes through the engine ─────────────────
+
+
+def test_handler_reference_nodes_compile_to_literals():
+    """Uploaded reference nodes (n_ref_*) materialize as literals, never agent() calls."""
+    g = {
+        "graph_id": "g_refs",
+        "nodes": [
+            {
+                "id": "n_ref_01", "type": "image", "label": "hero.png",
+                "config": {
+                    "prompt": "Reference 1: hero.png", "role": "image",
+                    "delegate": "handler", "skip_llm": True, "read_only": True,
+                    "user_reference_path": "C:/refs/hero.png",
+                    "upload": {"uri": "file:///C:/refs/hero.png"},
+                },
+            },
+            {"id": "n_char", "type": "text", "label": "角色",
+             "config": {"prompt": "参考 hero.png 设计角色"}},
+        ],
+        "edges": [{"id": "e1", "source": "n_ref_01", "target": "n_char"}],
+    }
+    src = GraphScriptCompiler().compile(g, {})
+    agent_lines = [ln for ln in src.splitlines() if "await agent(" in ln]
+    assert 'label="n_ref_01"' not in " ".join(agent_lines)
+    assert "user-uploaded reference media" in src
+    assert 'label="n_char"' in " ".join(agent_lines)
+    # the literal rides into the downstream prompt inline
+    assert "user-uploaded reference media" in src
+
+
+def test_wave_concurrency_cap_batches_large_waves():
+    """A 5-branch wave splits into batches of at most _MAX_WAVE_CONCURRENCY."""
+    from jiuwenswarm.server.runtime.design.graph_compiler import (
+        _MAX_WAVE_CONCURRENCY,
+    )
+
+    g = {
+        "graph_id": "g_wide",
+        "nodes": [
+            {"id": "root", "type": "text", "label": "R", "config": {"prompt": "r"}},
+            *[{
+                "id": f"b{i}", "type": "text", "label": f"B{i}",
+                "config": {"prompt": f"b{i}"},
+            } for i in range(5)],
+        ],
+        "edges": [
+            *[{"id": f"e{i}", "source": "root", "target": f"b{i}"} for i in range(5)],
+        ],
+    }
+    src = GraphScriptCompiler().compile(g, {})
+    blocks = [ln for ln in src.splitlines() if ln.startswith("    _wave = await parallel([")]
+    expected_blocks = -(-5 // _MAX_WAVE_CONCURRENCY)  # ceil(5 / cap)
+    assert len(blocks) == expected_blocks, f"{len(blocks)} blocks vs expected {expected_blocks}"
+    # Each block carries at most cap thunks
+    for ln in blocks:
+        assert ln.count("_thunk_") <= _MAX_WAVE_CONCURRENCY
+
+
+def test_fanout_engine_run_gates_downstream():
+    from openjiuwen.agent_teams.workflow.engine import run_workflow
+    from openjiuwen.agent_teams.workflow.engine.backends.base import (
+        AgentBackend,
+        AgentResult,
+    )
+
+    class FakeBackend(AgentBackend):
+        KNOWN_OPTIONS = frozenset({"agent_template"})
+
+        def __init__(self):
+            super().__init__()
+            self.calls: list[str] = []
+            self.concurrent = 0
+            self.max_concurrent = 0
+
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
+            self.calls.append(str(opts.get("label")))
+            self.concurrent += 1
+            self.max_concurrent = max(self.max_concurrent, self.concurrent)
+            try:
+                await asyncio.sleep(0.15)  # force the overlap window
+                label = str(opts.get("label"))
+                if label == "n1":
+                    raise RuntimeError("injected n1 failure")
+                return AgentResult(text=f"<<{label}>>")
+            finally:
+                self.concurrent -= 1
+
+    backend = FakeBackend()
+    src = GraphScriptCompiler().compile(_fanout_graph(), {})
+    path = Path(tempfile.gettempdir()) / "_ut_wave_fanout.py"
+    path.write_text(src, encoding="utf-8")
+    result = asyncio.run(run_workflow(str(path), args=None, backend=backend))
+
+    # All three pre-gate nodes attempted; the join node gated off at runtime
+    # (old-executor semantics: a failed predecessor blocks its dependents).
+    assert "n0" in backend.calls and "n1" in backend.calls and "n2" in backend.calls
+    assert "n3" not in backend.calls
+    assert backend.max_concurrent >= 2  # branches overlapped
+    assert result.get("n0") == "<<n0>>"
+    assert result.get("n1") is None
+    assert result.get("n2") == "<<n2>>"
+    assert result.get("n3") is None

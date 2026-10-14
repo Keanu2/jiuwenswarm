@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "package_type": "agent_template",
+  "name": "designer-teammate",
+  "description": "设计画布 worker 基座：按节点任务执行创作（文本/图片/视频）",
+  "persona": {
+    "dir": "./persona"
+  },
+  "display_name": {
+    "zh": "画布执行者",
+    "en": "Canvas Worker"
+  }
+}

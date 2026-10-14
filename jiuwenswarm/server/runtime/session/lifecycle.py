@@ -335,7 +335,11 @@ def project_id_for(
         )
     return str(
         meta.get("project_id")
-        or ("default_code" if meta.get("work_mode") == "code" else "default")
+        or (
+            "default_code"
+            if meta.get("work_mode") == "code"
+            else "default_design" if meta.get("work_mode") == "design" else "default"
+        )
     )
 
 

@@ -1,0 +1,31 @@
+{
+  "version": "1.0.0",
+  "package_type": "agent_template",
+  "name": "designer-character",
+  "description": "角色设计师：产出角色单人设定图（solo sheet），全部服装/面部特征与设定一致",
+  "persona": {
+    "dir": "./persona"
+  },
+  "display_name": {
+    "zh": "角色设计师",
+    "en": "Character Designer"
+  },
+  "tools": [
+    {
+      "file": "./tools.py",
+      "class": "ReadNodeContextTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "CallModelTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "GenerateImageTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "SubmitNodeOutputTool"
+    }
+  ]
+}

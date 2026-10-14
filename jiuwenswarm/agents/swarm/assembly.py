@@ -49,7 +49,10 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.extensions.observability.demand import get_trajectory_span_processor
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 
-from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
+from jiuwenswarm.agents.swarm.config_specs import (
+    build_member_capability_specs,
+    build_member_deep_agent_spec,
+)
 from jiuwenswarm.agents.swarm.context import (
     SwarmBuildContext,
     get_heartbeat_job_service,
@@ -60,7 +63,11 @@ from jiuwenswarm.common.mcp_config import (
     build_enabled_mcp_server_configs,
     preflight_mcp_server_reachable,
 )
-from jiuwenswarm.common.mode_matrix import is_code_profile_mode, is_team_mode
+from jiuwenswarm.common.mode_matrix import (
+    NEW_TEAM_DESIGN,
+    is_code_profile_mode,
+    is_team_mode,
+)
 from jiuwenswarm.common.utils import get_agent_skills_dir
 
 logger = logging.getLogger(__name__)
@@ -291,6 +298,137 @@ def _apply_agent_group(
     spec.team_mode = "hybrid"
 
 
+def _is_design_team_mode(mode: str) -> bool:
+    """Whether this enrich pass serves a team.design (designer canvas) team."""
+    return str(mode or "") == NEW_TEAM_DESIGN
+
+
+# Collaboration / task / swarmflow tool names stripped from the design leader
+# (agent-core ``core.team.tool`` rail exclude set). The design leader is a pure
+# conversation surface: execution is service-side (RunCoordinator) and the
+# canvas is the only work surface. ``group_send_message`` is the group-chat
+# companion of ``send_message`` (its card name differs from the plain entry).
+# Tools mounted *outside* the factory's exclude reach (workspace_meta, org_*)
+# are removed by DesignerSurfaceSanitizerRail instead.
+_DESIGN_LEADER_TOOL_EXCLUDE = [
+    "build_team", "clean_team", "spawn_teammate", "checkpoint",
+    "list_checkpoints", "spawn_human_agent", "spawn_passive_human",
+    "spawn_bridge_agent", "spawn_external_cli", "shutdown_member",
+    "set_member_model", "approve_plan", "approve_tool", "create_task",
+    "update_task", "view_task", "claim_task", "submit_plan",
+    "verify_task", "member_complete_task", "send_message", "swarmflow",
+    "async_tasks_list", "async_task_output", "async_task_cancel",
+    "group_send_message",
+]
+
+# Non-negotiable canvas rules for the design leader. Carried as the
+# DeepAgentSpec ``system_prompt`` so TEAM_POLICY mounts them as the static
+# ``team.extra`` system-prompt section (present on every model call); the full
+# persona still travels the member_prompt dynamic lane. Mirrors the old
+# server-side prompt assembly where these rules were force-fed every turn.
+_DESIGN_LEADER_SYSTEM_PROMPT = """你是设计画布（Design Canvas）的主编，与用户对话并编辑设计图。全新的创作需求用 designer_graph_autorun 自动建图，小改动用 designer_graph_patch；执行入口是 designer_run_graph 和画布运行按钮。
+
+画布硬规则（每次编辑必须遵守）：
+1. 全新创作需求（用户提出"帮我做一个关于X的视频/广告/故事"）必须调 designer_graph_autorun，把用户的完整需求原文传给 prompt 参数——六步导演链（分析→简报→审核→分镜→审核→建图→校验）在服务端完成，产出带完整锁体系的图。不要自己用 graph_patch 从零拼整图。
+2. designer_graph_patch 只用于用户要求的小改：加减个别节点、改 config.prompt、连线/断连、删节点。patch 字段是 {"upsert_nodes": [...], "upsert_edges": [{"id","source","target"}], "remove_node_ids": [], "remove_edge_ids": []}。
+3. 节点 type 只能是五种模态之一：text、table、image、video、audio——outline/character/storyboard/script/scene/shot/film 等叙事角色绝不是 type，一律 type="text"。config.role 合法值：text、table、image、video、audio；config.pipeline 合法值：brief、character_design、scene、storyboard、frame、clip、compose、music、speech。不要自创其他取值。
+4. 不要重建整张图，只 patch 用户要求改动的部分；保留既有节点 ID 与无关内容。
+5. 图建好/改好后，主动询问用户是否开始执行（等用户确认或点运行按钮）。执行完成后如果用户反馈不满意，给出具体优化建议（哪个节点改什么提示词），询问是否按建议调整后重跑。
+6. 上传参考图节点（id 以 n_ref_ 开头，config 带 user_reference_path）是用户上传的素材，系统已创建：不要删除、不要重建、不要改它们的连线——创作节点（角色/场景/分镜）应引用这些参考（参考图是视觉权威，从中提取可兼容的可见特征）。
+user_canvas_edits 是用户的画布操作日志（add/remove/connect/disconnect/replace/run）：run 表示用户手动触发过节点的执行（label=node 单点重跑，label=from 从该节点续跑）——把这些当作已发生的事实，不要建议重复执行或恢复被删除的节点。
+详细创作规则见你的成员设定（team-context）。"""
+
+
+def _apply_design_agent_group(spec: Any, agent_group_name: str) -> None:
+    """Assemble a team.design roster from one resolved AgentGroup package.
+
+    Design teams (``team.design``) apply the leader template only: the member
+    templates stay in the package as worker bases consumed per node by
+    ``TeamWorkerBackend`` — they never enter the spawn roster — and the
+    leader's collaboration toolset is stripped via ``team_tool_exclude``
+    (execution is service-driven; the leader has no run-control surface).
+    """
+    from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package
+    from jiuwenswarm.server.runtime.extension_package_manager import (
+        resolve_agent_group_dir,
+    )
+
+    templates = load_agent_group_package(resolve_agent_group_dir(agent_group_name))
+    leader_base = spec.agents.get("leader")
+    if leader_base is None or spec.agents.get("teammate") is None:
+        raise ValueError(
+            "AgentGroup assembly requires both base 'leader' and 'teammate' specs"
+        )
+    leader_template = templates["leader"]
+    leader_prompt = _template_team_prompt(leader_template, leader_base)
+    spec.leader = spec.leader.model_copy(
+        update={
+            "prompt": _merge_team_prompt(spec.leader.prompt, leader_prompt),
+        }
+    )
+    leader_spec = _with_agent_template(leader_base, leader_template)
+
+    # Design-team leader: a conversation surface over the canvas.
+    # Rebuild the leader spec instead of extending the config.yaml base:
+    # the base member's tools/rails/mcps (fs/shell/org/browser/MCP …)
+    # are dropped wholesale and replaced by the design profile
+    # (`_build_design_capability_specs`: vision/audio + designer graph
+    # tools + structured_ask_user). Execution is service-side
+    # (RunCoordinator); the leader has no run-control or collaboration
+    # surface at all.
+    #
+    # sys_operation stays ENABLED (user decision 2026-10-10): the first
+    # tools injected by the base team path (list_files/glob/bash/…) expect
+    # a live sys_operation, and the skill-use rail reads SKILL.md front
+    # matter through it — disabling it left "tools present, engine None"
+    # and every such call crashed with 'NoneType' object has no attribute
+    # 'fs'/'shell'. Skills remain a planned leader capability, so the
+    # filesystem engine must be there even though the design profile does
+    # not advertise fs tools itself.
+    leader_spec = leader_spec.model_copy(
+        update={
+            "tools": [],
+            "rails": [],
+            "mcps": [],
+            "subagents": [],
+            "enable_skill_discovery": False,
+        }
+    )
+    # Hard canvas rules ride the spec-level system prompt (TEAM_POLICY's
+    # base_prompt lane): the leader's static system-prompt sections only
+    # carry [team_bootstrap] + [team.extra(base_prompt)] (progressive
+    # disclosure, F_76), and the AgentGroup persona travels the
+    # member_prompt dynamic lane instead — too weak for schema-level
+    # constraints (first real run: 24 graph_patch attempts, all rejected
+    # for invented node types, persona rule never surfaced). Putting the
+    # non-negotiables here makes them a static system-prompt section that
+    # every model call sees.
+    leader_spec = leader_spec.model_copy(
+        update={"system_prompt": _DESIGN_LEADER_SYSTEM_PROMPT}
+    )
+    rails_specs, tool_specs = build_member_capability_specs(
+        get_config(),
+        NEW_TEAM_DESIGN,
+        "leader",
+        enable_permissions=spec.enable_permissions,
+    )
+    leader_spec = leader_spec.model_copy(
+        update={
+            "rails": rails_specs,
+            "tools": tool_specs,
+        }
+    )
+    spec.agents["leader"] = leader_spec
+    spec.team_tool_exclude = _DESIGN_LEADER_TOOL_EXCLUDE
+    spec.enable_swarmflow = False
+    spec.predefined_members = []
+    # The design leader holds no build_team tool (team_tool_exclude strips
+    # the whole collaboration set), so the build_team bootstrap section —
+    # whose entire body is "call build_team first" — is dropped from its
+    # prefix. The leader's system prompt (channel A) already carries the
+    # design hard rules; persona/context ride the dynamic lanes.
+    spec.leader_bootstrap = False
+
 def enrich_team_spec_for_swarm(
     spec: Any,
     *,
@@ -429,7 +567,10 @@ def enrich_team_spec_for_swarm(
             spec.agents[role] = member_spec
 
     if agent_group_name:
-        _apply_agent_group(spec, agent_group_name, agent_group_package)
+        if _is_design_team_mode(mode):
+            _apply_design_agent_group(spec, agent_group_name)
+        else:
+            _apply_agent_group(spec, agent_group_name, agent_group_package)
 
     spec.build_context = base
     # Carry a serializable seed alongside the live context so members rebuilt

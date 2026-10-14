@@ -7,7 +7,7 @@
 Those values reach vLLM-Omni the same way the ComfyUI plugin sends them:
 node fields and sampling params as top-level request fields, model params as
 top-level fields except MiniMax-H3 ``audio_flow_shift``, which rides
-``extra_params``. Canvas media settings and the style lock never apply here.
+``extra_params``. The canvas-wide aspect / style locks never apply here.
 """
 
 from __future__ import annotations
@@ -176,7 +176,7 @@ def _wired_media_sources(ctx: NodeExecutionContext, node_id: str) -> list[dict]:
 
 
 def _collect_references(ctx: NodeExecutionContext, node: DesignerGraphNode) -> _References:
-    """Attached images, then wired media outputs in edge order.
+    """Attached stills, then wired media outputs in edge order.
 
     A wired reference without a file fails the node: sending the request
     without it would silently change what the workflow generates.

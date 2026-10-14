@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 _GENERIC_SHOT_TITLE = re.compile(
-    r"(?i)^(clip|shot|beat|scene|keyframe|focus|untitled)\s*\d*$"
+    r"(?i)^(shot|beat|clip|scene|keyframe|focus|untitled)\s*\d*$"
 )
 _LEADING_FILLER_WORDS = {
     # Structural request wrappers (any story) — not topic nouns.
@@ -132,45 +132,20 @@ def derive_story_name(
     return _clean(candidate, limit=48) or "Untitled"
 
 
-_GENERIC_DISPLAY_TITLES = {
-    "untitled",
-    "design",
-    "video",
-    "film",
-    "设计项目",
-    "designer project",
-}
-
-
-def usable_story_title(name: object, prompt: str = "") -> str:
-    """Short display title from the model, empty when it is only the prompt."""
-    cleaned = _clean(name, limit=32)
-    if not cleaned or cleaned.casefold() in _GENERIC_DISPLAY_TITLES:
-        return ""
-    prompt_flat = _clean(prompt, limit=4000)
-    if not prompt_flat:
-        return cleaned
-    if cleaned == prompt_flat or cleaned == _clean(prompt_flat, limit=32):
-        return ""
-    if len(cleaned) >= 20 and prompt_flat.startswith(cleaned):
-        return ""
-    return cleaned
-
-
-def derive_clip_name(clip: dict[str, Any] | None, *, fallback_index: int = 1) -> str:
-    """2–4 word clip display name from title or action (any language)."""
-    sh = clip if isinstance(clip, dict) else {}
-    for key in ("title", "clip_title", "clip_name", "name"):
+def derive_shot_name(shot: dict[str, Any] | None, *, fallback_index: int = 1) -> str:
+    """2–4 word shot display name from title or action (any language)."""
+    sh = shot if isinstance(shot, dict) else {}
+    for key in ("title", "shot_title", "clip_name", "name"):
         hit = short_shot_phrase(sh.get(key), max_words=4)
         if hit:
             return hit
     action = short_shot_phrase(
-        sh.get("action") or sh.get("clip_prompt") or sh.get("character_action"),
+        sh.get("action") or sh.get("keyframe_prompt") or sh.get("character_action"),
         max_words=4,
     )
     if action:
         return action
-    return f"Clip {max(1, int(fallback_index or 1))}"
+    return f"Shot {max(1, int(fallback_index or 1))}"
 
 
 def label_brief(story_name: str) -> str:
@@ -195,19 +170,32 @@ def label_scene(*, scene_number: int, scene_name: str) -> str:
     return f"Scene {sn}: {desc}"
 
 
+def label_shot(
+    *,
+    scene_number: int,
+    shot_number: int,
+    shot_name: str,
+) -> str:
+    sn = max(1, int(scene_number or 1))
+    shn = max(1, int(shot_number or 1))
+    desc = short_shot_phrase(shot_name, max_words=4) or _clean(shot_name, limit=40)
+    if not desc or _is_generic_shot_title(desc):
+        return f"Scene {sn}: Shot {shn}"
+    return f"Scene {sn}: Shot {shn}: {desc}"
+
+
 def label_clip(
     *,
     scene_number: int,
     clip_number: int,
     clip_name: str,
 ) -> str:
-    """Canvas label: Scene N: Clip M: description."""
-    sn = max(1, int(scene_number or 1))
-    cn = max(1, int(clip_number or 1))
-    desc = short_shot_phrase(clip_name, max_words=4) or _clean(clip_name, limit=40)
-    if not desc or _is_generic_shot_title(desc):
-        return f"Scene {sn}: Clip {cn}"
-    return f"Scene {sn}: Clip {cn}: {desc}"
+    """Shot label. The stored node id may still contain clip; the name is shot."""
+    return label_shot(
+        scene_number=scene_number,
+        shot_number=clip_number,
+        shot_name=clip_name,
+    )
 
 
 def label_compose(story_name: str) -> str:

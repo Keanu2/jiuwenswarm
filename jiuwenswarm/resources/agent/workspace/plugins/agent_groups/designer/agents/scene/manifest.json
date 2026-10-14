@@ -1,0 +1,31 @@
+{
+  "version": "1.0.0",
+  "package_type": "agent_template",
+  "name": "designer-scene",
+  "description": "场景设计师：产出空场景板（无人物的场景基准图）",
+  "persona": {
+    "dir": "./persona"
+  },
+  "display_name": {
+    "zh": "场景设计师",
+    "en": "Scene Designer"
+  },
+  "tools": [
+    {
+      "file": "./tools.py",
+      "class": "ReadNodeContextTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "CallModelTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "GenerateImageTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "SubmitNodeOutputTool"
+    }
+  ]
+}

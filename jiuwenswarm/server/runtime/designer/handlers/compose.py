@@ -21,7 +21,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     AssetRef,
     DesignerGraphNode,
     node_pipeline,
-    node_clip_index,
+    node_shot_index,
 )
 from jiuwenswarm.server.runtime.designer.handlers import common as handler_io
 from jiuwenswarm.server.runtime.designer.handlers.common import role_output_text
@@ -67,7 +67,7 @@ def _run_ffmpeg(ffmpeg: str, args: list[str]) -> subprocess.CompletedProcess[str
 
 
 def _concat_file_line(path: Path) -> str:
-    posix = path.resolve().as_posix().replace("'", r"'\s'")
+    posix = path.resolve().as_posix().replace("'", r"'\''")
     return f"file '{posix}'"
 
 
@@ -96,8 +96,8 @@ def _clip_video_usable(path: Path, *, ffmpeg: str | None = None) -> bool:
             return False
         if path.stat().st_size < _MIN_CLIP_BYTES:
             return False
-        # Image→mp4 freezes are never acceptable film inputs on the quality path.
-        if "designer_clip_image_" in path.name.lower():
+        # Still→mp4 freezes are never acceptable film inputs on the quality path.
+        if "designer_clip_still_" in path.name.lower():
             return False
     except OSError:
         return False
@@ -299,7 +299,7 @@ def _workspace_clip_videos(run_id: str) -> list[Path]:
         f"designer_clip_{rid}*.mp4",
         f"*{rid}*clip*.mp4",
     )
-    # Never treat image→mp4 freezes or unrelated generated_*.mp4 as film inputs.
+    # Never treat still→mp4 freezes or unrelated generated_*.mp4 as film inputs.
     for pattern in patterns:
         for path in sorted(root.glob(pattern)):
             if (
@@ -389,7 +389,7 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
     states = (ctx.run or {}).get("node_states") or {}
     clips = sorted(
         [node for node in (ctx.graph.get("nodes") or []) if node_pipeline(node) == NODE_ROLE_CLIP],
-        key=node_clip_index,
+        key=node_shot_index,
     )
     # Prefer edged clips when present, but never drop other completed clips.
     pred_ids = {
@@ -412,7 +412,7 @@ def collect_clip_video_paths(ctx: NodeExecutionContext) -> list[Path]:
             state = {}
         path = _video_from_state(state, require_completed=True)
         if path is None:
-            missing.append(node_id or f"shot {node_clip_index(node)}")
+            missing.append(node_id or f"shot {node_shot_index(node)}")
             continue
         paths.append(path)
 
@@ -785,9 +785,7 @@ class ComposeNodeHandler:
             len(paths),
             ctx.run_id,
         )
-        dest = handler_io.canvas_output_dir(
-            ctx.graph if isinstance(ctx.graph, dict) else None
-        ) / f"designer_compose_{ctx.run_id}.mp4"
+        dest = handler_io.get_agent_workspace_dir() / f"designer_compose_{ctx.run_id}.mp4"
         merged = concatenate_clip_videos(paths, dest)
         scored = mix_compose_soundtrack(
             merged,

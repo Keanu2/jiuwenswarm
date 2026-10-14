@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 _LOCK_MARKERS = (
-    "PRIOR CLIP PROMPT",
+    "PRIOR KEYFRAME PROMPT",
     "PRIOR SHOT CONSISTENCY",
     "PREVIOUS CLIP HAD",
     "YOUR ASSIGNMENT",
@@ -34,7 +34,7 @@ _LOCK_MARKERS = (
     "WAN R2V PROMPT FORMULA",
     "WAN REFERENCE MEDIA RULES",
     "[WAN REFERENCE MODE",
-    "CLIP CAST LOCK",
+    "KEYFRAME CAST LOCK",
     "R2V CAST LOCK",
     "CHARACTER CONSISTENCY",
     "SAME-SCENE CONSISTENCY GATE",
@@ -73,7 +73,7 @@ def extract_finished_events(
     *,
     characters: list[dict[str, Any]] | None = None,
     on_screen: list[str] | None = None,
-    clip_index: int | None = None,
+    shot_index: int | None = None,
 ) -> list[dict[str, str]]:
     """Typed already-done events from prior Wan/storyboard text (domain-agnostic).
 
@@ -85,7 +85,7 @@ def extract_finished_events(
         return []
     names = character_name_map(characters)
     present = [str(x) for x in (on_screen or []) if str(x).strip()] or list(names)
-    prefix = f"shot {clip_index}: " if clip_index else ""
+    prefix = f"shot {shot_index}: " if shot_index else ""
     events: list[dict[str, str]] = []
 
     def add(kind: str, note: str, cid: str = "") -> None:
@@ -93,7 +93,7 @@ def extract_finished_events(
             {
                 "type": kind,
                 "character_id": cid,
-                "already_done": f"{prefix}{note}",
+                "already_done": f"{prefix}{note}"[:220],
             }
         )
 
@@ -117,7 +117,7 @@ def extract_finished_events(
             matched_exit = True
         if _ONSET_RE.search(local) or _BEAT_RE.search(local):
             # Prefer a concrete clause from the prior sentence over a generic onset note.
-            clause = hits[0].rstrip(".")
+            clause = hits[0][:160].rstrip(".")
             add(
                 "beat",
                 f"{who} already finished: {clause} — open this shot already past that beat",
@@ -133,7 +133,7 @@ def extract_finished_events(
     if _BEAT_RE.search(blob) and not any(e["type"] == "beat" for e in events):
         # Generic beat without a matched name — still block restage.
         clause = next(
-            (s.rstrip(".") for s in sentences if _BEAT_RE.search(s)),
+            (s[:160].rstrip(".") for s in sentences if _BEAT_RE.search(s)),
             "prior beat",
         )
         add("beat", f"already finished: {clause} — open this shot past that beat")
@@ -326,7 +326,7 @@ def agent_prior_story_block(cfg: dict[str, Any] | None) -> str:
     mining only; leaf context uses storyboard-derived end_state fields.
     """
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.shot_consistency_contract import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_continuity_contract import (
             agent_structured_continuity_block,
         )
 
@@ -336,10 +336,10 @@ def agent_prior_story_block(cfg: dict[str, Any] | None) -> str:
         action = str(cfg.get("previous_clip_action") or "").strip()
         if not action:
             return ""
-        idx = cfg.get("previous_clip_clip_index") or ""
+        idx = cfg.get("previous_clip_shot_index") or ""
         return (
             f"CONTINUITY STATE (prior shot {idx} finished — structured only):\n"
-            f"- Prior action finished: {action}"
+            f"- Prior action finished: {action[:220]}"
         )
 
 
@@ -367,7 +367,7 @@ def apply_story_state_to_next_cfg(
     from_cfg: dict[str, Any] | None = None,
     from_prompt: str = "",
     from_action: str = "",
-    from_clip_index: int = 0,
+    from_shot_index: int = 0,
     graph: dict[str, Any] | None = None,
     characters: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -393,14 +393,14 @@ def apply_story_state_to_next_cfg(
     except Exception:  # noqa: BLE001
         pass
     narrative = narrative_from_wan_prompt(from_prompt, limit=2500)
-    action = str(from_action or src.get("clip_action") or "").strip()
+    action = str(from_action or src.get("shot_action") or "").strip()
     seed = " ".join(x for x in (action, narrative) if x)
     src_on = on_screen_ids(src)
     events = extract_finished_events(
         seed,
         characters=characters,
         on_screen=src_on,
-        clip_index=from_clip_index,
+        shot_index=from_shot_index,
     )
     done = [str(x).strip() for x in (cfg.get("already_done") or []) if str(x).strip()]
     for item in events:
@@ -410,15 +410,15 @@ def apply_story_state_to_next_cfg(
     cfg["already_done"] = done[:16]
     cfg["previous_clip_finished_events"] = events[:12]
     # Always give the next agent positive prior story state. Prefer cleaned Wan
-    # body; fall back to clip_action so already_done is never alone without prior.
+    # body; fall back to shot_action so already_done is never alone without prior.
     if narrative:
         cfg["previous_clip_wan_prompt"] = narrative
     elif action:
-        cfg["previous_clip_wan_prompt"] = action
+        cfg["previous_clip_wan_prompt"] = action[:2500]
     if action:
-        cfg["previous_clip_action"] = action
-    if from_clip_index:
-        cfg["previous_clip_clip_index"] = int(from_clip_index)
+        cfg["previous_clip_action"] = action[:220]
+    if from_shot_index:
+        cfg["previous_clip_shot_index"] = int(from_shot_index)
 
     cfg = stamp_continuity_story_fields(
         cfg,
@@ -505,7 +505,7 @@ def _hold_from_beat_note(note: str) -> str:
         return ""
     if "already" not in body.lower():
         body = "Already past: " + body
-    return body.rstrip(".") + "."
+    return body[:200].rstrip(".") + "."
 
 
 def pose_holds_from_events(
@@ -613,9 +613,9 @@ def infer_crowd_state(
     return {
         "disposition": disposition,
         "present": bool(present),
-        "density": density,
-        "rule": rule,
-        "hold": hold,
+        "density": density[:80],
+        "rule": rule[:280],
+        "hold": hold[:280],
     }
 
 
@@ -664,7 +664,7 @@ def stamp_continuity_story_fields(
 
 
 def cap_r2v_reference_paths(paths: list[Path], *, max_refs: int = 5) -> list[Path]:
-    """Keep on-screen character specs + last scene specs within Wan's 5-ref cap."""
+    """Keep on-screen solos + last scene specs within Wan's 5-ref cap."""
     unique: list[Path] = []
     seen: set[str] = set()
     for path in paths or []:

@@ -12,8 +12,7 @@ from typing import Any
 
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER,
-    NODE_ROLE_CLIP,
+    NODE_ROLE_CHARACTER_DESIGN,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
     NODE_TYPE_VIDEO,
@@ -21,11 +20,9 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerExecutionGraph,
     DesignerGraphNode,
     node_pipeline,
-    node_clip_index,
-    video_concat_source_ids,
+    node_shot_index,
 )
 from jiuwenswarm.server.runtime.designer.handlers.common import (
-    canvas_output_dir,
     node_output_image_paths,
     role_output_image_path,
     role_output_text,
@@ -49,57 +46,26 @@ def _find_ffmpeg() -> str | None:
         exe = str(imageio_ffmpeg.get_ffmpeg_exe() or "").strip()
         return exe or None
     except Exception:
-        logger.debug("imageio_ffmpeg unavailable for image→mp4", exc_info=True)
+        logger.debug("imageio_ffmpeg unavailable for still→mp4", exc_info=True)
         return None
 
 
 
 def parse_shot_duration_seconds(timeline: str, default: int = 5) -> int:
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
         duration_from_timeline,
     )
 
     return duration_from_timeline(timeline, default=default)
 
 
-def generates_timed_video(graph: DesignerExecutionGraph, node: DesignerGraphNode) -> bool:
-    """True when running ``node`` asks the video model for a clip of some length."""
-    from jiuwenswarm.server.runtime.designer.handlers import resolve_handler_key
-
-    key = resolve_handler_key(node)
-    if key == NODE_ROLE_CLIP:
-        return True
-    if key != NODE_TYPE_VIDEO:
-        return False
-    return not video_concat_source_ids(graph, str(node.get("id") or ""))
-
-
-def video_duration_seconds(ctx: NodeExecutionContext | None, node: DesignerGraphNode) -> int:
-    """Seconds a video node is generated at, snapped to the model.
-
-    A manual ``config.duration_sec`` wins; a storyboard clip otherwise follows its
-    shot's Timeline (5s without one); any other video uses the model default.
-    """
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import clamp_clip_duration
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import active_video_capacity
-
-    cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
-    override = cfg.get("duration_sec")
-    if isinstance(override, (int, float)) and not isinstance(override, bool):
-        return clamp_clip_duration(override)
-    if node_pipeline(node) == NODE_ROLE_CLIP:
-        _, shot = _shot_for_node(ctx.graph if ctx is not None else {}, node, ctx)
-        return parse_shot_duration_seconds((shot or {}).get("timeline") or "", default=5)
-    return clamp_clip_duration(active_video_capacity().default_sec)
-
-
 def collect_clip_scene_image(
     ctx: NodeExecutionContext | None,
-    clip_index: int = 1,
+    shot_index: int = 1,
     node: DesignerGraphNode | None = None,
 ) -> Path | None:
     """Resolve the setting's scene-card image (empty environment plate for R2V)."""
-    del clip_index  # scene specs are keyed by setting / scene_node_id, not shot index
+    del shot_index  # scene specs are keyed by setting / scene_node_id, not shot index
     if ctx is None:
         return None
     cfg = (
@@ -168,8 +134,6 @@ def edge_image_flow(
 def edge_text_inputs(
     ctx: NodeExecutionContext | None,
     node: DesignerGraphNode | None,
-    *,
-    exclude_roles: frozenset[str] = frozenset(),
 ) -> list[tuple[str, str]]:
     """Text bodies that arrive on incoming data edges, in edge order."""
     from jiuwenswarm.server.runtime.designer.handlers.common import predecessor_outputs
@@ -177,11 +141,11 @@ def edge_text_inputs(
     outputs = predecessor_outputs(ctx, node if isinstance(node, dict) else None) or []
     texts: list[tuple[str, str]] = []
     for item in outputs:
-        if item.kind != "text" or item.role in exclude_roles:
+        if item.kind != "text":
             continue
         body = item.text.strip()
         if body:
-            texts.append((item.label, body))
+            texts.append((item.label, body[:4000]))
     return texts
 
 
@@ -231,7 +195,7 @@ def connected_payload_clause(
 
 
 def _flow_role_bucket(role: str) -> str:
-    if role in {NODE_ROLE_CHARACTER, "character"}:
+    if role in {NODE_ROLE_CHARACTER_DESIGN, "character"}:
         return "character"
     if role == NODE_ROLE_SCENE:
         return "scene"
@@ -295,13 +259,14 @@ def attach_order_clause(
 
 def collect_clip_reference_images(
     ctx: NodeExecutionContext | None,
-    clip_index: int = 1,
+    shot_index: int = 1,
     node: DesignerGraphNode | None = None,
 ) -> list[Path]:
-    """Wan reference_images: on-screen character specs, then user images, then the scene spec.
+    """Wan reference_images: on-screen solos, then user stills, then the scene card.
 
-    Design clips always attach these as R2V refs — never as a single first-frame image. Order matches Wan R2V labeling: character specs are character1…, uploads and
-    user-wired image nodes follow, and the scene spec stays last as the
+    Design clips always attach these as R2V refs — never as a single first-frame
+    still. Order matches Wan R2V labeling: solos are character1…, uploads and
+    user-wired image nodes follow, and the scene card stays last as the
     environment.
     """
     from jiuwenswarm.server.runtime.designer.handlers.common import (
@@ -366,7 +331,7 @@ def collect_clip_reference_images(
     for other in graph.get("nodes") or []:
         if not isinstance(other, dict):
             continue
-        if node_pipeline(other) != NODE_ROLE_CHARACTER:
+        if node_pipeline(other) != NODE_ROLE_CHARACTER_DESIGN:
             continue
         oc = other.get("config") if isinstance(other.get("config"), dict) else {}
         if oc.get("combined_cast"):
@@ -396,36 +361,23 @@ def collect_clip_reference_images(
         for path in node_ids_output_image_paths(ctx, solo_nids):
             add(path)
     elif not on_screen:
-        for path in role_output_image_paths(ctx, NODE_ROLE_CHARACTER)[:4]:
+        for path in role_output_image_paths(ctx, NODE_ROLE_CHARACTER_DESIGN)[:4]:
             add(path)
 
     for path in attached:
         add(path)
 
-    scene = collect_clip_scene_image(ctx, clip_index, node=node)
+    scene = collect_clip_scene_image(ctx, shot_index, node=node)
     # Scene specs is the last environment reference for every clip.
     add(scene)
     return cap_r2v_reference_paths(paths)
 
 
-def edge_storyboard_text(
-    ctx: NodeExecutionContext | None,
-    node: DesignerGraphNode | None,
-) -> str:
-    """The storyboard table that arrives on this clip's incoming data edge."""
-    from jiuwenswarm.server.runtime.designer.handlers.common import predecessor_outputs
-
-    outputs = predecessor_outputs(ctx, node if isinstance(node, dict) else None) or []
-    for item in outputs:
-        if item.kind == "text" and item.role == NODE_ROLE_STORYBOARD and item.text.strip():
-            return item.text
-    return ""
-
-
 def _storyboard_narrative_action(shot: dict[str, Any] | None) -> str:
+    """Prefer Comment (keyframe/clip description), then Character action."""
     if not isinstance(shot, dict):
         return ""
-    return str(shot.get("character_action") or "").strip()
+    return str(shot.get("comment") or shot.get("character_action") or "").strip()
 
 
 def _extract_action_from_generate_prompt(text: str) -> str:
@@ -450,10 +402,19 @@ def _shot_for_node(
     node: DesignerGraphNode,
     ctx: NodeExecutionContext | None,
 ) -> tuple[int, StoryboardShot | None]:
-    index = node_clip_index(node)
-    shots = parse_storyboard_shots(edge_storyboard_text(ctx, node))
+    index = node_shot_index(node)
+    text = role_output_text(ctx, NODE_ROLE_STORYBOARD) if ctx is not None else ""
+    shots = parse_storyboard_shots(text)
     if shots and 1 <= index <= len(shots):
-        return index, shots[index - 1]
+        shot = dict(shots[index - 1])
+        # Keep live storyboard comment/character_action intact.
+        # Do NOT overwrite comment with generate.prompt (often lock-stuffed / stale).
+        sb_action = _storyboard_narrative_action(shot)
+        if not str(shot.get("character_action") or "").strip() and sb_action:
+            shot["character_action"] = sb_action
+        if not str(shot.get("comment") or "").strip() and sb_action:
+            shot["comment"] = sb_action
+        return index, shot
     return index, None
 
 
@@ -461,8 +422,8 @@ def _looks_like_contaminated_prompt(text: str) -> bool:
     """True only for pasted handoff/assignment dumps — not normal SCENE SPECS / staging."""
     raw = (text or "").upper()
     needles = (
-        "PRIOR CLIP PROMPT",
-        "PREVIOUS CLIP HAD",
+        "PRIOR KEYFRAME PROMPT",
+        "PREVIOUS KEYFRAME HAD",
         "PRIOR SHOT CONSISTENCY",
         "PREVIOUS CLIP HAD",
         "YOUR ASSIGNMENT",
@@ -474,20 +435,23 @@ def _looks_like_contaminated_prompt(text: str) -> bool:
     return any(n in raw for n in needles)
 
 
-def _format_shot_block(shot: StoryboardShot, clip_index: int) -> str:
+def _format_shot_block(shot: StoryboardShot, shot_index: int) -> str:
     lines = [
-        f"Shot {clip_index} ONLY (do not film other shots)",
+        f"Shot {shot_index} ONLY (do not film other shots)",
         f"- Timeline: {shot.get('timeline') or ''}",
         f"- Camera: {shot.get('camera') or ''}",
         f"- Camera move: {shot.get('move') or ''}",
-        f"- On screen: {shot.get('on_screen') or ''}",
         f"- Character action: {shot.get('character_action') or ''}",
+        f"- Scene change: {shot.get('scene_change') or ''}",
     ]
+    comment = str(shot.get("comment") or "").strip()
+    if comment:
+        lines.append(f"- Shot description: {comment}")
     return "\n".join(lines)
 
 
 def _clip_prompt_lead(
-    clip_index: int,
+    shot_index: int,
     duration: int,
     *,
     has_character: bool,
@@ -498,7 +462,7 @@ def _clip_prompt_lead(
 ) -> str:
     attached: list[str] = []
     if has_character:
-        attached.append("on-screen character character specs as character1, character2, …")
+        attached.append("on-screen character solo sheets as character1, character2, …")
     if has_scene:
         attached.append("scene specs last, as the room")
     extras = (
@@ -513,11 +477,11 @@ def _clip_prompt_lead(
         else "Opening of this setting: place the on-screen people into the empty room. "
     )
     return (
-        f"Create shot {clip_index} as a {duration}-second video that plays THIS "
+        f"Create shot {shot_index} as a {duration}-second video that plays THIS "
         "storyboard shot only. "
         f"{extras}{focus} "
         f"{continue_bit}"
-        "character1/character2 are the character specs (face and wardrobe). "
+        "character1/character2 are the solo sheets (face and wardrobe). "
         "The last image is the scene specs. "
         "Match the film STYLE LOCK. One instance per person. "
         "No subtitles, no cutaways.\n\n"
@@ -530,7 +494,7 @@ def build_clip_prompt(
     ctx: NodeExecutionContext | None = None,
 ) -> str:
     """Shot-specific clip prompt. Prefer shot row over full Brief to avoid identical clips."""
-    clip_index, shot = _shot_for_node(graph, node, ctx)
+    shot_index, shot = _shot_for_node(graph, node, ctx)
     cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
     cfg = dict(cfg)
     try:
@@ -555,7 +519,7 @@ def build_clip_prompt(
             node["config"] = cfg
     except Exception:  # noqa: BLE001
         pass
-    duration = video_duration_seconds(ctx, node)
+    duration = parse_shot_duration_seconds((shot or {}).get("timeline") or "", default=5)
     focus_names = ""
     cfg_names = [str(x).strip() for x in (cfg.get("cast_names") or []) if str(x).strip()]
     if cfg_names:
@@ -571,7 +535,7 @@ def build_clip_prompt(
         pass
     if ctx is not None:
         preferred = [str(x) for x in (cfg.get("character_node_ids") or []) if str(x).strip()]
-        has_character = bool(preferred) or role_output_image_path(ctx, NODE_ROLE_CHARACTER) is not None
+        has_character = bool(preferred) or role_output_image_path(ctx, NODE_ROLE_CHARACTER_DESIGN) is not None
         has_scene = (
             bool(str(cfg.get("scene_node_id") or "").strip())
             or role_output_image_path(ctx, NODE_ROLE_SCENE) is not None
@@ -580,20 +544,30 @@ def build_clip_prompt(
         has_character = False
         has_scene = bool(str(cfg.get("scene_node_id") or "").strip())
     continuity = bool(
-        str(cfg.get("continuity_clip_node_id") or "").strip()
+        str(cfg.get("continuity_clip_node_id") or cfg.get("continuity_frame_node_id") or "").strip()
     )
     sb_action = _storyboard_narrative_action(shot if isinstance(shot, dict) else None)
-    action = str(sb_action or cfg.get("clip_action") or "").strip()
+    action = str(
+        sb_action
+        or cfg.get("shot_action")
+        or (shot or {}).get("character_action")
+        or (shot or {}).get("comment")
+        or ""
+    ).strip()
     if not action:
         local = str(cfg.get("prompt") or "").strip()
         user = str(graph.get("description") or "")
         try:
-            from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
                 looks_like_full_story_restatement,
+                storyboard_fallback_beat,
             )
 
             if local and not looks_like_full_story_restatement(local, user) and len(local) <= 400:
                 action = local
+            elif ctx is not None:
+                sb_text = str(role_output_text(ctx, NODE_ROLE_STORYBOARD) or "").strip()
+                action = storyboard_fallback_beat(sb_text, shot_index)
         except Exception:  # noqa: BLE001
             if local and len(local) <= 220:
                 action = local
@@ -602,22 +576,23 @@ def build_clip_prompt(
     ).strip()
     speech_line = str(
         cfg.get("speech_line")
-        or (shot or {}).get("speech")
+        or (shot or {}).get("speech_line")
+        or (shot or {}).get("dialogue")
         or ""
     ).strip()
     story_lines: list[str] = [
-        f"STORYBOARD SHOT (authoritative plot for shot {clip_index} — play this window only, "
+        f"STORYBOARD SHOT (authoritative plot for shot {shot_index} — play this window only, "
         f"do not restage the full user prompt or other shots): "
         f"{action or 'this shot row only'}."
     ]
     if camera:
-        story_lines.append(f"Camera for shot {clip_index}: {camera}")
+        story_lines.append(f"Camera for shot {shot_index}: {camera}")
     if speech_line:
-        story_lines.append(f"Speech for shot {clip_index}: {speech_line}")
+        story_lines.append(f"Speech for shot {shot_index}: {speech_line}")
     parts: list[str] = [
         "\n".join(story_lines),
         _clip_prompt_lead(
-            clip_index,
+            shot_index,
             duration,
             has_character=has_character,
             has_scene=has_scene,
@@ -666,9 +641,9 @@ def build_clip_prompt(
                     parts.append(line.strip())
                     break
     if action:
-        parts.append(f"Primary action for shot {clip_index}: {action}")
+        parts.append(f"Primary action for shot {shot_index}: {action}")
     if camera:
-        parts.append(f"Camera for shot {clip_index}: {camera}")
+        parts.append(f"Camera for shot {shot_index}: {camera}")
     identity = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
     setting_id = str(cfg.get("setting_id") or (shot or {}).get("setting_id") or "").strip()
     if setting_id:
@@ -708,7 +683,7 @@ def build_clip_prompt(
         cloth = clothing_lock_clause(costume_lock, for_clip=True)
         parts.append(cloth if cloth else f"Costume / identity lock (do not redesign): {costume_lock}")
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_staging_lock import (
+        from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
             ensure_cfg_staging_locks,
             staging_locks_from_cfg,
         )
@@ -718,10 +693,10 @@ def build_clip_prompt(
             or []
         )
         shot_row = shot if isinstance(shot, dict) else None
-        # Staging must use the preferred narrative (storyboard), not stale cfg.clip_action.
+        # Staging must use the preferred narrative (storyboard), not stale cfg.shot_action.
         staging_cfg = dict(cfg)
         if action:
-            staging_cfg["clip_action"] = action
+            staging_cfg["shot_action"] = action
         staging = ensure_cfg_staging_locks(
             staging_cfg, shot=shot_row, characters=analysis_chars
         ) or staging_locks_from_cfg(staging_cfg, for_clip=True)
@@ -764,11 +739,11 @@ def build_clip_prompt(
             parts.append(clause.strip())
     # THIS shot only — never dump the full storyboard (homogenizes / mixes scenes).
     if shot is not None:
-        parts.append(_format_shot_block(shot, clip_index))
+        parts.append(_format_shot_block(shot, shot_index))
     else:
         parts.append(
-            f"Storyboard shot for shot {clip_index} only "
-            f"(action={action or 'see clip spec'}; camera={camera or 'match clip spec'})."
+            f"Storyboard shot for shot {shot_index} only "
+            f"(action={action or 'see keyframe'}; camera={camera or 'match keyframe'})."
         )
     override = str((cfg.get("generate") or {}).get("prompt") or "").strip() if isinstance(cfg.get("generate"), dict) else ""
     # When live storyboard already provided the shot, skip stale generate.prompt narratives.
@@ -777,7 +752,7 @@ def build_clip_prompt(
         if extracted and extracted.casefold() not in (action or "").casefold():
             if not action:
                 action = extracted
-                parts.append(f"Primary action for shot {clip_index}: {action}")
+                parts.append(f"Primary action for shot {shot_index}: {action}")
             elif not _looks_like_contaminated_prompt(override):
                 parts.append(f"Director shot brief: {extracted[:400]}")
         elif (
@@ -819,7 +794,7 @@ def build_clip_prompt(
     if roster:
         parts.append(
             "User reference slots (original files are visual/audio authority). "
-            "Video and audio are generic references — not the first frame or clip image:\n"
+            "Video and audio are generic references — not the first frame or keyframe:\n"
             f"{roster}"
         )
     if user_reference_video_path(graph) is not None:
@@ -871,7 +846,7 @@ def build_clip_prompt(
         action or "",
         cfg=cfg,
         graph=graph if isinstance(graph, dict) else {},
-        clip_index=clip_index,
+        shot_index=shot_index,
         action=action,
         camera=camera,
         extra_image_labels=extra_labels,
@@ -881,22 +856,18 @@ def build_clip_prompt(
 
 async def generate_clip_video(
     prompt: str,
-    *,
-    aspect_ratio: str,
-    resolution: str,
     save_dir: str | None = None,
     first_frame: str | None = None,
     reference_images: list[str] | None = None,
     reference_file: str | None = None,
     duration: int = 5,
     audio: bool | None = None,
+    size: str | None = None,
+    resolution: str | None = None,
     model: str | None = None,
     force_reference_mode: bool = False,
 ) -> dict[str, Any]:
-    """Call the Settings > Agent video model and wait for the clip. Tests monkeypatch this function.
-
-    ``aspect_ratio`` / ``resolution`` are the canvas video settings (``media_settings``).
-    """
+    """Call the Settings > Agent video model and wait for the clip. Tests monkeypatch this function."""
     from jiuwenswarm.common.utils import get_env_file
     from jiuwenswarm.dotenv_early import load_dotenv_runtime
     from jiuwenswarm.server.runtime.designer import media_generation
@@ -906,14 +877,26 @@ async def generate_clip_video(
     except Exception:
         logger.debug("Failed to reload video generation env before generation", exc_info=True)
 
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import clamp_clip_duration
+    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
+        resolve_clip_video_format,
+    )
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import clamp_clip_duration
 
-    clamped_duration = clamp_clip_duration(duration)
+    if size or resolution:
+        video_size, video_res = resolve_clip_video_format(
+            user_resolution=str(resolution or ""),
+            director_resolution=str(resolution or ""),
+        )
+        if size and "*" in str(size).replace("x", "*").replace("X", "*"):
+            video_size = str(size).replace("x", "*").replace("X", "*")
+    else:
+        video_size, video_res = resolve_clip_video_format()
+    clamped_duration = clamp_clip_duration(duration, default=5)
     resolved_model = (str(model).strip() or None) if model else None
     tool_input = {
         "prompt": prompt,
-        "aspect_ratio": aspect_ratio,
-        "resolution": resolution,
+        "size": video_size,
+        "resolution": video_res,
         "first_frame": first_frame,
         "reference_images": reference_images,
         "reference_file": reference_file,
@@ -935,9 +918,9 @@ async def generate_clip_video(
         result = await media_generation.generate_video(
             media_generation.DesignerVideoRequest(
                 prompt=prompt,
-                aspect_ratio=aspect_ratio,
-                resolution=resolution,
                 duration=clamped_duration,
+                size=video_size,
+                resolution=video_res,
                 first_frame=first_frame,
                 reference_images=tuple(reference_images or ()),
                 reference_file=reference_file,
@@ -960,7 +943,7 @@ class ClipNodeHandler:
     """Submit one video job per storyboard shot."""
 
     async def execute(self, node: DesignerGraphNode, ctx: NodeExecutionContext) -> NodeResult:
-        clip_index = node_clip_index(node)
+        shot_index = node_shot_index(node)
         graph = ctx.graph if isinstance(ctx.graph, dict) else {}
         cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
         cfg = dict(cfg)
@@ -976,7 +959,7 @@ class ClipNodeHandler:
         node["config"] = cfg
 
         refs = collect_clip_reference_images(
-            ctx, clip_index, node=node
+            ctx, shot_index, node=node
         )
         _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
         ref_files = [p for p in refs if p.is_file() and p.suffix.lower() in _IMG]
@@ -984,10 +967,11 @@ class ClipNodeHandler:
         if scene_chain:
             cfg = stamp_scene_last_frame_chain(cfg, scene_chain)
             node["config"] = cfg
-        duration = video_duration_seconds(ctx, node)
+        _, shot = _shot_for_node(ctx.graph, node, ctx)
+        duration = parse_shot_duration_seconds((shot or {}).get("timeline") or "", default=5)
         prompt = build_clip_prompt(ctx.graph, node, ctx)
         payload = connected_payload_clause(
-            edge_text_inputs(ctx, node, exclude_roles=frozenset({NODE_ROLE_STORYBOARD})),
+            edge_text_inputs(ctx, node),
             edge_video_inputs(ctx, node),
         )
         if payload and payload not in prompt:
@@ -1012,22 +996,17 @@ class ClipNodeHandler:
             prompt,
             cfg=cfg,
             graph=graph,
-            clip_index=clip_index,
+            shot_index=shot_index,
         )
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
+                trim_prompt_to_limit,
             )
 
             vlim = resolve_prompt_limit("video")
             cfg["prompt_char_limit"] = vlim.max_chars
-            if vlim.max_chars and len(prompt) > vlim.max_chars:
-                logger.warning(
-                    "clip prompt length=%s exceeds limit %s (model=%s); passing as-is",
-                    len(prompt),
-                    vlim.max_chars,
-                    vlim.model,
-                )
+            prompt, _ = trim_prompt_to_limit(prompt, vlim)
         except Exception:  # noqa: BLE001
             pass
         if ctx is not None and callable(getattr(ctx, "on_prompt_artifact", None)):
@@ -1035,9 +1014,15 @@ class ClipNodeHandler:
                 ctx.on_prompt_artifact(prompt)
             except Exception:  # noqa: BLE001
                 logger.debug("clip early prompt handoff failed", exc_info=True)
-        from jiuwenswarm.server.runtime.designer.media_settings import video_settings
+        aspect = cfg.get("aspect_lock") if isinstance(cfg.get("aspect_lock"), dict) else {}
+        if not aspect:
+            meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+            aspect = meta.get("aspect_lock") if isinstance(meta.get("aspect_lock"), dict) else {}
+        from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
+            video_format_for_node,
+        )
 
-        video = video_settings(graph)
+        video_size, video_res = video_format_for_node(graph, cfg, aspect if isinstance(aspect, dict) else None)
         from jiuwenswarm.server.runtime.designer.user_references import (
             user_reference_video_path,
         )
@@ -1069,22 +1054,21 @@ class ClipNodeHandler:
         try:
             result = await generate_clip_video(
                 prompt,
-                save_dir=str(canvas_output_dir(graph if isinstance(graph, dict) else None)),
                 first_frame=overrides["first_frame"],
                 reference_images=overrides["reference_images"],
                 reference_file=reference_file,
                 duration=duration,
-                aspect_ratio=video.aspect_ratio,
-                resolution=video.resolution,
+                size=video_size,
+                resolution=video_res,
                 audio=True if want_audio else False,
                 model=None,
                 force_reference_mode=overrides["force_reference_mode"],
             )
             path = Path(str(result["video_path"]))
-            message = f"clip {clip_index} generated" + (" (with audio)" if want_audio else "")
-            cfg["last_wan_prompt"] = str(prompt)
-            cfg["last_approved_prompt"] = str(prompt)
-            cfg["clip_prompt_preview"] = str(prompt)
+            message = f"clip {shot_index} generated" + (" (with audio)" if want_audio else "")
+            cfg["last_wan_prompt"] = str(prompt)[:4000]
+            cfg["last_approved_prompt"] = str(prompt)[:4000]
+            cfg["clip_prompt_preview"] = str(prompt)[:1200]
             node["config"] = cfg
             try:
                 from jiuwenswarm.server.runtime.designer.pipeline.wan_prompt_hygiene import (
@@ -1107,10 +1091,10 @@ class ClipNodeHandler:
 
                 stamp_wan_prompt_handoff(
                     graph,
-                    clip_index=clip_index,
+                    shot_index=shot_index,
                     prompt=str(prompt),
                     node_id=str(node.get("id") or ""),
-                    clip_action=str(cfg.get("clip_action") or ""),
+                    shot_action=str(cfg.get("shot_action") or ""),
                     speech_line=str(cfg.get("speech_line") or ""),
                 )
             except Exception:  # noqa: BLE001
@@ -1124,7 +1108,7 @@ class ClipNodeHandler:
                         graph,
                         completed_clip_id=str(node.get("id") or ""),
                         last_frame_path=str(extracted),
-                        clip_index=clip_index,
+                        shot_index=shot_index,
                         speech_line=str(
                             cfg.get("speech_line") or cfg.get("previous_clip_speech") or ""
                         ),
@@ -1135,7 +1119,7 @@ class ClipNodeHandler:
                 logger.debug("post-clip last-frame stamp failed", exc_info=True)
         except Exception as exc:
             raise RuntimeError(
-                f"Video gen failed for shot {clip_index}; image→mp4 fallback is disabled: {exc}"
+                f"Video gen failed for shot {shot_index}; still→mp4 fallback is disabled: {exc}"
             ) from exc
         output_ref: AssetRef = {
             "kind": NODE_TYPE_VIDEO,

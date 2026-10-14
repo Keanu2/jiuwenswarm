@@ -43,7 +43,7 @@ def infer_pose_from_action(action: str, *, fallback: str = "engaged_in_beat") ->
 
 def contact_anti_penetration_clause(*, for_clip: bool = True) -> str:
     """Hard spatial physics for placing people into environment refs — any set."""
-    where = "this clip" if for_clip else "this image"
+    where = "this clip" if for_clip else "this still"
     return (
         f"CONTACT / ANTI-PENETRATION LOCK ({where}, all scenes): "
         "Bodies occupy empty volume only — never intersect solid furniture, walls, "
@@ -51,7 +51,7 @@ def contact_anti_penetration_clause(*, for_clip: bool = True) -> str:
         "If posture is seated/kneeling/reclining/leaning: visible contact with the "
         "support surface (seat, floor, edge, rail) — weight rests ON the surface, "
         "not floating and not sunk THROUGH it. "
-        "Solo character specs may show standing studio poses; when the shot requires "
+        "Solo identity sheets may show standing studio poses; when the shot requires "
         "contact with set geometry, REPOSE the body for This shot (do not paste the "
         "standing sheet pose into the room). "
         "Hands/props: grasp exteriors; do not bury limbs inside objects. "
@@ -86,13 +86,13 @@ def wan_reference_media_rules(*, prior_ending_count: int = 0) -> str:
     ]
     if int(prior_ending_count or 0) > 0:
         lines.append(
-            "- Prior ending images are not attached. "
+            "- Prior ending stills are not attached. "
             "This clip plays the current storyboard shot in the same setting, with the same placement."
         )
     else:
         lines.append(
-            "- First clip of a setting: no prior ending image — play the storyboard shot "
-            "using identity character specs + scene specs."
+            "- First clip of a setting: no prior ending still — play the storyboard shot "
+            "using identity solos + scene specs."
         )
     return "\n".join(lines)
 

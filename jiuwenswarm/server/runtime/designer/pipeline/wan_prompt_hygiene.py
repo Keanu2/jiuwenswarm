@@ -110,7 +110,7 @@ def positive_continuity_clause(
             bits.append(str(anchor["pose"]))
         holds.append(" ".join(bits))
     who_now = ", ".join(names.get(c, c) for c in on[:8]) if on else ""
-    action = str(cfg.get("clip_action") or cfg.get("character_action") or "").strip()
+    action = str(cfg.get("shot_action") or cfg.get("character_action") or "").strip()
     camera = str(cfg.get("camera") or "").strip()
     speech = str(cfg.get("speech_line") or "").strip()
     lines = ["CONTINUITY STATE (this clip continues the same film):"]
@@ -119,11 +119,11 @@ def positive_continuity_clause(
     if holds:
         lines.append("SEAT HOLDS: " + "; ".join(holds[:8]) + ".")
     if action:
-        lines.append(f"This window: {action}.")
+        lines.append(f"This window: {action[:400]}.")
     if camera:
-        lines.append(f"Camera this window: {camera}.")
+        lines.append(f"Camera this window: {camera[:120]}.")
     if speech:
-        lines.append(f"Spoken words in this window: {speech}.")
+        lines.append(f"Spoken words in this window: {speech[:200]}.")
     else:
         lines.append("This window has no new spoken line.")
     lines.append(
@@ -208,7 +208,7 @@ def capture_regenerate_packet(
             "node_id": nid,
             "status": state.get("status"),
             "output_ref": ref,
-            "prompt": other_prompt,
+            "prompt": other_prompt[:4000],
             "style_lock": other_cfg.get("style_lock") if isinstance(other_cfg.get("style_lock"), dict) else None,
             "path": path,
         }
@@ -222,18 +222,18 @@ def capture_regenerate_packet(
             image_paths.append(text)
     return {
         "node_id": str(node.get("id") or ""),
-        "prompt": stored_prompt,
-        "clip_action": str(cfg.get("clip_action") or ""),
-        "speech_line": str(cfg.get("speech_line") or ""),
-        "camera": str(cfg.get("camera") or ""),
+        "prompt": stored_prompt[:4000],
+        "shot_action": str(cfg.get("shot_action") or "")[:500],
+        "speech_line": str(cfg.get("speech_line") or "")[:280],
+        "camera": str(cfg.get("camera") or "")[:160],
         "style_lock": cfg.get("style_lock") if isinstance(cfg.get("style_lock"), dict) else None,
-        "costume_lock": str(cfg.get("costume_lock") or ""),
+        "costume_lock": str(cfg.get("costume_lock") or "")[:800],
         "character_node_ids": [str(x) for x in (cfg.get("character_node_ids") or []) if str(x)],
         "scene_node_id": str(cfg.get("scene_node_id") or ""),
         "on_screen": [str(x) for x in (cfg.get("on_screen") or []) if str(x)],
         "seat_anchors": cfg.get("seat_anchors") if isinstance(cfg.get("seat_anchors"), dict) else None,
-        "previous_clip_action": str(cfg.get("previous_clip_action") or ""),
-        "previous_clip_wan_prompt": str(cfg.get("previous_clip_wan_prompt") or ""),
+        "previous_clip_action": str(cfg.get("previous_clip_action") or "")[:300],
+        "previous_clip_wan_prompt": str(cfg.get("previous_clip_wan_prompt") or "")[:2500],
         "reference_images": image_paths[:8],
         "upstream": upstream,
     }
@@ -261,8 +261,8 @@ def remember_generation(
         reference_images=reference_images,
     )
     cfg["regenerate_packet"] = packet
-    cfg["last_wan_prompt"] = str(prompt or "")
-    cfg["last_approved_prompt"] = str(prompt or "")
+    cfg["last_wan_prompt"] = str(prompt or "")[:4000]
+    cfg["last_approved_prompt"] = str(prompt or "")[:4000]
     node["config"] = cfg
     return packet
 
@@ -286,7 +286,7 @@ def apply_regenerate_packet(
     if not use_prior or not packet:
         return prompt, list(reference_paths)
     for key in (
-        "clip_action",
+        "shot_action",
         "speech_line",
         "camera",
         "style_lock",

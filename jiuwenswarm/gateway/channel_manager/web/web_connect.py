@@ -828,6 +828,10 @@ class WebChannel(BaseWsChannel):
             or event_name.startswith("harness.")
             or event_name.startswith("personal_context.context.")
             or event_name.startswith("org.")
+            # designer.* canvas frames carry the whole run/graph snapshot the
+            # design page binds to; the {session_id, content} reduction here
+            # would blank the canvas (empty canvas / no node progress).
+            or event_name.startswith("designer.")
         )
 
     @staticmethod

@@ -1,0 +1,27 @@
+{
+  "version": "1.0.0",
+  "package_type": "agent_template",
+  "name": "designer-storyboard",
+  "description": "分镜师：把故事拆成分镜表，每行一个镜头（含 on_screen 出场角色、场景、机位、台词）",
+  "persona": {
+    "dir": "./persona"
+  },
+  "display_name": {
+    "zh": "分镜师",
+    "en": "Storyboard Artist"
+  },
+  "tools": [
+    {
+      "file": "./tools.py",
+      "class": "ReadNodeContextTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "CallModelTool"
+    },
+    {
+      "file": "./tools.py",
+      "class": "SubmitNodeOutputTool"
+    }
+  ]
+}
