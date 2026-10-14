@@ -644,7 +644,6 @@ export function ConversationSidebar({
   onOpenCron,
   onSelectDesignSession,
   activeDesignSessionId,
-  onProjectRemoved,
   isCronActive,
   collapsed = false,
   floating = false,

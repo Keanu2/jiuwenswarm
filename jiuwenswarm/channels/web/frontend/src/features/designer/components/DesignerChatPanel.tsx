@@ -1,17 +1,14 @@
-import { Loader2, PanelRight, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { Paperclip, SendHorizontal, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import SendPlaneIcon from '../../../assets/send_plane.svg?react';
-import { ModelProviderIcon } from '../../../components/ModelProviderIcon';
+import { MessageList } from '../../../components/ChatPanel/MessageList';
+import { InlineQuestionCard } from '../../../components/ChatPanel/InlineQuestionCard';
+import { InteractionSlot } from '../../../components/InteractionSlot';
 import { useChatStore } from '../../../stores/chatStore';
-import { resolveChatModelSelection, useSessionStore } from '../../../stores/sessionStore';
-import { chatDesignerGraph, composeDesignerSession } from '../designerEntry';
-import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
+import { useSessionStore } from '../../../stores/sessionStore';
+import type { Message, UserAnswer } from '../../../types';
+import { webClient } from '../../../services/webClient';
 import { useDesignerStore } from '../designerStore';
-import { designerActivityText } from '../designerActivity';
-import { selectLeaderPeek, useDesignerRunStore } from '../designerRunStore';
-import { useDesignerChatStore } from '../designerChatStore';
-import { useDesignerUiStore } from '../designerUiStore';
 import {
   DESIGNER_REF_LIMITS,
   designerReferenceKindFromMime,
@@ -20,6 +17,9 @@ import {
   type DesignerReferenceKind,
   type DesignerStoredReference,
 } from '../designerReferences';
+import { DesignerAssetsPanel } from './DesignerAssetsPanel';
+
+type SidebarTab = 'assistant' | 'assets';
 
 type ComposerDraft = {
   id: string;
@@ -50,6 +50,21 @@ export function DesignerEmptyState({
       </div>
     </div>
   );
+}
+
+function useDesignerSessionId(): string | null {
+  return useDesignerStore((state) =>
+    String(state.domainGraph?.metadata?.session_id ?? '').trim() || null,
+  );
+}
+
+const EMPTY_MESSAGES: Message[] = [];
+
+function useChatMessages(sessionId: string | null): Message[] {
+  return useChatStore((state) => {
+    if (!sessionId) return EMPTY_MESSAGES;
+    return state.runtimes[sessionId]?.messages ?? EMPTY_MESSAGES;
+  });
 }
 
 function ReferenceChips({
@@ -90,52 +105,33 @@ function ReferenceChips({
 
 export function DesignerChatPanel() {
   const { t } = useTranslation();
-  const messages = useDesignerChatStore((state) => state.messages);
-  const bootstrapPhase = useDesignerChatStore((state) => state.bootstrapPhase);
-  const domainGraph = useDesignerStore((state) => state.domainGraph);
-  const selectedNodeId = useDesignerStore((state) => state.selectedNodeId);
-  const toggleChatSidebar = useDesignerUiStore((state) => state.toggleChatSidebar);
+  const sessionId = useDesignerSessionId();
+  const chatMessages = useChatMessages(sessionId);
+  const isProcessing = useChatStore((state) =>
+    sessionId ? state.runtimes[sessionId]?.isProcessing ?? false : false,
+  );
   const bodyRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState('');
+  const [tab, setTab] = useState<SidebarTab>('assistant');
   const [attachments, setAttachments] = useState<ComposerDraft[]>([]);
   const [attachError, setAttachError] = useState('');
   const [sending, setSending] = useState(false);
-  const activeSessionId = useChatStore((state) => state.activeSessionId);
-  const chatAvailableModels = useSessionStore((state) => state.chatAvailableModels);
-  const selectedModelName = useSessionStore(
-    (state) => state.runtimes[activeSessionId ?? '']?.selectedModelName ?? null,
-  );
-  const defaultModelName = useSessionStore((state) => state.defaultModelName);
-  const selectedModel = useMemo(
-    () => resolveChatModelSelection(chatAvailableModels, selectedModelName, defaultModelName),
-    [chatAvailableModels, defaultModelName, selectedModelName],
-  );
-  const modelLabel = selectedModel?.alias || selectedModel?.model_name || '';
 
-  const chatBusy = bootstrapPhase === 'thinking' || bootstrapPhase === 'bootstrapping' || sending;
+  useEffect(() => {
+    if (!sessionId) return;
+    useChatStore.getState().ensureRuntime(sessionId);
+    // The design session runs on the team chain (team.design): the shared
+    // MessageList picks its rendering mode from this runtime value and the
+    // useWebSocket delta handler coalesces bubbles only for team sessions.
+    if (useSessionStore.getState().getRuntime(sessionId)?.mode !== 'team') {
+      useSessionStore.getState().setMode(sessionId, 'team');
+    }
+    useChatStore.getState().setActiveSessionId(sessionId);
+  }, [sessionId]);
+
+  const chatBusy = isProcessing || sending;
   const canSend = Boolean(draft.trim() || attachments.length > 0);
-
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages]);
-
-  const leaderPeek = useDesignerRunStore((state) => selectLeaderPeek(state));
-  useEffect(() => {
-    const thinking = messages.find((item) => item.kind === 'thinking');
-    if (!thinking) return;
-    const latest = designerActivityText(leaderPeek?.activity) || leaderPeek?.activity_tail?.at(-1);
-    if (!latest || latest === thinking.content) return;
-    useDesignerChatStore.getState().removeMessage(thinking.id);
-    useDesignerChatStore.getState().appendMessage({
-      id: thinking.id,
-      role: 'assistant',
-      content: latest,
-      kind: 'thinking',
-    });
-  }, [leaderPeek, messages]);
 
   const limitError = useCallback(
     (kind: DesignerReferenceKind) => {
@@ -192,6 +188,7 @@ export function DesignerChatPanel() {
     const content = draft.trim();
     if ((!content && attachments.length === 0) || chatBusy) return;
     setSending(true);
+    setTab('assistant');
     const files = attachments.map((item) => item.file);
     void filesToBootstrapReferences(files)
       .then(async (converted) => {
@@ -211,36 +208,46 @@ export function DesignerChatPanel() {
           if (item.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(item.previewUrl);
         });
         setAttachments([]);
-        const existingGraph = domainGraph && !isDesignerPreviewGraph(domainGraph) ? domainGraph : null;
-        const sessionId = String(existingGraph?.metadata?.session_id || '');
-        const projectId = String(existingGraph?.project_id || '');
-        const references = converted.refs;
-        if (existingGraph?.graph_id && existingGraph.nodes.length === 0 && sessionId && projectId) {
-          return composeDesignerSession({
-            projectId,
-            sessionId,
-            prompt: content,
-            references,
-            thinkingText: t('designer.chat.thinking'),
-            errorText: t('designer.chat.bootstrapError'),
-          });
+        if (!sessionId) {
+          setAttachError(t('designer.loadErrorFallback'));
+          return;
         }
-        if (existingGraph?.graph_id) {
-          return chatDesignerGraph({
-            graphId: existingGraph.graph_id,
-            prompt: content,
-            selectedNodeId: selectedNodeId || undefined,
-            thinkingText: t('designer.chat.updating'),
-            errorText: t('designer.chat.updateError'),
+        useChatStore.getState().addMessage(sessionId, {
+          id: `designer-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          role: 'user',
+          content,
+          timestamp: new Date().toISOString(),
+        });
+        useChatStore.getState().setProcessing(sessionId, true);
+        useChatStore.getState().setThinking(sessionId, true);
+        // Standard chat pipeline (F01 §8): same request shape as the work/
+        // code panels — streaming, interact and history persistence are all
+        // the standard team machinery from here on.
+        try {
+          // Flush pending canvas edits so the leader round reads the latest graph.
+          await useDesignerStore.getState().flushSave();
+          await webClient.request('chat.send', {
+            session_id: sessionId,
+            query: content,
+            mode: 'team.design',
           });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          useChatStore.getState().setProcessing(sessionId, false);
+          useChatStore.getState().setThinking(sessionId, false);
+          useChatStore.getState().addMessage(sessionId, {
+            id: `designer-error-${Date.now()}`,
+            role: 'assistant',
+            content: message || t('designer.chat.updateError'),
+            timestamp: new Date().toISOString(),
+            isError: true,
+          } as Message);
         }
-        setAttachError(t('designer.loadErrorFallback'));
-        return undefined;
       })
       .finally(() => {
         setSending(false);
       });
-  }, [attachments, chatBusy, domainGraph, draft, selectedNodeId, t]);
+  }, [attachments, chatBusy, draft, sessionId, t]);
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -252,126 +259,138 @@ export function DesignerChatPanel() {
     [handleSend],
   );
 
+  const handleUserAnswer = useCallback(
+    async (requestId: string, answers: UserAnswer[], source?: string): Promise<boolean> => {
+      if (!sessionId) return false;
+      const pendingQuestion = useChatStore.getState().getRuntime(sessionId)?.pendingQuestions[0];
+      try {
+        await webClient.request('chat.send', {
+          session_id: sessionId,
+          query: '',
+          mode: 'team.design',
+          request_id: requestId,
+          answers,
+          ...(source ? { source } : {}),
+        });
+        if (pendingQuestion) {
+          useChatStore.getState().consumePendingQuestion(sessionId, pendingQuestion);
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [sessionId],
+  );
+
   return (
     <aside
-      className="designer-chat-panel designer-chat-panel--docked"
-      aria-label={t('designer.sidebar.conversation')}
+      className="designer-chat-panel designer-chat-panel--expanded"
+      aria-label={t('designer.chat.title')}
       data-testid="designer-chat-panel"
+      data-tab={tab}
     >
-      <div className="designer-chat-panel__header">
-        <h2 className="designer-chat-panel__title" data-testid="designer-chat-panel-title">
-          {t('designer.sidebar.conversation')}
-        </h2>
+      <div className="designer-chat-panel__header" role="tablist" aria-label={t('designer.sidebar.tabsLabel')}>
         <button
           type="button"
-          className="designer-chat-panel__collapse"
-          onClick={toggleChatSidebar}
-          aria-label={t('designer.chat.collapse')}
-          title={t('designer.chat.collapse')}
-          data-testid="designer-chat-panel-collapse"
+          role="tab"
+          aria-selected={tab === 'assistant'}
+          className={`designer-chat-panel__tab${tab === 'assistant' ? ' is-active' : ''}`}
+          data-testid="designer-sidebar-tab-assistant"
+          onClick={() => setTab('assistant')}
         >
-          <PanelRight size={18} aria-hidden />
+          {t('designer.sidebar.assistant')}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'assets'}
+          className={`designer-chat-panel__tab${tab === 'assets' ? ' is-active' : ''}`}
+          data-testid="designer-sidebar-tab-assets"
+          onClick={() => setTab('assets')}
+        >
+          {t('designer.sidebar.assets')}
         </button>
       </div>
 
-      <div className="designer-chat-panel__body" ref={bodyRef} data-testid="designer-chat-panel-body">
-        {messages.length === 0 ? (
-          <p className="designer-chat-panel__empty">{t('designer.chat.emptyHint')}</p>
-        ) : (
-          <div className="designer-chat-panel__messages" data-testid="designer-chat-panel-messages">
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`designer-chat-panel__message designer-chat-panel__message--${message.role}`}
-                data-testid="designer-chat-panel-message"
-                data-role={message.role}
-                data-kind={message.kind}
-              >
-                {message.kind === 'thinking' ? (
-                  <span className="designer-chat-panel__thinking">
-                    <Loader2 className="designer-chat-panel__thinking-icon" size={14} aria-hidden />
-                    {message.content}
-                  </span>
-                ) : (
-                  <>
-                    {message.content}
-                    {message.references ? <ReferenceChips items={message.references} /> : null}
-                  </>
-                )}
-              </div>
-            ))}
+      {tab === 'assistant' ? (
+        <>
+          <div
+            className="designer-chat-panel__body"
+            ref={bodyRef}
+            data-testid="designer-chat-panel-body"
+            data-timeline-scroll-root
+          >
+            <InlineQuestionCard onSubmit={handleUserAnswer} />
+            <MessageList messages={chatMessages} />
           </div>
-        )}
-      </div>
-      <div className="designer-chat-panel__composer">
-        {attachments.length > 0 ? (
-          <ReferenceChips
-            items={attachments.map((item) => ({
-              id: item.id,
-              kind: item.kind,
-              filename: item.filename,
-              previewUrl: item.previewUrl,
-            }))}
-            onRemove={removeAttachment}
-            removeLabel={t('designer.chat.removeAttachment')}
-          />
-        ) : null}
-        {attachError ? (
-          <p className="designer-chat-panel__attach-error" data-testid="designer-chat-panel-attach-error">
-            {attachError}
-          </p>
-        ) : null}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*,video/*,audio/*"
-          multiple
-          hidden
-          data-testid="designer-chat-panel-file"
-          onChange={(event) => {
-            if (event.target.files) addFiles(event.target.files);
-            event.target.value = '';
-          }}
-        />
-        {/* Canvas chat sidebar: hide attach control; landing prompt keeps its own attach UI. */}
-        <div className="designer-chat-panel__composer-box">
-          <textarea
-            className="designer-chat-panel__input"
-            placeholder={t('designer.chat.inputPlaceholder')}
-            value={draft}
-            disabled={chatBusy}
-            data-testid="designer-chat-panel-input"
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={onKeyDown}
-          />
-          <div className="designer-chat-panel__composer-actions">
-            {modelLabel ? (
-              <span
-                className="designer-chat-panel__model"
-                title={modelLabel}
-                data-testid="designer-chat-panel-model"
-              >
-                {selectedModel ? (
-                  <span className="designer-chat-panel__model-icon" aria-hidden>
-                    <ModelProviderIcon model={selectedModel} />
-                  </span>
-                ) : null}
-                <span className="designer-chat-panel__model-label">{modelLabel}</span>
-              </span>
+          <div className="designer-chat-panel__composer">
+            <InteractionSlot onSubmit={handleUserAnswer} />
+            {attachments.length > 0 ? (
+              <ReferenceChips
+                items={attachments.map((item) => ({
+                  id: item.id,
+                  kind: item.kind,
+                  filename: item.filename,
+                  previewUrl: item.previewUrl,
+                }))}
+                onRemove={removeAttachment}
+                removeLabel={t('designer.chat.removeAttachment')}
+              />
             ) : null}
-            <button
-              type="button"
-              className="designer-chat-panel__send"
-              disabled={chatBusy || !canSend}
-              onClick={handleSend}
-              aria-label={t('designer.chat.send')}
-              data-testid="designer-chat-panel-send"
-            >
-              <SendPlaneIcon className="designer-chat-panel__send-icon" aria-hidden />
-            </button>
+            {attachError ? (
+              <p className="designer-chat-panel__attach-error" data-testid="designer-chat-panel-attach-error">
+                {attachError}
+              </p>
+            ) : null}
+            <div className="designer-chat-panel__composer-row">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,video/*,audio/*"
+                multiple
+                hidden
+                data-testid="designer-chat-panel-file"
+                onChange={(event) => {
+                  if (event.target.files) addFiles(event.target.files);
+                  event.target.value = '';
+                }}
+              />
+              <button
+                type="button"
+                className="designer-chat-panel__attach"
+                disabled={chatBusy}
+                onClick={() => fileInputRef.current?.click()}
+                aria-label={t('designer.chat.attach')}
+                title={t('designer.chat.attachHint')}
+                data-testid="designer-chat-panel-attach"
+              >
+                <Paperclip size={16} aria-hidden />
+              </button>
+              <textarea
+                className="designer-chat-panel__input"
+                placeholder={t('designer.chat.inputPlaceholder')}
+                value={draft}
+                data-testid="designer-chat-panel-input"
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={onKeyDown}
+              />
+              <button
+                type="button"
+                className="designer-chat-panel__send"
+                disabled={chatBusy || !canSend}
+                onClick={handleSend}
+                aria-label={t('designer.chat.send')}
+                data-testid="designer-chat-panel-send"
+              >
+                <SendHorizontal size={16} aria-hidden />
+              </button>
+            </div>
           </div>
-        </div>
-      </div>
+        </>
+      ) : (
+        <DesignerAssetsPanel />
+      )}
     </aside>
   );
 }

@@ -18,9 +18,10 @@ export const DESIGNER_NODE_TYPES = [
 export type DesignerNodeType = (typeof DESIGNER_NODE_TYPES)[number];
 
 export const DESIGNER_NODE_ROLE_BRIEF = 'brief' as const;
-export const DESIGNER_NODE_ROLE_CHARACTER = 'character' as const;
+export const DESIGNER_NODE_ROLE_CHARACTER_DESIGN = 'character_design' as const;
 export const DESIGNER_NODE_ROLE_SCENE = 'scene' as const;
 export const DESIGNER_NODE_ROLE_STORYBOARD = 'storyboard' as const;
+export const DESIGNER_NODE_ROLE_FRAME = 'frame' as const;
 export const DESIGNER_NODE_ROLE_CLIP = 'clip' as const;
 export const DESIGNER_NODE_ROLE_COMPOSE = 'compose' as const;
 export const DESIGNER_NODE_ROLE_MUSIC = 'music' as const;
@@ -55,14 +56,18 @@ export type DesignerConfigDelegate = (typeof DESIGNER_CONFIG_DELEGATES)[number];
 
 export const DESIGNER_AGENT_GROUP_NAME = 'designer' as const;
 
+// Mirrors ROLE_DEFAULT_TEMPLATES in designer_graph.py (backend is the source
+// of truth): text-producing nodes resolve to designer/text — the member whose
+// manifest carries the worker tool surface.
 export const DESIGNER_ROLE_DEFAULT_TEMPLATES = {
-  [DESIGNER_NODE_ROLE_BRIEF]: 'designer/leader',
-  [DESIGNER_NODE_ROLE_CHARACTER]: 'designer/character',
+  [DESIGNER_NODE_ROLE_BRIEF]: 'designer/text',
+  [DESIGNER_NODE_ROLE_CHARACTER_DESIGN]: 'designer/character',
   [DESIGNER_NODE_ROLE_SCENE]: 'designer/scene',
   [DESIGNER_NODE_ROLE_STORYBOARD]: 'designer/storyboard',
+  [DESIGNER_NODE_ROLE_FRAME]: 'designer/frame',
   [DESIGNER_NODE_ROLE_CLIP]: 'designer/clip',
   [DESIGNER_NODE_ROLE_COMPOSE]: 'designer/clip',
-  [DESIGNER_NODE_TYPE_TEXT]: 'designer/leader',
+  [DESIGNER_NODE_TYPE_TEXT]: 'designer/text',
   [DESIGNER_NODE_TYPE_TABLE]: 'designer/storyboard',
   [DESIGNER_NODE_TYPE_IMAGE]: 'designer/character',
   [DESIGNER_NODE_TYPE_VIDEO]: 'designer/clip',
@@ -86,6 +91,10 @@ export const DESIGNER_NODE_CONFIG_KEYS = [
 export type DesignerMediaGenerateConfig = {
   prompt?: string;
   prompt_origin?: 'storyboard' | 'user';
+  aspect_ratio?: string;
+  resolution?: string;
+  duration?: string;
+  has_audio?: boolean;
   count?: number;
 };
 
@@ -158,7 +167,7 @@ type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
   edit?: DesignerMediaEditConfig;
   interaction_mode?: 'generate' | 'upload' | 'edit';
   materials?: DesignerMediaMaterialSlot[];
-  clip_index?: number;
+  shot_index?: number;
   /** Canvas-added by the user (Director onboards as LLM agent when available). */
   user_added?: boolean;
   /** User dragged the node resize handle; skip content auto-fit. */
@@ -177,9 +186,10 @@ type DesignerRoleConfig<R extends DesignerNodeRole | string> = {
 
 export type DesignerNodeConfig =
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_BRIEF>
-  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_CHARACTER>
+  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_CHARACTER_DESIGN>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_SCENE>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_STORYBOARD>
+  | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_FRAME>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_CLIP>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_COMPOSE>
   | DesignerRoleConfig<typeof DESIGNER_NODE_ROLE_MUSIC>
@@ -200,7 +210,7 @@ export type DesignerNodeConfig =
       edit?: DesignerMediaEditConfig;
       interaction_mode?: string;
       materials?: DesignerMediaMaterialSlot[];
-      clip_index?: number;
+      shot_index?: number;
       user_added?: boolean;
       user_resized?: boolean;
       kind?: string;
@@ -213,8 +223,9 @@ export type DesignerNodeConfig =
     };
 
 export const DESIGNER_EDGE_KIND_DATA = 'data' as const;
+export const DESIGNER_EDGE_KIND_SYNC = 'sync' as const;
 
-export const DESIGNER_EDGE_KINDS = [DESIGNER_EDGE_KIND_DATA] as const;
+export const DESIGNER_EDGE_KINDS = [DESIGNER_EDGE_KIND_DATA, DESIGNER_EDGE_KIND_SYNC] as const;
 
 export type DesignerEdgeKind = (typeof DESIGNER_EDGE_KINDS)[number];
 
@@ -301,6 +312,15 @@ export type DesignerMediaSettingsPatch = {
   image_settings?: Partial<DesignerImageSettings>;
 };
 
+export type DesignerGraphPatch = DesignerMediaSettingsPatch & {
+  title?: string;
+  description?: string;
+  upsert_nodes?: DesignerGraphNode[];
+  upsert_edges?: DesignerGraphEdge[];
+  remove_node_ids?: string[];
+  remove_edge_ids?: string[];
+};
+
 /** Values the configured models accept, from `designer.media.capabilities`. */
 export type DesignerMediaCapabilities = {
   video: {
@@ -331,15 +351,6 @@ export type DesignerMediaCapabilities = {
   };
   /** Generated video node id → seconds it will be generated at. Present with a graph. */
   video_durations?: Record<string, number>;
-};
-
-export type DesignerGraphPatch = DesignerMediaSettingsPatch & {
-  title?: string;
-  description?: string;
-  upsert_nodes?: DesignerGraphNode[];
-  upsert_edges?: DesignerGraphEdge[];
-  remove_node_ids?: string[];
-  remove_edge_ids?: string[];
 };
 
 export type DesignerExecutionGraph = {
@@ -391,22 +402,14 @@ export type DesignerExecutionRun = {
 
 export type DesignerGraphSummary = {
   graph_id: string;
+  session_id?: string;
   project_id: string;
+  project_dir?: string | null;
+  project_name?: string | null;
   title: string;
   updated_at?: number;
   run_id?: string | null;
   run_status?: string | null;
   has_video: boolean;
   clip_label?: string | null;
-};
-
-export type DesignerGraphBootstrapResult = {
-  graph: DesignerExecutionGraph;
-  project_id: string;
-  project?: {
-    project_id: string;
-    project_dir: string;
-    restored: boolean;
-    work_mode: string;
-  };
 };

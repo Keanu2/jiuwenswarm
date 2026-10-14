@@ -4,6 +4,7 @@ import {
   extractDesignerGraphReferences,
   type DesignerStoredReference,
 } from './designerReferences';
+import type { ToolCall, ToolResult } from '../../types';
 
 export { extractDesignerGraphReferences };
 
@@ -11,9 +12,11 @@ export type DesignerStoredChatMessage = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  kind: 'user' | 'thinking' | 'bootstrap_done' | 'bootstrap_error' | 'chat_ack' | 'chat_error' | 'not_implemented';
+  kind: 'user' | 'thinking' | 'bootstrap_done' | 'bootstrap_error' | 'chat_ack' | 'chat_error' | 'not_implemented' | 'tool_call' | 'tool_result' | 'reasoning' | 'ask_user' | 'event';
   createdAt: number;
   references?: DesignerStoredReference[];
+  toolCall?: ToolCall;
+  toolResult?: ToolResult;
 };
 
 export const DESIGNER_CHAT_STORAGE_KEY = 'jiuwenswarm_designer_chat_by_graph';
@@ -41,6 +44,11 @@ const MESSAGE_KINDS = new Set([
   'chat_ack',
   'chat_error',
   'not_implemented',
+  'tool_call',
+  'tool_result',
+  'reasoning',
+  'ask_user',
+  'event',
 ]);
 
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'system']);

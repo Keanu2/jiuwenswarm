@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { webClient } from '../../services/webClient';
 import { isDesignerPreviewGraph } from './designerBootstrapGraph';
+import { appendUserCanvasEdit } from './designerCanvasNodes';
 import { designerGraphClient } from './designerGraphClient';
 import { useDesignerStore } from './designerStore';
 import { derivePrimaryAction, type DesignerRunPrimaryAction } from './designerLayerRun';
@@ -35,6 +36,7 @@ type DesignerRunStore = {
   getPrimaryAction: (graph: DesignerExecutionGraph | null) => DesignerRunPrimaryAction;
   advance: (graph: DesignerExecutionGraph) => Promise<void>;
   rerunNode: (graph: DesignerExecutionGraph, nodeId: string) => Promise<void>;
+  rerunFrom: (graph: DesignerExecutionGraph, nodeId: string) => Promise<void>;
   restart: (graph: DesignerExecutionGraph) => Promise<void>;
   cancel: (graph: DesignerExecutionGraph | null) => Promise<void>;
   patchNodeOutput: (nodeId: string, outputRef: AssetRef) => void;
@@ -239,6 +241,13 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
 
   rerunNode: async (graph, nodeId) => {
     if (get().isRunning || !nodeId) return;
+    // Canvas-op log first so it rides the persistBeforeRun save (the design
+    // leader sees manual runs on its next graph read — same fact-sync
+    // contract as add/remove/connect edits).
+    useDesignerStore.getState().applyGraph({
+      ...graph,
+      metadata: appendUserCanvasEdit(graph.metadata, { op: 'run', node_id: nodeId, label: 'node' }),
+    });
     await persistBeforeRun();
     set({ runError: null, runWarning: null });
     try {
@@ -247,6 +256,32 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
         graphId: graph.graph_id,
         runId: run?.run_id,
         nodeId,
+      });
+      const warning = String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
+      get().applyRun(result.run);
+      if (warning) {
+        set({ runWarning: warning });
+      }
+    } catch (error) {
+      set({ runError: error instanceof Error ? error.message : String(error) });
+    }
+  },
+
+  rerunFrom: async (graph, nodeId) => {
+    if (get().isRunning || !nodeId) return;
+    useDesignerStore.getState().applyGraph({
+      ...graph,
+      metadata: appendUserCanvasEdit(graph.metadata, { op: 'run', node_id: nodeId, label: 'from' }),
+    });
+    await persistBeforeRun();
+    set({ runError: null, runWarning: null });
+    try {
+      const run = get().run?.graph_id === graph.graph_id ? get().run : null;
+      const result = await designerGraphClient.startRun({
+        graphId: graph.graph_id,
+        runId: run?.run_id,
+        nodeId,
+        cascade: true,
       });
       const warning = String(result.warning || result.run?.warning || result.warnings?.[0] || '').trim() || null;
       get().applyRun(result.run);

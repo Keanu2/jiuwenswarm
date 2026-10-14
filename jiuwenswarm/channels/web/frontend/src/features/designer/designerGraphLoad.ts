@@ -77,6 +77,8 @@ export function summariesFromGraphList(payload: {
     .map((graph) => ({
       graph_id: String(graph.graph_id || '').trim(),
       project_id: String(graph.project_id || '').trim(),
+      project_dir: (graph as { project_dir?: string | null }).project_dir ?? null,
+      project_name: (graph as { project_name?: string | null }).project_name ?? null,
       title: String(graph.title || graph.graph_id || '').trim(),
       updated_at: graph.updated_at,
       has_video: Boolean(

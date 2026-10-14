@@ -120,6 +120,7 @@
       "cancel": "Cancel"
     },
     "subtitle": "Multi-modal creation from idea to design",
+    "selectProject": "Select project",
     "toolbar": {
       "modeLabel": "Node mode",
       "minimap": "Minimap",

@@ -38,7 +38,11 @@ import {
 import { ConnectorMarketPanel } from './components/ConnectorMarket';
 import { LoginDialog } from './components/LoginDialog';
 import { DesignerPage } from './features/designer/components/DesignerPage';
-import { submitDesignComposer } from './features/designer/designerEntry';
+import { DesignerLanding } from './features/designer/components/DesignerLanding';
+import { designerWorkspaceClient } from './features/designer/designerGraphClient';
+import { useDesignerStore } from './features/designer/designerStore';
+import { useDesignerChatStore } from './features/designer/designerChatStore';
+import { mediaItemsToBootstrapReferences } from './features/designer/designerReferences';
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI, FEATURE_PERSONAL_CONTEXT_UI } from './featureFlags';
@@ -68,7 +72,7 @@ import {
 import { readAgentTemplateName } from './features/agentIdentity';
 import { normalizeTeamLeaderIdentity } from './features/teamLeaderIdentity';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
-import { webRequest } from './services/webClient';
+import { webClient, webRequest } from './services/webClient';
 import type { WorkflowRun } from './components/teamArea/workflowTypes';
 import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
@@ -2972,25 +2976,55 @@ function AppContent({
       useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, true);
       if (useWorkspaceStore.getState().workMode === 'design') {
         try {
-          const created = await submitDesignComposer({
-            prompt: messageContent,
-            mediaItems,
-          });
-          const store = useWorkspaceStore.getState();
-          if (!store.expandedProjectIds[created.projectId]) {
-            store.toggleProjectExpanded(created.projectId);
+          const converted = mediaItemsToBootstrapReferences(mediaItems);
+          if (converted.error) {
+            window.alert(converted.error);
+            return;
           }
-          await store.loadProjects();
-          await store.loadProjectSessions(created.projectId);
-          const project = useWorkspaceStore.getState().projects.find(
-            (item) => item.project_id === created.projectId,
+          const workspace = await designerWorkspaceClient.create({
+            prompt: messageContent,
+            createToken: crypto.randomUUID(),
+            references: converted.refs,
+          });
+          const createdProjectId = workspace.project.project_id;
+          const createdSessionId = workspace.session.session_id;
+          useDesignerStore.getState().applyGraph(workspace.graph);
+          useDesignerChatStore.getState().replaceMessages(
+            workspace.graph.graph_id,
+            workspace.messages,
           );
-          if (project && !project.is_default) store.setSelectedProject(project);
+          // Seed the shared chat store (work-mode rendering) so the panel
+          // shows the user bubble and thinking state while the first leader
+          // round streams over the standard chat.send(team.design) pipeline.
+          useChatStore.getState().ensureRuntime(createdSessionId);
+          useChatStore.getState().addMessage(createdSessionId, {
+            id: `designer-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            role: 'user',
+            content: messageContent,
+            timestamp: new Date().toISOString(),
+          });
+          useChatStore.getState().setProcessing(createdSessionId, true);
+          useChatStore.getState().setThinking(createdSessionId, true);
+          const store = useWorkspaceStore.getState();
+          if (!store.expandedProjectIds[createdProjectId]) {
+            store.toggleProjectExpanded(createdProjectId);
+          }
+          void store.loadProjects();
           navigate({
             kind: 'design-project',
-            projectId: created.projectId,
-            sessionId: created.sessionId,
+            projectId: createdProjectId,
+            sessionId: createdSessionId,
           });
+          webClient
+            .request('chat.send', {
+              session_id: createdSessionId,
+              query: messageContent,
+              mode: 'team.design',
+            })
+            .catch(() => {
+              useChatStore.getState().setProcessing(createdSessionId, false);
+              useChatStore.getState().setThinking(createdSessionId, false);
+            });
         } catch (error) {
           const code = error instanceof Error ? error.message : '';
           const referenceError = code === 'image_limit'
@@ -3568,6 +3602,10 @@ function AppContent({
     });
   }, [navigate, setSelectedProject]);
 
+  const handleDesignWorkspaceCreated = useCallback((projectId: string, createdSessionId: string) => {
+    navigate({ kind: 'design-project', projectId, sessionId: createdSessionId });
+  }, [navigate]);
+
   const handleProjectRemoved = useCallback((projectId: string, removedWorkMode: WorkMode) => {
     // 目前Design功能页是唯一需要处理项目软删除的场景
     // 打开项目的URL是 `/design/<id>`，但是回到上层是`/chat/new`
@@ -3860,20 +3898,11 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 }
               />
               {workspaceWorkMode === 'design' && route.kind === 'design-project' ? (
-                  <DesignerPage
-                    projectId={route.projectId}
-                    sessionId={route.sessionId}
-                    sidebarCollapsed={conversationSidebarCollapsed}
-                    onToggleSidebarCollapse={() =>
-                      setConversationSidebarCollapsed((v) => !v)
-                    }
-                    onOpenSession={(nextProjectId, nextSessionId, options) => {
-                      navigate(
-                        { kind: 'design-project', projectId: nextProjectId, sessionId: nextSessionId },
-                        options,
-                      );
-                    }}
-                  />
+                route.sessionId ? (
+                  <DesignerPage sessionId={route.sessionId} />
+                ) : (
+                  <DesignerLanding onCreated={handleDesignWorkspaceCreated} />
+                )
               ) : (
               <div
                 className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
