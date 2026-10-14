@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from shutil import copy2
 
@@ -36,6 +37,8 @@ from jiuwenswarm.server.runtime.designer.handlers.text_nodes import (
     parse_storyboard_shots,
 )
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext, NodeResult
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_image_size(cfg: dict, graph: dict | None = None) -> str:
@@ -294,11 +297,16 @@ async def _require_image(
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
             resolve_prompt_limit,
-            trim_prompt_to_limit,
         )
 
         lim = resolve_prompt_limit("image")
-        prompt, _ = trim_prompt_to_limit(str(prompt or ""), lim)
+        if lim.max_chars and len(str(prompt or "")) > lim.max_chars:
+            logger.warning(
+                "image prompt length=%s exceeds limit %s (model=%s); passing as-is",
+                len(str(prompt or "")),
+                lim.max_chars,
+                lim.model,
+            )
     except Exception:  # noqa: BLE001
         pass
 

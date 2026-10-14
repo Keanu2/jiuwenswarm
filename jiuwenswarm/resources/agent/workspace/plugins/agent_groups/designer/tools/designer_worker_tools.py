@@ -187,8 +187,22 @@ async def _read_node_context(ticket_text: str = "") -> str:
         },
         "graph_title": graph.get("title"),
         "graph_description": graph.get("description"),
+        # Advisory media prompt budgets (colleague PR #14 semantics): the
+        # worker self-limits its tool prompts to these; nothing truncates.
+        "media_prompt_limits": _media_limit_packet(),
     }
     return json.dumps(snapshot, ensure_ascii=False, indent=2)
+
+
+def _media_limit_packet() -> dict[str, Any]:
+    try:
+        from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
+            media_prompt_limit_packet,
+        )
+
+        return media_prompt_limit_packet()
+    except Exception:  # noqa: BLE001 — advisory only, context read must not die
+        return {}
 
 
 # ─── media generation (硬编 claw handler；后续同事剥离) ──────────────────
@@ -211,24 +225,35 @@ from jiuwenswarm.server.runtime.designer.mock_media import (
 )
 
 
+def _ticket_graph() -> Any:
+    """Graph for the bound ticket, or None outside a node run (defaults apply)."""
+    try:
+        return _CTX.env()[1]
+    except Exception:  # noqa: BLE001 — settings fall back to model defaults
+        return None
+
+
 async def _call_image_model(
     prompt: str,
-    size: str = "1K",
     reference_images: list[str] | None = None,
     ticket_text: str = "",
 ) -> str:
-    """Generate one image via the Settings image model (mock seam preserved)."""
+    """Generate one image via the Settings image model (mock seam preserved).
+
+    Size is server-decided (canvas image_settings snapped onto the active
+    model — colleague PR #9 semantics); the LLM never passes a size.
+    """
     _bind_ctx_from_prompt(ticket_text)
     if not str(prompt or "").strip():
         return "prompt is required"
     # Handler-stage line first — the old handler emitted it before any model
     # call, so a mocked debug run shows the same "calling image model" frame.
     _emit_stage("calling image model", "image_gen")
+    run_id = _CTX.ticket["run_id"] if _CTX.ticket else "designer"
     # MOCK seam: swap ONLY the model call; prompt build / refs / logging stay.
     if _mock_media_enabled():
         import logging as _logging
 
-        run_id = _CTX.ticket["run_id"] if _CTX.ticket else "designer"
         target = next_mock_image(_media_save_dir(run_id))
         _logging.getLogger(__name__).info(
             "[designer-mock-media] image prompt=%r refs=%d -> %s",
@@ -241,14 +266,17 @@ async def _call_image_model(
     from jiuwenswarm.server.runtime.designer.handlers.common import (
         generate_designer_image,
     )
+    from jiuwenswarm.server.runtime.designer.media_settings import image_settings
 
+    settings = image_settings(_ticket_graph())
     try:
         generated = await generate_designer_image(
             prompt,
-            size=size,
+            size=settings.size,
             reference_images=[str(r) for r in (reference_images or []) if str(r).strip()]
             or None,
             max_tries=2,
+            save_dir=str(_media_save_dir(run_id)),
         )
     except Exception as exc:  # noqa: BLE001 — surface to the worker, fail-closed at submit
         return f"image generation failed: {exc}"
@@ -262,44 +290,57 @@ async def _call_image_model(
 
 async def _call_video_model(
     prompt: str,
-    duration: int = 5,
     reference_images: list[str] | None = None,
     ticket_text: str = "",
 ) -> str:
-    """Generate one video clip via the Settings video model."""
+    """Generate one video clip via the Settings video model.
+
+    Format comes from canvas video_settings snapped onto the active model and
+    duration from the node's own config.duration_sec (clamped to the model's
+    min/max) — the LLM passes neither (colleague PR #9 semantics).
+    """
     _bind_ctx_from_prompt(ticket_text)
     if not str(prompt or "").strip():
         return "prompt is required"
     # Same ordering as _call_image_model: stage line before the mock seam too.
     _emit_stage("calling video model", "video_gen")
+    run_id = _CTX.ticket["run_id"] if _CTX.ticket else "designer"
     # MOCK seam: swap ONLY the model call; prompt/refs/duration stay real.
     if _mock_media_enabled():
         import logging as _logging
 
-        run_id = _CTX.ticket["run_id"] if _CTX.ticket else "designer"
         target = next_mock_video(_media_save_dir(run_id))
         _logging.getLogger(__name__).info(
-            "[designer-mock-media] video prompt=%r refs=%d duration=%s -> %s",
+            "[designer-mock-media] video prompt=%r refs=%d -> %s",
             str(prompt)[:160],
             len(reference_images or []),
-            duration,
             target.name,
         )
         uri = target.resolve().as_uri()
         return f"video_ready uri={uri} path={target}"
     from jiuwenswarm.server.runtime.designer.handlers.clip import (
-        collect_clip_reference_images,
         generate_clip_video,
     )
+    from jiuwenswarm.server.runtime.designer.media_settings import video_settings
+    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
+        active_video_capacity,
+        size_for_resolution,
+        snap_duration,
+    )
 
-    refs = [str(r) for r in (reference_images or []) if str(r).strip()]
-    save_run = _CTX.ticket["run_id"] if _CTX.ticket else "designer"
+    graph = _ticket_graph()
+    settings = video_settings(graph)
+    video_size = size_for_resolution(settings.resolution, settings.aspect_ratio)
+    duration = _node_duration_sec(graph)
     try:
         generated = await generate_clip_video(
             prompt,
-            save_dir=str(_media_save_dir(save_run)),
-            reference_images=refs or None,
-            duration=int(duration or 5),
+            save_dir=str(_media_save_dir(run_id)),
+            reference_images=[str(r) for r in (reference_images or []) if str(r).strip()]
+            or None,
+            duration=snap_duration(duration, active_video_capacity()),
+            size=video_size,
+            resolution=settings.resolution,
         )
     except Exception as exc:  # noqa: BLE001
         return f"video generation failed: {exc}"
@@ -310,6 +351,22 @@ async def _call_video_model(
     return f"video_ready uri={uri} path={path}"
 
 
+def _node_duration_sec(graph: Any) -> int:
+    """The node's own duration_sec, else 5 — snap_duration clamps to the model."""
+    if not isinstance(graph, dict) or _CTX.ticket is None:
+        return 5
+    node = next(
+        (n for n in graph.get("nodes") or [] if str(n.get("id")) == _CTX.node_id),
+        None,
+    )
+    config = node.get("config") if isinstance(node, dict) else None
+    raw = config.get("duration_sec") if isinstance(config, dict) else None
+    try:
+        return int(raw) if raw else 5
+    except (TypeError, ValueError):
+        return 5
+
+
 async def _call_model(prompt: str, ticket_text: str = "") -> str:
     """Plain text-model call (story/brief drafting aid)."""
     _bind_ctx_from_prompt(ticket_text)
@@ -317,7 +374,7 @@ async def _call_model(prompt: str, ticket_text: str = "") -> str:
 
     _emit_stage("calling text model", "text_gen")
     try:
-        return await _plain_model_text(str(prompt or ""))
+        return _plain_model_text(str(prompt or ""))
     except Exception as exc:  # noqa: BLE001
         return f"model call failed: {exc}"
 
@@ -425,19 +482,20 @@ class GenerateImageTool:
         async def _invoke(**kwargs: Any) -> str:
             return await _call_image_model(
                 prompt=str(kwargs.get("prompt") or ""),
-                size=str(kwargs.get("size") or "1K"),
                 reference_images=kwargs.get("reference_images"),
                 ticket_text=str(kwargs.get("ticket_text") or ""),
             )
 
         card = ToolCard(
             name="generate_image",
-            description="生成一张图片。prompt 必填；reference_images 可传上游图片文件 uri 列表。",
+            description=(
+                "生成一张图片。prompt 必填；reference_images 可传上游图片文件 uri 列表。"
+                "尺寸由画布媒体设置决定（服务端解析），无需传参。"
+            ),
             input_params={
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string", "description": "图片生成提示词"},
-                    "size": {"type": "string", "description": "尺寸档位，默认 1K"},
                     "reference_images": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -459,19 +517,20 @@ class GenerateVideoTool:
         async def _invoke(**kwargs: Any) -> str:
             return await _call_video_model(
                 prompt=str(kwargs.get("prompt") or ""),
-                duration=int(kwargs.get("duration") or 5),
                 reference_images=kwargs.get("reference_images"),
                 ticket_text=str(kwargs.get("ticket_text") or ""),
             )
 
         card = ToolCard(
             name="generate_video",
-            description="生成一段视频。prompt 必填；reference_images 传参考图 uri 列表。",
+            description=(
+                "生成一段视频。prompt 必填；reference_images 传参考图 uri 列表。"
+                "时长/分辨率由节点时长与画布媒体设置决定（服务端解析），无需传参。"
+            ),
             input_params={
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string", "description": "视频生成提示词"},
-                    "duration": {"type": "integer", "description": "时长秒数，默认 5"},
                     "reference_images": {
                         "type": "array",
                         "items": {"type": "string"},

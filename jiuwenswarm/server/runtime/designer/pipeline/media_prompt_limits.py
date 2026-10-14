@@ -4,6 +4,10 @@
 Resolves limits from the user's VISUAL_GEN / VIDEO_GEN model + provider hints.
 Never forces a specific model. Unknown backends get a soft advisory only.
 
+Limits are advisory labels only: the pipeline never truncates a prompt.
+Leaf agents are asked to keep their tool prompts within the resolved limit,
+and callers may log a warning when a prompt runs over.
+
 Sources are vendor docs / common API contracts (chars unless noted). Token
 limits are converted with a conservative chars≈tokens*4 estimate for LLM
 guidance. Override at runtime with VISUAL_GEN_PROMPT_MAX_CHARS /
@@ -76,9 +80,11 @@ _REGISTRY: tuple[tuple[str, str, int, str, str], ...] = (
     ("image", r"(?i)recraft|imagen|gemini.*image|nano-?banana|seedream", 4000, "chars", "common hosted image APIs"),
     ("image", r"(?i)midjourney", 2000, "chars", "Midjourney prompt practice"),
     # —— Video ——
-    ("video", r"(?i)minimax-h3|hailuo-?h3|h3-max|video.?generation.?v2", 7000, "chars", "MiniMax H3 / video-generation v2"),
-    ("video", r"(?i)minimax|hailuo|t2v-01|i2v-01|video-01", 2000, "chars", "MiniMax Hailuo T2V/I2V (pre-H3)"),
+    # Wan before MiniMax i2v-01: model ids like wan2.2-i2v must not hit the MiniMax row
+    # when VIDEO_GEN_API_BASE from another test still mentions i2v-01 / hailuo.
     ("video", r"(?i)wan2\.|wan3\.|wan-?video|wanx|tongyi.*wan", 20000, "chars", "Wan / DashScope video common max"),
+    ("video", r"(?i)minimax-h3|hailuo-?h3|h3-max|video.?generation.?v2", 7000, "chars", "MiniMax H3 / video-generation v2"),
+    ("video", r"(?i)minimax|hailuo|\bt2v-01\b|\bi2v-01\b|\bvideo-01\b", 2000, "chars", "MiniMax Hailuo T2V/I2V (pre-H3)"),
     ("video", r"(?i)seedance.?2\.5|seedance@2\.5", 10000, "chars", "Seedance 2.5 API max"),
     ("video", r"(?i)seedance|doubao.*video|bytedance.*video", 5000, "chars", "Seedance / ByteDance video common"),
     ("video", r"(?i)\bkling\b|kwai.*video", 2500, "chars", "Kling API common practice"),
@@ -247,29 +253,8 @@ def media_prompt_limit_packet() -> dict[str, Any]:
     }
 
 
-def prompt_within_limit(text: str, limit: PromptLimit) -> bool:
+def prompt_over_limit(text: str, limit: PromptLimit) -> bool:
+    """Advisory check for logs/notes — the pipeline never truncates prompts."""
     if not limit.max_chars or limit.max_chars <= 0:
-        return True
-    return len(str(text or "")) <= int(limit.max_chars)
-
-
-def trim_prompt_to_limit(text: str, limit: PromptLimit) -> tuple[str, bool]:
-    """Optional soft trim only when a known hard cap is exceeded.
-
-    Prefer leaf self-limit; this is a last-resort safety for documented caps.
-    Soft/unknown limits are never truncated here.
-    """
-    raw = str(text or "").strip()
-    if not limit.known or limit.soft or not limit.max_chars:
-        return raw, False
-    if len(raw) <= limit.max_chars:
-        return raw, False
-    budget = max(1, int(limit.max_chars) - 1)
-    cut = raw[:budget]
-    if budget >= 40:
-        for sep in (". ", "。", "! ", "? ", "\n"):
-            idx = cut.rfind(sep)
-            if idx >= budget // 2:
-                cut = cut[: idx + len(sep)].rstrip()
-                break
-    return cut.strip(), True
+        return False
+    return len(str(text or "")) > int(limit.max_chars)

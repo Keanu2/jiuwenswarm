@@ -1045,20 +1045,11 @@ class DesignerGraphToolkit:
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
-                trim_prompt_to_limit,
             )
 
             lim = resolve_prompt_limit("image")
             cfg["prompt_char_limit"] = lim.max_chars
-            text, trimmed = trim_prompt_to_limit(text, lim)
-            if trimmed:
-                logger.warning(
-                    "call_image_model trimmed prompt to %s chars (model=%s source=%s)",
-                    lim.max_chars,
-                    lim.model,
-                    lim.source,
-                )
-            elif lim.max_chars and len(text) > lim.max_chars:
+            if lim.max_chars and len(text) > lim.max_chars:
                 logger.warning(
                     "call_image_model prompt length=%s exceeds advisory %s (model=%s)",
                     len(text),
@@ -1255,22 +1246,13 @@ class DesignerGraphToolkit:
         try:
             from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 resolve_prompt_limit,
-                trim_prompt_to_limit,
             )
 
             vlim = resolve_prompt_limit("video")
             cfg = node.get("config") if isinstance(node.get("config"), dict) else {}
             cfg["prompt_char_limit"] = vlim.max_chars
             node["config"] = cfg
-            text, trimmed = trim_prompt_to_limit(text, vlim)
-            if trimmed:
-                logger.warning(
-                    "call_video_model trimmed prompt to %s chars (model=%s source=%s)",
-                    vlim.max_chars,
-                    vlim.model,
-                    vlim.source,
-                )
-            elif vlim.max_chars and len(text) > vlim.max_chars:
+            if vlim.max_chars and len(text) > vlim.max_chars:
                 logger.warning(
                     "call_video_model prompt length=%s exceeds advisory %s (model=%s); "
                     "sending full text (LLM should self-limit)",

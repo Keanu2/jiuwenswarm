@@ -3095,7 +3095,6 @@ class Director:
             from jiuwenswarm.server.runtime.designer.pipeline.media_prompt_limits import (
                 media_prompt_limit_packet,
                 resolve_prompt_limit,
-                trim_prompt_to_limit,
             )
 
             packet = media_prompt_limit_packet()
@@ -3105,15 +3104,9 @@ class Director:
             cfg["prompt_char_limit"] = lim.max_chars
             cfg["prompt_limit_guidance"] = lim.guidance()
             if lim.max_chars and len(prompt) > lim.max_chars:
-                trimmed, did = trim_prompt_to_limit(prompt, lim)
-                if did:
-                    prompt = trimmed
-                    notes.append(f"trim_to_prompt_limit:{lim.max_chars}")
-                    changed = True
-                else:
-                    notes.append(
-                        f"prompt_over_advisory_limit:{len(prompt)}>{lim.max_chars}"
-                    )
+                notes.append(
+                    f"prompt_over_advisory_limit:{len(prompt)}>{lim.max_chars}"
+                )
         except Exception:  # noqa: BLE001
             packet = {}
             lim = None

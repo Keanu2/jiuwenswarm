@@ -865,6 +865,7 @@ async def generate_designer_image(
     reference_images: list[str] | None = None,
     max_tries: int = 2,
     timeout_sec: float = 1200.0,
+    save_dir: str | None = None,
 ) -> dict[str, str] | None:
     """Call the Settings > Agent image model when enabled. Tests monkeypatch this function.
 
@@ -920,6 +921,7 @@ async def generate_designer_image(
                             prompt,
                             size=size,
                             reference_images=refs or None,
+                            save_dir=save_dir,
                         ),
                         timeout=max(60.0, float(timeout_sec or 1200.0)),
                     )
