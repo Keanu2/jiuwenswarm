@@ -2038,6 +2038,27 @@ def apply_graph_patch(graph: DesignerExecutionGraph, patch: Any) -> DesignerExec
         for edge in edges_by_id.values()
         if edge.get("source") in remaining_node_ids and edge.get("target") in remaining_node_ids
     ]
+    # Canvas-wide media settings live in metadata; only these two keys are
+    # patchable from the client (the settings menu), and only string fields.
+    metadata = dict(raw.get("metadata") or {})
+    for settings_key in ("video_settings", "image_settings"):
+        if settings_key not in patch:
+            continue
+        settings = patch.get(settings_key)
+        if settings is None:
+            metadata.pop(settings_key, None)
+            continue
+        if not isinstance(settings, dict):
+            raise DesignerGraphValidationError(f"patch.{settings_key} must be an object")
+        clean: dict[str, str] = {}
+        for field in ("aspect_ratio", "resolution"):
+            value = settings.get(field)
+            if value is not None and not isinstance(value, str):
+                raise DesignerGraphValidationError(f"patch.{settings_key}.{field} must be a string")
+            if isinstance(value, str) and value.strip():
+                clean[field] = value.strip()
+        metadata[settings_key] = clean
+    raw["metadata"] = metadata
     raw["updated_at"] = utc_now_ms()
     return normalize_execution_graph(raw)
 

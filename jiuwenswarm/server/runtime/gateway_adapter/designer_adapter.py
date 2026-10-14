@@ -789,6 +789,64 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
     return {"graph": dict(saved)}, None, None
 
 
+def _media_capabilities(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Model limits and canvas media settings for the settings menu.
+
+    Video figures come from the configured model's capacity entry, image tiers
+    from the image capacity table; ``settings`` echoes the graph's stored
+    canvas-wide video/image settings when a graph is requested. Per-node video
+    durations are not derived on this line (no storyboard timeline), so the
+    menu falls back to each node's ``duration_sec`` and the model default.
+    """
+    from jiuwenswarm.server.runtime.designer.media_generation import slot_settings
+    from jiuwenswarm.server.runtime.designer.pipeline.image_capacity import (
+        DEFAULT_IMAGE_RATIO,
+        IMAGE_RATIOS,
+        active_image_capacity,
+    )
+    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
+        active_video_capacity,
+    )
+
+    video_slot = slot_settings("video")
+    video_cap = active_video_capacity()
+    image_slot = slot_settings("image")
+    image_cap = active_image_capacity()
+    caps: dict[str, Any] = {
+        "video": {
+            "configured_model": video_slot.model,
+            "backend": video_slot.backend,
+            "model_id": video_cap.model_id,
+            "provider": video_cap.provider,
+            "ratios": list(video_cap.ratios),
+            "resolutions": list(video_cap.resolutions),
+            "default_ratio": "16:9" if "16:9" in video_cap.ratios else video_cap.ratios[0],
+            "default_resolution": video_cap.default_resolution,
+            "min_sec": video_cap.min_sec,
+            "max_sec": video_cap.max_sec,
+            "default_sec": video_cap.default_sec,
+        },
+        "image": {
+            "configured_model": image_slot.model,
+            "backend": image_slot.backend,
+            "ratios": list(IMAGE_RATIOS),
+            "resolutions": list(image_cap.resolutions),
+            "default_ratio": DEFAULT_IMAGE_RATIO,
+            "default_resolution": image_cap.default_resolution,
+        },
+    }
+    graph_id = str(params.get("graph_id") or "").strip()
+    if graph_id:
+        graph = _store.get_graph(graph_id)
+        if graph is None:
+            return None, "graph not found", "NOT_FOUND"
+        metadata = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+        caps["settings"] = {
+            "video": dict(metadata.get("video_settings") or {}),
+            "image": dict(metadata.get("image_settings") or {}),
+        }
+    return caps, None, None
+
 
 
 def _get_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -976,6 +1034,7 @@ class DesignerAdapter(GatewayAdapter):
             ReqMethod.DESIGNER_GRAPH_LIST.value,
             ReqMethod.DESIGNER_GRAPH_SAVE.value,
             ReqMethod.DESIGNER_GRAPH_PATCH.value,
+            ReqMethod.DESIGNER_MEDIA_CAPABILITIES.value,
             ReqMethod.DESIGNER_RUN_START.value,
             ReqMethod.DESIGNER_RUN_GET.value,
             ReqMethod.DESIGNER_RUN_PAUSE.value,
@@ -1002,6 +1061,8 @@ class DesignerAdapter(GatewayAdapter):
                 payload, error, code = await asyncio.to_thread(_save_graph, params)
             elif method == ReqMethod.DESIGNER_GRAPH_PATCH:
                 payload, error, code = await asyncio.to_thread(_patch_graph, params)
+            elif method == ReqMethod.DESIGNER_MEDIA_CAPABILITIES:
+                payload, error, code = await asyncio.to_thread(_media_capabilities, params)
             elif method == ReqMethod.DESIGNER_RUN_GET:
                 payload, error, code = await asyncio.to_thread(_get_run, params)
             elif method == ReqMethod.DESIGNER_RUN_START:
