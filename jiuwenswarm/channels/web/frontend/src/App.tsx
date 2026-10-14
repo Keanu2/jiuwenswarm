@@ -3899,7 +3899,20 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               />
               {workspaceWorkMode === 'design' && route.kind === 'design-project' ? (
                 route.sessionId ? (
-                  <DesignerPage sessionId={route.sessionId} />
+                  <DesignerPage
+                    projectId={route.projectId}
+                    sessionId={route.sessionId}
+                    sidebarCollapsed={conversationSidebarCollapsed}
+                    onToggleSidebarCollapse={() =>
+                      setConversationSidebarCollapsed((v) => !v)
+                    }
+                    onOpenSession={(nextProjectId, nextSessionId, options) => {
+                      navigate(
+                        { kind: 'design-project', projectId: nextProjectId, sessionId: nextSessionId },
+                        options,
+                      );
+                    }}
+                  />
                 ) : (
                   <DesignerLanding onCreated={handleDesignWorkspaceCreated} />
                 )

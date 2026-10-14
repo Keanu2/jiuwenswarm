@@ -390,3 +390,27 @@ class DesignerGraphStore:
                         latest = run
                         latest_ts = ts
         return latest
+
+    def latest_runs_by_graph(self) -> dict[str, DesignerExecutionRun]:
+        """Latest run per graph in one scan over the run files.
+
+        List views need the latest run of every graph at once; calling
+        ``get_latest_run_for_graph`` per graph re-parses every run file each
+        time (O(graphs x runs)). One pass keeps the landing page flat.
+        """
+        latest: dict[str, DesignerExecutionRun] = {}
+        with _STORE_LOCK:
+            for runs_dir in _all_runs_dirs():
+                for path in runs_dir.glob("*.json"):
+                    try:
+                        run = normalize_execution_run(_read_json(path))
+                    except (DesignerGraphValidationError, ValueError, json.JSONDecodeError):
+                        continue
+                    graph_id = str(run.get("graph_id") or "")
+                    if not graph_id:
+                        continue
+                    ts = int(run.get("updated_at") or 0)
+                    held = latest.get(graph_id)
+                    if held is None or ts >= int(held.get("updated_at") or 0):
+                        latest[graph_id] = run
+        return latest

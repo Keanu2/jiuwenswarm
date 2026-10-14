@@ -45,8 +45,11 @@ export const designerWorkspaceClient = {
       },
       { timeoutMs: 30 * 1000 },
     ),
-  get: (sessionId: string) =>
-    webRequest<DesignerWorkspace>('designer.workspace.get', { session_id: sessionId }),
+  get: (projectId?: string, sessionId?: string) =>
+    webRequest<DesignerWorkspace>(
+      'designer.workspace.get',
+      sessionId ? { session_id: sessionId } : { project_id: projectId || '' },
+    ),
 };
 
 export const designerGraphClient = {

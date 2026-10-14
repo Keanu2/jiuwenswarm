@@ -1,4 +1,4 @@
-import { Paperclip, SendHorizontal, X } from 'lucide-react';
+import { SendHorizontal, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MessageList } from '../../../components/ChatPanel/MessageList';
@@ -17,9 +17,6 @@ import {
   type DesignerReferenceKind,
   type DesignerStoredReference,
 } from '../designerReferences';
-import { DesignerAssetsPanel } from './DesignerAssetsPanel';
-
-type SidebarTab = 'assistant' | 'assets';
 
 type ComposerDraft = {
   id: string;
@@ -113,7 +110,6 @@ export function DesignerChatPanel() {
   const bodyRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState('');
-  const [tab, setTab] = useState<SidebarTab>('assistant');
   const [attachments, setAttachments] = useState<ComposerDraft[]>([]);
   const [attachError, setAttachError] = useState('');
   const [sending, setSending] = useState(false);
@@ -132,6 +128,12 @@ export function DesignerChatPanel() {
 
   const chatBusy = isProcessing || sending;
   const canSend = Boolean(draft.trim() || attachments.length > 0);
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [chatMessages]);
 
   const limitError = useCallback(
     (kind: DesignerReferenceKind) => {
@@ -188,7 +190,6 @@ export function DesignerChatPanel() {
     const content = draft.trim();
     if ((!content && attachments.length === 0) || chatBusy) return;
     setSending(true);
-    setTab('assistant');
     const files = attachments.map((item) => item.file);
     void filesToBootstrapReferences(files)
       .then(async (converted) => {
@@ -285,112 +286,74 @@ export function DesignerChatPanel() {
 
   return (
     <aside
-      className="designer-chat-panel designer-chat-panel--expanded"
-      aria-label={t('designer.chat.title')}
+      className="designer-chat-panel designer-chat-panel--docked"
+      aria-label={t('designer.sidebar.conversation')}
       data-testid="designer-chat-panel"
-      data-tab={tab}
     >
-      <div className="designer-chat-panel__header" role="tablist" aria-label={t('designer.sidebar.tabsLabel')}>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'assistant'}
-          className={`designer-chat-panel__tab${tab === 'assistant' ? ' is-active' : ''}`}
-          data-testid="designer-sidebar-tab-assistant"
-          onClick={() => setTab('assistant')}
-        >
-          {t('designer.sidebar.assistant')}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'assets'}
-          className={`designer-chat-panel__tab${tab === 'assets' ? ' is-active' : ''}`}
-          data-testid="designer-sidebar-tab-assets"
-          onClick={() => setTab('assets')}
-        >
-          {t('designer.sidebar.assets')}
-        </button>
+      <div className="designer-chat-panel__header">
+        <h2 className="designer-chat-panel__title" data-testid="designer-chat-panel-title">
+          {t('designer.sidebar.conversation')}
+        </h2>
       </div>
 
-      {tab === 'assistant' ? (
-        <>
-          <div
-            className="designer-chat-panel__body"
-            ref={bodyRef}
-            data-testid="designer-chat-panel-body"
-            data-timeline-scroll-root
+      <div className="designer-chat-panel__body" ref={bodyRef} data-testid="designer-chat-panel-body">
+        <InlineQuestionCard onSubmit={handleUserAnswer} />
+        <MessageList messages={chatMessages} />
+      </div>
+      <div className="designer-chat-panel__composer">
+        <InteractionSlot onSubmit={handleUserAnswer} />
+        {attachments.length > 0 ? (
+          <ReferenceChips
+            items={attachments.map((item) => ({
+              id: item.id,
+              kind: item.kind,
+              filename: item.filename,
+              previewUrl: item.previewUrl,
+            }))}
+            onRemove={removeAttachment}
+            removeLabel={t('designer.chat.removeAttachment')}
+          />
+        ) : null}
+        {attachError ? (
+          <p className="designer-chat-panel__attach-error" data-testid="designer-chat-panel-attach-error">
+            {attachError}
+          </p>
+        ) : null}
+        <div className="designer-chat-panel__composer-row">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,video/*,audio/*"
+            multiple
+            hidden
+            data-testid="designer-chat-panel-file"
+            onChange={(event) => {
+              if (event.target.files) addFiles(event.target.files);
+              event.target.value = '';
+            }}
+          />
+          {/* Canvas chat sidebar: hide attach control; landing prompt keeps its own attach UI. */}
+          <textarea
+            className="designer-chat-panel__input"
+            placeholder={t('designer.chat.inputPlaceholder')}
+            value={draft}
+            disabled={chatBusy}
+            data-testid="designer-chat-panel-input"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={onKeyDown}
+          />
+          <button
+            type="button"
+            className="designer-chat-panel__send"
+            disabled={chatBusy || !canSend}
+            onClick={handleSend}
+            aria-label={t('designer.chat.send')}
+            data-testid="designer-chat-panel-send"
           >
-            <InlineQuestionCard onSubmit={handleUserAnswer} />
-            <MessageList messages={chatMessages} />
-          </div>
-          <div className="designer-chat-panel__composer">
-            <InteractionSlot onSubmit={handleUserAnswer} />
-            {attachments.length > 0 ? (
-              <ReferenceChips
-                items={attachments.map((item) => ({
-                  id: item.id,
-                  kind: item.kind,
-                  filename: item.filename,
-                  previewUrl: item.previewUrl,
-                }))}
-                onRemove={removeAttachment}
-                removeLabel={t('designer.chat.removeAttachment')}
-              />
-            ) : null}
-            {attachError ? (
-              <p className="designer-chat-panel__attach-error" data-testid="designer-chat-panel-attach-error">
-                {attachError}
-              </p>
-            ) : null}
-            <div className="designer-chat-panel__composer-row">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*,video/*,audio/*"
-                multiple
-                hidden
-                data-testid="designer-chat-panel-file"
-                onChange={(event) => {
-                  if (event.target.files) addFiles(event.target.files);
-                  event.target.value = '';
-                }}
-              />
-              <button
-                type="button"
-                className="designer-chat-panel__attach"
-                disabled={chatBusy}
-                onClick={() => fileInputRef.current?.click()}
-                aria-label={t('designer.chat.attach')}
-                title={t('designer.chat.attachHint')}
-                data-testid="designer-chat-panel-attach"
-              >
-                <Paperclip size={16} aria-hidden />
-              </button>
-              <textarea
-                className="designer-chat-panel__input"
-                placeholder={t('designer.chat.inputPlaceholder')}
-                value={draft}
-                data-testid="designer-chat-panel-input"
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={onKeyDown}
-              />
-              <button
-                type="button"
-                className="designer-chat-panel__send"
-                disabled={chatBusy || !canSend}
-                onClick={handleSend}
-                aria-label={t('designer.chat.send')}
-                data-testid="designer-chat-panel-send"
-              >
-                <SendHorizontal size={16} aria-hidden />
-              </button>
-            </div>
-          </div>
-        </>
-      ) : (
-        <DesignerAssetsPanel />
-      )}
+            <SendHorizontal size={16} aria-hidden />
+          </button>
+        </div>
+      </div>
     </aside>
   );
 }

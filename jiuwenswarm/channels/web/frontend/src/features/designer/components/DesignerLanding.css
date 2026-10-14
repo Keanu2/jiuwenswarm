@@ -114,15 +114,6 @@
   padding: 0 12px 10px 16px;
 }
 
-/* Work-mode layout: project selector sits on its own row below the composer. */
-.designer-landing__context-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 10px;
-  padding: 0 4px;
-}
-
 .designer-landing__send {
   display: flex;
   align-items: center;

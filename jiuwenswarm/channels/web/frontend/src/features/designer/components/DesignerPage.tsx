@@ -1,49 +1,86 @@
-import { Loader2 } from 'lucide-react';
-import { useEffect, useMemo, useRef } from 'react';
+import { LayoutPanelTop, Loader2, MapPinned, Route, RouteOff } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import PanelCollapseIcon from '../../../assets/panel-collapse.svg?react';
+import chatOrbIcon from '../../../assets/designer-chat-orb.png';
 import {
   collectDesignerMaterials,
   collectPendingRevisions,
 } from '../designerMaterials';
 import { useDesignerChatStore } from '../designerChatStore';
 import { bindDesignerRuntime, useDesignerRunStore } from '../designerRunStore';
+import { useChatStore } from '../../../stores/chatStore';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
 import { DesignerMaterialViewer } from '../DesignerMaterialViewer';
 import { DesignerRevisionChooser } from '../DesignerRevisionChooser';
+import { DesignerDeleteNodeDialog } from './controls/DesignerDeleteNodeDialog';
+import { DesignerZoomMenu } from './DesignerZoomMenu';
+import { DesignerAssetsSidebar } from './DesignerAssetsSidebar';
 import { DesignerCanvas } from './DesignerCanvas';
 import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
 import { DesignerRunControl } from './DesignerRunControl';
 import { designerWorkspaceClient } from '../designerGraphClient';
-import { useChatStore } from '../../../stores/chatStore';
-import type { DesignerChatMessage } from '../designerChatStore';
+import { useWorkspaceStore } from '../../../stores/workspaceStore';
 import './DesignerPage.css';
 
-function seedChatHistory(sessionId: string, messages: DesignerChatMessage[]): void {
-  // Restore persisted task history into the shared chat store on page load so
-  // the MessageList (work-mode rendering) shows it after refresh. A full
-  // replace mirrors the work-mode history restore: a stream that raced ahead
-  // of this load simply keeps appending on top of the restored list.
-  useChatStore.getState().ensureRuntime(sessionId);
-  useChatStore.getState().replaceHistoryMessages(
-    sessionId,
-    messages.map((item) => ({
-      id: item.id,
-      role: item.role === 'user' ? ('user' as const) : ('assistant' as const),
-      content: item.content,
-      timestamp: new Date(item.createdAt).toISOString(),
-    })),
-  );
-}
-
 type DesignerPageProps = {
+  projectId?: string;
   sessionId?: string;
+  onOpenSession?: (projectId: string, sessionId: string, options?: { replace?: boolean }) => void;
+  sidebarCollapsed?: boolean;
+  onToggleSidebarCollapse?: () => void;
 };
 
-export function DesignerPage({ sessionId }: DesignerPageProps) {
-  const { t } = useTranslation();
-  const effectiveSessionId = sessionId;
+function startOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function formatModifiedAt(
+  timestamp: number | undefined,
+  locale: string,
+  yesterdayLabel: string,
+): string {
+  if (!timestamp || !Number.isFinite(timestamp)) return '';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const time = new Intl.DateTimeFormat(locale, {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+  const now = new Date();
+  const dayDiff = Math.round(
+    (startOfLocalDay(now).getTime() - startOfLocalDay(date).getTime()) / 86_400_000,
+  );
+  if (dayDiff === 0) return time;
+  if (dayDiff === 1) return `${yesterdayLabel} ${time}`;
+
+  const isZh = locale.toLowerCase().startsWith('zh');
+  if (date.getFullYear() === now.getFullYear()) {
+    if (isZh) return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
+    return `${new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' }).format(date)} ${time}`;
+  }
+  if (isZh) {
+    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
+  }
+  return `${new Intl.DateTimeFormat(locale, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(date)} ${time}`;
+}
+
+export function DesignerPage({
+  projectId,
+  sessionId,
+  onOpenSession,
+  sidebarCollapsed = false,
+  onToggleSidebarCollapse,
+}: DesignerPageProps) {
+  const { t, i18n } = useTranslation();
+  const effectiveProjectId = projectId;
 
   const loadStatus = useDesignerStore((state) => state.loadStatus);
   const loadError = useDesignerStore((state) => state.loadError);
@@ -64,50 +101,65 @@ export function DesignerPage({ sessionId }: DesignerPageProps) {
   const closeViewer = useDesignerUiStore((state) => state.closeViewer);
   const closeRevision = useDesignerUiStore((state) => state.closeRevision);
   const resetUi = useDesignerUiStore((state) => state.reset);
+  const chatSidebarOpen = useDesignerUiStore((state) => state.chatSidebarOpen);
+  const assetsSidebarOpen = useDesignerUiStore((state) => state.assetsSidebarOpen);
+  const minimapVisible = useDesignerUiStore((state) => state.minimapVisible);
+  const edgesVisible = useDesignerUiStore((state) => state.edgesVisible);
+  const toggleChatSidebar = useDesignerUiStore((state) => state.toggleChatSidebar);
+  const toggleMinimap = useDesignerUiStore((state) => state.toggleMinimap);
+  const toggleEdges = useDesignerUiStore((state) => state.toggleEdges);
+  const requestAutoLayout = useDesignerUiStore((state) => state.requestAutoLayout);
+  const pendingDeleteNodeIds = useDesignerUiStore((state) => state.pendingDeleteNodeIds);
+  const dismissDeleteNodes = useDesignerUiStore((state) => state.dismissDeleteNodes);
+  const closeDock = useDesignerUiStore((state) => state.closeDock);
+  const removeNodes = useDesignerStore((state) => state.removeNodes);
+  const confirmDeleteNodes = useCallback(() => {
+    const ids = useDesignerUiStore.getState().pendingDeleteNodeIds;
+    dismissDeleteNodes();
+    if (ids.length === 0) return;
+    removeNodes(ids);
+    closeDock();
+  }, [closeDock, dismissDeleteNodes, removeNodes]);
   const workspaceLoadSeqRef = useRef(0);
+  const loadedKeyRef = useRef('');
+  const onOpenSessionRef = useRef(onOpenSession);
+  onOpenSessionRef.current = onOpenSession;
   useEffect(() => bindDesignerRuntime(), []);
 
   useEffect(() => {
+    if (!sessionId || bootstrapInProgress) return;
+    const requestedKey = `${effectiveProjectId}:${sessionId || ''}`;
+    if (sessionId && loadedKeyRef.current === requestedKey) return;
     const loadSeq = ++workspaceLoadSeqRef.current;
-    if (!effectiveSessionId || bootstrapInProgress) return;
-    const current = useDesignerStore.getState().domainGraph;
-    if (current?.graph_id && String(current.metadata?.session_id ?? '') === effectiveSessionId) {
-      // Background refresh (no reset → no blank flash, no dropped in-flight
-      // events): heals the case where the first leader round finished before
-      // this page mounted and its designer.graph.updated push went unheard
-      // (e.g. the landing navigating after the round). Apply only snapshots
-      // at least as new as the held one so a slow response can't roll the
-      // canvas back under live pushes.
-      void designerWorkspaceClient.get(effectiveSessionId)
-        .then((workspace) => {
-          if (workspaceLoadSeqRef.current !== loadSeq) return;
-          const held = useDesignerStore.getState().domainGraph;
-          const sameGraph = held?.graph_id === workspace.graph.graph_id;
-          const incomingAt = Number(workspace.graph.updated_at ?? 0);
-          const heldAt = Number(held?.updated_at ?? 0);
-          if (!sameGraph || incomingAt >= heldAt) {
-            useDesignerStore.getState().applyGraph(workspace.graph);
-          }
-        })
-        .catch(() => {
-          // Keep the held graph; a background refresh failure is not fatal.
-        });
-      return;
-    }
     useDesignerStore.getState().reset();
-    void designerWorkspaceClient.get(effectiveSessionId)
+    void designerWorkspaceClient.get(effectiveProjectId, sessionId)
       .then((workspace) => {
         if (workspaceLoadSeqRef.current !== loadSeq) return;
+        const opened = String(workspace.session?.session_id || '');
+        loadedKeyRef.current = `${effectiveProjectId}:${opened}`;
         useDesignerStore.getState().applyGraph(workspace.graph);
         useDesignerChatStore.getState().replaceMessages(
           workspace.graph.graph_id,
           workspace.messages,
         );
+        // Restore persisted task history into the shared chat store so the
+        // panel's work-mode MessageList shows it after a page refresh.
         const historySessionId = String(
-          workspace.graph.metadata?.session_id ?? effectiveSessionId,
+          workspace.graph.metadata?.session_id ?? opened,
         );
         useChatStore.getState().ensureRuntime(historySessionId);
-        seedChatHistory(historySessionId, workspace.messages);
+        useChatStore.getState().replaceHistoryMessages(
+          historySessionId,
+          workspace.messages.map((item) => ({
+            id: item.id,
+            role: item.role === 'user' ? ('user' as const) : ('assistant' as const),
+            content: item.content,
+            timestamp: new Date(item.createdAt).toISOString(),
+          })),
+        );
+        if (opened && opened !== sessionId) {
+          onOpenSessionRef.current?.(effectiveProjectId || '', opened, { replace: true });
+        }
       })
       .catch((reason) => {
         if (workspaceLoadSeqRef.current !== loadSeq) return;
@@ -121,7 +173,8 @@ export function DesignerPage({ sessionId }: DesignerPageProps) {
     };
   }, [
     bootstrapInProgress,
-    effectiveSessionId,
+    effectiveProjectId,
+    sessionId,
   ]);
 
   useEffect(() => {
@@ -137,6 +190,13 @@ export function DesignerPage({ sessionId }: DesignerPageProps) {
       });
     }
   }, [boundGraphId, domainGraph, resetForGraph, resetUi, t]);
+
+  useEffect(() => {
+    if (!effectiveProjectId) return;
+    const workspace = useWorkspaceStore.getState();
+    void workspace.loadProjectSessions(effectiveProjectId);
+    void workspace.loadProjects();
+  }, [domainGraph?.graph_id, domainGraph?.title, effectiveProjectId]);
 
   const materials = useMemo(
     () => collectDesignerMaterials(domainGraph, run),
@@ -174,64 +234,135 @@ export function DesignerPage({ sessionId }: DesignerPageProps) {
   const projectTitle =
     domainGraph?.title?.trim() ||
     (showLoading || showEmpty || showError ? '' : t('designer.subtitle'));
+  const modifiedLabel = formatModifiedAt(
+    domainGraph?.updated_at,
+    i18n.language,
+    t('designer.toolbar.yesterday'),
+  );
+  const canvasInteractive =
+    showCanvas && !bootstrapInProgress && !isDesignerPreviewGraph(domainGraph);
 
   return (
     <div className="designer-page app-section" data-testid="designer-page">
-      <header className="designer-page__toolbar" data-testid="designer-page-toolbar">
-        <div className="designer-page__heading">
-          <h1 className="designer-page__title" data-testid="designer-page-rail-title">
-            {t('nav.design')}
-          </h1>
-          <p className="designer-page__subtitle" data-testid="designer-page-title">
-            {projectTitle || t('designer.subtitle')}
-          </p>
-        </div>
-        <div className="designer-page__toolbar-actions">
-          <DesignerRunControl
-            graph={showCanvas ? domainGraph : null}
-            disabled={
-              !showCanvas ||
-              bootstrapInProgress ||
-              isDesignerPreviewGraph(domainGraph)
-            }
-          />
-        </div>
-      </header>
-      {runError ? (
-        <div
-          className="app-toast-wrapper app-toast-wrapper--top-center"
-          data-testid="designer-run-error-toast"
-        >
-          <div className="app-connection-toast" role="alert" data-testid="designer-error">
-            {runError}
+      <div className="designer-page__main">
+        <header className="designer-page__toolbar" data-testid="designer-page-toolbar">
+          {onToggleSidebarCollapse ? (
+            <button
+              type="button"
+              className="designer-page__sidebar-collapse"
+              onClick={onToggleSidebarCollapse}
+              aria-label={sidebarCollapsed ? t('common.expand') : t('common.collapse')}
+              aria-pressed={!sidebarCollapsed}
+              title={sidebarCollapsed ? t('common.expand') : t('common.collapse')}
+              data-testid="designer-page-sidebar-collapse"
+              data-variant={sidebarCollapsed ? 'expand' : 'collapse'}
+            >
+              <PanelCollapseIcon aria-hidden />
+            </button>
+          ) : null}
+          <div className="designer-page__heading">
+            <h1 className="designer-page__title" data-testid="designer-page-title">
+              {projectTitle || t('designer.subtitle')}
+            </h1>
+            {modifiedLabel ? (
+              <span className="designer-page__modified" data-testid="designer-page-modified">
+                {modifiedLabel}
+              </span>
+            ) : null}
           </div>
-        </div>
-      ) : null}
-      {runWarning ? (
-        <p className="designer-page__warning" data-testid="designer-warning">
-          {runWarning}
-        </p>
-      ) : null}
-
-      <div className="designer-page__workspace">
-        <DesignerChatPanel />
-
-        {showCanvas && domainGraph ? <DesignerCanvas graph={domainGraph} /> : null}
-
-        {showLoading ? (
-          <div className="designer-page__state" data-testid="designer-loading-state">
-            <div className="designer-page__state-card">
-              <Loader2 className="mx-auto mb-3 animate-spin" size={24} aria-hidden />
-              <p className="designer-page__state-desc">
-                {loadStatus === 'bootstrapping' ? t('designer.chat.thinking') : t('designer.loading')}
-              </p>
+          <div className="designer-page__toolbar-actions">
+            <DesignerZoomMenu />
+            <span className="designer-page__toolbar-split" aria-hidden />
+            <button
+              type="button"
+              className="designer-page__toolbar-icon-btn"
+              aria-label={edgesVisible ? t('designer.toolbar.hideEdges') : t('designer.toolbar.showEdges')}
+              aria-pressed={edgesVisible}
+              title={edgesVisible ? t('designer.toolbar.hideEdges') : t('designer.toolbar.showEdges')}
+              data-testid="designer-page-edges-toggle"
+              disabled={!canvasInteractive}
+              onClick={toggleEdges}
+            >
+              {edgesVisible ? <Route size={18} aria-hidden /> : <RouteOff size={18} aria-hidden />}
+            </button>
+            <button
+              type="button"
+              className="designer-page__toolbar-icon-btn"
+              aria-label={t('designer.toolbar.layoutNodes')}
+              title={t('designer.toolbar.layoutNodes')}
+              data-testid="designer-page-layout"
+              disabled={!canvasInteractive || !domainGraph?.nodes.length}
+              onClick={requestAutoLayout}
+            >
+              <LayoutPanelTop size={18} aria-hidden />
+            </button>
+            <button
+              type="button"
+              className={`designer-page__toolbar-icon-btn${minimapVisible ? ' is-active' : ''}`}
+              aria-label={t('designer.toolbar.minimap')}
+              aria-pressed={minimapVisible}
+              title={t('designer.toolbar.minimap')}
+              data-testid="designer-page-minimap-toggle"
+              disabled={!canvasInteractive}
+              onClick={toggleMinimap}
+            >
+              <MapPinned size={18} aria-hidden />
+            </button>
+            <button
+              type="button"
+              className="designer-page__chat-btn"
+              aria-label={t('designer.toolbar.openChat')}
+              aria-pressed={chatSidebarOpen}
+              title={t('designer.toolbar.openChat')}
+              data-testid="designer-page-chat-toggle"
+              onClick={toggleChatSidebar}
+            >
+              <img src={chatOrbIcon} alt="" width={20} height={20} />
+              <span>{t('designer.toolbar.openChat')}</span>
+            </button>
+            <DesignerRunControl
+              graph={showCanvas ? domainGraph : null}
+              disabled={!canvasInteractive}
+            />
+          </div>
+        </header>
+        {runError ? (
+          <div
+            className="app-toast-wrapper app-toast-wrapper--top-center"
+            data-testid="designer-run-error-toast"
+          >
+            <div className="app-connection-toast" role="alert" data-testid="designer-error">
+              {runError}
             </div>
           </div>
         ) : null}
+        {runWarning ? (
+          <p className="designer-page__warning" data-testid="designer-warning">
+            {runWarning}
+          </p>
+        ) : null}
 
-        {showEmpty ? <DesignerEmptyState variant="empty" /> : null}
-        {showError ? <DesignerEmptyState variant="error" errorMessage={loadError} /> : null}
+        <div className="designer-page__canvas-area">
+          {showCanvas && domainGraph ? <DesignerCanvas graph={domainGraph} /> : null}
+
+          {showLoading ? (
+            <div className="designer-page__state" data-testid="designer-loading-state">
+              <div className="designer-page__state-card">
+                <Loader2 className="mx-auto mb-3 animate-spin" size={24} aria-hidden />
+                <p className="designer-page__state-desc">
+                  {loadStatus === 'bootstrapping' ? t('designer.chat.thinking') : t('designer.loading')}
+                </p>
+              </div>
+            </div>
+          ) : null}
+
+          {showEmpty ? <DesignerEmptyState variant="empty" /> : null}
+          {showError ? <DesignerEmptyState variant="error" errorMessage={loadError} /> : null}
+        </div>
       </div>
+
+      {assetsSidebarOpen ? <DesignerAssetsSidebar /> : null}
+      {chatSidebarOpen ? <DesignerChatPanel /> : null}
 
       {viewerOpen ? (
         <DesignerMaterialViewer
@@ -251,6 +382,9 @@ export function DesignerPage({ sessionId }: DesignerPageProps) {
           }}
           onClose={closeRevision}
         />
+      ) : null}
+      {pendingDeleteNodeIds.length > 0 ? (
+        <DesignerDeleteNodeDialog onCancel={dismissDeleteNodes} onConfirm={confirmDeleteNodes} />
       ) : null}
     </div>
   );

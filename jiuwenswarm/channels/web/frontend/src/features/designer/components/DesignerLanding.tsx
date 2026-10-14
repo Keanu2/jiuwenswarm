@@ -1,22 +1,18 @@
 import { Loader2, Plus, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import beeStaticIcon from '../../../assets/bee-static.png';
 import AttachmentIcon from '../../../assets/agent-management/attachment.svg?react';
 import sendActiveIcon from '../../../assets/send_active.svg';
 import sendIcon from '../../../assets/send.svg';
 import ChatModelSelector from '../../../components/ChatPanel/ChatModelSelector';
-import { ProjectContextSelector } from '../../../components/ChatPanel/ProjectContextSelector';
 import { generateUuidV4 } from '../../../utils/uuid';
 import { useWorkspaceStore } from '../../../stores';
 import { useChatStore } from '../../../stores/chatStore';
-import type { Message } from '../../../types';
 import {
   resolveChatModelSelection,
   useSessionStore,
 } from '../../../stores/sessionStore';
-import { registerCreatedConversation } from '../../../multi-session/state/newConversationLifecycle';
-import { webClient } from '../../../services/webClient';
 import { useDesignerChatStore } from '../designerChatStore';
 import { designerWorkspaceClient } from '../designerGraphClient';
 import { useDesignerStore } from '../designerStore';
@@ -30,7 +26,6 @@ type DesignerLandingProps = {
 
 export function DesignerLanding({ onCreated }: DesignerLandingProps) {
   const { t, i18n } = useTranslation();
-  const isZh = i18n.language.startsWith('zh');
   const [prompt, setPrompt] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -39,30 +34,7 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const createAttemptRef = useRef<{ signature: string; token: string } | null>(null);
-
-  const { projects, selectedProject, setSelectedProject, createProject, loadProjects } = useWorkspaceStore(
-    (state) => ({
-      projects: state.projects,
-      selectedProject: state.selectedProject,
-      setSelectedProject: state.setSelectedProject,
-      createProject: state.createProject,
-      loadProjects: state.loadProjects,
-    }),
-  );
-
-  const designProjects = useMemo(() => {
-    const list = projects.filter((project) => project.work_mode === 'design');
-    return list.sort((a, b) => (b.last_message_at ?? 0) - (a.last_message_at ?? 0));
-  }, [projects]);
-
-  const displayedDesignProject = useMemo(
-    () => (selectedProject?.work_mode === 'design' ? selectedProject : null),
-    [selectedProject],
-  );
-
-  useEffect(() => {
-    void loadProjects();
-  }, [loadProjects]);
+  const isZh = i18n.language.startsWith('zh');
 
   useEffect(() => {
     if (!attachMenuOpen) return;
@@ -114,7 +86,6 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
         prompt: content,
         createToken: attempt.token,
         modelName,
-        projectId: displayedDesignProject?.project_id,
         references: converted.refs,
       });
       createAttemptRef.current = null;
@@ -123,68 +94,12 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
         workspace.graph.graph_id,
         workspace.messages,
       );
-      const createdSessionId = workspace.session.session_id;
-      // Register the design workspace session in the global session store so the
-      // sidebar and chat lifecycle treat it like any other newly created session.
-      const createdSession = registerCreatedConversation(
-        createdSessionId,
-        {
-          mode: 'team',
-          selectedModelName: modelName ?? null,
-          projectDir: workspace.session.project_dir || undefined,
-          persistSession: true,
-        },
-        Date.now(),
-        content,
-        {
-          project_id: workspace.project.project_id || '',
-          project_dir: workspace.project.project_dir || '',
-          work_mode: 'design',
-          persist_session: true,
-        },
+      await useWorkspaceStore.getState().loadProjects();
+      const project = useWorkspaceStore.getState().projects.find(
+        (item) => item.project_id === workspace.project.project_id,
       );
-      // Work-mode send semantics: the user bubble is client-side and the first
-      // leader turn rides the standard chat.send(team.design) pipeline, which
-      // owns streaming, history persistence and the processing lifecycle.
-      useChatStore.getState().ensureRuntime(createdSessionId);
-      useChatStore.getState().addMessage(createdSessionId, {
-        id: `designer-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        role: 'user',
-        content,
-        timestamp: new Date().toISOString(),
-      });
-      useChatStore.getState().setProcessing(createdSessionId, true);
-      useChatStore.getState().setThinking(createdSessionId, true);
-      // Navigate before the round starts: designer.push handlers
-      // (designer.graph.updated / leader.activity) only bind once DesignerPage
-      // mounts, and the chat.send response resolves only at stream end —
-      // awaiting it here would silently drop the whole first-round canvas
-      // event stream.
-      useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
-      // Refresh the project / task lists in the background; navigation should
-      // not wait for them.
-      void useWorkspaceStore.getState().loadProjects();
-      onCreated(workspace.project.project_id, createdSessionId);
-      webClient
-        .request('chat.send', {
-          session_id: createdSessionId,
-          query: content,
-          mode: 'team.design',
-          ...(modelName ? { model_name: modelName } : {}),
-        })
-        .catch((reason) => {
-          // Delivery failed before the page took over the stream.
-          const message = reason instanceof Error ? reason.message : String(reason);
-          useChatStore.getState().setProcessing(createdSessionId, false);
-          useChatStore.getState().setThinking(createdSessionId, false);
-          useChatStore.getState().addMessage(createdSessionId, {
-            id: `designer-error-${Date.now()}`,
-            role: 'assistant',
-            content: message || t('designer.chat.updateError'),
-            timestamp: new Date().toISOString(),
-            isError: true,
-          } as Message);
-        });
+      if (project) useWorkspaceStore.getState().setSelectedProject(project);
+      onCreated(workspace.project.project_id, workspace.session.session_id);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
       useDesignerStore.getState().failBootstrapEntry(message);
@@ -192,7 +107,7 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
     } finally {
       setSubmitting(false);
     }
-  }, [displayedDesignProject, files, onCreated, prompt, submitting, t]);
+  }, [files, onCreated, prompt, submitting, t]);
 
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -206,7 +121,7 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
       <div className="designer-landing__content">
         <h1 className="designer-landing__heading">
           <span className="chat-welcome__heading-highlight">WorkSwarm</span>
-          <span>{isZh ? "轻松提供设计创意！" : "makes design easier!"}</span>
+          <span>{isZh ? "轻松解决每个设计问题！" : "solves every design problem!"}</span>
         </h1>
         <div className="designer-landing__composer-stage">
           <img
@@ -313,17 +228,6 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
               setFiles((current) => [...current, ...selected]);
               event.target.value = '';
             }}
-          />
-        </div>
-        <div className="designer-landing__context-row" data-testid="designer-landing-context-row">
-          <ProjectContextSelector
-            projects={designProjects}
-            displayedProject={displayedDesignProject}
-            placeholder={t('designer.selectProject')}
-            disabled={submitting}
-            onSelect={setSelectedProject}
-            onCreateProject={createProject}
-            testIdPrefix="designer-landing-work-select"
           />
         </div>
       </div>

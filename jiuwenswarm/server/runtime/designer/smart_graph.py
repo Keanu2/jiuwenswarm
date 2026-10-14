@@ -1010,6 +1010,15 @@ def build_smart_video_graph(
     graph_id = new_graph_id()
     now = utc_now_ms()
     graph_title = title.strip() if isinstance(title, str) and title.strip() else prompt_text[:80]
+    # The canvas header is sized for the model's short story name, never the
+    # raw creation prompt (graph_title falls back to it) — prefer the analysis.
+    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+
+    graph_title = (
+        usable_story_title(analysis.get("story_name"), prompt_text)
+        or usable_story_title(graph_title, prompt_text)
+        or graph_title
+    )
 
     nodes: list[dict[str, Any]] = [
         {

@@ -271,6 +271,172 @@ def _design_title(prompt: str) -> str:
     return sanitize_project_dir_name(prompt, max_len=80)
 
 
+_DESIGN_PLACEHOLDER_TITLE = "设计项目"
+
+
+def _stamp_canvas_title(graph: dict[str, Any], prompt: str) -> str:
+    """Set the canvas title from the model's short name, never the raw prompt."""
+    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    name = usable_story_title(analysis.get("story_name"), prompt)
+    if not name:
+        current = "".join(ch for ch in str(graph.get("title") or "") if ch.isalnum())
+        reference = "".join(ch for ch in str(prompt or "") if ch.isalnum())
+        # Creation stamps a sanitized copy of the prompt as the title (quotes
+        # and punctuation dropped); any alphanumeric prefix of the prompt is
+        # that echo, not a user-chosen name.
+        if not (current and reference.startswith(current)):
+            name = usable_story_title(graph.get("title"), prompt)
+    graph["title"] = name or _DESIGN_PLACEHOLDER_TITLE
+    return name
+
+
+_retitled_design_projects: set[str] = set()
+
+
+def _replacement_display_title(current: str, prompt: str, story_name: str) -> str:
+    """Short model title when the current label is still the user prompt."""
+    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+
+    reference = prompt or current
+    summary = usable_story_title(story_name, reference)
+    if not summary:
+        return ""
+    current_flat = " ".join(str(current or "").split())
+    if usable_story_title(current, reference) and len(current_flat) <= 40:
+        return ""
+    if prompt or len(current_flat) > 40:
+        return summary
+    return ""
+
+
+def _graph_story_prompt(graph: dict[str, Any]) -> tuple[str, str]:
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    return str(analysis.get("story_name") or ""), str(graph.get("description") or "")
+
+
+def _graph_session_id(graph: dict[str, Any]) -> str:
+    metadata = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    return str((metadata or {}).get("session_id") or "").strip()
+
+
+def _design_sessions(project_id: str) -> list[dict[str, Any]]:
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        collect_all_sessions_metadata,
+    )
+
+    return [
+        item
+        for item in collect_all_sessions_metadata()
+        if str(item.get("project_id") or "") == project_id
+        and str(item.get("work_mode") or "") == DESIGN_WORK_MODE
+    ]
+
+
+def _pair_design_canvases(
+    sessions: list[dict[str, Any]],
+    graphs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bind each design session to one canvas.
+
+    A project may hold many sessions. Chat history stays on the session, and
+    the canvas is the graph whose metadata.session_id matches it. Graphs saved
+    before sessions were explicit fill sessions that do not yet have one.
+    """
+    ordered = sorted(sessions, key=lambda item: float(item.get("created_at") or 0))
+    owned: dict[str, list[dict[str, Any]]] = {}
+    unmatched: list[dict[str, Any]] = []
+    for graph in graphs:
+        session_id = _graph_session_id(graph)
+        if session_id:
+            owned.setdefault(session_id, []).append(graph)
+        else:
+            unmatched.append(graph)
+    unmatched.sort(key=lambda item: int(item.get("created_at") or item.get("updated_at") or 0))
+    pairs: list[dict[str, Any]] = []
+    for session in ordered:
+        session_id = str(session.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        candidates = list(owned.get(session_id) or [])
+        if not candidates and unmatched:
+            candidates = [unmatched.pop(0)]
+        if not candidates:
+            continue
+        graph = max(candidates, key=lambda item: int(item.get("updated_at") or 0))
+        pairs.append({"session": session, "graph": graph})
+    return pairs
+
+
+def sync_design_display_name(project: Any) -> Any:
+    """Rename a design project and its canvases from the stored model title."""
+    project_id = str(getattr(project, "project_id", "") or "")
+    if not project_id or project_id in _retitled_design_projects:
+        return project
+    if str(getattr(project, "work_mode", "") or "") != DESIGN_WORK_MODE:
+        return project
+    try:
+        pairs = _pair_design_canvases(
+            _design_sessions(project_id),
+            _store.list_graphs_for_project(project_id),
+        )
+    except Exception:
+        logger.debug("Skip design title sync for %s", project_id, exc_info=True)
+        return project
+    _retitled_design_projects.add(project_id)
+    if not pairs:
+        return project
+    from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
+
+    ordered = sorted(pairs, key=lambda item: int(item["graph"].get("updated_at") or 0))
+    project_summary = ""
+    for pair in ordered:
+        graph = pair["graph"]
+        story_name, prompt = _graph_story_prompt(graph)
+        if not project_summary:
+            project_summary = _replacement_display_title(
+                str(getattr(project, "name", "") or ""),
+                prompt,
+                story_name,
+            )
+        session = pair["session"]
+        session_id = str(session.get("session_id") or "")
+        session_title = _replacement_display_title(
+            str(session.get("title") or ""),
+            prompt,
+            story_name,
+        )
+        if session_id and session_title and session_title != str(session.get("title") or ""):
+            update_session_metadata(
+                session_id=session_id,
+                title=session_title,
+                touch_last_message_at=False,
+                sync_write=True,
+            )
+    if project_summary:
+        renamed_name = _design_title(project_summary) or project_summary
+        if renamed_name and renamed_name != project.name:
+            try:
+                renamed = project_store.rename_project(project_id, renamed_name)
+                if renamed is not None:
+                    return renamed
+            except (project_store.ProjectNameConflict, ValueError):
+                logger.debug(
+                    "Design project %s kept its name; %r is taken",
+                    project_id,
+                    renamed_name,
+                    exc_info=True,
+                )
+    return project
+
+
+def sync_design_display_names(projects: list[Any]) -> list[Any]:
+    return [sync_design_display_name(project) for project in projects]
+
+
 def _design_workspace_messages(session_id: str) -> list[dict[str, Any]]:
     from jiuwenswarm.server.runtime.session.session_history import load_history_records
 
@@ -374,6 +540,12 @@ def _get_design_workspace(
         graph = graphs[-1]
     if graph is None:
         return None, "design workspace has no graph", "NOT_FOUND"
+    # Heal canvases whose title is still the raw creation prompt: the canvas
+    # header is sized for the model's short story name, never the prompt.
+    previous_title = str(graph.get("title") or "")
+    _stamp_canvas_title(graph, str(graph.get("description") or ""))
+    if str(graph.get("title") or "") != previous_title:
+        graph = dict(_store.save_graph(graph))
     run = _store.get_latest_run_for_graph(str(graph.get("graph_id") or ""))
     return {
         "project": {
@@ -479,24 +651,24 @@ async def _create_design_workspace_once(
             agent_group_name="designer",
         )
 
-        graph = _store.save_graph(
-            normalize_execution_graph(
-                {
-                    "schema_version": "designer-execution-graph.v1",
-                    "graph_id": new_graph_id(),
-                    "project_id": project_id,
-                    "title": title,
-                    "description": prompt[:200],
-                    "nodes": [],
-                    "edges": [],
-                    "metadata": {
-                        "session_id": session_id,
-                        "work_mode": DESIGN_WORK_MODE,
-                        **({"model_name": model_name} if model_name else {}),
-                    },
-                }
-            )
+        graph = normalize_execution_graph(
+            {
+                "schema_version": "designer-execution-graph.v1",
+                "graph_id": new_graph_id(),
+                "project_id": project_id,
+                "title": title,
+                "description": prompt[:200],
+                "nodes": [],
+                "edges": [],
+                "metadata": {
+                    "session_id": session_id,
+                    "work_mode": DESIGN_WORK_MODE,
+                    **({"model_name": model_name} if model_name else {}),
+                },
+            }
         )
+        _stamp_canvas_title(graph, prompt)
+        graph = dict(_store.save_graph(graph))
         graph_id = str(graph["graph_id"])
 
         raw_references = params.get("references")
@@ -606,20 +778,27 @@ def _list_graphs(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
     # callers load the one graph they need through designer.graph.get.
     payload: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
+    latest_runs = _store.latest_runs_by_graph()
+    project_cache: dict[str, tuple[str, str] | None] = {}
+
+    def _project_dir_name(pid: str) -> tuple[str, str] | None:
+        if pid not in project_cache:
+            project = project_store.get_project_by_id(pid, cache_bust=True) if pid else None
+            project_cache[pid] = (
+                (project.project_dir, project.name) if project is not None else None
+            )
+        return project_cache[pid]
+
     for graph in graphs:
         item = dict(graph)
-        run = _store.get_latest_run_for_graph(str(item.get("graph_id") or ""))
+        run = latest_runs.get(str(item.get("graph_id") or ""))
         summaries.append(_summarize_graph(item, run))
         # Do not hydrate outputs or ship full node bodies here — Agent WS
         # send budget is 6MB; a page of Designer graphs with images exceeds it.
         project_id = str(item.get("project_id") or "")
-        project_dir: str | None = None
-        project_name: str | None = None
-        if project_id:
-            project = project_store.get_project_by_id(project_id, cache_bust=True)
-            if project is not None:
-                project_dir = project.project_dir
-                project_name = project.name
+        resolved = _project_dir_name(project_id)
+        project_dir = resolved[0] if resolved else None
+        project_name = resolved[1] if resolved else None
         payload.append(
             {
                 "graph_id": item.get("graph_id"),
