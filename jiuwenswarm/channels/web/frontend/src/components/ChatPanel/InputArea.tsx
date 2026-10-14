@@ -4957,7 +4957,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 {micTooltipNode}
 
                 <ApplicationPluginTaskInputActions
-                  eligible={fullDuplexActionEligible}
+                  eligible={fullDuplexActionEligible && !isTeamMode}
                   sessionId={activeSessionId}
                   ensureSession={onEnsureSession}
                   labels={{
