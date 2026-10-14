@@ -4739,7 +4739,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         ).strip() or None
         identity_refs = {
             "character_ids": cids,
-            "character_node_ids": list(cfg.get("character_node_ids") or solo_nodes),
+            "character_node_ids": list(cfg.get("character_node_ids") or spec_nodes),
             "cast_names": names or list(cfg.get("cast_names") or []),
             "costume_lock": costume_lock,
             "scene_node_id": None,
