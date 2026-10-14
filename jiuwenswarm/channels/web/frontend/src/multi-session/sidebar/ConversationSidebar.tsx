@@ -82,7 +82,7 @@ export type NewConversationOptions = {
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
-  return project.is_default || project.project_id === 'default' || project.project_id === 'default_code';
+  return project.is_default || project.project_id === 'default' || project.project_id === 'default_code' || project.project_id === 'default_design';
 }
 
 interface ConversationSidebarProps {
