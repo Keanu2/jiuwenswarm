@@ -3997,6 +3997,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                         onToggleComposerCollapsed={toggleTrajectoryComposer}
                         onComposerHeightChange={setTrajectoryComposerHeight}
                         onContinueQueuedSessionMessages={handleContinueQueuedSessionMessages}
+                        virtualized={route.kind !== 'design-project'}
                       />
                     )}
                     chatLabel={t('nav.chat')}

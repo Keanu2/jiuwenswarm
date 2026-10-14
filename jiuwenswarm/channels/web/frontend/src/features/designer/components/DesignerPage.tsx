@@ -9,7 +9,6 @@ import {
 } from '../designerMaterials';
 import { useDesignerChatStore } from '../designerChatStore';
 import { bindDesignerRuntime, useDesignerRunStore } from '../designerRunStore';
-import { useChatStore } from '../../../stores/chatStore';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
@@ -141,21 +140,6 @@ export function DesignerPage({
         useDesignerChatStore.getState().replaceMessages(
           workspace.graph.graph_id,
           workspace.messages,
-        );
-        // Restore persisted task history into the shared chat store so the
-        // panel's work-mode MessageList shows it after a page refresh.
-        const historySessionId = String(
-          workspace.graph.metadata?.session_id ?? opened,
-        );
-        useChatStore.getState().ensureRuntime(historySessionId);
-        useChatStore.getState().replaceHistoryMessages(
-          historySessionId,
-          workspace.messages.map((item) => ({
-            id: item.id,
-            role: item.role === 'user' ? ('user' as const) : ('assistant' as const),
-            content: item.content,
-            timestamp: new Date(item.createdAt).toISOString(),
-          })),
         );
         if (opened && opened !== sessionId) {
           onOpenSessionRef.current?.(effectiveProjectId || '', opened, { replace: true });

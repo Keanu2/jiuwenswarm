@@ -191,6 +191,8 @@ interface ChatPanelProps {
    * 仅在停靠模式下回调；收起时上报 0。
    */
   onComposerHeightChange?: (height: number) => void;
+  /** Designer dock is narrow; disable virtualization so content flows normally. */
+  virtualized?: boolean;
 }
 
 // 邀请指令只对 human_agent 成员存在（见 upsertHumanShareCommandFromEvent 的
@@ -1074,6 +1076,7 @@ export const ChatPanel = React.memo(function ChatPanel({
   composerCollapsed = false,
   onToggleComposerCollapsed,
   onComposerHeightChange,
+  virtualized,
 }: ChatPanelProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -1968,6 +1971,7 @@ export const ChatPanel = React.memo(function ChatPanel({
                     onLoadOlderHistory={historyOnLoadMore}
                     teamGroupIdentityOverride={teamGroupIdentity}
                     onForkFromMessage={handleForkFromMessage}
+                    virtualized={virtualized}
                   />
                   {shouldShowHumanShare && (
                     <HumanShareCard commands={teamHumanShareCommands} onShare={() => setHumanShareOpen(true)} />
