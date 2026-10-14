@@ -207,22 +207,20 @@ def _media_limit_packet() -> dict[str, Any]:
 
 # ─── media generation (硬编 claw handler；后续同事剥离) ──────────────────
 
-# ── mock media layer (env-switched; keeps prompt build & execution logic) ──
-# When DESIGNER_MOCK_MEDIA=1 the real image/video model calls are replaced by
-# deterministic local files (real PNGs / real tiny MP4s shipped with the repo)
-# so the whole canvas pipeline — prompt construction, reference binding,
-# multi-artifact submit, uri materialization, frontend preview — runs
-# end-to-end without any media model. The LLM orchestration stays REAL: the
-# worker still decides how many images to generate, still passes the real
-# built prompts (they are logged), still collects every file into
-# extra_uris. Only the network call is swapped. Pool/copy/dir logic lives in
-# the claw repo's shared mock_media module (also used by the host guarantee).
-from jiuwenswarm.server.runtime.designer.mock_media import (
-    media_save_dir as _media_save_dir,
-    mock_media_enabled as _mock_media_enabled,
-    next_mock_image,
-    next_mock_video,
-)
+def _media_save_dir(run_id: str) -> Path:
+    """Team-owned media dir for one run; falls back to the legacy layout."""
+    from jiuwenswarm.server.runtime.designer.node_agent import (
+        _media_dir_from_team_workspace,
+    )
+
+    root = _media_dir_from_team_workspace(run_id)
+    if root is not None:
+        return root
+    from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+    root = get_agent_workspace_dir() / "designer_media" / run_id
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _ticket_graph() -> Any:
@@ -238,7 +236,7 @@ async def _call_image_model(
     reference_images: list[str] | None = None,
     ticket_text: str = "",
 ) -> str:
-    """Generate one image via the Settings image model (mock seam preserved).
+    """Generate one image via the Settings image model.
 
     Size is server-decided (canvas image_settings snapped onto the active
     model — colleague PR #9 semantics); the LLM never passes a size.
@@ -246,23 +244,8 @@ async def _call_image_model(
     _bind_ctx_from_prompt(ticket_text)
     if not str(prompt or "").strip():
         return "prompt is required"
-    # Handler-stage line first — the old handler emitted it before any model
-    # call, so a mocked debug run shows the same "calling image model" frame.
     _emit_stage("calling image model", "image_gen")
     run_id = _CTX.ticket["run_id"] if _CTX.ticket else "designer"
-    # MOCK seam: swap ONLY the model call; prompt build / refs / logging stay.
-    if _mock_media_enabled():
-        import logging as _logging
-
-        target = next_mock_image(_media_save_dir(run_id))
-        _logging.getLogger(__name__).info(
-            "[designer-mock-media] image prompt=%r refs=%d -> %s",
-            str(prompt)[:160],
-            len(reference_images or []),
-            target.name,
-        )
-        uri = target.resolve().as_uri()
-        return f"image_ready uri={uri} path={target}"
     from jiuwenswarm.server.runtime.designer.handlers.common import (
         generate_designer_image,
     )
@@ -302,22 +285,9 @@ async def _call_video_model(
     _bind_ctx_from_prompt(ticket_text)
     if not str(prompt or "").strip():
         return "prompt is required"
-    # Same ordering as _call_image_model: stage line before the mock seam too.
+    # Same ordering as _call_image_model: stage line before the model call.
     _emit_stage("calling video model", "video_gen")
     run_id = _CTX.ticket["run_id"] if _CTX.ticket else "designer"
-    # MOCK seam: swap ONLY the model call; prompt/refs/duration stay real.
-    if _mock_media_enabled():
-        import logging as _logging
-
-        target = next_mock_video(_media_save_dir(run_id))
-        _logging.getLogger(__name__).info(
-            "[designer-mock-media] video prompt=%r refs=%d -> %s",
-            str(prompt)[:160],
-            len(reference_images or []),
-            target.name,
-        )
-        uri = target.resolve().as_uri()
-        return f"video_ready uri={uri} path={target}"
     from jiuwenswarm.server.runtime.designer.handlers.clip import (
         generate_clip_video,
     )

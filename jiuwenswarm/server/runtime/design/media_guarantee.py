@@ -36,8 +36,6 @@ from typing import Any
 
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 
-from jiuwenswarm.server.runtime.designer.mock_media import mock_media_enabled
-
 logger = logging.getLogger(__name__)
 
 
@@ -113,9 +111,8 @@ class MediaGuaranteeBackend:
         state = (self._run.get("node_states") or {}).get(node_id) or {}
         # Single-node triggers park the worker's submit in candidate_* fields
         # (choose_output promotes later); reading output_ref there would look
-        # "media missing" and the mock materialization would overwrite the
-        # real submission (observed: worker submitted 3 storyboard stills,
-        # guarantee replaced them with one pool mock).
+        # "media missing" and re-materialize over the worker's real
+        # submission.
         ref_field = "candidate_output_ref" if self._bridge.single else "output_ref"
         refs_field = "candidate_output_refs" if self._bridge.single else "output_refs"
         agent_result = NodeResult(
@@ -157,49 +154,6 @@ class MediaGuaranteeBackend:
 
         node_id = str(node.get("id") or ctx.node_id)
         required = _required_media_family(node)
-        if mock_media_enabled():
-            # Mocked debug run: materialize through the shared mock seam (the
-            # same pool the worker tools use) instead of touching real media
-            # backends. Audio has no pool — fail honestly.
-            from jiuwenswarm.server.runtime.designer.mock_media import (
-                media_save_dir,
-                next_mock_image,
-                next_mock_video,
-            )
-
-            if required not in {"image", "video"}:
-                self._bridge.mark_node_failed(
-                    node_id,
-                    f"worker produced no {required or 'media'}; "
-                    "no mock pool for that family (DESIGNER_MOCK_MEDIA=1)",
-                )
-                raise _MediaGuaranteeDeclined()
-            run_id = str(self._run.get("run_id") or "designer")
-            target = (
-                next_mock_image(media_save_dir(run_id))
-                if required == "image"
-                else next_mock_video(media_save_dir(run_id))
-            )
-            ref = {
-                "kind": required,
-                "uri": target.resolve().as_uri(),
-                "label": f"mock {required}",
-            }
-            self._bridge.on_node_result(
-                node_id,
-                {
-                    "text": str(agent_result.message or ""),
-                    "output_ref": ref,
-                    "output_refs": [ref],
-                },
-            )
-            logger.info(
-                "[design-guarantee] mock media materialized: node=%s family=%s -> %s",
-                node_id,
-                required,
-                target.name,
-            )
-            return
         _seed_handler_prompt(node, agent_result)
         logger.info(
             "[design-guarantee] materializing media via handler: node=%s required=%s",
