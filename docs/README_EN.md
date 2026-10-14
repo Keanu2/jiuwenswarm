@@ -71,6 +71,11 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
       <td width="50%">Workflow canvas for video and image creation: turn one sentence into a brief, storyboard, keyframes, and video clips, with per-node editing and re-runs.</td>
     </tr>
     <tr>
+      <td width="22%"><strong>Process CLI Session Queries</strong></td>
+      <td width="28%"><a href="en/ProcessCLISessionQueries.md">Process CLI Session Queries</a></td>
+      <td width="50%">Read full local session IDs, search and paginate, select the latest session, and resume a task in a new process.</td>
+    </tr>
+    <tr>
       <td width="22%"><strong>Agent</strong></td>
       <td width="28%"><a href="en/Agent.md">Agent</a></td>
       <td width="50%">Agents with different roles, workspace creation, and workspace management flows.</td>
@@ -104,6 +109,11 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
       <td width="22%"><strong>Configuration</strong></td>
       <td width="28%"><a href="en/Configuration.md">Configuration</a></td>
       <td width="50%">System parameters, LLM APIs, and runtime environment configuration.</td>
+    </tr>
+    <tr>
+      <td width="22%"><strong>Process CLI Model Configuration</strong></td>
+      <td width="28%"><a href="en/Process_CLI_Model.md">Model connection flags</a></td>
+      <td width="50%">Select a model, API base, key environment variable, and provider for one CMD invocation.</td>
     </tr>
     <tr>
       <td width="22%"><strong>IDE Plugins</strong></td>
@@ -170,7 +180,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Agent Team</strong></td>
-      <td width="28%"><a href="en/AgentTeam.md">Agent Teams</a> / <a href="en/SwarmSkills.md">Swarm Skills</a> / <a href="en/DistributedTeam.md">Distributed Team</a></td>
+      <td width="28%"><a href="en/AgentTeam.md">Agent Teams</a> / <a href="en/TeamOrganization.md">Team Organization</a> / <a href="en/SwarmSkills.md">Swarm Skills</a> / <a href="en/DistributedTeam.md">Distributed Team</a></td>
       <td width="50%">Supports multi-agent team collaboration, team-level skill orchestration and reuse, and multi-process distributed Team runtime mode.</td>
     </tr>
     <tr>
