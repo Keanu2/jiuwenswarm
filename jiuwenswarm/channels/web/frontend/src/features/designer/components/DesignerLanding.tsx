@@ -17,6 +17,7 @@ import { useDesignerChatStore } from '../designerChatStore';
 import { designerWorkspaceClient } from '../designerGraphClient';
 import { useDesignerStore } from '../designerStore';
 import { filesToBootstrapReferences } from '../designerReferences';
+import './DesignerErrorToast.css';
 import './DesignerLanding.css';
 
 type DesignerLandingProps = {
@@ -235,7 +236,7 @@ export function DesignerLanding({ onCreated }: DesignerLandingProps) {
       </div>
       {error ? (
         <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="designer-landing-error-toast">
-          <div className="app-connection-toast" role="alert">{error}</div>
+          <div className="designer-error-toast" role="alert">{error}</div>
         </div>
       ) : null}
     </section>
