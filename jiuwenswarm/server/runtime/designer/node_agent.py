@@ -491,7 +491,7 @@ def flatten_template_prompt(template: Any, *, language: str = "cn") -> str:
 
 
 _DESIGNER_MEMBERS = frozenset(
-    {"leader", "character", "scene", "storyboard", "frame", "clip"}
+    {"leader", "teammate", "character", "scene", "storyboard", "frame", "clip", "text"}
 )
 
 

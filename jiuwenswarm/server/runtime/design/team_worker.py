@@ -1,32 +1,29 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """team.design worker backend wiring — the TeamWorkerBackend integration.
 
-User ruling (2026-10-12, terminal state): ALL worker logic lives in the
-designer AgentGroup package (persona / tools / per-role tool surfaces); the
-claw repo only compiles graph scripts (node → ``agent(options={
-'agent_template': role})``) and reads events. This module is that thin
-mapping on the execution side:
+User ruling (2026-10-14, SDD-0030 adaptation): agent-core provides the
+expert-table mechanism (``derive_swarmflow_expert_specs`` — ``agents[m]``
+joined with ``predefined_members[m]`` once at assembly, member name →
+``SwarmflowExpertEntry``); this module is the design-side derivation of that
+table. The graph compiler emits bare member names
+(``agent(options={'agent_template': 'clip'})``) and the engine resolves them
+against the bound AgentGroup (fail-closed: unknown member / external runtime /
+``agent_type`` clash raise before any resource is touched).
 
-* :func:`build_worker_backend` — construct the agent-core
-  ``TeamWorkerBackend`` with the design team's teammate base spec and the
-  role-template ``spec_resolver`` below;
-* :func:`resolve_role_spec` — map an ``agent_template`` reference
-  (``"designer/storyboard"``) + the base teammate spec to the worker
-  ``DeepAgentSpec`` that call should derive from: the role template's
-  persona (flattened prompt sections) becomes the system prompt and its
-  manifest tools (``harness.tool.file`` specs into the package's shared
-  designer worker tools module) ride the spec so ``TeamHarness.build``
-  instantiates them per worker.
+The design team assembles WITHOUT a predefined roster
+(``_apply_design_agent_group`` clears ``predefined_members`` — members only
+exist as worker templates), so the expert table cannot ride the configurator
+chain the regular team path uses. Instead the bridge derives it here from the
+same enriched spec, synthesizing the roster data the join needs without ever
+writing it back to the live spec (writing it back would spawn teammates).
 
-Media/config hard-coding lives inside the package tool module
-(``tools/designer_worker_tools.py`` calls the claw handler functions
-directly); the follow-up crew will strip those out of the claw repo.
+Persona / tools / per-role tool surfaces live in the designer AgentGroup
+package; the claw repo only compiles graph scripts and reads events.
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -34,89 +31,102 @@ logger = logging.getLogger(__name__)
 _DESIGNER_GROUP = "designer"
 
 
-def resolve_role_spec(template_ref: str, base_spec: Any) -> Any:
-    """``agent_template`` reference → worker ``DeepAgentSpec``.
+def derive_design_expert_specs(team_spec: Any) -> dict[str, Any]:
+    """Derive the swarmflow expert table for the design team's enriched spec.
 
-    The reference is ``"<group>/<member>"`` (e.g. ``"designer/clip"``).
-    Unknown references return the base spec unchanged (TeamWorkerBackend
-    contract: the embedder decides whether that is an error).
+    The design spec carries the designer group's member templates in
+    ``agents[m].agent_template_spec`` (capability snapshots written by
+    ``_apply_design_agent_group``) but no ``predefined_members`` roster. The
+    agent-core join (``derive_swarmflow_expert_specs``) needs both halves, so
+    this synthesizes the roster half from the SAME bound group package on
+    disk — persona (flattened prompt sections) + display name + external
+    runtime config — and joins it against the spec's snapshots on a THROWAWAY
+    spec copy (never the live one: writing members back would spawn them).
+
+    Observability rails match the configurator's worker derivation exactly
+    (``TEAM_OBSERVABILITY`` + ``OBSERVABILITY``).
+    """
+    from openjiuwen.agent_teams.rails.elements import TEAM_OBSERVABILITY
+    from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
+    from openjiuwen.agent_teams.workflow.backends.expert_specs import (
+        derive_swarmflow_expert_specs,
+    )
+    from openjiuwen.harness.manifest.builtin_elements import OBSERVABILITY
+
+    members = _design_member_roster(team_spec)
+    scratch = team_spec.model_copy(update={"predefined_members": members})
+    observability_rail_specs = [
+        RailSpec(type=TEAM_OBSERVABILITY),
+        RailSpec(type=OBSERVABILITY),
+    ]
+    return derive_swarmflow_expert_specs(scratch, observability_rail_specs)
+
+
+def _design_member_roster(team_spec: Any) -> list[Any]:
+    """Synthesize the predefined-member roster from the bound designer group.
+
+    Reads the SAME package the assembly step read (``agents/<m>/`` member
+    templates of the bound group): persona flattened per language, display
+    name resolved, external-runtime members typed as ``ExternalCliMemberSpec``
+    so the expert table lists them with the precise "not run by swarmflow yet"
+    error instead of a silent native run. The teammate/leader entries of the
+    spec never enter this roster (they carry no template snapshot and would be
+    skipped by the join anyway, but excluding them here keeps the roster
+    exactly the worker cast).
     """
     from jiuwenswarm.agents.swarm.agent_group import load_agent_group_package
-    from jiuwenswarm.server.runtime.designer.node_agent import (
-        flatten_template_prompt,
+    from jiuwenswarm.agents.swarm.assembly import _template_team_prompt
+    from jiuwenswarm.server.runtime.extension_package_manager import (
+        resolve_agent_group_dir,
+        resolve_agent_group_member_display_name,
+    )
+    from openjiuwen.agent_teams.external import external_cli_agent_spec_from_template
+    from openjiuwen.agent_teams.schema.team import (
+        ExternalCliMemberSpec,
+        TeamMemberSpec,
+        TeamRole,
     )
 
-    group_name, _, member_id = str(template_ref or "").partition("/")
-    group_name = group_name.strip() or _DESIGNER_GROUP
-    member_id = member_id.strip()
-    if not member_id:
-        return base_spec
-    try:
-        from jiuwenswarm.server.runtime.extension_package_manager import (
-            install_agent_group,
-            resolve_agent_group_dir,
+    package_dir = resolve_agent_group_dir(_DESIGNER_GROUP)
+    templates = load_agent_group_package(package_dir)
+    teammate_base = team_spec.agents.get("teammate")
+
+    roster: list[Any] = []
+    for member_name, template in templates.items():
+        if member_name in ("leader", "teammate"):
+            continue
+        member_prompt = (
+            _template_team_prompt(template, teammate_base)
+            if teammate_base is not None
+            else ""
         )
-
-        try:
-            package_dir = resolve_agent_group_dir(group_name)
-        except Exception:  # noqa: BLE001 — not installed yet (fresh env)
-            if group_name != _DESIGNER_GROUP:
-                raise
-            install_agent_group({"id": _DESIGNER_GROUP})
-            package_dir = resolve_agent_group_dir(group_name)
-        template = load_agent_group_package(Path(package_dir)).get(member_id)
-    except (OSError, ValueError):
-        logger.exception("role template resolution failed: %s", template_ref)
-        return base_spec
-    if template is None:
-        logger.warning("role template not found: %s (using base spec)", template_ref)
-        return base_spec
-    persona = flatten_template_prompt(template)
-    update: dict[str, Any] = {"tools": list(template.tools) + list(base_spec.tools or [])}
-    # Skill visibility seed: template skill names ride the spec (merged with
-    # the base spec's, same rule as the assembly path). The rail only reads
-    # names from the global skill library — the SKILL.md files themselves are
-    # not read out of the package by this path.
-    skill_names: list[str] = []
-    for name in [
-        *(base_spec.skills or []),
-        *(Path(skill.dir).name for skill in template.skills),
-    ]:
-        if name and name not in skill_names:
-            skill_names.append(name)
-    if skill_names:
-        update["skills"] = skill_names
-    if persona:
-        update["system_prompt"] = persona
-    card = getattr(template, "agent_card", None)
-    if card is not None:
-        update["description"] = str(getattr(card, "description", "") or member_id)
-    # Ticket-binding rail (colleague sample §3.6 semantics): parses the node
-    # ticket off every model call's input and binds it onto the shared tool
-    # context, so the package tools never depend on the model relaying a
-    # ticket argument. Attached programmatically here (one source of truth
-    # in the group package's rails/ dir; role manifests stay tool-only).
-    try:
-        update["rails"] = [
-            *(base_spec.rails or []),
-            _ticket_rail_spec(Path(package_dir)),
-        ]
-    except Exception:  # noqa: BLE001 — rail attach is best-effort
-        logger.debug("ticket rail attach failed", exc_info=True)
-    return base_spec.model_copy(update=update)
-
-
-def _ticket_rail_spec(package_dir: Path) -> Any:
-    """Build the harness.rail.file spec for the ticket-binding rail."""
-    from openjiuwen.harness.schema.deep_agent_spec import RailSpec
-
-    rail_path = package_dir / "rails" / "node_ticket_binding_rail.py"
-    if not rail_path.is_file():
-        raise FileNotFoundError(rail_path)
-    return RailSpec(
-        type="harness.rail.file",
-        params={"file_path": str(rail_path), "class_name": "NodeTicketBindingRail"},
-    )
+        display_name = resolve_agent_group_member_display_name(
+            package_dir,
+            member_name,
+            fallback=template.agent_card.name or member_name,
+        )
+        external_config = external_cli_agent_spec_from_template(template)
+        if external_config is None:
+            roster.append(
+                TeamMemberSpec(
+                    member_name=member_name,
+                    display_name=display_name,
+                    desc=template.agent_card.description or "",
+                    prompt=member_prompt,
+                    role_type=TeamRole.TEAMMATE,
+                )
+            )
+        else:
+            roster.append(
+                ExternalCliMemberSpec(
+                    member_name=member_name,
+                    display_name=display_name,
+                    desc=template.agent_card.description or "",
+                    prompt=member_prompt,
+                    external_cli=external_config,
+                )
+            )
+    return roster
 
 
 def build_worker_backend(
@@ -125,8 +135,15 @@ def build_worker_backend(
     worker_base_spec: Any,
     build_context: Any,
     run_id: str,
+    expert_specs: dict[str, Any] | None = None,
 ) -> Any:
-    """Construct the agent-core TeamWorkerBackend for one design trigger."""
+    """Construct the agent-core TeamWorkerBackend for one design trigger.
+
+    ``expert_specs`` comes from :func:`derive_design_expert_specs` (derived
+    once per design session by the bridge, cached on the design context).
+    Empty / None when no group is bound — scripts that never name an
+    ``agent_template`` are unaffected (plain teammate-base workers).
+    """
     from openjiuwen.agent_teams.workflow.backends.team_worker_backend import (
         TeamWorkerBackend,
     )
@@ -137,8 +154,8 @@ def build_worker_backend(
         worker_base_spec=worker_base_spec,
         build_context=build_context,
         run_id=run_id,
-        spec_resolver=resolve_role_spec,
+        expert_specs=expert_specs or {},
     )
 
 
-__all__ = ["build_worker_backend", "resolve_role_spec"]
+__all__ = ["build_worker_backend", "derive_design_expert_specs"]

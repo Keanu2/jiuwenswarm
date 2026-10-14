@@ -295,13 +295,35 @@ class RunCoordinator:
         context = get_design_context_registry().for_graph(str(graph.get("graph_id") or self._graph_id))
         base_spec = getattr(context, "worker_base_spec", None)
         build_ctx = getattr(context, "worker_build_context", None)
+        expert_specs = getattr(context, "expert_specs", None)
         team_name = getattr(context, "team_name", None) or f"jiuwen_team_design"
         if base_spec is not None:
+            if expert_specs is None:
+                # Bridge bound the base spec but never derived the expert
+                # table (older binding path / ST direct binding): derive it
+                # now from the SAME enriched-spec source so agent_template
+                # names resolve instead of failing as "no group bound".
+                from jiuwenswarm.agents.harness.team import get_team_manager
+                from jiuwenswarm.common.mode_matrix import NEW_TEAM_DESIGN
+                from jiuwenswarm.server.runtime.design.team_worker import (
+                    derive_design_expert_specs,
+                )
+
+                meta = dict(graph.get("metadata") or {})
+                session_id = str(meta.get("session_id") or "").strip()
+                worker_spec = await get_team_manager().get_swarm_enriched_team_spec(
+                    session_id=session_id,
+                    mode=NEW_TEAM_DESIGN,
+                    agent_group_name="designer",
+                )
+                expert_specs = derive_design_expert_specs(worker_spec)
+                context.expert_specs = expert_specs
             backend = _build_team_worker(
                 team_name=team_name,
                 worker_base_spec=base_spec,
                 build_context=build_ctx,
                 run_id=run_id,
+                expert_specs=expert_specs,
             )
         else:  # pragma: no cover — bridge not bound (unit path)
             backend = DesignerWorkerBackend(

@@ -350,6 +350,25 @@ class DesignTeamBridge:
                 )
                 context.worker_build_context = worker_spec.build_context
                 context.team_name = worker_spec.team_name
+                # SDD-0030 expert table (2026-10-14): derived once from the
+                # same enriched spec — bare member names resolve against it
+                # in the engine (fail-closed), replacing the per-call
+                # spec_resolver path (dropped).
+                try:
+                    from jiuwenswarm.server.runtime.design.team_worker import (
+                        derive_design_expert_specs,
+                    )
+
+                    context.expert_specs = derive_design_expert_specs(worker_spec)
+                except Exception:
+                    # Without the group package the table stays empty: plain
+                    # workers keep running; agent_template names fail closed.
+                    logger.debug(
+                        "[DesignTeamBridge] expert table derivation failed: session_id=%s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    context.expert_specs = {}
             except Exception:
                 # Unit/ST environments run without a team manager; the worker
                 # path is simply unavailable for this round.

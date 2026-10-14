@@ -23,5 +23,11 @@
       "file": "./tools.py",
       "class": "SubmitNodeOutputTool"
     }
+  ],
+  "rails": [
+    {
+      "file": "./ticket_rail.py",
+      "class": "NodeTicketBindingRail"
+    }
   ]
 }

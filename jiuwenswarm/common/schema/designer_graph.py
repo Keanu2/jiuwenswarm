@@ -265,18 +265,21 @@ DESIGNER_AGENT_GROUP_NAME = "designer"
 # (read_node_context / call_model / submit_node_output). The earlier
 # designer/leader mapping left text workers with no submit tool — every text
 # product fell to the host guarantee instead of the worker's own submit.
+# Values are BARE member names (SDD-0030): the engine's agent_template gate
+# rejects "group/member" refs — the group is the session binding, not part of
+# the script's vocabulary.
 ROLE_DEFAULT_TEMPLATES: dict[str, str] = {
-    PIPELINE_BRIEF: f"{DESIGNER_AGENT_GROUP_NAME}/text",
-    PIPELINE_CHARACTER_DESIGN: f"{DESIGNER_AGENT_GROUP_NAME}/character",
-    PIPELINE_SCENE: f"{DESIGNER_AGENT_GROUP_NAME}/scene",
-    PIPELINE_STORYBOARD: f"{DESIGNER_AGENT_GROUP_NAME}/storyboard",
-    PIPELINE_FRAME: f"{DESIGNER_AGENT_GROUP_NAME}/frame",
-    PIPELINE_CLIP: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
-    PIPELINE_COMPOSE: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
-    NODE_TYPE_TEXT: f"{DESIGNER_AGENT_GROUP_NAME}/text",
-    NODE_TYPE_TABLE: f"{DESIGNER_AGENT_GROUP_NAME}/storyboard",
-    NODE_TYPE_IMAGE: f"{DESIGNER_AGENT_GROUP_NAME}/character",
-    NODE_TYPE_VIDEO: f"{DESIGNER_AGENT_GROUP_NAME}/clip",
+    PIPELINE_BRIEF: "text",
+    PIPELINE_CHARACTER_DESIGN: "character",
+    PIPELINE_SCENE: "scene",
+    PIPELINE_STORYBOARD: "storyboard",
+    PIPELINE_FRAME: "frame",
+    PIPELINE_CLIP: "clip",
+    PIPELINE_COMPOSE: "clip",
+    NODE_TYPE_TEXT: "text",
+    NODE_TYPE_TABLE: "storyboard",
+    NODE_TYPE_IMAGE: "character",
+    NODE_TYPE_VIDEO: "clip",
 }
 
 # ── Edge kinds ────────────────────────────────────────────────────────────────
@@ -638,7 +641,22 @@ def normalize_node_config(raw: Any) -> DesignerNodeConfig:
             raise DesignerGraphValidationError(
                 "node.config.agent_template must be a non-empty string"
             )
-        config[CONFIG_KEY_AGENT_TEMPLATE] = agent_template.strip()
+        value = agent_template.strip()
+        # SDD-0030: the engine resolves bare member names against the bound
+        # AgentGroup ("group/member" refs are rejected at the engine gate);
+        # accept a "designer/<member>" prefix here only to normalize legacy
+        # graph payloads, then strip it.
+        if "/" in value:
+            group, _, member = value.partition("/")
+            group = group.strip()
+            member = member.strip()
+            if group != DESIGNER_AGENT_GROUP_NAME or not member or "/" in member:
+                raise DesignerGraphValidationError(
+                    "node.config.agent_template must be a bare member name of the "
+                    f"bound {DESIGNER_AGENT_GROUP_NAME} AgentGroup (got {value!r})"
+                )
+            value = member
+        config[CONFIG_KEY_AGENT_TEMPLATE] = value
     collaborate = raw.get(CONFIG_KEY_COLLABORATE)
     if collaborate is not None:
         if not isinstance(collaborate, bool):
@@ -1958,8 +1976,17 @@ def node_delegate(node: DesignerGraphNode) -> str:
 
 
 def node_agent_template(node: DesignerGraphNode) -> str:
-    """Resolve the AgentTemplate ref for a node (explicit, else pipeline / type default)."""
+    """Resolve the AgentTemplate member name for a node (explicit, else pipeline / type default).
+
+    SDD-0030 §5.10: the value is a BARE member name — the engine's expert
+    gate rejects "group/member" refs. The compiler strips a legacy
+    ``designer/`` prefix here (raw graph payloads may still carry it; the
+    config validator normalizes too, but the compiler must be safe on raw
+    dicts as well).
+    """
     explicit = str(node_config(node).get(CONFIG_KEY_AGENT_TEMPLATE) or "").strip()
+    if explicit.startswith(f"{DESIGNER_AGENT_GROUP_NAME}/"):
+        explicit = explicit.partition("/")[2].strip()
     if explicit:
         return explicit
     pipeline = node_pipeline(node)

@@ -472,14 +472,25 @@ class GraphScriptCompiler:
         node_id: str,
         run_outputs: dict[str, Any] | None,
     ) -> str:
-        """The agent(...) argument list shared by serial lines and thunks."""
+        """The agent(...) argument list shared by serial lines and thunks.
+
+        ``options.agent_template`` carries the node's AgentGroup member name
+        (bare, SDD-0030 — the engine gate rejects "group/member" refs); the
+        engine resolves it against the design session's expert table.
+        """
         version = self._node_version(node_id, run_outputs)
         model = json.dumps(str(node.get("type") or "text"), ensure_ascii=False)
         options = {"model": model}
         template_ref = str(node_agent_template(node) or "").strip()
         if template_ref:
             options["agent_template"] = json.dumps(template_ref, ensure_ascii=False)
-        options_expr = ", ".join(f"{key!r}: {value}" for key, value in options.items())
+        # Keys AND values through json.dumps — uniform double quoting, the
+        # same style swarmflow's own docs/examples use
+        # (options={"agent_template": "<member>"}); {key!r} would mix
+        # single-quoted keys with double-quoted values.
+        options_expr = ", ".join(
+            f"{json.dumps(key)}: {value}" for key, value in options.items()
+        )
         return (
             f"{prompt_expr}, label={json.dumps(node_id, ensure_ascii=False)}, "
             f"phase={json.dumps(f'v{version}', ensure_ascii=False)}, "
@@ -542,7 +553,7 @@ class GraphScriptCompiler:
         A rerun bumps the version → new phase → new sig → WAL cache miss →
         live execution; an untouched node keeps its phase → stable sig →
         cross-trigger cache hit (free replay). ``options.agent_template``
-        carries the node's AgentGroup member template reference (see
+        carries the node's AgentGroup member name (bare, SDD-0030; see
         :meth:`_agent_call_expr`).
         """
         call = self._agent_call_expr(prompt_expr, node, node_id, run_outputs)

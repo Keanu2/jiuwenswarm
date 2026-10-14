@@ -403,6 +403,20 @@ def _apply_design_agent_group(spec: Any, agent_group_name: str) -> None:
         }
     )
     spec.agents["leader"] = leader_spec
+    # SDD-0030 expert table (2026-10-14): write each member's capability
+    # snapshot into spec.agents (same shape as the regular team path's
+    # _apply_agent_group) so the design bridge can derive the swarmflow
+    # expert table (agents[m] ⋈ synthesized roster). The members still never
+    # enter the spawn roster (predefined_members stays [] below), so nothing
+    # is spawned — the entries are data for derive_design_expert_specs only.
+    teammate_base = spec.agents["teammate"]
+    for agent_name, template in templates.items():
+        if agent_name in ("leader", "teammate"):
+            continue
+        spec.agents[agent_name] = _with_agent_template(
+            teammate_base.model_copy(deep=True),
+            template,
+        )
     spec.enable_swarmflow = False
     spec.predefined_members = []
 

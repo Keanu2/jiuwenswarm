@@ -177,6 +177,10 @@ class _DesignContext:
         # bridge; role templates ride agent(options={'agent_template'}).
         self.worker_base_spec: Any = None
         self.worker_build_context: Any = None
+        # Swarmflow expert table (SDD-0030 adaptation 2026-10-14): member
+        # name → SwarmflowExpertEntry, derived ONCE from the same enriched
+        # spec by the bridge (derive_design_expert_specs) — never per call.
+        self.expert_specs: dict[str, Any] | None = None
         self.team_name: str = ""
         # Channel the design session's chat runs on (bound by DesignTeamBridge
         # each round). Design tools that push canvas events (the authoring

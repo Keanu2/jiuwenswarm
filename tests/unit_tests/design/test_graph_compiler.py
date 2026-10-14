@@ -95,21 +95,23 @@ def test_explicit_agent_template_wins():
                 "label": "角色",
                 "config": {
                     "prompt": "x",
-                    "agent_template": "designer/agents/character",
+                    "agent_template": "designer/character",
                 },
             }
         ],
         "edges": [],
     }
     src = GraphScriptCompiler().compile(g, {})
-    assert "'agent_template': 'designer/agents/character'" in src.replace('"', "'")
+    # SDD-0030: the compiler strips the legacy "designer/" prefix AND emits
+    # swarmflow's uniform double-quoted style.
+    assert '"agent_template": "character"' in src
 
 
 def test_default_template_per_type():
     src = GraphScriptCompiler().compile(_chain_graph(), {})
-    # text nodes default to the designer leader template (quoted either way)
+    # text nodes default to the designer text member (bare name, SDD-0030)
     normalized = src.replace('"', "'")
-    assert "'agent_template': 'designer/leader'" in normalized
+    assert "'agent_template': 'text'" in normalized
 
 
 def test_version_in_phase_and_frozen_literal():
@@ -140,9 +142,9 @@ def test_whitelist_accepts_agent_template():
     from openjiuwen.agent_teams.workflow.engine.primitives import _build_opts
 
     opts = _build_opts(
-        _RT(), {"label": "n2"}, {"agent_template": "designer/agents/storyboard"}
+        _RT(), {"label": "n2"}, {"agent_template": "storyboard"}
     )
-    assert opts.get("agent_template") == "designer/agents/storyboard"
+    assert opts.get("agent_template") == "storyboard"
 
 
 def test_bare_backend_rejects_agent_template():
