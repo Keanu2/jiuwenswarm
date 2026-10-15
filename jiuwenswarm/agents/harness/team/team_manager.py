@@ -1732,6 +1732,7 @@ class TeamManager:
         agent_group_name: str | None = None,
         swarmflow_config: dict | None = None,
         dispatch_mode: str | None = None,
+        bootstrap_mode: str | None = None,
         model_selection: SwarmModelSelection | dict[str, Any] | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
@@ -1756,6 +1757,12 @@ class TeamManager:
                 ``"scheduled"``); None keeps the team config's ``dispatch_mode``.
                 Task verification only applies to scheduled dispatch, so it is
                 switched off when the session picks autonomous dispatch.
+            bootstrap_mode: Session-level team bootstrap mode (``"leader"`` /
+                ``"framework"``); None keeps the team config's ``bootstrap_mode``.
+                ``"framework"`` requires the effective dispatch mode to be
+                ``"scheduled"`` and raises ``ValueError`` otherwise — the
+                combination is rejected here, at the request boundary, rather
+                than surfacing as a spec build failure later.
 
         Returns:
             The enriched ``TeamAgentSpec`` ready to build (``build_context`` set;
@@ -1810,6 +1817,14 @@ class TeamManager:
             spec.dispatch_mode = dispatch_mode
             if dispatch_mode != "scheduled":
                 spec.enable_task_verification = False
+        if bootstrap_mode is not None:
+            spec.bootstrap_mode = bootstrap_mode
+        if spec.bootstrap_mode == "framework" and spec.dispatch_mode != "scheduled":
+            raise ValueError(
+                "team_bootstrap_mode='framework' requires scheduled dispatch "
+                f"(effective dispatch_mode={spec.dispatch_mode!r}); "
+                "turn on scheduled dispatch for this session or drop the bootstrap mode"
+            )
         return spec
 
     @staticmethod

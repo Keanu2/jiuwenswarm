@@ -127,6 +127,8 @@ _SESSION_BUDGET_STATE_KEY = "session_budget"
 _SESSION_SWARMFLOW_CONFIG_KEY = "session_swarmflow_config"
 _SESSION_TEAM_DISPATCH_MODE_KEY = "session_team_dispatch_mode"
 _TEAM_DISPATCH_MODES = frozenset({"autonomous", "scheduled"})
+_SESSION_TEAM_BOOTSTRAP_MODE_KEY = "session_team_bootstrap_mode"
+_TEAM_BOOTSTRAP_MODES = frozenset({"leader", "framework"})
 
 _TEAM_CREATE_KINDS = {
     RunActionKind.CREATE.value,
@@ -1222,6 +1224,51 @@ def _resolve_session_team_dispatch_mode(
     from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
     metadata = _read_metadata(session_id, cache_bust=True)
     return _coerce_team_dispatch_mode(metadata.get(_SESSION_TEAM_DISPATCH_MODE_KEY))
+
+
+def _coerce_team_bootstrap_mode(value: Any) -> str | None:
+    """Return ``value`` as a known bootstrap mode, else None."""
+    mode = str(value or "").strip().lower()
+    return mode if mode in _TEAM_BOOTSTRAP_MODES else None
+
+
+def persist_session_team_bootstrap_mode(session_id: str, bootstrap_mode: str) -> None:
+    """Persist the session-level team bootstrap mode to session metadata.
+
+    Same shape as ``persist_session_team_dispatch_mode``: read-modify-write,
+    no-op on read failure, so a refreshed page restores the mode the team was
+    built with.
+    """
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
+    metadata = _read_metadata(session_id, cache_bust=True)
+    if not metadata.get("session_id"):
+        logger.warning(
+            "[TeamHelpers] skipping session_team_bootstrap_mode persist: "
+            "failed to read session metadata (session_id=%s)",
+            session_id,
+        )
+        return
+    metadata[_SESSION_TEAM_BOOTSTRAP_MODE_KEY] = bootstrap_mode
+    _enqueue_write(session_id, metadata)
+
+
+def _resolve_session_team_bootstrap_mode(
+    params: dict | None,
+    *,
+    session_id: str,
+) -> str | None:
+    """Resolve the session-level team bootstrap mode: params > persisted > unset.
+
+    ``None`` means "not specified" and the team config's ``bootstrap_mode``
+    stands, exactly like ``_resolve_session_team_dispatch_mode``.
+    """
+    if params is not None:
+        requested = _coerce_team_bootstrap_mode(params.get("team_bootstrap_mode"))
+        if requested is not None:
+            return requested
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+    metadata = _read_metadata(session_id, cache_bust=True)
+    return _coerce_team_bootstrap_mode(metadata.get(_SESSION_TEAM_BOOTSTRAP_MODE_KEY))
 
 
 def _resolve_channel_id(channel_id: str | None) -> str:
@@ -3371,6 +3418,10 @@ async def _process_team_message_stream(
             params_obj if isinstance(params_obj, dict) else None,
             session_id=session_id,
         )
+        team_bootstrap_mode = _resolve_session_team_bootstrap_mode(
+            params_obj if isinstance(params_obj, dict) else None,
+            session_id=session_id,
+        )
         team_spec = await team_manager.get_swarm_enriched_team_spec(
             session_id=session_id,
             mode=resolved_mode,
@@ -3387,6 +3438,7 @@ async def _process_team_message_stream(
             agent_group_name=agent_group_name,
             swarmflow_config=swarmflow_config,
             dispatch_mode=team_dispatch_mode,
+            bootstrap_mode=team_bootstrap_mode,
             model_selection=runtime_model_selection,
         )
         if group_input is not None and request_metadata.get("group_members") is not None:
@@ -3436,6 +3488,11 @@ async def _process_team_message_stream(
             and _coerce_team_dispatch_mode(params_obj.get("team_dispatch_mode")) is not None
         ):
             persist_session_team_dispatch_mode(session_id, team_spec.dispatch_mode)
+        if (
+            isinstance(params_obj, dict)
+            and _coerce_team_bootstrap_mode(params_obj.get("team_bootstrap_mode")) is not None
+        ):
+            persist_session_team_bootstrap_mode(session_id, team_spec.bootstrap_mode)
         if team_skill_names is not None:
             await _apply_team_skill_selection(
                 team_manager=team_manager,

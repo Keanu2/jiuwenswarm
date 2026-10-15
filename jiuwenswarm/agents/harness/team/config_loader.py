@@ -607,6 +607,10 @@ def load_team_spec_dict(
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["dispatch_mode"] = team_raw.get("dispatch_mode", "autonomous")
+    # Who materializes the team (F_122): the leader via build_team, or the
+    # framework on start. team_display_name / team_desc only matter under
+    # "framework" and pass through from the raw section unchanged.
+    spec_dict["bootstrap_mode"] = team_raw.get("bootstrap_mode", "leader")
     spec_dict["enable_task_verification"] = team_raw.get("enable_task_verification", False)
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base)

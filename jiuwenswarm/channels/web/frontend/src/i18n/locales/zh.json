@@ -4870,6 +4870,11 @@
     "toggleHint": "开启后 Leader 将每个任务指派给具名成员；关闭则由成员自主认领任务",
     "readonlyHint": "团队已启动，调度模式不可修改"
   },
+  "teamBootstrap": {
+    "toggleLabel": "启动即建队",
+    "toggleHint": "开启后会话一开始由系统建好一个通用团队，Leader 直接按任务创建成员，无需先调用 build_team",
+    "readonlyHint": "团队已启动，建队方式不可修改"
+  },
   "swarmflow": {
     "statusPlanned": "已规划",
     "statusPending": "等待中",

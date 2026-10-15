@@ -226,3 +226,15 @@ class ChatSendParams(TypedDict, total=False):
     persisted value (first request falls back to the team config's
     ``dispatch_mode``).
     """
+
+    team_bootstrap_mode: NotRequired[Literal["leader", "framework"]]
+    """Session-level team bootstrap mode (``TeamAgentSpec.bootstrap_mode``).
+
+    ``"leader"`` lets the leader build the team with its ``build_team`` tool;
+    ``"framework"`` has the runtime build a generic team on start, so the
+    leader starts from ``create_task`` with no ``build_team`` step. Only valid
+    together with ``team_dispatch_mode="scheduled"`` (the effective dispatch
+    mode must be scheduled). Fixed once the session's team is built, like
+    ``team_dispatch_mode``; absent keeps the session's persisted value (first
+    request falls back to the team config's ``bootstrap_mode``).
+    """
