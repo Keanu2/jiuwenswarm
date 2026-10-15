@@ -149,10 +149,16 @@ def _scene_phrase(cfg: dict[str, Any]) -> str:
         bible.get("place"),
         bible.get("architecture"),
         (spatial or {}).get("architecture"),
+        # Landmarks carry the authored setting description. At graph-build
+        # time scene_name/architecture are often still empty, and this is the
+        # only place text available for the pre-run scene plate prompt — it
+        # must not be dropped (see the "One empty setting." stub).
+        (spatial or {}).get("landmarks"),
     ):
         place = visual_place_name(raw)
         if place:
-            return place
+            place = re.sub(r"(?i)\bset[_\s-]?\d+\s*[:：]\s*", "", place)
+            return place.strip().rstrip("。.;；")
     return ""
 
 
