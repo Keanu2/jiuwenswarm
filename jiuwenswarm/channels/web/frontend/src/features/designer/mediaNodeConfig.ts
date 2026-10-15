@@ -119,11 +119,15 @@ export function resolveMediaPromptForToolbar(
   const lastWan = typeof raw.last_wan_prompt === 'string' ? raw.last_wan_prompt : '';
   const lastApproved =
     typeof raw.last_approved_prompt === 'string' ? raw.last_approved_prompt : '';
+  // A lock essay is a text LED by a lock banner — not any long prompt that
+  // merely mentions a lock. The director's "Film shot N only. …" shot text
+  // appends IDENTITY/CLOTHING/SCENE SPECS/STYLE LOCK bits, and the blanket
+  // contains-check used to suppress those whole shot prompts (falling through
+  // to the locks-only director_task in the toolbar).
   const looksLikeLockEssay = (text: string): boolean =>
-    /\bSPATIAL LOCK\b/i.test(text) ||
-    /\bSTYLE LOCK\b/i.test(text) ||
-    /\bSCENE SPECS\b/i.test(text) ||
-    /\bCLOTHING LOCK\b/i.test(text);
+    /^\s*(?:(?:SPATIAL|STYLE|CLOTHING|PRODUCTION|COSTUME)\s+LOCK\b|SCENE\s+SPECS\b|LOCKS:)/i.test(
+      text,
+    );
   const gen =
     raw.generate && typeof raw.generate === 'object'
       ? String((raw.generate as { prompt?: unknown }).prompt ?? '')

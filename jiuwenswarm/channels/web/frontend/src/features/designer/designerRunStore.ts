@@ -115,6 +115,7 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
     if (run && graph && run.graph_id !== graph.graph_id) {
       return;
     }
+    const prior = get().run;
     const leader = run?.node_states?.[DESIGNER_LEADER_NODE_ID];
     const failureMessage = designerRunFailureMessage(run);
     set({
@@ -138,6 +139,27 @@ export const useDesignerRunStore = create<DesignerRunStore>((set, get) => ({
           .then((result) => get().applyRun(result.run))
           .catch(() => undefined);
       }, 400);
+    } else if (
+      run &&
+      graph &&
+      graph.graph_id === run.graph_id &&
+      (isActiveDesignerRun(prior?.status) ||
+        (prior != null && prior.run_id !== run.run_id))
+    ) {
+      // The run just reached a terminal state and the server stamped the node
+      // configs (last_wan_prompt / regenerate_packet / generate.prompt). Pull
+      // the fresh graph so node toolbars show the prompts this run produced
+      // instead of pre-run fallbacks (they would otherwise stay stale until a
+      // full page reload).
+      void designerGraphClient
+        .get(run.graph_id)
+        .then(({ graph: fresh }) => {
+          if (useDesignerStore.getState().domainGraph?.graph_id !== fresh.graph_id) {
+            return;
+          }
+          useDesignerStore.getState().applyGraph(fresh);
+        })
+        .catch(() => undefined);
     }
   },
 
