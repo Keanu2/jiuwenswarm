@@ -96,7 +96,6 @@ class TrafficRuntime:
                 self.shell_rails.append(rail)
 
     async def attach_gateway_connection(self, ws, send_lock) -> None:
-        # Dispatcher always awaits this hook (same contract as AgentWsServer).
         pass
 
     async def on_gateway_disconnect(self, ws, remote) -> None:
