@@ -1081,6 +1081,20 @@ def _save_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | No
         return None, "graph is required", "BAD_REQUEST"
     try:
         graph = normalize_execution_graph(raw_graph)
+        # The server-minted run id must survive client saves: the canvas's
+        # in-memory graph predates the first trigger's mint, so its save
+        # would wipe team_design_run_id and the next trigger would mint a
+        # fresh run (empty node_states — the canvas loses every result).
+        stored = _store.get_graph(str(graph.get("graph_id") or ""))
+        stored_run = (
+            str((stored.get("metadata") or {}).get("team_design_run_id") or "").strip()
+            if stored is not None
+            else ""
+        )
+        meta = dict(graph.get("metadata") or {})
+        if stored_run and not str(meta.get("team_design_run_id") or "").strip():
+            meta["team_design_run_id"] = stored_run
+            graph["metadata"] = meta
         try:
             from jiuwenswarm.server.runtime.designer.orchestration import Director
 

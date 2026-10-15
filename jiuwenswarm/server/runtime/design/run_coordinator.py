@@ -447,6 +447,7 @@ class RunCoordinator:
         failed_nodes = [nid for nid, text in outputs.items() if text is None]
         if failed_nodes:
             run["status"] = "failed"
+            failed_set = set(failed_nodes)
             for node_id in failed_nodes:
                 state = (run.setdefault("node_states", {}).setdefault(
                     node_id, {"status": "pending", "started_at": None, "completed_at": None}
@@ -456,9 +457,25 @@ class RunCoordinator:
                 # guarantee's precise reason, an engine attempt error) instead
                 # of the generic gate text.
                 if not state.get("error"):
-                    state["error"] = (
-                        "node execution failed (backend retries exhausted)"
-                    )
+                    # A node gated off by the compiled script (its upstream
+                    # failed this trigger) never ran — say which upstream
+                    # failed instead of the misleading backend-retry text.
+                    failed_upstream = [
+                        str(edge.get("source") or "")
+                        for edge in graph.get("edges") or []
+                        if str(edge.get("target") or "") == node_id
+                        and str(edge.get("source") or "") in failed_set
+                    ]
+                    if failed_upstream:
+                        state["error"] = (
+                            "upstream node failed: "
+                            + ", ".join(failed_upstream)
+                            + " — node not executed"
+                        )
+                    else:
+                        state["error"] = (
+                            "node execution failed (backend retries exhausted)"
+                        )
             run["current_node_ids"] = []
             self._store.save_run(run)
             if on_update is not None:
