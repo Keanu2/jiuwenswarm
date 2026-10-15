@@ -207,7 +207,8 @@ def _file_uri_to_path(uri: str) -> Path:
     exists. Strip it so the drive letter resolves.
     """
     raw = unquote(urlparse(uri).path)
-    if len(raw) > 2 and raw[0] == "/" and raw[2] == ":" and raw[1].isalpha():
+    windows_drive = len(raw) > 2 and raw[0] == "/" and raw[2] == ":"
+    if windows_drive and raw[1].isalpha():
         raw = raw[1:]
     return Path(raw)
 
@@ -226,7 +227,7 @@ def _output_content_text(result: Any) -> str:
         if uri.startswith("file:"):
             try:
                 text = _file_uri_to_path(uri).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError, ValueError):
+            except (OSError, ValueError):
                 # Binary media (png/mp4) as primary output has no text body —
                 # fall through to the message stub instead of raising out of
                 # backend.run (a media-primary node would otherwise fail all

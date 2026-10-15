@@ -2782,8 +2782,8 @@ def _push_design_tool_activity(request: Any, chunk: Any) -> None:
     payload = chunk.payload
     if payload is None:
         return
-    event_type = str(payload.get("event_type") or "")
-    if event_type not in ("chat.tool_call", "chat.tool_result"):
+    payload_event = str(payload.get("event_type") or "")
+    if payload_event not in ("chat.tool_call", "chat.tool_result"):
         return
     import asyncio as _asyncio
 
@@ -2794,7 +2794,7 @@ def _push_design_tool_activity(request: Any, chunk: Any) -> None:
 
     channel_id = str(request.channel_id or "web")
     session_id = str(request.session_id or "")
-    kind = "tool_call" if event_type == "chat.tool_call" else "tool_result"
+    kind = "tool_call" if payload_event == "chat.tool_call" else "tool_result"
     try:
         loop = _asyncio.get_running_loop()
     except RuntimeError:

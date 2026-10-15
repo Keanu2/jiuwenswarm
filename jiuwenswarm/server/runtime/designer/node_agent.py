@@ -381,6 +381,14 @@ class DesignerNodeSpawner(Protocol):
         ...
 
 
+def _graph_patch_summary(graph: DesignerExecutionGraph) -> dict[str, Any]:
+    """Shape returned to the leader after a canvas patch is saved."""
+    return {
+        "graph_id": graph.get("graph_id"),
+        "nodes": [node.get("id") for node in graph.get("nodes") or []],
+    }
+
+
 def designer_agent_group_dir() -> Path:
     """Return the built-in Designer AgentGroup directory."""
     current = Path(__file__).resolve()
@@ -740,11 +748,7 @@ class DesignerGraphToolkit:
 
     def graph_patch(self, patch: dict[str, Any]) -> dict[str, Any]:
         graph_id = str(self.ctx.graph.get("graph_id") or "")
-        graph = self.spawner.apply_agent_graph_patch(graph_id, patch)
-        return {
-            "graph_id": graph.get("graph_id"),
-            "nodes": [node.get("id") for node in graph.get("nodes") or []],
-        }
+        return _graph_patch_summary(self.spawner.apply_agent_graph_patch(graph_id, patch))
 
     async def node_run(self, node_id: str) -> str:
         if self.completed is not None:

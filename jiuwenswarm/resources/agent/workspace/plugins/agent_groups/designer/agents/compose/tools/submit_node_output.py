@@ -42,10 +42,20 @@ class SubmitNodeOutput(Tool):
                 return {"success": False, "status": "rejected", "output_ref": None, "error": "missing_shot_ticket"}
             uri = data.get("uri")
             if uri is not None and not file_uri_ok(uri):
-                return {"success": False, "status": "rejected", "output_ref": None, "error": "uri_must_be_file_absolute"}
+                return {
+                    "success": False,
+                    "status": "rejected",
+                    "output_ref": None,
+                    "error": "uri_must_be_file_absolute",
+                }
             extras = data.get("extra_uris") or []
             if not isinstance(extras, list) or any(not file_uri_ok(item) for item in extras if item):
-                return {"success": False, "status": "rejected", "output_ref": None, "error": "extra_uris_must_be_file_absolute"}
+                return {
+                    "success": False,
+                    "status": "rejected",
+                    "output_ref": None,
+                    "error": "extra_uris_must_be_file_absolute",
+                }
             return await node_tools().submit_node_output(
                 ticket,
                 uri=uri,

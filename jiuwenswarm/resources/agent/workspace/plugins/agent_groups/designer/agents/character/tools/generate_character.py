@@ -22,7 +22,14 @@ class GenerateCharacter(Tool):
                 ),
                 input_params={
                     "type": "object",
-                    "properties": {"shot_ticket": {"type": "string"}, "prompt": {"type": "string"}, "subject": {"type": "string", "description": "这一张设定图上的主体"}},
+                    "properties": {
+                        "shot_ticket": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "subject": {
+                            "type": "string",
+                            "description": "这一张设定图上的主体",
+                        },
+                    },
                     "required": ["shot_ticket", "prompt"],
                     "additionalProperties": False,
                 },

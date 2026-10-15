@@ -460,12 +460,14 @@ class RunCoordinator:
                     # A node gated off by the compiled script (its upstream
                     # failed this trigger) never ran — say which upstream
                     # failed instead of the misleading backend-retry text.
-                    failed_upstream = [
-                        str(edge.get("source") or "")
-                        for edge in graph.get("edges") or []
-                        if str(edge.get("target") or "") == node_id
-                        and str(edge.get("source") or "") in failed_set
-                    ]
+                    failed_upstream: list[str] = []
+                    for edge in graph.get("edges") or []:
+                        source = str(edge.get("source") or "")
+                        if str(edge.get("target") or "") != node_id:
+                            continue
+                        if source not in failed_set:
+                            continue
+                        failed_upstream.append(source)
                     if failed_upstream:
                         state["error"] = (
                             "upstream node failed: "

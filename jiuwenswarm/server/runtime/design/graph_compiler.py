@@ -32,6 +32,7 @@ keeping single-node chains byte-identical to the serial form.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -143,7 +144,7 @@ def _text_file_body(ref: Any) -> str:
         return ""
     try:
         return path.read_text(encoding="utf-8")[:_FROZEN_TEXT_MAX_CHARS]
-    except (OSError, UnicodeDecodeError, ValueError):
+    except (OSError, ValueError):
         return ""
 
 
@@ -220,6 +221,19 @@ def _waves(
 # reason — LLM/media API quota protection). Batches within a wave chain
 # sequentially: [A,B,C] with cap 2 → parallel([A,B]) then parallel([C]).
 _MAX_WAVE_CONCURRENCY = 3
+
+
+@dataclass
+class _NodeEmit:
+    """Mutable compile buffers shared while emitting one node's script."""
+
+    lines: list[str]
+    graph: DesignerExecutionGraph
+    nodes_by_id: dict[str, dict[str, Any]]
+    bindings: dict[str, str]
+    run_outputs: dict[str, Any] | None
+    failed: list[str]
+    executed: list[str]
 
 
 class GraphScriptCompiler:
@@ -339,6 +353,15 @@ class GraphScriptCompiler:
                 bindings[nid] = json.dumps(frozen, ensure_ascii=False)
                 frozen_ids.add(nid)
         waves = _waves(graph, order, scope, frozen_ids)
+        emit = _NodeEmit(
+            lines=lines,
+            graph=graph,
+            nodes_by_id=nodes_by_id,
+            bindings=bindings,
+            run_outputs=run_outputs,
+            failed=failed,
+            executed=executed,
+        )
         for wave in waves:
             executing = [
                 nid
@@ -349,17 +372,7 @@ class GraphScriptCompiler:
                 continue
             if len(executing) == 1:
                 for nid in executing:
-                    self._emit_serial_node(
-                        lines,
-                        nid,
-                        nodes_by_id[nid],
-                        graph,
-                        nodes_by_id,
-                        bindings,
-                        run_outputs,
-                        failed,
-                        executed,
-                    )
+                    self._emit_serial_node(emit, nid, nodes_by_id[nid])
                 continue
             # Multi-node wave: batches of at most _MAX_WAVE_CONCURRENCY nodes,
             # each batch one parallel([...]) block (concurrency cap mirrors
@@ -372,15 +385,7 @@ class GraphScriptCompiler:
                 batch = executing[batch_start:batch_start + _MAX_WAVE_CONCURRENCY]
                 thunk_names: list[str] = []
                 for nid in batch:
-                    thunk_src = self._emit_thunk(
-                        nid,
-                        nodes_by_id[nid],
-                        graph,
-                        nodes_by_id,
-                        bindings,
-                        run_outputs,
-                        failed,
-                    )
+                    thunk_src = self._emit_thunk(emit, nid, nodes_by_id[nid])
                     lines.append(thunk_src)
                     thunk_names.append(f"_thunk_{_safe_ident(nid)}")
                 lines.append(
@@ -414,8 +419,8 @@ class GraphScriptCompiler:
             )
         return "\n".join(lines) + "\n"
 
+    @staticmethod
     def _gate_expr(
-        self,
         nid: str,
         graph: DesignerExecutionGraph,
         bindings: dict[str, str],
@@ -449,66 +454,45 @@ class GraphScriptCompiler:
             return None
         return " or ".join(dict.fromkeys(gate_parts))
 
-    def _emit_serial_node(
-        self,
-        lines: list[str],
-        nid: str,
-        node: dict[str, Any],
-        graph: DesignerExecutionGraph,
-        nodes_by_id: dict[str, dict[str, Any]],
-        bindings: dict[str, str],
-        run_outputs: dict[str, Any] | None,
-        failed: list[str],
-        executed: list[str],
-    ) -> None:
+    def _emit_serial_node(self, emit: _NodeEmit, nid: str, node: dict[str, Any]) -> None:
         """Emit one node as a plain serial await (single-node wave)."""
-        gate = self._gate_expr(nid, graph, bindings, failed)
+        gate = self._gate_expr(nid, emit.graph, emit.bindings, emit.failed)
         var = "r_" + _safe_ident(nid)
-        prompt_expr = self._prompt_expr(node, graph, nodes_by_id, bindings, run_outputs)
         if gate is not None:
             # Gated node: bind unconditionally, await only when the gate
             # passes (downstream gates reference the variable regardless).
-            lines.append("    " + var + " = None")
-            lines.append("    if " + gate + ":")
-            lines.append(
+            emit.lines.append("    " + var + " = None")
+            emit.lines.append("    if " + gate + ":")
+            emit.lines.append(
                 "        __failed.append("
                 + json.dumps(nid, ensure_ascii=False) + ")"
             )
-            lines.append("    else:")
-            lines.append(self._agent_call_line(
-                var, prompt_expr, node, nid, run_outputs, indent="        "
-            ))
-            bindings[nid] = var
-            failed.append(nid)
-            executed.append(nid)
+            emit.lines.append("    else:")
+            emit.lines.append(self._agent_call_line(emit, node, var, indent="        "))
+            emit.bindings[nid] = var
+            emit.failed.append(nid)
+            emit.executed.append(nid)
         else:
-            lines.append(self._agent_call_line(var, prompt_expr, node, nid, run_outputs))
-            lines.append(
+            emit.lines.append(self._agent_call_line(emit, node, var))
+            emit.lines.append(
                 f"    if {var} is None:"
                 f" __failed.append({json.dumps(nid, ensure_ascii=False)})"
             )
-            bindings[nid] = var
-            executed.append(nid)
+            emit.bindings[nid] = var
+            emit.executed.append(nid)
 
-    def _emit_thunk(
-        self,
-        nid: str,
-        node: dict[str, Any],
-        graph: DesignerExecutionGraph,
-        nodes_by_id: dict[str, dict[str, Any]],
-        bindings: dict[str, str],
-        run_outputs: dict[str, Any] | None,
-        failed: list[str],
-    ) -> str:
+    def _emit_thunk(self, emit: _NodeEmit, nid: str, node: dict[str, Any]) -> str:
         """Emit one node as a parallel-branch thunk (multi-node wave).
 
         The thunk closes over nothing node-specific: the gate reads the
         shared ``__failed`` list (single-threaded asyncio — no races), and a
         blocked/failed branch returns None exactly like the serial gate.
         """
-        gate = self._gate_expr(nid, graph, bindings, failed)
-        prompt_expr = self._prompt_expr(node, graph, nodes_by_id, bindings, run_outputs)
-        call = self._agent_call_expr(prompt_expr, node, nid, run_outputs)
+        gate = self._gate_expr(nid, emit.graph, emit.bindings, emit.failed)
+        prompt_expr = self._prompt_expr(
+            node, emit.graph, emit.nodes_by_id, emit.bindings, emit.run_outputs,
+        )
+        call = self._agent_call_expr(prompt_expr, node, nid, emit.run_outputs)
         thunk_name = f"_thunk_{_safe_ident(nid)}"
         body: list[str] = [f"    async def {thunk_name}():"]
         if gate is not None:
@@ -603,11 +587,9 @@ class GraphScriptCompiler:
 
     def _agent_call_line(
         self,
-        var: str,
-        prompt_expr: str,
+        emit: _NodeEmit,
         node: dict[str, Any],
-        node_id: str,
-        run_outputs: dict[str, Any] | None,
+        var: str,
         indent: str = "    ",
     ) -> str:
         """One agent() call line, with the node version encoded in ``phase``.
@@ -620,7 +602,11 @@ class GraphScriptCompiler:
         carries the node's AgentGroup member name (bare, SDD-0030; see
         :meth:`_agent_call_expr`).
         """
-        call = self._agent_call_expr(prompt_expr, node, node_id, run_outputs)
+        node_id = str(node.get("id") or "")
+        prompt_expr = self._prompt_expr(
+            node, emit.graph, emit.nodes_by_id, emit.bindings, emit.run_outputs,
+        )
+        call = self._agent_call_expr(prompt_expr, node, node_id, emit.run_outputs)
         return f"{indent}{var} = await agent({call})"
 
     def _prompt_expr(

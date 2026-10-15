@@ -22,7 +22,14 @@ class GenerateScene(Tool):
                 ),
                 input_params={
                     "type": "object",
-                    "properties": {"shot_ticket": {"type": "string"}, "prompt": {"type": "string"}, "setting": {"type": "string", "description": "这一张场景图对应的场景"}},
+                    "properties": {
+                        "shot_ticket": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "setting": {
+                            "type": "string",
+                            "description": "这一张场景图对应的场景",
+                        },
+                    },
                     "required": ["shot_ticket", "prompt"],
                     "additionalProperties": False,
                 },

@@ -28,7 +28,14 @@ class GenerateShotVideo(Tool):
                 ),
                 input_params={
                     "type": "object",
-                    "properties": {"shot_ticket": {"type": "string"}, "prompt": {"type": "string"}, "duration_seconds": {"type": "number", "description": "这一镜的时长，秒"}},
+                    "properties": {
+                        "shot_ticket": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "duration_seconds": {
+                            "type": "number",
+                            "description": "这一镜的时长，秒",
+                        },
+                    },
                     "required": ["shot_ticket", "prompt"],
                     "additionalProperties": False,
                 },
