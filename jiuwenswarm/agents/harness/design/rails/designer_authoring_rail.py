@@ -80,7 +80,7 @@ small user-driven edits only.
 
 def _retitle_session(session_id: str, graph: dict[str, Any], prompt: str) -> None:
     """Name the session after the model's short story title, never the prompt."""
-    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+    from jiuwenswarm.common.schema.designer_node_labels import usable_story_title
     from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
 
     meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}

@@ -585,7 +585,7 @@ def _heuristic_clips(prompt: str, characters: list[dict[str, str]]) -> list[dict
 
     for i, shot in enumerate(shots, start=1):
         shot["clip_index"] = i
-        from jiuwenswarm.server.runtime.designer.node_labels import derive_clip_name
+        from jiuwenswarm.common.schema.designer_node_labels import derive_clip_name
 
         shot["title"] = derive_clip_name(shot, fallback_index=i)
         # If a shot still has no cast, pick the single best character — not a round-robin leak.
@@ -771,7 +771,7 @@ def _heuristic_lean_shot(
     setting_id: str = "set_1",
 ) -> dict[str, Any]:
     """One full-narrative beat: no LLM → one scene spec + one clip."""
-    from jiuwenswarm.server.runtime.designer.node_labels import derive_clip_name
+    from jiuwenswarm.common.schema.designer_node_labels import derive_clip_name
 
     all_ids = [str(c.get("id")) for c in characters if str(c.get("id") or "").strip()]
     title = (story_name or derive_clip_name({"title": "", "action": prompt}, fallback_index=1))[:80]
@@ -837,7 +837,7 @@ def _assign_heuristic_setting_ids(
 def heuristic_analysis(prompt: str) -> dict[str, Any]:
     from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
     from jiuwenswarm.server.runtime.designer.media_model_playbook import default_style_lock
-    from jiuwenswarm.server.runtime.designer.node_labels import derive_story_name
+    from jiuwenswarm.common.schema.designer_node_labels import derive_story_name
     from jiuwenswarm.server.runtime.designer.skills_loader import detect_audio_intent
 
     prompt = _strip_reference_appendix(prompt)
@@ -1194,7 +1194,7 @@ def _normalize_llm_analysis(
             entry["cast_states"] = sh["cast_states"]
         if strategy in {"compose_from_character_specs", "edit_prior_image"}:
             entry["clip_strategy"] = strategy
-        from jiuwenswarm.server.runtime.designer.node_labels import derive_clip_name
+        from jiuwenswarm.common.schema.designer_node_labels import derive_clip_name
 
         entry["title"] = derive_clip_name(entry, fallback_index=i)
         norm_shots.append(entry)
@@ -1214,7 +1214,7 @@ def _normalize_llm_analysis(
         tsc = int(parsed.get("target_clip_count") or 0)
     except (TypeError, ValueError):
         tsc = 0
-    from jiuwenswarm.server.runtime.designer.node_labels import derive_story_name
+    from jiuwenswarm.common.schema.designer_node_labels import derive_story_name
 
     story_name = derive_story_name(
         analysis={

@@ -669,7 +669,7 @@ def build_smart_video_graph(
         analysis = apply_shot_scope(analysis, prompt_text)
     except Exception:  # noqa: BLE001
         pass
-    from jiuwenswarm.server.runtime.designer.node_labels import (
+    from jiuwenswarm.common.schema.designer_node_labels import (
         derive_clip_name,
         derive_story_name,
         usable_story_title,

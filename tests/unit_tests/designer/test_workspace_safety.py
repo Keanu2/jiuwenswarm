@@ -519,7 +519,7 @@ async def test_selected_model_context_reaches_designer_model_calls(monkeypatch):
 
 
 def test_canvas_title_uses_model_phrase_not_the_prompt():
-    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+    from jiuwenswarm.common.schema.designer_node_labels import usable_story_title
 
     prompt = "帮我做一支雨夜里侦探追凶的短片，要有三个镜头和结尾反转"
     assert usable_story_title("雨夜追凶", prompt) == "雨夜追凶"

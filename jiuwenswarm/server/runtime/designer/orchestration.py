@@ -4506,7 +4506,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
         if names:
             cfg["cast_names"] = identity_refs["cast_names"]
         # Sensible LLM-style node names (Brief: … / Scene N: Clip M: …).
-        from jiuwenswarm.server.runtime.designer.node_labels import (
+        from jiuwenswarm.common.schema.designer_node_labels import (
             derive_clip_name,
             derive_story_name,
             label_character,
@@ -4589,7 +4589,7 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             continue
         _stamp_media_node(node, assign_strategy=False)
         # Also rename character sheets if generic.
-    from jiuwenswarm.server.runtime.designer.node_labels import (
+    from jiuwenswarm.common.schema.designer_node_labels import (
         derive_story_name,
         label_brief,
         label_character,

@@ -9,6 +9,7 @@ distinct companion id still gets a solo sheet (or a combined overflow card).
 
 from __future__ import annotations
 
+import math
 import sys
 import types
 
@@ -40,7 +41,6 @@ from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
 from jiuwenswarm.server.runtime.designer.smart_graph import build_smart_video_graph
 
 _FOCUS_N = 20_000
-_PIPELINE_N = 40_000
 
 _GENERIC_WARDROBE = (
     "无外套",
@@ -86,6 +86,22 @@ _MEDIUMS = (
 _BINDINGS = ("verbatim", "condition")
 _SLOT_KINDS = ("character", "motion_tagged", "alias_match", "product_plus_cast")
 _CAST_SIZES = (3, 4, 5, 6)
+
+# Every input that steers a pipeline scenario cycles with ``index`` (the
+# tuples above, plus the motion-alias, shot-count, scene-slot and style-slot
+# cycles of 2, 3, 7 and 11), so one period covers each combination exactly
+# once. Name suffixes also vary with ``index`` but are only labels.
+_PIPELINE_N = math.lcm(
+    len(_SLOT_KINDS),
+    len(_GENERIC_WARDROBE),
+    len(_LEAD_ALIASES),
+    len(_BINDINGS),
+    len(_CAST_SIZES),
+    2,
+    3,
+    7,
+    11,
+)
 
 
 def _pick(items: tuple, index: int, salt: int = 0):
@@ -451,6 +467,6 @@ def _assert_pipeline_scenario(index: int) -> None:
 
 
 def test_reference_led_companion_cast_completeness_pipeline() -> None:
-    """~40k pipeline budget: multi-character companion minting stays complete."""
+    """Every scenario combination once: multi-character companion minting stays complete."""
     for index in range(_PIPELINE_N):
         _assert_pipeline_scenario(index)

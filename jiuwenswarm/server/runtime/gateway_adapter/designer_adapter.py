@@ -277,7 +277,7 @@ _retitled_design_projects: set[str] = set()
 
 def _replacement_display_title(current: str, prompt: str, story_name: str) -> str:
     """Short model title when the current label is still the user prompt."""
-    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+    from jiuwenswarm.common.schema.designer_node_labels import usable_story_title
 
     reference = prompt or current
     summary = usable_story_title(story_name, reference)
@@ -365,7 +365,7 @@ def sync_design_display_names(projects: list[Any]) -> list[Any]:
 
 def _stamp_canvas_title(graph: dict[str, Any], prompt: str) -> str:
     """Set the canvas title from the model's short name, never the raw prompt."""
-    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+    from jiuwenswarm.common.schema.designer_node_labels import usable_story_title
 
     meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
     analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}

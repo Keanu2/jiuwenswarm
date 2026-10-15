@@ -16,6 +16,12 @@ import secrets
 import time
 from typing import Any, TypedDict
 
+from jiuwenswarm.common.schema.designer_node_labels import (
+    derive_clip_name,
+    is_semantic_canvas_label,
+    label_clip,
+)
+
 # ── Schema version ────────────────────────────────────────────────────────────
 
 SCHEMA_VERSION = "designer-execution-graph.v1"
@@ -159,13 +165,8 @@ def english_pipeline_label(label: str, role: str, clip_index: int = 1) -> str:
         desired = pipeline_node_label(role, clip_index)
         return desired or text
     # Designer semantic scheme (Brief: … / Character N: … / Scene N: Clip …) must survive.
-    try:
-        from jiuwenswarm.server.runtime.designer.node_labels import is_semantic_canvas_label
-
-        if is_semantic_canvas_label(text):
-            return text
-    except Exception:  # noqa: BLE001
-        pass
+    if is_semantic_canvas_label(text):
+        return text
     # Any label with a descriptive suffix after ":" is author/LLM-owned.
     if ":" in text and not _INDEXED_LABEL_RE.match(text):
         return text
@@ -1161,11 +1162,6 @@ def expand_shot_nodes(
             default_x=1120.0,
             default_y=240.0,
         )
-        from jiuwenswarm.server.runtime.designer.node_labels import (
-            derive_clip_name,
-            label_clip,
-        )
-
         clip_name = derive_clip_name(
             {"title": f"Clip {index}", "action": ""},
             fallback_index=index,
