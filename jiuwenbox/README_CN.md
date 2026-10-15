@@ -784,6 +784,35 @@ python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforc
 python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint 127.0.0.1:8321
 ```
 
+### Java 宿主机全量回归
+
+`tests/integration/test_jiuwenbox_java_e2e.py` 是独立运行的 API + SSH 宿主机测试脚本。
+不提供默认远程地址、用户名或密码；未显式配置以下必填项时，会在发起网络请求前退出。
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `JIUWENBOX_TEST_SERVER` | 必填，测试服务的完整 HTTP(S) 地址 |
+| `JIUWENBOX_TEST_SSH_HOST` | 必填，专用测试宿主机地址 |
+| `JIUWENBOX_TEST_SSH_USER` | 必填，已授权的测试账户，按宿主用例需要授予权限 |
+| `JIUWENBOX_TEST_SSH_KEY` | 可选，客户端私钥路径；未设置时使用 SSH agent / 本机 SSH 配置 |
+
+SSH 仅允许公钥认证，不再使用密码或创建 askpass 文件，并强制校验服务端主机密钥。
+运行前须通过可信渠道核验宿主机指纹，将正确的主机密钥加入运行账户的 `known_hosts`。
+私钥保存在本机或 CI 的密钥存储中，不提交到仓库。脚本会执行宿主机命令，请使用授权的专用测试环境。
+
+PowerShell 示例（在 `jiuwenbox` 目录运行，示例地址须替换）：
+
+```powershell
+$env:JIUWENBOX_TEST_SERVER = "http://192.0.2.10:8321"
+$env:JIUWENBOX_TEST_SSH_HOST = "192.0.2.10"
+$env:JIUWENBOX_TEST_SSH_USER = "test-operator"
+$env:JIUWENBOX_TEST_SSH_KEY = "$HOME/.ssh/jiuwenbox_test"
+python tests/integration/test_jiuwenbox_java_e2e.py
+```
+
+若真实凭证曾被提交到仓库，删除当前文件中的凭证不能使其失效：需立即轮换已泄露密码，
+核查 SSH 访问记录和持久化访问项，并评估仓库历史、派生仓及构建产物中的残留。
+
 ### MCP 集成测试
 
 `test_mcp_default.py` 针对 `/mcp` Streamable HTTP 端点和 `sandbox_run_command`

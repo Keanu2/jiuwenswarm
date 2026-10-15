@@ -814,6 +814,39 @@ python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforc
 python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint 127.0.0.1:8321
 ```
 
+### Full Java Host Regression
+
+`tests/integration/test_jiuwenbox_java_e2e.py` is a standalone API + SSH host test script.
+It has no default remote address, username, or password. Missing required settings cause it
+to exit before making network requests.
+
+| Environment variable | Purpose |
+| --- | --- |
+| `JIUWENBOX_TEST_SERVER` | Required: full HTTP(S) URL of the test service |
+| `JIUWENBOX_TEST_SSH_HOST` | Required: dedicated test host address |
+| `JIUWENBOX_TEST_SSH_USER` | Required: authorized test account with permissions needed by the host cases |
+| `JIUWENBOX_TEST_SSH_KEY` | Optional: client private-key path; otherwise use the SSH agent / local SSH configuration |
+
+SSH uses public-key authentication only, creates no password or askpass files, and requires
+host-key verification. Verify the host fingerprint through a trusted channel and add the
+correct host key to the runner account's `known_hosts` before running. Keep private keys
+locally or in CI secret storage, outside the repository. This script executes host commands;
+run it against an authorized, dedicated test environment.
+
+PowerShell example (run from `jiuwenbox`; replace the example address):
+
+```powershell
+$env:JIUWENBOX_TEST_SERVER = "http://192.0.2.10:8321"
+$env:JIUWENBOX_TEST_SSH_HOST = "192.0.2.10"
+$env:JIUWENBOX_TEST_SSH_USER = "test-operator"
+$env:JIUWENBOX_TEST_SSH_KEY = "$HOME/.ssh/jiuwenbox_test"
+python tests/integration/test_jiuwenbox_java_e2e.py
+```
+
+Removing a committed credential does not invalidate it. If a real credential was committed,
+rotate the exposed password immediately, review SSH access logs and persistent access,
+and assess copies in repository history, forks, and build artifacts.
+
 ### MCP Integration Tests
 
 `test_mcp_default.py` exercises the `/mcp` Streamable HTTP endpoint and the
