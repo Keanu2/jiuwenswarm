@@ -227,6 +227,48 @@ def test_handler_reference_nodes_compile_to_literals():
     assert "user-uploaded reference media" in src
 
 
+def test_handler_reference_node_script_runs():
+    """The compiled script binds r_<ref> before returning it (no NameError)."""
+    from openjiuwen.agent_teams.workflow.engine import run_workflow
+    from openjiuwen.agent_teams.workflow.engine.backends.base import (
+        AgentBackend,
+        AgentResult,
+    )
+
+    class FakeBackend(AgentBackend):
+        KNOWN_OPTIONS = frozenset({"agent_template"})
+
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
+            label = str(opts.get("label"))
+            ref = {"kind": "text", "uri": f"file:///tmp/{label}.md"}
+            return AgentResult(text=label, structured={"output_ref": ref})
+
+    g = {
+        "graph_id": "g_refs_run",
+        "nodes": [
+            {
+                "id": "n_ref_01", "type": "image", "label": "girl.png",
+                "config": {
+                    "delegate": "handler", "force_handler": True,
+                    "skip_llm": True, "read_only": True,
+                    "user_reference_id": "ref_01",
+                    "user_reference_path": "/tmp/refs/girl.png",
+                },
+            },
+            {"id": "n_char", "type": "text", "label": "角色",
+             "config": {"prompt": "参考 girl.png 设计角色", "pipeline": "character"}},
+        ],
+        "edges": [{"id": "e1", "source": "n_ref_01", "target": "n_char"}],
+    }
+    src = GraphScriptCompiler().compile(g, {}, run_id="run_refs")
+    path = Path(tempfile.gettempdir()) / "_ut_handler_ref_run.py"
+    path.write_text(src, encoding="utf-8")
+    result = asyncio.run(run_workflow(str(path), args=None, backend=FakeBackend()))
+
+    assert "user-uploaded reference media (ref_01)" in result["n_ref_01"]
+    assert result["n_char"]["output_ref"]["uri"] == "file:///tmp/n_char.md"
+
+
 def test_wave_concurrency_cap_batches_large_waves():
     """A 5-branch wave splits into batches of at most _MAX_WAVE_CONCURRENCY."""
     from jiuwenswarm.server.runtime.design.graph_compiler import (

@@ -327,6 +327,8 @@ class GraphScriptCompiler:
             if not node_uses_agent_runtime(node):
                 literal = self._handler_literal(node)
                 if literal is not None:
+                    # The return dict reads r_<id> for every executed node.
+                    lines.append(f"    r_{_safe_ident(nid)} = {literal}")
                     bindings[nid] = literal
                     frozen_ids.add(nid)
                     executed.append(nid)
