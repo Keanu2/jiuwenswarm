@@ -310,11 +310,29 @@
 }
 
 .designer-run-control {
-  position: relative;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  pointer-events: auto;
+}
+
+.designer-run-control__dev-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.designer-run-control__actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  z-index: 1;
 }
 
 .designer-run-control__primary-wrap {

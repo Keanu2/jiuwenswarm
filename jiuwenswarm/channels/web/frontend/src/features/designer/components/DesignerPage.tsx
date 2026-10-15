@@ -20,7 +20,6 @@ import { DesignerZoomMenu } from './DesignerZoomMenu';
 import { DesignerAssetsSidebar } from './DesignerAssetsSidebar';
 import { DesignerCanvas } from './DesignerCanvas';
 import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
-import { DesignerRunControl } from './DesignerRunControl';
 import { designerWorkspaceClient } from '../designerGraphClient';
 import { useWorkspaceStore } from '../../../stores/workspaceStore';
 import './DesignerErrorToast.css';
@@ -317,10 +316,6 @@ export function DesignerPage({
               <img src={chatOrbIcon} alt="" width={20} height={20} />
               <span>{t('designer.toolbar.openChat')}</span>
             </button>
-            <DesignerRunControl
-              graph={showCanvas ? domainGraph : null}
-              disabled={!canvasInteractive}
-            />
           </div>
         </header>
         {runError ? (

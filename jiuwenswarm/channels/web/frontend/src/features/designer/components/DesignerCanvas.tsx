@@ -29,6 +29,7 @@ import { useDesignerStore } from '../designerStore';
 import { designerEdgeTypes } from './edges/DesignerEdge';
 import { designerNodeTypes } from './nodes/designerNodes';
 import { DesignerCanvasDock } from './DesignerCanvasDock';
+import { DesignerRunControl } from './DesignerRunControl';
 import { useDesignerRunStore } from '../designerRunStore';
 import {
   DESIGNER_ASSET_DRAG_MIME,
@@ -430,6 +431,9 @@ function DesignerCanvasInner({ graph }: DesignerCanvasProps) {
           className={`designer-canvas__controls${minimapVisible && !canvasLocked ? ' designer-canvas__controls--below-minimap' : ''}`}
           showInteractive={false}
         />
+        {import.meta.env.DEV ? (
+          <DesignerRunControl graph={graph} disabled={canvasLocked} />
+        ) : null}
       </ReactFlow>
       {canvasLocked ? null : <DesignerCanvasDock />}
     </div>
