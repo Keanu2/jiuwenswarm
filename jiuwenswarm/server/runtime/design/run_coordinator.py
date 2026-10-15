@@ -310,6 +310,7 @@ class RunCoordinator:
         build_ctx = getattr(context, "worker_build_context", None)
         expert_specs = getattr(context, "expert_specs", None)
         team_name = getattr(context, "team_name", None) or f"jiuwen_team_design"
+        session_id = str((graph.get("metadata") or {}).get("session_id") or "").strip()
         if base_spec is not None:
             if expert_specs is None:
                 # Bridge bound the base spec but never derived the expert
@@ -322,8 +323,6 @@ class RunCoordinator:
                     derive_design_expert_specs,
                 )
 
-                meta = dict(graph.get("metadata") or {})
-                session_id = str(meta.get("session_id") or "").strip()
                 worker_spec = await get_team_manager().get_swarm_enriched_team_spec(
                     session_id=session_id,
                     mode=NEW_TEAM_DESIGN,
@@ -335,7 +334,12 @@ class RunCoordinator:
                 team_name=team_name,
                 worker_base_spec=base_spec,
                 build_context=build_ctx,
-                run_id=run_id,
+                # Worker names (hence their checkpointer keys under the shared
+                # session) derive from this id; the lifelong run id would mint
+                # the same name on every rerun and restore the last worker's
+                # context. The engine's journal keeps the lifelong run id.
+                run_id=trigger_scope,
+                session_id=session_id or None,
                 expert_specs=expert_specs,
             )
         else:  # pragma: no cover — bridge not bound (unit path)

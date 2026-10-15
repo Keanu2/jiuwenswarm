@@ -135,6 +135,7 @@ def build_worker_backend(
     worker_base_spec: Any,
     build_context: Any,
     run_id: str,
+    session_id: str | None = None,
     expert_specs: dict[str, Any] | None = None,
 ) -> Any:
     """Construct the agent-core TeamWorkerBackend for one design trigger.
@@ -154,6 +155,7 @@ def build_worker_backend(
         worker_base_spec=worker_base_spec,
         build_context=build_context,
         run_id=run_id,
+        session_id=session_id,
         expert_specs=expert_specs or {},
     )
 
