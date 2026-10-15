@@ -44,11 +44,12 @@ const EMPTY_VENDOR_CATALOG: VendorPresetMap = {
   custom_api: [],
 };
 
-/** 视频/图像生成配置弹窗里"API"分组只保留这几家——其余厂商没有可用的视频/图像
- *  生成模型，放出来只会诱导用户选到一个填不出正确模型名的死路。已保存的旧配置
- *  仍然用完整的 catalog（见下方 preset/findStoredPreset）正常回显，这里只是收窄
- *  下拉本身能新选到的选项。 */
-const ALLOWED_API_VENDORS = new Set(['openrouter', 'volcengine', 'minimax']);
+/** 视频/图像生成配置弹窗里"API"分组只保留有生成目录的厂商。其余厂商没有可用的
+ *  视频/图像生成模型，放出来只会诱导用户选到一个填不出正确模型名的死路。已保存的
+ *  旧配置仍然用完整的 catalog（见下方 preset/findStoredPreset）正常回显，这里只是
+ *  收窄下拉本身能新选到的选项。百炼和 vLLM-Omni 的目录在 design 侧，不能被上游
+ *  只含 OpenRouter / 火山引擎 / MiniMax 的白名单滤掉。 */
+const ALLOWED_API_VENDORS = new Set(['openrouter', 'volcengine', 'minimax', 'alibaba', 'vllm-omni']);
 
 const OPENAI_PROTOCOL = 'openai';
 
