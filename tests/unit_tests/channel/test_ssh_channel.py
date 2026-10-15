@@ -1,5 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import pytest
+
 from jiuwenswarm.gateway.channel_manager.protocol.ssh.config import proxy_config_from_dict
 from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannelConfig
 
@@ -10,6 +12,7 @@ def test_ssh_channel_config_from_dict():
         "listen_host": "127.0.0.1",
         "listen_port": 3333,
         "relay_timeout_sec": 120,
+        "authorized_keys": {"alice": "~/.ssh/alice_authorized_keys"},
     }
     cfg = SshChannelConfig.from_dict(conf)
     assert cfg.enabled is True
@@ -19,8 +22,16 @@ def test_ssh_channel_config_from_dict():
     proxy = cfg.to_proxy_config()
     assert proxy.listen_host == "127.0.0.1"
     assert proxy.listen_port == 3333
+    assert proxy.authorized_keys["alice"].endswith("alice_authorized_keys")
+    assert "~" not in proxy.authorized_keys["alice"]
 
 
 def test_proxy_config_from_dict_sets_default_host_key_path():
     proxy = proxy_config_from_dict({"listen_port": 2222})
     assert proxy.host_key_path.endswith("ssh_host_key")
+
+
+@pytest.mark.parametrize("value", [None, [], "keys", {"alice": ""}, {"": "keys"}, {"alice": []}])
+def test_ssh_channel_rejects_invalid_authorized_keys(value):
+    with pytest.raises(ValueError, match="authorized_keys"):
+        SshChannelConfig.from_dict({"authorized_keys": value}).to_proxy_config()

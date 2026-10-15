@@ -2893,7 +2893,8 @@ async def _run(
                         except Exception as exc:  # noqa: BLE001
                             logger.error(
                                 "[App] SSH channel failed to start: %s. "
-                                "If SSH is enabled, install optional dependency with "
+                                "Check channels.ssh.authorized_keys and its files. "
+                                "If the SSH dependency is missing, install it with "
                                 "`uv sync --extra ssh` or `pip install \"jiuwenswarm[ssh]\"`.",
                                 exc,
                             )
