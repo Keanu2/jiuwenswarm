@@ -331,7 +331,11 @@ def test_fanout_engine_run_gates_downstream():
     src = GraphScriptCompiler().compile(_fanout_graph(), {})
     path = Path(tempfile.gettempdir()) / "_ut_wave_fanout.py"
     path.write_text(src, encoding="utf-8")
-    result = asyncio.run(run_workflow(str(path), args=None, backend=backend))
+    # Force agents_per_run >= 2: CI hosts with cpu_count<=3 resolve the default
+    # cap to 1 and would serialize the fan-out, defeating the overlap check.
+    result = asyncio.run(
+        run_workflow(str(path), args=None, backend=backend, cap=4)
+    )
 
     # All three pre-gate nodes attempted; the join node gated off at runtime
     # (old-executor semantics: a failed predecessor blocks its dependents).

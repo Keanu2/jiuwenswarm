@@ -51,6 +51,10 @@ async def serve_worker(socket_path: str, *, host: str, port: int) -> None:
     runtime_task: asyncio.Task | None = None
     beat_task = asyncio.create_task(_beat_loop(beat), name="worker-loop-beat")
     instance = uuid.uuid4().hex
+    # WorkerForceExit means the process must die hard (main logs + SystemExit).
+    # Capture it so finally does not run graceful `_close_worker` and replace it
+    # with CancelledError from ipc server teardown.
+    fatal: WorkerForceExit | None = None
     try:
         while True:
             conn = await server.accept()
@@ -71,6 +75,9 @@ async def serve_worker(socket_path: str, *, host: str, port: int) -> None:
                 await conn.send(holder.last_readiness)
             try:
                 keep_running = await _read_session(conn, dispatcher)
+            except WorkerForceExit as exc:
+                fatal = exc
+                break
             except (OSError, asyncio.IncompleteReadError):
                 logger.info("[Worker] supervisor disconnected; runtime stays resident")
                 await _retire_session(holder, dispatcher)
@@ -83,7 +90,13 @@ async def serve_worker(socket_path: str, *, host: str, port: int) -> None:
     finally:
         beat_task.cancel()
         await asyncio.gather(beat_task, return_exceptions=True)
-        await _close_worker(dispatcher, runtime_task, loaded, server)
+        if fatal is None:
+            try:
+                await _close_worker(dispatcher, runtime_task, loaded, server)
+            except WorkerForceExit as exc:
+                fatal = exc
+    if fatal is not None:
+        raise fatal
 
 
 async def _beat_loop(beat: LoopBeat) -> None:
