@@ -384,6 +384,15 @@
     }
   },
   "settingsPanel": {
+    "voice": {
+      "connectionFailed": "Connection failed. Check the endpoint, API key and model, then try again.",
+      "connectionSuccess": "Model connection verified",
+      "testConnection": "Test model connection",
+      "requiredFields": "Enter the provider endpoint, model and API key before saving.",
+      "description": "Configure microphone input, full-duplex voice and screen sharing.",
+      "screenSharing": "Screen sharing",
+      "screenSharingDescription": "Choose a screen, window or camera when starting full duplex. Your browser asks for permission each time. Turn off to use voice only."
+    },
     "title": "Settings",
     "freeModels": {
       "title": "Free models",
@@ -404,6 +413,7 @@
       "configDescription": "Set the context window and other options for the limited-time free models"
     },
     "categories": {
+      "voice": "Voice",
       "general": "General",
       "models": "Models",
       "agent": "Agent",
@@ -922,7 +932,7 @@
       },
       "task_full_duplex_enabled": {
         "title": "Enable Full-duplex in task chat",
-        "description": "Show a Full-duplex action when the composer is empty; it shares the entire screen and continuously listens to the microphone."
+        "description": "Full-duplex is only available in single-Agent mode; its entry is hidden in swarm/team mode. Show a Full-duplex action when the composer is empty. Start a continuous voice conversation; the switch below controls optional screen sharing."
       },
       "kv_cache_affinity_enabled": {
         "title": "Enable compute affinity",
@@ -1249,6 +1259,21 @@
     }
   },
   "chat": {
+    "recordingInProgress": "Recording. Select Stop to transcribe.",
+    "duplexControls": {
+      "sharingVideo": "WorkSwarm is receiving shared video",
+      "screenOrWindow": "Screen or window",
+      "chooseSourceDescription": "The next step requests browser permission for the selected source. Cancel to return without starting a session.",
+      "chooseSource": "Choose what to share",
+      "muteMic": "Mute microphone",
+      "unmuteMic": "Unmute microphone",
+      "muteSpeaker": "Mute model audio",
+      "unmuteSpeaker": "Unmute model audio",
+      "stopSharing": "Stop screen sharing",
+      "listening": "Listening",
+      "connecting": "Connecting",
+      "exit": "Exit full-duplex voice"
+    },
     "slashPicker": {
       "commands": "Commands",
       "skills": "Skills",
@@ -1332,7 +1357,7 @@
     "agentGroupDeletedDescription": "The Expert Team bound to this conversation has been deleted and can no longer be used. Chat history is still available.",
     "placeholderAgentGroupDeleted": "This Expert Team has been deleted",
     "stop": "Stop",
-    "taskFullDuplexStart": "Share the entire screen and start a Full-duplex conversation",
+    "taskFullDuplexStart": "Start full-duplex voice",
     "taskFullDuplexStarting": "Starting Full-duplex conversation",
     "taskFullDuplexStop": "Stop Full-duplex conversation and screen sharing",
     "modelSelector": {
@@ -4374,7 +4399,8 @@
     "tokenModal": {
       "title": "Connect {{name}}",
       "placeholder": "Paste your {{name}} API Key",
-      "saveAndConnect": "Save and connect"
+      "saveAndConnect": "Save and connect",
+      "oauthAuthorize": "Authorize"
     },
     "cliAuth": {
       "title": "Connect {{name}}",
@@ -4870,6 +4896,7 @@
     "verifyReviewing": "Reviewing…",
     "verifyReviewingShort": "Reviewing",
     "verifyPass": "✓ Pass",
+    "expertIdentity": "Expert: {{name}} ({{template}})",
     "verifyFail": "✗ Fail",
     "verifyUndecided": "? Undecided",
     "verifyThreshold": "Threshold {{count}}",
@@ -4894,7 +4921,7 @@
   "a4pSettings": {
     "title": "A4P pre-authorization",
     "enableTitle": "Enable A4P pre-authorization",
-    "description": "Batch-authorize the multiple permissions an Agent needs for tasks in a session, and pre-authorize permissions for scheduled tasks. Only applies in Default permissions mode."
+    "description": "Pre-authorize permissions needed for the current conversation and scheduled tasks in batches. When enabled, scheduled tasks also use permission approval during execution. Only applies in Default permissions mode."
   },
   "a4pAuthorization": {
     "expandParams": "Expand parameters for {{name}}",

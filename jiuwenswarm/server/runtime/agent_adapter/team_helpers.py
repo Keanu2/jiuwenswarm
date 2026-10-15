@@ -956,9 +956,14 @@ def persist_workflow_runs(
         )
         return
     metadata[_WORKFLOW_RUNS_STATE_KEY] = runs_data
+    fields = {_WORKFLOW_RUNS_STATE_KEY}
     if session_budget is not None:
         metadata[_SESSION_BUDGET_STATE_KEY] = session_budget
-    _enqueue_write(session_id, metadata)
+        fields.add(_SESSION_BUDGET_STATE_KEY)
+    # Synchronous, field-merged: the end-of-turn metadata sync reads disk and
+    # replaces the whole file, so a checkpoint still sitting in the async queue
+    # is rolled back — a completed run then restores as "running 19/19".
+    _enqueue_write(session_id, metadata, sync_write=True, merge_fields=frozenset(fields))
 
 
 def restore_workflow_runs(session_id: str) -> dict[str, WorkflowRunState] | None:
@@ -1019,7 +1024,9 @@ def persist_session_budget(session_id: str, snapshot: dict) -> None:
         )
         return
     metadata[_SESSION_BUDGET_STATE_KEY] = snapshot
-    _enqueue_write(session_id, metadata)
+    _enqueue_write(
+        session_id, metadata, sync_write=True, merge_fields=frozenset({_SESSION_BUDGET_STATE_KEY}),
+    )
 
 
 def restore_session_budget(session_id: str) -> dict | None:
@@ -1046,7 +1053,17 @@ def persist_session_swarmflow_config(session_id: str, config: dict) -> None:
         )
         return
     metadata[_SESSION_SWARMFLOW_CONFIG_KEY] = config
-    _enqueue_write(session_id, metadata)
+    # Synchronous, single-field merge: the agent_group binding that follows on a
+    # first build reads disk (cache_bust) and replaces the whole file, so a config
+    # still sitting in the async queue is lost and the toggle vanishes on the next
+    # session switch. Merging also keeps us from rolling back fields written by
+    # async writers we could not see on disk yet.
+    _enqueue_write(
+        session_id,
+        metadata,
+        sync_write=True,
+        merge_fields=frozenset({_SESSION_SWARMFLOW_CONFIG_KEY}),
+    )
 
 
 def restore_session_swarmflow_config(session_id: str) -> dict | None:
@@ -4746,6 +4763,12 @@ def _wf_spawned_member_event(
         "status": status,
         "workflow_run_id": run_id,
     }
+    # Expert nodes keep the same shape as plain workers (name = script label) and
+    # carry the expert identity alongside, so the roster can show it as a hint
+    # without losing the label — the one thing that tells two calls of one expert apart.
+    if agent.get("agent_template"):
+        event["agent_template"] = agent["agent_template"]
+        event["display_name"] = agent.get("display_name") or agent["agent_template"]
     # Same identity fields the roster uses for real members, so the member
     # list resolves the same avatar as the workflow tree.
     if agent.get("agent_type"):
@@ -5090,6 +5113,18 @@ async def _consume_workflow_events(
             # channel_id 随事件传下去：终态事件在 waiter 已被 cancel 拆除时，
             # broadcast_event 用它走 gateway server-push 兜底投递。
             await _broadcast_event(channel_id, session_id, event)
+
+            if not is_tui and wf.get("budget_exhausted_scope") == "session":
+                await _broadcast_event(
+                    channel_id,
+                    session_id,
+                    {
+                        "event_type": "chat.error",
+                        "session_id": session_id,
+                        "code": "SWARMFLOW_SESSION_BUDGET_EXHAUSTED",
+                        "error": "Session budget exhausted",
+                    },
+                )
 
             # The idle guard may be holding a swallowed team.idle for this
             # session. A pause / stop takes the run out of the active set

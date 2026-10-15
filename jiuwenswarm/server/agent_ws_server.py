@@ -131,7 +131,7 @@ from jiuwenswarm.common.mode_matrix import (
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
     get_permissions_config_req_methods,
 )
-from jiuwenswarm.agents.harness.common.a4p_rpc import get_a4p_req_methods
+from jiuwenswarm.agents.harness.common.a4p.rpc import get_a4p_req_methods
 from jiuwenswarm.common.config import (
     DEFAULT_SANDBOX_POLICY_FILE,
     DEFAULT_SANDBOX_STARTUP_MODE,
@@ -6033,7 +6033,7 @@ class AgentWebSocketServer:
         send_lock: asyncio.Lock,
     ) -> None:
         """Handle a4p.* requests forwarded from the Web User Authorizer."""
-        from jiuwenswarm.agents.harness.common.a4p_rpc import dispatch_a4p_request
+        from jiuwenswarm.agents.harness.common.a4p.rpc import dispatch_a4p_request
 
         resp = await dispatch_a4p_request(request)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -6695,11 +6695,13 @@ class AgentWebSocketServer:
 
         team_manager = get_team_manager(channel_id)
         metadata_team_name = ""
+        live_team_name = ""
         if session_id:
             session_info = team_manager.get_runtime_team_snapshot().get(session_id)
             if session_info:
+                live_team_name = str(session_info.get("team_name") or "").strip()
                 _upsert(
-                    str(session_info.get("team_name") or ""),
+                    live_team_name,
                     state="running" if session_info.get("state") == "active" else "pending",
                     source="manager",
                 )
@@ -6721,9 +6723,17 @@ class AgentWebSocketServer:
                     source="metadata",
                 )
 
+        # ``team_name`` reaches session metadata only when the team runtime
+        # becomes ready (sync_team_identity_metadata). During the first-turn
+        # assembly window the session's own team is already listed via the
+        # TeamManager markers above; without the live-binding fallback every
+        # team would answer is_owner=false and the Web conversation view would
+        # flip to the empty team panel until the next poll. Metadata stays
+        # authoritative once it has been persisted.
+        owner_team_name = metadata_team_name or live_team_name
         for entry in entries.values():
             entry["is_owner"] = bool(
-                metadata_team_name and entry["team_id"] == metadata_team_name
+                owner_team_name and entry["team_id"] == owner_team_name
             )
             if not entry.get("organization_id"):
                 org_id = self._lookup_session_org_binding(session_id, entry["team_id"])
@@ -11405,7 +11415,7 @@ class AgentWebSocketServer:
             if reload_scopes:
                 reload_kwargs["reload_scopes"] = reload_scopes
             if isinstance(config_payload, dict) and "a4p" in config_payload:
-                from jiuwenswarm.agents.harness.common.a4p_runtime import (
+                from jiuwenswarm.agents.harness.common.a4p.runtime import (
                     get_a4p_config,
                 )
 

@@ -829,6 +829,92 @@ class TestAgentGroupLifecycle:
         assert after["source"] == "builtin"
         assert after["installed"] is False
 
+    def test_builtin_shelf_groups_install_once_on_startup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        extension_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        source_workspace = tmp_path / "resource-home" / "agent" / "workspace"
+        resource_package = _seed_valid_agent_group(
+            source_workspace, "designer", under="resources"
+        )
+        monkeypatch.setattr(
+            catalog,
+            "get_equipment_resources_agent_groups_dir",
+            lambda: resource_package.parent,
+        )
+
+        assert catalog.ensure_builtin_agent_groups_installed() == ["designer"]
+        installed_copy = (
+            extension_workspace.parent.parent
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "built_in"
+            / "designer"
+        )
+        assert installed_copy.is_dir()
+        assert catalog.resolve_agent_group_dir("designer") == installed_copy.resolve()
+        assert catalog.show_agent_group("designer")["installed"] is True
+
+        # Second start: already seeded, user edits preserved, nothing re-copied.
+        marker = installed_copy / "USER_EDIT.md"
+        marker.write_text("keep", encoding="utf-8")
+        assert catalog.ensure_builtin_agent_groups_installed() == []
+        assert marker.read_text(encoding="utf-8") == "keep"
+
+    def test_builtin_shelf_uninstall_is_respected_on_next_start(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        extension_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        source_workspace = tmp_path / "resource-home" / "agent" / "workspace"
+        resource_package = _seed_valid_agent_group(
+            source_workspace, "designer", under="resources"
+        )
+        monkeypatch.setattr(
+            catalog,
+            "get_equipment_resources_agent_groups_dir",
+            lambda: resource_package.parent,
+        )
+
+        assert catalog.ensure_builtin_agent_groups_installed() == ["designer"]
+        installed_copy = (
+            extension_workspace.parent.parent
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "built_in"
+            / "designer"
+        )
+        assert installed_copy.is_dir()
+
+        catalog.uninstall_agent_group({"id": "designer"})
+        assert catalog.ensure_builtin_agent_groups_installed() == []
+        assert not installed_copy.exists()
+
+    def test_builtin_shelf_install_skips_broken_package_without_raising(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        extension_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        shelf = tmp_path / "shelf"
+        (shelf / "broken").mkdir(parents=True)
+        (shelf / "broken" / "manifest.json").write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(
+            catalog, "get_equipment_resources_agent_groups_dir", lambda: shelf
+        )
+
+        assert catalog.ensure_builtin_agent_groups_installed() == []
+        assert not (
+            extension_workspace.parent.parent
+            / ".agent_teams"
+            / AGENT_GROUPS
+            / "built_in"
+            / "broken"
+        ).exists()
+
     @pytest.mark.parametrize("unsafe_kind", ["traversal", "symlink"])
     def test_import_group_archive_rejects_unsafe_members(
         self,

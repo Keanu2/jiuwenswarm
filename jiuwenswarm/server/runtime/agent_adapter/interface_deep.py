@@ -427,7 +427,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context
     TOOL_PERMISSION_CHANNEL_ID,
     TOOL_PERMISSION_REQUEST_ID,
 )
-from jiuwenswarm.agents.harness.common.a4p_execution_context import (
+from jiuwenswarm.agents.harness.common.a4p.execution_context import (
     AUTHORIZATION_EXECUTION_CONTEXTS,
     build_authorization_execution_context,
 )
@@ -6828,7 +6828,7 @@ class JiuWenSwarmDeepAdapter:
         session_id: str | None,
     ) -> None:
         """Expose A4P only when this session has an interactive Web authorizer."""
-        from jiuwenswarm.agents.harness.common.a4p_runtime import is_a4p_enabled
+        from jiuwenswarm.agents.harness.common.a4p.runtime import is_a4p_enabled
         from jiuwenswarm.agents.harness.common.tools.a4p_tools import get_tools
 
         execution_context = AUTHORIZATION_EXECUTION_CONTEXTS.get(session_id)
@@ -10169,11 +10169,19 @@ class JiuWenSwarmDeepAdapter:
             )
         return rails
 
+    def _skip_cron_permission_rail(self, config_base: dict[str, Any] | None) -> bool:
+        """Cron uses ordinary permission rules only while A4P is enabled."""
+        if not getattr(self, "_is_cron_execution", False):
+            return False
+        from jiuwenswarm.agents.harness.common.a4p.runtime import is_a4p_enabled
+
+        return not is_a4p_enabled(config_base or {})
+
     def _permission_interrupt_rail_infos(
         self, config_base: dict[str, Any],
     ) -> list[_RailBuildInfo]:
-        """Non-Smart/Code recipe; Smart uses the shared group, cron has no rail."""
-        if self._is_cron_execution:
+        """Non-Smart/Code recipe, including cron when A4P is enabled."""
+        if self._skip_cron_permission_rail(config_base):
             logger.info(
                 "[JiuWenSwarmDeepAdapter] skip PermissionInterruptRail for cron session %s",
                 self._parent_session_id,
@@ -10367,7 +10375,7 @@ class JiuWenSwarmDeepAdapter:
         detached_rail: Any | None = None,
     ) -> None:
         """Drop a manual rail from the running instance when permissions turn off."""
-        if self._is_cron_execution or not self._permissions_explicitly_disabled(config_base):
+        if not (self._skip_cron_permission_rail(config_base) or self._permissions_explicitly_disabled(config_base)):
             return
         if isinstance(config_base, dict) and self._uses_smart_permission_lifecycle(config_base):
             return
@@ -10390,7 +10398,8 @@ class JiuWenSwarmDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        if self._is_cron_execution:
+        if self._skip_cron_permission_rail(config_base):
+            self._permission_rail = None
             logger.info(
                 "[JiuWenSwarmDeepAdapter] skip PermissionInterruptRail hot-update "
                 "for cron session %s",
@@ -10783,7 +10792,7 @@ class JiuWenSwarmDeepAdapter:
         after ``configure()``; this method gives the permission rail the same
         treatment.
 
-        Idempotent: skips cron sessions, sessions without a built rail, and
+        Idempotent: skips cron sessions without A4P, sessions without a built rail, and
         sessions whose instance has the rail already on the registered chain.
         On ``register_rail()`` failure it logs a warning without clearing
         ``_permission_rail`` so the next reload retries the same registration.
@@ -10793,7 +10802,7 @@ class JiuWenSwarmDeepAdapter:
             # Smart reloads publish a complete PermissionRailGroup atomically;
             # this helper owns only the legacy single-rail configure path.
             return
-        if getattr(self, "_is_cron_execution", False):
+        if self._skip_cron_permission_rail(config_base):
             return
         rail = getattr(self, "_permission_rail", None)
         if rail is None or self._instance is None:
@@ -14218,6 +14227,18 @@ class JiuWenSwarmDeepAdapter:
         request: AgentRequest,
         inputs: dict[str, Any],
     ) -> dict[str, Any]:
+        from jiuwenswarm.extensions.video_duplex.backend.conversation_context import sync_conversation_context
+
+        rail = getattr(self, "_voice_agent_task_rail", None)
+        bindings = getattr(rail, "managed_tasks", {})
+        binding = bindings.get(request.session_id)
+        if (binding is not None and binding.request_id != request.request_id
+                and not (request.channel_id == "video_tool"
+                         and isinstance(inputs.get("query"), InteractiveInput))):
+            raise RuntimeError("全双工工具任务正在执行，请等待任务完成后再发送文字消息。")
+        # An interrupt resume must preserve the pending assistant/tool ordering.
+        if not isinstance(inputs.get("query"), InteractiveInput):
+            await sync_conversation_context(self._instance, request.session_id)
         if not self._enable_auto_permission:
             await self._discard_pending_core_interrupt_for_fresh_input(request, inputs)
             return inputs

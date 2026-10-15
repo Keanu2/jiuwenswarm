@@ -497,6 +497,14 @@ function devFileContentApi(): Plugin {
   const agentTeamsRootDir = path.resolve(projectRootDir, '.agent_teams')
   const webLogsRootDir = path.resolve(workspaceRootDir, '.logs')
   const autoHarnessDir = path.resolve(projectRootDir, 'auto-harness')
+  // Projectless tasks (no bound project_dir) write generated media under
+  // <Documents>/JiuwenSwarm/<date>/chat-<n>/outputs/ (see
+  // jiuwenswarm/common/projectless_workspace.py::get_projectless_tasks_dir) --
+  // outside workspaceRootDir, so it needs its own allowed-root entry or any
+  // @-referenced or inline-rendered media from a projectless task 403s here.
+  const projectlessTasksDir = path.resolve(
+    (process.env.JIUWENSWARM_TASKS_DIR || '').trim() || path.join(os.homedir(), 'Documents', 'JiuwenSwarm'),
+  )
   const generateAgentFoldersScriptPath = path.resolve(__dirname, '../../../scripts/generate-agent-folders.js')
   // dev 模式默认开启调试视图，与“前端 dev 即调试模式”一致。
   let wsDisableCompress = true
@@ -634,7 +642,10 @@ function devFileContentApi(): Plugin {
     const inWebLogs = !relativeLogsPath.startsWith('..') && !path.isAbsolute(relativeLogsPath)
     const relativeAutoHarnessPath = path.relative(autoHarnessDir, targetPath)
     const inAutoHarness = !relativeAutoHarnessPath.startsWith('..') && !path.isAbsolute(relativeAutoHarnessPath)
-    return inWorkspace || inAgentTeams || inWebLogs || inAutoHarness
+    const relativeProjectlessTasksPath = path.relative(projectlessTasksDir, targetPath)
+    const inProjectlessTasks =
+      !relativeProjectlessTasksPath.startsWith('..') && !path.isAbsolute(relativeProjectlessTasksPath)
+    return inWorkspace || inAgentTeams || inWebLogs || inAutoHarness || inProjectlessTasks
       || registeredProjectDirs().some((dir) => isInsideRoot(dir, targetPath))
   }
 

@@ -193,6 +193,7 @@ import { DESIGNER_REF_MAX_INLINE_BYTES } from '../../features/designer/designerR
 import { ContextUsageIndicator } from './ContextUsageIndicator';
 import { isImeCompositionKey } from './imeComposition';
 import { useTaskAsr } from '../../features/taskAsr/useTaskAsr';
+import { RecordingWaveform } from '../../features/taskAsr/RecordingWaveform';
 import { useTaskAsrEnabled } from '../../features/taskAsr/featureFlag';
 import { ApplicationPluginTaskInputActions } from '../../applicationPlugins/ApplicationPluginOutlet';
 
@@ -1506,6 +1507,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const {
     isRecording: isListening,
     isTranscribing,
+    audioLevel,
     isSupported: taskAsrSupported,
     toggleRecording,
   } = useTaskAsr({
@@ -1608,9 +1610,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const releaseUnsentUploads = useCallback((drafts: AttachmentDraft[]) => {
     const removingIds = new Set(drafts.map((draft) => draft.id));
     const remaining = attachmentsRef.current.filter((draft) => !removingIds.has(draft.id));
+    const registeredPaths = new Set(sessionAssetsRef.current.map((asset) => normalizePath(asset.path)));
     const plan = planUnsentImageDiscard(
       drafts.map(toUnsentImageDraft),
       remaining.map(toUnsentImageDraft),
+      registeredPaths,
+      normalizePath,
     );
     const sessionId = activeSessionId || '';
     for (const id of plan.pendingIds) {
@@ -2493,7 +2498,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   );
 
   const handleSubmit = useCallback(() => {
-    if (composerDisabled) return;
+    if (composerDisabled || isListening || isTranscribing) return;
 
     // 用富文本（含 chip 标记）作为发送内容，气泡可交织渲染技能
     const richContent = extractRichContent();
@@ -2618,6 +2623,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     hasUploadingAttachments,
     hasAttachmentErrors,
     composerDisabled,
+    isListening,
+    isTranscribing,
     isInterruptible,
     onSubmit,
     onForkSession,
@@ -2646,7 +2653,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const hasReadyMedia = readyMediaItems.length > 0;
   const canSubmit =
     showStop ||
-    (!composerDisabled &&
+    (!composerDisabled && !isListening && !isTranscribing &&
       (hasTextDraft || hasReadyMedia) &&
       !isLoadingHistory &&
       !isImageInterruptBlocked &&
@@ -2666,7 +2673,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const fullDuplexActionEligible =
     !showStop &&
     !composerDisabled &&
-    !hasTextDraft &&
     attachments.length === 0 &&
     !isListening &&
     !isTranscribing &&
@@ -5004,11 +5010,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
                 {(isAgentMode || isTeamMode) && <ContextUsageIndicator />}
 
-                <ChatModelSelector
+                {isListening ? <RecordingWaveform level={audioLevel} /> : <ChatModelSelector
                   disabled={
                     isProcessing || composerDisabled || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)
                   }
-                />
+                />}
 
                 {taskAsrEnabled && <button
                   type="button"
@@ -5019,7 +5025,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     isListening && 'chat-input-btn--recording',
                     (composerDisabled || isTranscribing || !taskAsrSupported) && 'chat-input-btn--disabled',
                   )}
-                  aria-label={isListening ? t('chat.stopRecording') : t('chat.startRecording')}
+                  aria-label={isTranscribing ? t('chat.transcribing') : isListening ? t('chat.stopRecording') : t('chat.startRecording')}
                   aria-pressed={isListening}
                   data-tooltip={
                     isTranscribing
@@ -5039,6 +5045,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       strokeWidth={1.8}
                       aria-hidden="true"
                     />
+                  ) : isListening ? (
+                    <Square className="chat-input-btn-icon" fill="currentColor" strokeWidth={1.8} aria-hidden="true" />
                   ) : (
                     <Mic className="chat-input-btn-icon" strokeWidth={1.8} aria-hidden="true" />
                   )}
@@ -5047,6 +5055,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
                 <ApplicationPluginTaskInputActions
                   eligible={fullDuplexActionEligible && !isTeamMode}
+                  hasTextDraft={hasTextDraft}
                   sessionId={activeSessionId}
                   ensureSession={onEnsureSession}
                   labels={{

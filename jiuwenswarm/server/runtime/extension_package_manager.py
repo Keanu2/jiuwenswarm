@@ -4122,6 +4122,42 @@ def install_agent_group(params: dict) -> None:
     )
 
 
+def ensure_builtin_agent_groups_installed() -> list[str]:
+    """Install every AgentGroup shipped on the packaged shelf that was never seeded.
+
+    Runs at service start so a shipped group is selectable without a manual
+    install. A shelf package is seeded once per home (recorded in
+    ``.builtin_seeded``); an explicit uninstall is respected on later starts
+    instead of being undone by the next startup. A broken shelf entry is
+    logged, never raised, so one bad package cannot block startup; a local
+    package of the same name wins.
+    """
+    marker_path = _kind_root(_AGENT_GROUP_KIND) / ".builtin_seeded"
+    try:
+        seeded = set(marker_path.read_text(encoding="utf-8").split())
+    except OSError:
+        seeded = set()
+    installed: list[str] = []
+    for resource_dir in _iter_resource_package_dirs(_AGENT_GROUP_KIND):
+        package_id = resource_dir.name
+        if package_id in seeded:
+            continue
+        try:
+            if _package_dir_if_present(_local_root(_AGENT_GROUP_KIND), package_id):
+                continue
+            if not is_agent_group_installed(package_id):
+                install_agent_group({"id": package_id})
+                installed.append(package_id)
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            with marker_path.open("a", encoding="utf-8") as stream:
+                stream.write(f"{package_id}\n")
+        except Exception as exc:  # noqa: BLE001 - one bad shelf package must not block startup
+            logger.warning("builtin agent_group %r not installed: %s", package_id, exc)
+            continue
+        seeded.add(package_id)
+    return installed
+
+
 async def install_agent_group_with_hub(
     params: dict, *, hub_port: HubAssetPort | None = None, downloader: Any = None
 ) -> None:

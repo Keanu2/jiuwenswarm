@@ -27,6 +27,9 @@ interface TeamMember {
   mode?: string;
   role?: string;
   cli_agent?: string | null;
+  workflow_run_id?: string;
+  agent_template?: string | null;
+  display_name?: string | null;
 }
 
 interface TeamTaskEvent {
@@ -750,6 +753,10 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
         mode: pickString(event, ['mode']) || knownMember?.mode || undefined,
         role: pickString(event, ['role']) || knownMember?.role || undefined,
         cli_agent: pickString(event, ['cli_agent']) || knownMember?.cli_agent || undefined,
+        // 镜像 worker 的头像键与专家身份都靠这两个字段；丢了就退回 run 作用域 id 的哈希插画
+        workflow_run_id: pickString(event, ['workflow_run_id']) || knownMember?.workflow_run_id || undefined,
+        agent_template: pickString(event, ['agent_template']) || knownMember?.agent_template || undefined,
+        display_name: pickString(event, ['display_name']) || knownMember?.display_name || undefined,
       });
       continue;
     }
