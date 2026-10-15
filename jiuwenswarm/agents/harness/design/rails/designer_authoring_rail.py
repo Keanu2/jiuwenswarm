@@ -51,8 +51,7 @@ _PROMPT_CN = """# 画布建图（designer_graph_autorun）
 
 用户提出**全新的创作需求**（如"帮我做一个关于X的视频/广告/故事"）时调用：
 
-- `prompt`：用户的完整创作需求原文（或整理后的完整需求）——它是六步导演链的创意输入。
-- `optimize_for`：quality（默认）或 cost。
+- `prompt`：用户的完整创作需求原文（或整理后的完整需求）——它是导演链的创意输入。用户在需求里写的画幅/分辨率/时长会被识别并写入画布设置。
 
 服务端会按导演链建图（分析→写创意简报→审核→写分镜→审核→生成执行图→校验），产出带完整锁体系的图并推送到画布。调用约定：
 
@@ -66,8 +65,7 @@ _PROMPT_CN = """# 画布建图（designer_graph_autorun）
 _PROMPT_EN = """# Canvas authoring (designer_graph_autorun)
 
 Call this when the user brings a FRESH creative request ("make a video about
-X"). Pass the user's complete request as ``prompt`` (quality/cost via
-``optimize_for``). The Director chain runs server-side (analyze → brief →
+X"). Pass the user's complete request as ``prompt``. The Director chain runs server-side (analyze → brief →
 review → storyboard → review → execution graph → validate), saves the
 composed graph to the canvas, and the tool returns a structure summary.
 
@@ -75,9 +73,30 @@ On success, IMMEDIATELY call ``designer_run_graph`` (no args) to start the
 run — do not ask first; tell the user the graph is built, execution has
 started and progress is on the canvas. Only hold off when the user has
 explicitly said not to run yet. Report the structure briefly (roles/scenes/
-shots). Do NOT hand-assemble whole graphs with graph_patch; patch is for
+clips). Do NOT hand-assemble whole graphs with graph_patch; patch is for
 small user-driven edits only.
 """
+
+
+def _retitle_session(session_id: str, graph: dict[str, Any], prompt: str) -> None:
+    """Name the session after the model's short story title, never the prompt."""
+    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+    from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
+
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    title = usable_story_title(analysis.get("story_name"), prompt)
+    if not title:
+        return
+    try:
+        update_session_metadata(
+            session_id=session_id,
+            title=title,
+            touch_last_message_at=False,
+            sync_write=True,
+        )
+    except Exception:  # noqa: BLE001 — a title is cosmetic
+        logger.debug("[DesignerAuthoringRail] session retitle failed", exc_info=True)
 
 
 class DesignerAuthoringRail(DeepAgentRail):
@@ -129,15 +148,17 @@ class DesignerAuthoringRail(DeepAgentRail):
 
         async def _autorun(**kwargs: Any) -> str:
             prompt = str(kwargs.get("prompt") or "").strip()
-            optimize_raw = str(kwargs.get("optimize_for") or "").strip().lower()
-            optimize_for = "cost" if optimize_raw == "cost" else "quality"
-            if not prompt:
-                return "prompt is required"
             store = DesignerGraphStore()
             graph = store.get_graph(self._graph_id)
             if graph is None:
                 return "error: designer graph not found"
             context = get_design_context_registry().get(self._session_id)
+            if context is not None and context.spawner is not None and context.spawner.report_pending:
+                from jiuwenswarm.agents.harness.design.rails.designer_execution_rail import (
+                    REPORT_ONLY_REFUSAL,
+                )
+
+                return REPORT_ONLY_REFUSAL
             channel_id = (
                 context.channel_id if context is not None and context.channel_id else "web"
             )
@@ -162,12 +183,12 @@ class DesignerAuthoringRail(DeepAgentRail):
                     composed = await run_director_chain(
                         graph,
                         prompt=prompt,
-                        optimize_for=optimize_for,
                         on_stage=_stage_emitter(channel_id, self._session_id),
                     )
             except DirectorChainError as exc:
                 return f"error: {exc.user_message}"
             saved = store.save_graph(composed)
+            _retitle_session(self._session_id, saved, prompt)
             # The chat surface is async (accept-and-trigger): nothing else
             # tells the canvas the composed graph exists — the tool pushes it.
             push_graph_update(channel_id, self._session_id, dict(saved))
@@ -190,8 +211,7 @@ class DesignerAuthoringRail(DeepAgentRail):
             description=(
                 "按导演链自动建图（分析→写创意简报→审核→写分镜→审核→生成执行图→校验）。"
                 "用户提出全新的创作需求时用这个工具，不要自己手拼 graph_patch 建整图；"
-                "graph_patch 只用于用户要求的小改。参数：prompt=用户的完整创作需求原文；"
-                "optimize_for=quality|cost（默认 quality）。"
+                "graph_patch 只用于用户要求的小改。参数：prompt=用户的完整创作需求原文。"
             ),
             input_params={
                 "type": "object",
@@ -199,11 +219,6 @@ class DesignerAuthoringRail(DeepAgentRail):
                     "prompt": {
                         "type": "string",
                         "description": "用户的完整创作需求（原话或整理后的需求），将作为建图的创意输入",
-                    },
-                    "optimize_for": {
-                        "type": "string",
-                        "enum": ["quality", "cost"],
-                        "description": "优化目标，默认 quality",
                     },
                 },
                 "required": ["prompt"],

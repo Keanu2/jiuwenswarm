@@ -659,7 +659,7 @@ export function withPredecessorInput(
 }
 
 export type UserCanvasEdit = {
-  op: 'add' | 'remove' | 'connect' | 'disconnect' | 'replace' | 'run';
+  op: 'add' | 'remove' | 'connect' | 'disconnect' | 'replace';
   node_id: string;
   peer_id?: string;
   label?: string;
@@ -697,7 +697,6 @@ const CANVAS_EDIT_OPS = new Set<UserCanvasEdit['op']>([
   'connect',
   'disconnect',
   'replace',
-  'run',
 ]);
 
 /** Latest canvas edit op. The visible sentence lives in designer.canvasEdit i18n. */

@@ -1,13 +1,16 @@
 {
-  "version": "1.0.0",
   "package_type": "agent_template",
-  "name": "designer-leader",
-  "description": "设计主编：对话理解意图，编辑设计图，把关提示词",
-  "persona": {
-    "dir": "./persona"
-  },
+  "name": "leader",
   "display_name": {
-    "zh": "设计主编",
-    "en": "Design Director"
+    "zh": "设计团长",
+    "en": "Design Lead"
+  },
+  "description": "查看整张设计执行图，不执行具体画布节点。",
+  "persona": {
+    "dir": "persona"
+  },
+  "metadata": {
+    "node_type": null,
+    "tools": []
   }
 }

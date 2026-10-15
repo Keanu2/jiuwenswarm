@@ -12,10 +12,6 @@ import { parseChatRoute } from '../multi-session/routing/route';
 export const PROJECT_SESSION_PAGE_SIZE = 10;
 const DEFAULT_PROJECT_ID = 'default';
 const DEFAULT_CODE_PROJECT_ID = 'default_code';
-// Backend attribute_session_project files project-less design sessions under
-// 'default_design' (work_mode.py) — the synthetic design node must query the
-// same id or those sessions never appear in the sidebar.
-const DEFAULT_DESIGN_PROJECT_ID = 'default_design';
 
 function normalizeProject(project: ProjectInfo, fallbackWorkMode: WorkMode): ProjectInfo {
   return {
@@ -92,8 +88,7 @@ function findProject(projects: ProjectInfo[], projectId: string): ProjectInfo | 
 function isDefaultProject(project: ProjectInfo): boolean {
   return project.is_default
     || project.project_id === DEFAULT_PROJECT_ID
-    || project.project_id === DEFAULT_CODE_PROJECT_ID
-    || project.project_id === DEFAULT_DESIGN_PROJECT_ID;
+    || project.project_id === DEFAULT_CODE_PROJECT_ID;
 }
 
 // 默认项目节点由后端按固定中文文案实时生成、不入库也不可重命名，
@@ -104,7 +99,7 @@ export function getProjectDisplayName(project: ProjectInfo): string {
 
 function designDefaultProject(): ProjectInfo {
   return {
-    project_id: DEFAULT_DESIGN_PROJECT_ID,
+    project_id: DEFAULT_PROJECT_ID,
     name: i18n.t('multiSession.project.defaultProjectName'),
     project_dir: '',
     pinned: false,

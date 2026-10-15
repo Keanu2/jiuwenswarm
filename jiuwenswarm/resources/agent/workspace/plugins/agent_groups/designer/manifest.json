@@ -1,17 +1,20 @@
 {
-  "version": "1.0.0",
   "package_type": "agent_group",
   "name": "designer",
-  "description": "设计画布团队：leader 与用户对话并编辑设计图；worker 角色模板（分镜/角色/场景/关键帧/镜头/文本）由 swarmflow 按节点 agent_template 调度",
-  "instruction": "这是设计画布（Design Canvas）团队。leader 是设计主编：与用户对话理解创作意图，用 designer_graph_get / designer_graph_patch 工具读取和编辑设计图，图结构变更后询问用户是否开始执行。团队成员是画布节点的执行者，由服务侧按需调度，leader 不直接指挥成员。",
+  "display_name": {
+    "zh": "设计专家团",
+    "en": "Design Experts"
+  },
+  "description": "JiuwenDesign 画布节点使用的专家团。团长不执行节点。",
+  "instruction": "这是设计画布的专家团。每个画布节点只由同名成员执行一次。团长负责看整张图，不代替成员交节点产物。",
   "agents": [
     "leader",
-    "teammate",
-    "storyboard",
+    "brief",
     "character",
     "scene",
-    "frame",
+    "storyboard",
     "clip",
-    "text"
-  ]
+    "compose"
+  ],
+  "skills": []
 }

@@ -9,7 +9,7 @@ worker tools never inherited):
 * **text guarantee** — a node that ends with text but no ``output_ref`` gets
   its text written to the workspace and a file ref stamped (the old
   ``node_complete`` contract; without it the canvas cell stays empty);
-* **media materialization** — a node that expects media (clip/frame/scene/…)
+* **media materialization** — a node that expects media (clip/character/scene/…)
   whose result lacks the required family gets the media materialized by the
   node handler — the SAME ``handlers/*`` generation backends the package's
   ``generate_image`` / ``generate_video`` tools call, so there is one
@@ -77,18 +77,46 @@ class MediaGuaranteeBackend:
         *,
         call_key: str | None = None,
     ) -> AgentResult:
-        result = await self._inner.run(prompt, opts, schema_json, call_key=call_key)
+        node_id = str(opts.get("label") or "")
+        member_call = schema_json is not None and bool(node_id)
         try:
-            await self._enforce(opts, result)
+            result = await self._inner.run(prompt, opts, schema_json, call_key=call_key)
+        except Exception as exc:
+            if not member_call:
+                raise
+            # The engine retries a raising call, and every retry re-runs the
+            # member's paid generation: a member call ends here instead.
+            receipt = self._receipt(node_id)
+            if receipt is not None:
+                return receipt
+            self._bridge.mark_node_failed(node_id, str(exc) or "member worker failed")
+            return AgentResult(text=None, skipped=True)
+        try:
+            await self._enforce(opts, result, member_call=member_call)
         except _MediaGuaranteeDeclined:
             return AgentResult(text=None, skipped=True)
+        if member_call:
+            # The receipt comes from the Store write, never the worker's own
+            # structured_output (a malformed one would trigger a retry).
+            return self._receipt(node_id) or result
         return result
+
+    def _receipt(self, node_id: str) -> AgentResult | None:
+        produced = self._bridge.produced_for(node_id)
+        if produced is None or not produced.get("output_ref"):
+            return None
+        receipt: dict[str, Any] = {"output_ref": produced["output_ref"]}
+        if produced.get("output_refs"):
+            receipt["output_refs"] = produced["output_refs"]
+        return AgentResult(text=str(produced.get("text") or ""), structured=receipt)
 
     # ------------------------------------------------------------------
     # the old host guarantees (node_agent post-turn block, 52469f4c)
     # ------------------------------------------------------------------
 
-    async def _enforce(self, opts: dict, result: AgentResult) -> None:
+    async def _enforce(
+        self, opts: dict, result: AgentResult, *, member_call: bool = False
+    ) -> None:
         from jiuwenswarm.server.runtime.designer.node_agent import (
             _node_expects_media,
             _result_satisfies_required_media,
@@ -115,13 +143,25 @@ class MediaGuaranteeBackend:
         # submission.
         ref_field = "candidate_output_ref" if self._bridge.single else "output_ref"
         refs_field = "candidate_output_refs" if self._bridge.single else "output_refs"
-        agent_result = NodeResult(
-            output_ref=state.get(ref_field),
-            output_refs=state.get(refs_field),
-            message=str(
-                result.text or state.get("text") or state.get("candidate_text") or ""
-            ),
-        )
+        if member_call:
+            # Member nodes write their product through submit_node_output; only
+            # THIS trigger's write counts (state may still hold an older
+            # run's refs), and the worker's final text is its receipt, never
+            # a creative prompt for the handler.
+            produced = self._bridge.produced_for(node_id) or {}
+            agent_result = NodeResult(
+                output_ref=produced.get("output_ref"),
+                output_refs=produced.get("output_refs"),
+                message=str(produced.get("text") or ""),
+            )
+        else:
+            agent_result = NodeResult(
+                output_ref=state.get(ref_field),
+                output_refs=state.get(refs_field),
+                message=str(
+                    result.text or state.get("text") or state.get("candidate_text") or ""
+                ),
+            )
         ctx = NodeExecutionContext(
             graph=self._graph,
             run_id=str(self._run.get("run_id") or ""),
@@ -134,6 +174,16 @@ class MediaGuaranteeBackend:
             agent_result, node, ctx
         ):
             await self._materialize_media(node, agent_result, ctx)
+            return
+
+        # A text member that never submitted has no product: its final
+        # message is a receipt, not the brief / storyboard.
+        if member_call:
+            if agent_result.output_ref is None:
+                message = f"node {node_id} finished without submit_node_output"
+                logger.warning("[design-guarantee] %s", message)
+                self._bridge.mark_node_failed(node_id, message)
+                raise _MediaGuaranteeDeclined()
             return
 
         # Text guarantee: text landed but no product ref → write it to the

@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { generateUuidV4 } from '../../utils/uuid';
-import type { ToolCall, ToolResult } from '../../types';
 import type { DesignerExecutionGraph } from './executionGraphTypes';
 import {
   extractDesignerGraphPrompt,
@@ -18,12 +17,7 @@ export type DesignerChatMessageKind =
   | 'bootstrap_error'
   | 'chat_ack'
   | 'chat_error'
-  | 'not_implemented'
-  | 'tool_call'
-  | 'tool_result'
-  | 'reasoning'
-  | 'ask_user'
-  | 'event';
+  | 'not_implemented';
 
 export type DesignerChatMessage = {
   id: string;
@@ -32,8 +26,6 @@ export type DesignerChatMessage = {
   kind: DesignerChatMessageKind;
   createdAt: number;
   references?: DesignerStoredReference[];
-  toolCall?: ToolCall;
-  toolResult?: ToolResult;
 };
 
 export type DesignerBootstrapPhase = 'idle' | 'thinking' | 'bootstrapping' | 'done' | 'error';
@@ -50,8 +42,6 @@ type DesignerChatStore = {
     id?: string;
     createdAt?: number;
   }) => string;
-  /** 同 id 覆盖（流式 delta 累积用）；id 不存在时等价 appendMessage。 */
-  upsertMessage: (message: DesignerChatMessage) => void;
   removeMessage: (id: string) => void;
   setBootstrapPhase: (phase: DesignerBootstrapPhase) => void;
   ensureGraphPrompt: (graph: DesignerExecutionGraph | null | undefined, options?: {
@@ -140,19 +130,6 @@ export const useDesignerChatStore = create<DesignerChatStore>((set, get) => ({
       return { messages: next, messagesByGraphId };
     });
     return id;
-  },
-
-  upsertMessage: (message) => {
-    set((state) => {
-      const exists = state.messages.some((item) => item.id === message.id);
-      const next = exists
-        ? state.messages.map((item) => (item.id === message.id ? { ...message } : item))
-        : [...state.messages, { ...message }];
-      const messagesByGraphId = state.activeGraphId
-        ? { ...state.messagesByGraphId, [state.activeGraphId]: next }
-        : state.messagesByGraphId;
-      return { messages: next, messagesByGraphId };
-    });
   },
 
   removeMessage: (id) =>

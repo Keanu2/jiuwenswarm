@@ -2,14 +2,14 @@
 """Build prompt-aware Designer graphs from cast/shot analysis.
 
 Quality layout (default, forward-only):
-  Brief → Storyboard → solo cast sheets
+  Brief → Storyboard → character spec sheets
   → Scene specs per setting_id (room only, no people)
-  → Shots-as-shots: every shot is Wan R2V from on-screen solos plus that empty plate
+  → Clips: every clip is Wan R2V from on-screen character specs plus scene specs
   → optional Speech/Music → Film (ffmpeg assemble)
 
-``scene_continuity_mode = scene_card_plus_clip_shots``. Solo sheets are identity
-locks. Director prunes any node that cannot reach ``n_compose`` and re-edits
-Brief / Storyboard / locks afterward.
+``scene_consistency_mode = scene_specs_plus_clips``. Character spec sheets are
+identity locks. Director prunes any node that cannot reach ``n_compose`` and
+re-edits Brief / Storyboard / locks afterward.
 """
 
 from __future__ import annotations
@@ -21,10 +21,9 @@ from jiuwenswarm.common.schema.designer_graph import (
     EDGE_KIND_DATA,
     GRAPH_SOURCE_PROMPT,
     NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CHARACTER,
     NODE_ROLE_CLIP,
     NODE_ROLE_COMPOSE,
-    NODE_ROLE_FRAME,
     NODE_ROLE_SCENE,
     NODE_ROLE_STORYBOARD,
     NODE_TYPE_IMAGE,
@@ -41,18 +40,6 @@ from jiuwenswarm.common.schema.designer_graph import (
 from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
 
 _MAX_SPLIT_CHARS = 12
-_IMAGE_SIZE = "1K"  # cost-save: ~1024 class, not 2K/4K
-
-
-def _duration_sec_for_graph(prompt: str, analysis: dict[str, Any], characters: list[dict[str, Any]]) -> int:
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
-        film_duration_for_graph,
-    )
-
-    stamped = film_duration_for_graph(prompt, analysis)
-    if stamped >= 1:
-        return stamped
-    return max(6, min(24, max(1, len(characters)) * 3 + 4))
 
 
 def default_spatial_lock(scene: dict[str, Any] | None = None) -> dict[str, str]:
@@ -68,9 +55,10 @@ def default_spatial_lock(scene: dict[str, Any] | None = None) -> dict[str, str]:
             "Never invent an empty environment plate; never borrow architecture from another setting_id."
         ),
         "crowd_rule": (
-            "No scene specs. Scene master prompt + solos define the scene. Later "
-            "same-setting keyframes reuse the scene specs; keep extras silhouette unless "
-            "storyboard exits them. Featured cast are distinct people — never clone faces."
+            "No crowd generated separately. Scene master prompt + character specs define "
+            "the scene. Later same-setting clips reuse the scene specs; keep extras "
+            "silhouette unless storyboard exits them. Featured cast are distinct people — "
+            "never clone faces."
         ),
     }
 
@@ -253,123 +241,17 @@ def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
     return pruned
 
 
-def _write_storyboard_markdown(
-    shots: list[dict[str, Any]],
-    characters: list[dict[str, Any]],
-    *,
-    style_lock: dict[str, Any] | None = None,
-) -> str:
-    id_to_name = {str(c.get("id")): str(c.get("name") or c.get("id")) for c in characters}
-    # Hierarchical: scenes (setting_id) → keyframes/shots.
-    by_set: dict[str, list[dict[str, Any]]] = {}
-    order: list[str] = []
-    for shot in shots:
-        if not isinstance(shot, dict):
-            continue
-        sid = str(shot.get("setting_id") or "set_1").strip() or "set_1"
-        if sid not in by_set:
-            by_set[sid] = []
-            order.append(sid)
-        by_set[sid].append(shot)
-    lines = [
-        "# Storyboard Scenario",
-        "",
-        (
-            "Visual style: "
-            + str((style_lock or {}).get("look") or (style_lock or {}).get("medium") or "").strip()
-        )
-        if style_lock
-        else "",
-        "",
-        "Hierarchy: **Scene (setting_id)** → **Keyframes/shots**.",
-        "Different scenes = different places. First keyframe of each scene authors the "
-        "**scene specs + master prompt** (compose scene + only on-screen cast) — not an "
-        "empty plate. Later same-scene keyframes **compose again from character solos** "
-        "using that shared scene prompt/view locks (architecture locked). "
-        "Never borrow another setting_id. Not every cast member is in every scene.",
-        "",
-    ]
-    for sid in order:
-        scene_shots = by_set.get(sid) or []
-        scene_text = ""
-        for shot in scene_shots:
-            scene_text = str(shot.get("setting_description") or "").strip()
-            if scene_text:
-                break
-        lines.append(f"## Scene `{sid}`" + (f" — {scene_text}" if scene_text else ""))
-        lines.append("")
-        for shot in scene_shots:
-            idx = int(shot.get("shot_index") or 0)
-            strategy = str(shot.get("keyframe_strategy") or "")
-            visible = [
-                id_to_name.get(str(cid), str(cid))
-                for cid in (
-                    shot.get("on_screen")
-                    or shot.get("visible_cast_ids")
-                    or shot.get("character_ids")
-                    or []
-                )
-            ]
-            offscreen = [
-                id_to_name.get(str(cid), str(cid))
-                for cid in (shot.get("offscreen") or shot.get("off_screen_cast_ids") or [])
-            ]
-            featured = [
-                id_to_name.get(str(cid), str(cid))
-                for cid in (shot.get("featured_cast_ids") or [])
-            ]
-            actions = shot.get("cast_actions") if isinstance(shot.get("cast_actions"), dict) else {}
-            doing_lines = [
-                f"{id_to_name.get(str(cid), str(cid))}: {act}"
-                for cid, act in actions.items()
-                if str(act).strip()
-            ]
-            crowd = shot.get("crowd_lock") if isinstance(shot.get("crowd_lock"), dict) else {}
-            lines.append(f"### Shot {idx} — {shot.get('title') or f'Shot {idx}'}")
-            lines.append(f"- Timeline: {shot.get('timeline') or ''}")
-            lines.append(f"- Strategy: `{strategy}`")
-            lines.append(f"- Camera: {shot.get('camera') or ''}")
-            lines.append(f"- On screen (visible): {', '.join(visible) or '—'}")
-            lines.append(f"- Offscreen (in scene, not in frame): {', '.join(offscreen) or '—'}")
-            lines.append(f"- Featured (camera focus): {', '.join(featured) or '—'}")
-            if doing_lines:
-                lines.append(f"- Doing: {'; '.join(doing_lines)}")
-            lines.append(f"- Action: {shot.get('action') or shot.get('keyframe_prompt') or ''}")
-            if shot.get("scene_distinctness"):
-                lines.append(f"- Scene note: {shot.get('scene_distinctness')}")
-            speech_line = str(shot.get("speech_line") or "").strip()
-            by_char = shot.get("speech_by_character") if isinstance(shot.get("speech_by_character"), dict) else {}
-            if by_char:
-                bits = "; ".join(f"{cid}: {line}" for cid, line in by_char.items() if str(line).strip())
-                if bits:
-                    lines.append(f"- Speech by character: {bits}")
-            elif speech_line:
-                lines.append(f"- Speech: {speech_line}")
-            if shot.get("language_lock"):
-                lines.append(f"- Language lock: {shot.get('language_lock')}")
-            if crowd:
-                lines.append(
-                    f"- Crowd lock: present={crowd.get('present')}; "
-                    f"{str(crowd.get('density') or '')}"
-                )
-            done = shot.get("already_done") or []
-            if done:
-                lines.append(f"- Already done: {'; '.join(str(x) for x in done[:8])}")
-            lines.append("")
-    return "\n".join(lines).strip() + "\n"
-
-
 def _shot_budget(analysis: dict[str, Any], shots: list[dict[str, Any]]) -> int:
-    """Honor explicit target_shot_count as a HARD ceiling — never invent extra keyframes."""
+    """Honor explicit target_clip_count as a HARD ceiling — never invent extra clips."""
     n = len(shots) or 1
     try:
-        target = int(analysis.get("target_shot_count") or 0)
+        target = int(analysis.get("target_clip_count") or 0)
     except (TypeError, ValueError):
         target = 0
     # Also honor user-prompt N-shot / N分镜 language stamped on analysis.
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-            _explicit_shot_count_from_prompt,
+            _explicit_clip_count_from_prompt,
         )
 
         prompt = str(
@@ -377,7 +259,7 @@ def _shot_budget(analysis: dict[str, Any], shots: list[dict[str, Any]]) -> int:
             or analysis.get("summary")
             or ""
         )
-        explicit = _explicit_shot_count_from_prompt(prompt)
+        explicit = _explicit_clip_count_from_prompt(prompt)
         if explicit >= 1:
             target = explicit if target < 1 else min(target, explicit)
     except Exception:  # noqa: BLE001
@@ -444,37 +326,17 @@ def _plan_cast_sheets(
     characters: list[dict[str, Any]],
     shots: list[dict[str, Any]],
     *,
-    prefer_combined: bool,
     prompt: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, list[str]], str]:
-    """Plan cast postcard nodes and per-shot node refs.
+    """Plan character spec nodes and per-shot node refs.
 
-    Identity rule: **always** one solo sheet per character (canonical look).
-    Optional combined sheets are compose aids only — keyframes/shots must
-    reference solo sheets via ``character_node_ids`` so wardrobe cannot drift
-    when a multi-person postcard is regenerated independently. Combined aids
-    are still wired into matching frame/shot edges by the graph builder.
+    Identity rule: one character spec sheet per character (canonical look). Combined
+    multi-person sheets are not used — quality path always composes from character specs.
     """
     id_to_char = {str(c.get("id")): c for c in characters if str(c.get("id") or "")}
-    groups: list[frozenset[str]] = []
-    seen_groups: set[frozenset[str]] = set()
-    for shot in shots:
-        cids = [
-            str(x)
-            for x in (shot.get("character_ids") or [])
-            if str(x) in id_to_char
-        ]
-        cids = list(dict.fromkeys(cids))
-        if len(cids) >= 2:
-            key = frozenset(cids)
-            if key not in seen_groups:
-                seen_groups.add(key)
-                groups.append(key)
-
     sheets: list[dict[str, Any]] = []
-    budget = max(_MAX_SPLIT_CHARS, len(characters) + len(groups))
+    budget = max(_MAX_SPLIT_CHARS, len(characters))
 
-    # 1) Canonical solo identity sheets — always.
     for ch in characters:
         cid = str(ch.get("id") or "")
         if not cid or cid not in id_to_char:
@@ -506,44 +368,6 @@ def _plan_cast_sheets(
             }
         )
 
-    # 2) Optional combined compose aids (not the identity source of truth).
-    use_combined = bool(prefer_combined and groups)
-    if use_combined:
-        for g in groups:
-            if len(sheets) >= budget:
-                break
-            members = [id_to_char[cid] for cid in sorted(g) if cid in id_to_char]
-            if not members:
-                continue
-            names = [str(m.get("name") or m.get("id")) for m in members]
-            from jiuwenswarm.server.runtime.designer.pipeline.clothing_lock import (
-                costume_lock_for_ids,
-                enrich_character_clothing,
-            )
-
-            for m in members:
-                enrich_character_clothing(m)
-            cast_costume = costume_lock_for_ids(
-                members, [str(m.get("id")) for m in members]
-            )
-            sheets.append(
-                {
-                    "character_ids": [str(m.get("id")) for m in members],
-                    "character_names": names,
-                    "combined_cast": True,
-                    "identity_source": False,
-                    "label": (" & ".join(names))[:48],
-                    "prompt_body": "; ".join(
-                        f"{m.get('name')}: {m.get('description')}" for m in members
-                    ),
-                    "costume_lock": cast_costume[:480]
-                    or "; ".join(
-                        f"{m.get('name')}: {str(m.get('costume_lock') or m.get('description') or '')[:100]}"
-                        for m in members
-                    )[:320],
-                }
-            )
-
     if not sheets and characters:
         ch = characters[0]
         name = _character_display_name(ch, prompt)
@@ -559,33 +383,24 @@ def _plan_cast_sheets(
             }
         )
 
-    # Assign node ids — solos first (n_character / n_character_i), combined as n_cast_*.
-    solo_count = sum(1 for s in sheets if not s["combined_cast"])
-    solo_i = 0
-    cast_i = 0
-    for sheet in sheets:
-        if sheet["combined_cast"]:
-            cast_i += 1
-            sheet["node_id"] = f"n_cast_{cast_i}"
+    solo_count = len(sheets)
+    for solo_i, sheet in enumerate(sheets, start=1):
+        if solo_count == 1:
+            sheet["node_id"] = "n_character"
         else:
-            solo_i += 1
-            if solo_count == 1:
-                sheet["node_id"] = "n_character"
-            else:
-                sheet["node_id"] = f"n_character_{solo_i}"
+            sheet["node_id"] = f"n_character_{solo_i}"
 
     solo_by_id: dict[str, str] = {}
     costume_by_id: dict[str, str] = {}
     for sheet in sheets:
         ids = [str(x) for x in sheet["character_ids"]]
-        if not sheet["combined_cast"] and len(ids) == 1:
+        if len(ids) == 1:
             solo_by_id[ids[0]] = str(sheet["node_id"])
             costume_by_id[ids[0]] = str(sheet.get("costume_lock") or "")
 
-    # Per-shot refs = solo sheets only (compose multi-char keyframes from individuals).
     shot_to_nodes: dict[str, list[str]] = {}
     for shot in shots:
-        idx = str(int(shot.get("shot_index") or 0))
+        idx = str(int(shot.get("clip_index") or 0))
         cids = [
             str(x)
             for x in (shot.get("character_ids") or [])
@@ -594,51 +409,20 @@ def _plan_cast_sheets(
         cids = list(dict.fromkeys(cids))
         nodes = [solo_by_id[cid] for cid in cids if cid in solo_by_id]
         if not nodes:
-            nodes = [str(s["node_id"]) for s in sheets if not s["combined_cast"]] or [
-                str(s["node_id"]) for s in sheets
-            ]
+            nodes = [str(s["node_id"]) for s in sheets]
         shot_to_nodes[idx] = list(dict.fromkeys(nodes))
 
-    if use_combined and solo_count:
-        layout = "solo_first_with_combined_aids"
-    elif solo_count <= 1:
-        layout = "single"
-    else:
-        layout = "solo_first"
-    # Stash costume map on first sheet metadata for graph builder (returned via sheets).
+    layout = "single" if solo_count <= 1 else "solo_first"
     for sheet in sheets:
         sheet["_costume_by_id"] = costume_by_id
     return sheets, shot_to_nodes, layout
 
 
-def _combined_aid_nodes_for_shot(
-    cast_sheets: list[dict[str, Any]],
-    focus_cids: list[str],
-) -> list[str]:
-    """Combined cast postcard ids that intersect this shot's character_ids.
-
-    Compose aids only — never identity sources. Caller must attach them to
-    ``frame_inputs`` / ``clip_inputs`` (and edges) but leave
-    ``identity_refs.character_node_ids`` as solos.
-    """
-    focus_set = {str(x) for x in focus_cids if str(x)}
-    if not focus_set:
-        return []
-    aids: list[str] = []
-    for sheet in cast_sheets:
-        if not sheet.get("combined_cast"):
-            continue
-        sheet_ids = {str(x) for x in (sheet.get("character_ids") or []) if str(x)}
-        if sheet_ids & focus_set:
-            aids.append(str(sheet["node_id"]))
-    return list(dict.fromkeys(aids))
-
-
 def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[str]:
     """Safety net: every combined-cast node must be an edge source into the DAG.
 
-    If a combined sheet never sources an edge to a scene/shot/compose/storyboard,
-    wire it to ``n_clip_1`` (then scene / compose / legacy frame) and append to that
+    If a combined sheet never sources an edge to a scene/clip/compose/storyboard,
+    wire it to ``n_clip_1`` (then scene / compose) and append to that
     target's ``config.inputs``.
     """
     notes: list[str] = []
@@ -651,13 +435,10 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
 
     sink_roles = {
         NODE_ROLE_SCENE,
-        NODE_ROLE_FRAME,
-        "keyframe",
         NODE_ROLE_CLIP,
         NODE_ROLE_COMPOSE,
         NODE_ROLE_STORYBOARD,
         "scene",
-        "frame",
         "clip",
         "compose",
         "storyboard",
@@ -674,7 +455,6 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
             trole in sink_roles
             or t in {"n_compose", "n_storyboard", "n_scene"}
             or t.startswith("n_scene_")
-            or t.startswith("n_frame_")
             or t.startswith("n_clip_")
         ):
             wired_sources.add(s)
@@ -696,7 +476,6 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
                 "n_clip_1",
                 "n_scene_1",
                 "n_scene",
-                "n_frame_1",
                 "n_compose",
             )
             if cand in ids
@@ -741,7 +520,7 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
 
 
 def _cameras_compatible(a: str, b: str) -> bool:
-    """True when sequential keyframe edit is safer than a full recompose."""
+    """True when sequential clip edit is safer than a full recompose."""
     la = (a or "").strip().lower()
     lb = (b or "").strip().lower()
     if not la or not lb:
@@ -818,7 +597,7 @@ def _ensure_setting_ids(
             prev = sid
             shot["setting_id"] = sid
             continue
-        blob = f"{shot.get('action') or ''} {shot.get('keyframe_prompt') or ''} {shot.get('title') or ''}"
+        blob = f"{shot.get('action') or ''} {shot.get('clip_prompt') or ''} {shot.get('title') or ''}"
         if i > 0 and new_place_re.search(blob):
             # Prefer next unused scene id from analysis; else synthesize.
             used = {
@@ -842,14 +621,13 @@ def build_smart_video_graph(
     prompt: str,
     analysis: dict[str, Any],
     title: str | None = None,
-    optimize_for: str = "quality",
 ) -> DesignerExecutionGraph:
     """Lean multi-shot video DAG: few image gens + brief/storyboard.
 
     Creative nodes are always stamped as LLM agents (``delegate=agent``).
     """
-    from jiuwenswarm.server.runtime.designer.pipeline.keyframe_policy import (
-        apply_compose_solos_setting_policy,
+    from jiuwenswarm.server.runtime.designer.pipeline.clip_policy import (
+        apply_compose_character_specs_setting_policy,
     )
 
     prompt_text = prompt.strip()
@@ -864,12 +642,10 @@ def build_smart_video_graph(
             prompt=prompt_text,
             analysis=analysis,
             title=title,
-            optimize_for=optimize_for,
         )
         graph = normalize_execution_graph(graph)
         prune_non_contributing_nodes(graph)
         return attach_skills_metadata(graph, prompt_text)
-    mode = "cost" if str(optimize_for).strip().lower() == "cost" else "quality"
     from jiuwenswarm.server.runtime.designer.audio_locks import ensure_audio_locks_on_analysis
 
     analysis = ensure_audio_locks_on_analysis(dict(analysis or {}), prompt_text)
@@ -886,7 +662,7 @@ def build_smart_video_graph(
     )
     analysis["style_lock"] = dict(film_style)
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
             apply_shot_scope,
         )
 
@@ -894,8 +670,9 @@ def build_smart_video_graph(
     except Exception:  # noqa: BLE001
         pass
     from jiuwenswarm.server.runtime.designer.node_labels import (
-        derive_shot_name,
+        derive_clip_name,
         derive_story_name,
+        usable_story_title,
         label_brief,
         label_character,
         label_clip,
@@ -912,14 +689,14 @@ def build_smart_video_graph(
     analysis["story_name"] = story_name
     characters = [item for item in (analysis.get("characters") or []) if isinstance(item, dict)]
     scenes = [item for item in (analysis.get("scenes") or []) if isinstance(item, dict)]
-    shots = [item for item in (analysis.get("shots") or []) if isinstance(item, dict)]
+    shots = [item for item in (analysis.get("clips") or []) if isinstance(item, dict)]
     audio = dict(analysis.get("audio") or {})
     missing = [
         name
         for name, values in (
             ("characters", characters),
             ("scenes", scenes),
-            ("shots", shots),
+            ("clips", shots),
         )
         if not values
     ]
@@ -936,88 +713,49 @@ def build_smart_video_graph(
             code=LLM_API_ERROR,
         )
     shots = shots[: _shot_budget(analysis, shots)]
-    analysis["target_shot_count"] = len(shots)
+    analysis["target_clip_count"] = len(shots)
     for i, shot in enumerate(shots, start=1):
-        shot["shot_index"] = i
+        shot["clip_index"] = i
     _ensure_characters_referenced(characters, shots)
     _ensure_setting_ids(shots, scenes)
     analysis["characters"] = characters
     analysis["scenes"] = scenes
-    analysis["shots"] = shots
-    analysis = apply_compose_solos_setting_policy(analysis)
+    analysis["clips"] = shots
+    analysis = apply_compose_character_specs_setting_policy(analysis)
     characters = list(analysis.get("characters") or characters)
     scenes = list(analysis.get("scenes") or scenes)
-    shots = list(analysis.get("shots") or shots)
+    shots = list(analysis.get("clips") or shots)
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
-            ensure_shot_start_end_states,
+        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_clip_state import (
+            ensure_clip_start_end_states,
         )
 
-        shots = ensure_shot_start_end_states(shots)
-        analysis["shots"] = shots
+        shots = ensure_clip_start_end_states(shots)
+        analysis["clips"] = shots
     except Exception:  # noqa: BLE001
         pass
-    # Continuity: scene specs + on-screen solos; storyboard start/end owns continuity.
-    analysis["scene_continuity_mode"] = "scene_card_plus_clip_shots"
-    from jiuwenswarm.server.runtime.designer.pipeline.axis_locks import (
-        infer_aspect_lock,
-        resolve_clip_video_format,
-    )
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        resolution_mentioned,
-    )
+    # Continuity: scene specs + on-screen character specs; storyboard start/end owns continuity.
+    analysis["scene_consistency_mode"] = "scene_specs_plus_clips"
 
-    aspect = analysis.get("aspect_lock") if isinstance(analysis.get("aspect_lock"), dict) else {}
-    if not aspect:
-        aspect = infer_aspect_lock(prompt_text)
-    asked_res = resolution_mentioned(prompt_text)
-    if asked_res:
-        analysis["video_resolution"] = asked_res
-    elif not str(analysis.get("video_resolution") or "").strip():
-        analysis["video_resolution"] = str(aspect.get("video_resolution") or "")
-    film_video_size, film_video_res = resolve_clip_video_format(
-        ratio=str(aspect.get("ratio") or "16:9"),
-        user_resolution=asked_res,
-        director_resolution=str(
-            analysis.get("video_resolution") or aspect.get("video_resolution") or ""
-        ),
-    )
-    analysis["video_resolution"] = film_video_res
-    analysis["video_size"] = film_video_size
-    aspect = dict(aspect)
-    aspect["video_size"] = film_video_size
-    aspect["video_resolution"] = film_video_res
-    analysis["aspect_lock"] = aspect
-
-    # Quality path: solo identity sheets only — keyframes compose multi-person.
-    prefer_combined = False
     cast_sheets, shot_cast_nodes, cast_layout = _plan_cast_sheets(
-        characters, shots, prefer_combined=prefer_combined, prompt=prompt_text
+        characters, shots, prompt=prompt_text
     )
-    # Drop any combined sheets that slipped through (no concatenation).
-    cast_sheets = [s for s in cast_sheets if not s.get("combined_cast")]
-    film_duration = _duration_sec_for_graph(prompt_text, analysis, characters)
     try:
-        from jiuwenswarm.server.runtime.designer.pipeline.production_bible import (
-            build_production_bible,
+        from jiuwenswarm.server.runtime.designer.pipeline.production_specs import (
+            build_production_specs,
         )
 
-        bible = build_production_bible(analysis, user_prompt=prompt_text)
-        analysis["production_bible"] = bible
+        bible = build_production_specs(analysis, user_prompt=prompt_text)
+        analysis["production_specs"] = bible
     except Exception:  # noqa: BLE001
         pass
 
     graph_id = new_graph_id()
     now = utc_now_ms()
-    graph_title = title.strip() if isinstance(title, str) and title.strip() else prompt_text[:80]
-    # The canvas header is sized for the model's short story name, never the
-    # raw creation prompt (graph_title falls back to it) — prefer the analysis.
-    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
-
     graph_title = (
-        usable_story_title(analysis.get("story_name"), prompt_text)
-        or usable_story_title(graph_title, prompt_text)
-        or graph_title
+        usable_story_title(story_name, prompt_text)
+        or usable_story_title(title, prompt_text)
+        or "设计项目"
     )
 
     nodes: list[dict[str, Any]] = [
@@ -1029,7 +767,6 @@ def build_smart_video_graph(
                 "role": NODE_ROLE_BRIEF,
                 "prompt": prompt_text,
                 "tools": ["call_model", "write_artifact"],
-                "optimize_for": mode,
                 "agent_name": label_brief(story_name),
                 "kind": "agent",
                 "skill_id": "brief",
@@ -1054,7 +791,6 @@ def build_smart_video_graph(
         "prompt": prompt_text,
         "planned_shots": shots,
         "inputs": ["n_brief"],
-        "optimize_for": mode,
         "agent_name": label_storyboard(story_name),
         "kind": "agent",
         "skill_id": "storyboard",
@@ -1109,11 +845,10 @@ def build_smart_video_graph(
             )
 
             seed_cfg = {
-                "role": NODE_ROLE_CHARACTER_DESIGN,
+                "role": NODE_ROLE_CHARACTER,
                 "character_name": names[0] if names else display,
                 "character_names": names,
                 "costume_lock": wardrobe or str(sheet.get("costume_lock") or ""),
-                "image_size": _IMAGE_SIZE,
             }
             prompt = compose_character_sheet_prompt(cfg=seed_cfg, graph=None, seed="")
         except Exception:  # noqa: BLE001
@@ -1130,7 +865,7 @@ def build_smart_video_graph(
                 "type": NODE_TYPE_IMAGE,
                 "label": label,
                 "config": {
-                    "role": NODE_ROLE_CHARACTER_DESIGN,
+                    "role": NODE_ROLE_CHARACTER,
                     "prompt": prompt,
                     "generate": {"prompt": prompt},
                     "character_id": (sheet["character_ids"][0] if len(sheet["character_ids"]) == 1 else None),
@@ -1141,30 +876,27 @@ def build_smart_video_graph(
                     "identity_source": True,
                     "costume_lock": str(sheet.get("costume_lock") or ""),
                     "style_lock": dict(film_style),
-                    "image_size": _IMAGE_SIZE,
                     "max_image_calls": 1,
-                    "inputs": ["n_brief", "n_storyboard"],
-                    "optimize_for": mode,
+                    "inputs": ["n_brief"],
                     "agent_name": agent,
                     "kind": "agent",
                     "skill_id": "character",
                     "tools": ["call_image_model", "read_upstream", "call_model"],
                     "delegate": "agent",
                     "director_task": (
-                        f"Solo identity sheet for {display}. "
+                        f"Solo character specs for {display}. "
                         "Write a positive Qwen-ready studio portrait from the locks "
-                        "(face, wardrobe, style, aspect) — no LOCK banners or negatives. "
+                        "(face, wardrobe, style) — no LOCK banners or negatives. "
                         "Then call_image_model with that prompt only."
                     ),
                 },
                 "layout": {"x": 680, "y": float(40 + (i - 1) * 160), "width": 240, "height": 140},
             }
         )
-        edges.append(_edge(f"e_sb_{nid}", "n_storyboard", nid))
         edges.append(_edge(f"e_brief_{nid}", "n_brief", nid))
 
     # Spatial lock text (weak env hint only). Scene specs are built per setting_id;
-    # shots use them as Wan reference images (last env ref) with solos as character1…
+    # clips use them as Wan reference images (last env ref) with character specs as character1…
     scene_base = scenes[0] if scenes else {"id": "scene_1", "name": "Setting", "description": ""}
     spatial_lock = default_spatial_lock(scene_base if isinstance(scene_base, dict) else None)
     prior_lock = analysis.get("spatial_lock") if isinstance(analysis.get("spatial_lock"), dict) else {}
@@ -1193,7 +925,7 @@ def build_smart_video_graph(
     def _lock_line_for(sid: str) -> str:
         lock = spatial_by_setting.get(sid) or spatial_lock
         return (
-            f"SPATIAL LOCK (text hint only — not an empty plate): setting={lock.get('setting')}; "
+            f"SPATIAL LOCK (text hint only — keep scene specs as reference): setting={lock.get('setting')}; "
             f"{lock.get('architecture')}; {lock.get('static_rule')} "
             f"{lock.get('crowd_rule')}"
         )
@@ -1314,7 +1046,7 @@ def build_smart_video_graph(
             {},
         )
         opening_action = str(
-            (first_shot or {}).get("action") or (first_shot or {}).get("keyframe_prompt") or ""
+            (first_shot or {}).get("action") or (first_shot or {}).get("clip_prompt") or ""
         )[:280]
         opening_cast = ", ".join(ensemble_names) or "named cast"
         tod: dict[str, str] = {}
@@ -1352,14 +1084,13 @@ def build_smart_video_graph(
                 "spatial_lock": shot_spatial_scene,
                 "time_of_day_lock": tod,
                 "style_lock": dict(film_style) if isinstance(film_style, dict) else {},
-                "image_size": _IMAGE_SIZE,
             }
             scene_prompt = compose_scene_specs_prompt(cfg=seed_cfg, graph=None, seed="")
         except Exception:  # noqa: BLE001
             tod = {}
             scene_prompt = "One empty setting. The setting is empty. One clear image."
         _ = (opening_cast, opening_action, ensemble_nids, lock_line_scene)
-        scene_inputs = ["n_brief", "n_storyboard"]
+        scene_inputs = ["n_brief"]
         nodes.append(
             {
                 "id": scene_nid,
@@ -1380,10 +1111,8 @@ def build_smart_video_graph(
                     "is_scene_master": True,
                     "generate": {"prompt": scene_prompt},
                     "prompt": scene_prompt,
-                    "image_size": _IMAGE_SIZE,
                     "max_image_calls": 1,
                     "inputs": scene_inputs,
-                    "optimize_for": mode,
                     "agent_name": scene_label,
                     "kind": "agent",
                     "skill_id": "scene",
@@ -1392,7 +1121,7 @@ def build_smart_video_graph(
                     "director_task": (
                         f"Empty environment plate for setting {sid}. "
                         "Write a positive Qwen-ready plate prompt from the locks "
-                        "(place, lighting, style, aspect) — no LOCK banners or negatives. "
+                        "(place, lighting, style) — no LOCK banners or negatives. "
                         "Then call_image_model with that prompt only."
                     ),
                 },
@@ -1412,7 +1141,7 @@ def build_smart_video_graph(
         "medium / slow pan",
     )
     for shot in shots:
-        idx = int(shot.get("shot_index") or (len(shot_ids) + 1))
+        idx = int(shot.get("clip_index") or (len(shot_ids) + 1))
         shot_id = f"n_clip_{idx}"
         shot_ids.append(shot_id)
         setting_id = str(shot.get("setting_id") or "set_1").strip() or "set_1"
@@ -1489,9 +1218,9 @@ def build_smart_video_graph(
         )
         camera = str(shot.get("camera") or "").strip() or camera_cycle[(idx - 1) % len(camera_cycle)]
         shot["camera"] = camera
-        action = str(shot.get("action") or shot.get("keyframe_prompt") or "").strip()
+        action = str(shot.get("action") or shot.get("clip_prompt") or "").strip()
         if not action:
-            from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+            from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
                 window_beat,
             )
 
@@ -1499,24 +1228,24 @@ def build_smart_video_graph(
             shot["action"] = action
         action = action[:800]
         costume_lock = _costume_lock_for_ids(characters, focus_cids)
-        from jiuwenswarm.server.runtime.designer.pipeline.shot_staging_lock import (
-            enrich_shot_staging,
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_staging_lock import (
+            enrich_clip_staging,
             staging_lock_clause,
         )
 
-        staging = enrich_shot_staging(shot, characters)
+        staging = enrich_clip_staging(shot, characters)
         staging_bits = staging_lock_clause(
             positioning_lock=staging.get("positioning_lock") or "",
             action_lock=staging.get("action_lock") or "",
             relationship_lock=staging.get("relationship_lock") or "",
-            shot_index=idx,
+            clip_index=idx,
             setting_id=setting_id,
             for_clip=True,
         )
         shot_spatial = spatial_by_setting.get(setting_id) or spatial_lock
         lock_line = _lock_line_for(setting_id)
-        keyframe_strategy = "clip_from_scene_and_solos"
-        # Storyboard-owned consistency: deps = storyboard + on-screen solos + scene only.
+        clip_strategy = "clip_from_scene_and_character_specs"
+        # Storyboard-owned consistency: deps = storyboard + on-screen character specs + scene only.
         # No prior-shot edge — same-setting shots can run concurrently.
         clip_inputs = ["n_storyboard", *focus_char_nodes]
         if scene_nid:
@@ -1546,7 +1275,7 @@ def build_smart_video_graph(
             if isinstance(shot.get("scene_specs"), dict)
             else (scene_locks_meta.get(setting_id) if isinstance(scene_locks_meta.get(setting_id), dict) else {})
         )
-        from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+        from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
             ANGLE_VIEWS,
             user_asked_coverage,
         )
@@ -1646,7 +1375,7 @@ def build_smart_video_graph(
             + done_bits
             + detail_bits
             + "ANTI-CLONE: one instance per named person. "
-            + f"STRATEGY={keyframe_strategy}. first_of_setting={first_of_setting}. "
+            + f"STRATEGY={clip_strategy}. first_of_setting={first_of_setting}. "
             + "Keep clothing / language / occupancy / position locks. "
             + "Keep this Wan prompt ≤4000 characters. "
             + "Real motion — animate this shot only."
@@ -1658,11 +1387,11 @@ def build_smart_video_graph(
             "costume_lock": costume_lock,
             "scene_node_id": scene_nid or None,
             "master_scene_node_id": scene_nid or None,
-            "scene_master_frame_id": None,
+            "scene_master_node_id": None,
             "is_scene_master": False,
-            "prior_keyframe_node_id": None,
+            "prior_clip_node_id": None,
             "scene_prompt_handoff_from": scene_nid or None,
-            "keyframe_strategy": keyframe_strategy,
+            "clip_strategy": clip_strategy,
             "setting_id": setting_id,
             "view_key": view_key,
             "spatial_lock": shot_spatial,
@@ -1675,7 +1404,7 @@ def build_smart_video_graph(
             if isinstance(shot.get("setting_lock"), dict)
             else None,
             "scene_distinctness": shot.get("scene_distinctness"),
-            "scene_continuity_mode": "scene_card_plus_clip_shots",
+            "scene_consistency_mode": "scene_specs_plus_clips",
             "scene_specs": scene_specs or None,
             "first_of_setting": first_of_setting,
             "composed_scene": False,
@@ -1684,9 +1413,9 @@ def build_smart_video_graph(
         scene_n = setting_num.get(setting_id, 1)
         shot_ord_by_setting[setting_id] = int(shot_ord_by_setting.get(setting_id) or 0) + 1
         shot_n = shot_ord_by_setting[setting_id]
-        shot_name = derive_shot_name(shot, fallback_index=idx)
+        clip_name = derive_clip_name(shot, fallback_index=idx)
         clip_label = label_clip(
-            scene_number=scene_n, clip_number=shot_n, clip_name=shot_name
+            scene_number=scene_n, clip_number=shot_n, clip_name=clip_name
         )
         from jiuwenswarm.server.runtime.designer.audio_locks import (
             normalize_speech_by_character,
@@ -1744,9 +1473,9 @@ def build_smart_video_graph(
             tod_shot = {}
         shot_cfg: dict[str, Any] = {
             "role": NODE_ROLE_CLIP,
-            "shot_index": idx,
+            "clip_index": idx,
             "shot_title": shot.get("title"),
-            "shot_action": action,
+            "clip_action": action,
             "timeline": timeline,
             "camera": camera,
             "setting_id": setting_id,
@@ -1789,16 +1518,13 @@ def build_smart_video_graph(
             "spatial_lock": shot_spatial,
             "time_of_day_lock": tod_shot or None,
             "master_scene_node_id": scene_nid or None,
-            "keyframe_strategy": keyframe_strategy,
+            "clip_strategy": clip_strategy,
             "first_of_setting": first_of_setting,
             "composed_scene": False,
             "style_lock": dict(film_style),
-            "video_size": film_video_size,
-            "video_resolution": film_video_res,
             "generate": {"prompt": shot_prompt_body},
             "max_video_calls": 1,
             "inputs": clip_inputs,
-            "optimize_for": mode,
             "agent_name": clip_label,
             "kind": "agent",
             "skill_id": "clip",
@@ -1816,7 +1542,7 @@ def build_smart_video_graph(
         shot_cfg.pop("continuity_clip_node_id", None)
         shot_cfg["previous_clip_handoff_ready"] = False
         try:
-            from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
+            from jiuwenswarm.server.runtime.designer.pipeline.storyboard_clip_state import (
                 stamp_shot_states_on_clip_cfg,
             )
 
@@ -1876,12 +1602,12 @@ def build_smart_video_graph(
                 cfg = n.get("config") if isinstance(n.get("config"), dict) else {}
                 if str(cfg.get("role") or "") != NODE_ROLE_CLIP:
                     continue
-                idx = int(cfg.get("shot_index") or 0)
+                idx = int(cfg.get("clip_index") or 0)
                 shot_row = next(
                     (
                         s
                         for s in shots
-                        if isinstance(s, dict) and int(s.get("shot_index") or 0) == idx
+                        if isinstance(s, dict) and int(s.get("clip_index") or 0) == idx
                     ),
                     {},
                 )
@@ -1912,7 +1638,6 @@ def build_smart_video_graph(
             "config": {
                 "role": NODE_ROLE_COMPOSE,
                 "inputs": compose_inputs,
-                "optimize_for": mode,
                 "agent_name": label_compose(story_name),
                 "kind": "agent",
                 "skill_id": "compose",
@@ -1941,7 +1666,6 @@ def build_smart_video_graph(
         "metadata": {
             "bootstrap": "designer.graph.smart_video.quality.v5",
             "scenario": "video",
-            "optimize_for": mode,
             "skill_guided": True,
             "script_analysis": analysis,
             "audio_intent": audio,
@@ -1964,18 +1688,17 @@ def build_smart_video_graph(
             ),
             "prefer_clip_native_audio": bool(clip_embedded),
             "prefer_wan3_clip_audio": bool(clip_embedded),  # legacy alias
-            "scene_continuity_mode": "scene_card_plus_clip_shots",
+            "scene_consistency_mode": "scene_specs_plus_clips",
             "scene_masters": dict(scene_master_by_setting),
             "scene_locks": dict(scene_locks_meta),
             # Storyboard must not rebuild the node set (that spawned extra nodes).
-            "freeze_shot_topology": True,
+            "freeze_clip_topology": True,
             "combined_cast": False,
             "cast_layout": cast_layout,
             "spatial_lock": spatial_lock,
             "spatial_lock_by_setting": spatial_by_setting,
             "max_shots": len(shots),
-            "target_shot_count": len(shots),
-            "image_size": _IMAGE_SIZE,
+            "target_clip_count": len(shots),
             "max_image_calls_per_node": 1,
         },
         "created_at": now,

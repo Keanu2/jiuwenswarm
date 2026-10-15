@@ -295,12 +295,12 @@ def _drain():
     _METADATA_QUEUE.join()
 
 
-def _make_session(sid, *, project_dir="", project_id="", pinned=False, pin_order=0, last_user_message_at=None, model="", cron_id="", channel_id="web", work_mode=""):
+def _make_session(sid, *, project_dir="", project_id="", pinned=False, pin_order=0, last_user_message_at=None, model="", cron_id="", channel_id="web"):
     """创建一个会话并写入指定元数据,flush 队列确保落盘。"""
     from jiuwenswarm.server.runtime.session.session_metadata import (
         init_session_metadata, update_session_metadata,
     )
-    init_session_metadata(session_id=sid, project_dir=project_dir, project_id=project_id, model=model, cron_id=cron_id, channel_id=channel_id, work_mode=work_mode)
+    init_session_metadata(session_id=sid, project_dir=project_dir, project_id=project_id, model=model, cron_id=cron_id, channel_id=channel_id)
     if pinned or pin_order:
         update_session_metadata(session_id=sid, pinned=pinned, pin_order=pin_order)
     if last_user_message_at is not None:
@@ -357,11 +357,10 @@ class TestProjectList:
 
         assert ids[0] == p_pinned.project_id  # 置顶在前
         assert ids[1] == p_normal.project_id  # 非置顶
-        # work_mode 改造后默认项目按 work_mode 拆分为三个虚拟条目:
-        # default(work) / default_code(code) / default_design(design),均位于列表末尾
-        assert ids[-3] == "default"  # work 默认项目
-        assert ids[-2] == "default_code"  # code 默认项目
-        assert ids[-1] == "default_design"  # design 默认项目
+        # work_mode 改造后默认项目按 work 拆分为两个虚拟条目:
+        # work 模式 default 在前, code 模式 default_code 在后(均位于列表末尾)
+        assert ids[-2] == "default"  # work 默认项目
+        assert ids[-1] == "default_code"  # code 默认项目
         # 统计:普通项目 1 个非置顶会话,默认 1 个
         normal_info = next(p for p in projects if p["project_id"] == p_normal.project_id)
         assert normal_info["session_count"] == 1
@@ -372,9 +371,6 @@ class TestProjectList:
         assert default_code_info["is_default"] is True
         assert default_code_info["work_mode"] == "code"
         assert default_code_info["git"]["enabled"] is False
-        default_design_info = next(p for p in projects if p["project_id"] == "default_design")
-        assert default_design_info["is_default"] is True
-        assert default_design_info["work_mode"] == "design"
         assert "git" in normal_info
 
     @staticmethod
@@ -399,10 +395,9 @@ class TestProjectInfo:
     @pytest.mark.parametrize("project_id, work_mode", [
         pytest.param("default", "work", id="virtual_default_work"),
         pytest.param("default_code", "code", id="virtual_default_code"),
-        pytest.param("default_design", "design", id="virtual_default_design"),
     ])
     async def test_virtual_default(registered_channel, tmp_path, project_id, work_mode):
-        """project_id=default/default_code/default_design → 返回各模式虚拟默认项目。"""
+        """project_id=default/default_code → 返回 work/code 模式虚拟默认项目。"""
         _make_session("s1", project_dir="", last_user_message_at=100.0)
         resp = await _call(registered_channel, "project.info", {"project_id": project_id})
         assert resp["ok"] is True
@@ -538,49 +533,6 @@ class TestProjectGetSessions:
         ids = [s["session_id"] for s in resp_d["payload"]["sessions"]]
         assert "s_hidden" not in ids  # 已推断为其他项目的会话
         assert "s_default" in ids
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_design_sessions_land_in_default_design(registered_channel, tmp_path):
-        """design 会话（无项目）→ default_design，不混入 work 的 default。"""
-        _make_session("s_design", project_dir="", last_user_message_at=300.0, work_mode="design")
-        _make_session("s_work", project_dir="", last_user_message_at=200.0)
-        pd = _abspath(tmp_path, "design-proj")
-        proj_design = _make_project("设计项目", pd)
-        proj_design.work_mode = "design"
-        from jiuwenswarm.server.runtime.session.project_store import save_project
-        save_project(proj_design)
-        _make_session("s_design_proj", project_id=proj_design.project_id, project_dir=pd, last_user_message_at=100.0, work_mode="design")
-
-        resp = await _call(
-            registered_channel, "project.get_sessions", {"project_id": "default_design"}
-        )
-        assert resp["ok"] is True
-        ids = [s["session_id"] for s in resp["payload"]["sessions"]]
-        assert ids == ["s_design"]  # 无项目 design 会话归 default_design
-        assert resp["payload"]["total"] == 1
-
-        resp_work = await _call(
-            registered_channel, "project.get_sessions", {"project_id": "default"}
-        )
-        ids_work = [s["session_id"] for s in resp_work["payload"]["sessions"]]
-        assert ids_work == ["s_work"]  # design 会话不泄漏进 work 默认项目
-
-        resp_proj = await _call(
-            registered_channel, "project.get_sessions", {"project_id": proj_design.project_id}
-        )
-        ids_proj = [s["session_id"] for s in resp_proj["payload"]["sessions"]]
-        assert ids_proj == ["s_design_proj"]  # 有项目 design 会话归项目
-
-        # project.list 按 design 过滤返回设计项目 + default_design 虚拟默认
-        resp_list = await _call(
-            registered_channel, "project.list", {"filter": "all", "work_mode": "design"}
-        )
-        list_ids = [p["project_id"] for p in resp_list["payload"]["projects"]]
-        assert list_ids == [proj_design.project_id, "default_design"]
-        default_entry = resp_list["payload"]["projects"][-1]
-        assert default_entry["is_default"] is True
-        assert default_entry["session_count"] == 1
 
 
 # ===========================================================================

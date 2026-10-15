@@ -1693,6 +1693,64 @@
   color: var(--color-text-muted);
 }
 
+.designer-node.is-generating-shimmer .designer-node__card,
+.designer-node.is-generating-shimmer .designer-node__body {
+  background: #f5f5f5;
+}
+
+.designer-node.is-generating-shimmer .designer-node__body {
+  padding: 0;
+}
+
+.designer-node.is-generating-shimmer .designer-node__placeholder {
+  visibility: hidden;
+}
+
+.designer-node__running-overlay--shimmer {
+  overflow: hidden;
+  background: #f5f5f5;
+}
+
+.designer-node__running-overlay--shimmer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 200%;
+  background-image: linear-gradient(
+    90deg,
+    #f5f5f5 0%,
+    #ffffff 25%,
+    #f5f5f5 50%,
+    #ffffff 75%,
+    #f5f5f5 100%
+  );
+  animation: designer-node-shimmer 1.6s linear infinite;
+}
+
+.designer-node__running-overlay--shimmer > * {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes designer-node-shimmer {
+  from {
+    transform: translateX(-50%);
+  }
+
+  to {
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .designer-node__running-overlay--shimmer::before {
+    animation: none;
+    opacity: 0;
+  }
+}
+
 .designer-node__text-preview {
   margin: 0;
   width: 100%;
@@ -1700,12 +1758,9 @@
   overflow: hidden;
   color: var(--color-text-primary);
   font-size: 11px;
-  line-height: 1.4;
+  line-height: 1.45;
   text-align: left;
-  white-space: pre-wrap;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 6;
+  white-space: normal;
 }
 
 .designer-node:has(.designer-node__fit-content) .designer-node__body {
@@ -1727,17 +1782,36 @@
 }
 
 .designer-node__fit-content--text {
-  width: max-content;
+  flex: 0 0 256px;
+  width: 256px;
+  min-width: 256px;
   max-width: 256px;
 }
 
 .designer-node:has(.designer-node__fit-content) .designer-node__text-preview {
   display: block;
-  width: max-content;
-  max-width: 256px;
   max-height: none;
   overflow: visible;
-  -webkit-line-clamp: unset;
+}
+
+.designer-node__text-preview.chat-markdown :where(h1, h2, h3, h4, h5, h6) {
+  margin: 0.35em 0 0.15em;
+  font-size: 1.05em;
+  line-height: 1.3;
+}
+
+.designer-node__text-preview.chat-markdown :where(ul, ol) {
+  margin: 0.2em 0;
+  padding-left: 1.15em;
+}
+
+.designer-node__text-preview.chat-markdown :where(img) {
+  max-width: 100%;
+  height: auto;
+}
+
+.designer-node__text-preview.chat-markdown .chat-markdown-table-wrap > table {
+  min-width: 0;
 }
 
 .designer-node__fit-content--table {
@@ -2359,6 +2433,10 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
 }
 
 .designer-node-toolbar__param--wide {
@@ -3034,6 +3112,11 @@ textarea.designer-node-toolbar__param-input {
   white-space: pre-wrap;
 }
 
+.designer-text-editor__text.chat-markdown {
+  white-space: normal;
+  font-family: inherit;
+}
+
 .designer-text-editor__error {
   margin: 0;
   font-size: 12px;
@@ -3382,4 +3465,27 @@ textarea.designer-node-toolbar__param-input {
 .designer-revision-chooser__actions {
   justify-content: flex-end;
   border-top: 1px solid var(--color-border-default, #e5e7eb);
+}
+
+/* Read-only workflow: edit affordances stay visible and show a forbidden cursor. */
+.designer-canvas-dock__btn.designer-edit-control:disabled,
+.designer-page__toolbar-icon-btn.designer-edit-control:disabled,
+.designer-node-action-bar__btn.designer-edit-control:disabled,
+.designer-edge-delete.designer-edit-control,
+.designer-edge-delete.designer-edit-control:disabled,
+.designer-node-toolbar__send.designer-edit-control:disabled,
+.designer-node-toolbar__material-remove.designer-edit-control,
+.designer-node-toolbar__material-remove.designer-edit-control:disabled,
+.btn.designer-edit-control:disabled,
+textarea.designer-node-toolbar__prompt.designer-edit-control,
+.designer-node__card .react-flow__handle.designer-node__port.designer-edit-control,
+.designer-node__card .react-flow__handle.designer-node__port.designer-edit-control .designer-node__port-icon,
+.designer-canvas-shell.is-hand .designer-node__card .react-flow__handle.designer-node__port.designer-edit-control .designer-node__port-icon,
+.designer-node__resize.designer-edit-control,
+.designer-node__resize.designer-edit-control *,
+.designer-media-settings.designer-edit-control,
+.designer-media-settings.designer-edit-control *,
+.designer-node-toolbar__comfyui.designer-edit-control,
+.designer-node-toolbar__comfyui.designer-edit-control * {
+  cursor: not-allowed;
 }

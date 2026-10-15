@@ -21,6 +21,7 @@ import {
   storeDesignerUpload,
   uploadKindFromMime,
 } from '../designerNodeUpload';
+import { useDesignerGraphEditingLocked } from '../useDesignerGraphEditingLocked';
 import { useDesignerRunStore } from '../designerRunStore';
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
@@ -39,6 +40,7 @@ export function DesignerCanvasDock() {
   const setCanvasTool = useDesignerUiStore((state) => state.setCanvasTool);
   const toggleAssetsSidebar = useDesignerUiStore((state) => state.toggleAssetsSidebar);
   const closeDock = useDesignerUiStore((state) => state.closeDock);
+  const editingLocked = useDesignerGraphEditingLocked();
   const importComfyui = useComfyuiImport();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -54,6 +56,7 @@ export function DesignerCanvasDock() {
 
   const placeAndAdd = useCallback(
     (template: DesignerAddTemplate) => {
+      if (editingLocked) return;
       const existing = domainGraph?.nodes ?? [];
       const node = buildManualDesignerNode({
         template,
@@ -63,16 +66,17 @@ export function DesignerCanvasDock() {
       addNode(node);
       closeDock();
     },
-    [addNode, canvasCenter, closeDock, domainGraph?.nodes],
+    [addNode, canvasCenter, closeDock, domainGraph?.nodes, editingLocked],
   );
 
   const placeComfyui = useCallback(
     (files: File[]) => {
+      if (editingLocked) return;
       const origin = offsetCanvasPosition(canvasCenter(), domainGraph?.nodes.length ?? 0);
       closeDock();
       void importComfyui(files, origin);
     },
-    [canvasCenter, closeDock, domainGraph?.nodes.length, importComfyui],
+    [canvasCenter, closeDock, domainGraph?.nodes.length, editingLocked, importComfyui],
   );
 
   const onComfyuiChange = useCallback(
@@ -87,7 +91,7 @@ export function DesignerCanvasDock() {
   const placeUpload = useCallback(
     async (file: File) => {
       const kind = uploadKindFromMime(file.type);
-      if (!kind) return;
+      if (editingLocked || !kind) return;
       const position = offsetCanvasPosition(canvasCenter(), domainGraph?.nodes.length ?? 0);
       closeDock();
       try {
@@ -100,7 +104,7 @@ export function DesignerCanvasDock() {
         });
       }
     },
-    [addNode, canvasCenter, closeDock, domainGraph?.nodes.length],
+    [addNode, canvasCenter, closeDock, domainGraph?.nodes.length, editingLocked],
   );
 
   const onUploadChange = useCallback(
@@ -119,7 +123,8 @@ export function DesignerCanvasDock() {
           <button
             key={item.id}
             type="button"
-            className="designer-canvas-dock__btn"
+            className={`designer-canvas-dock__btn${editingLocked ? ' designer-edit-control' : ''}`}
+            disabled={editingLocked}
             aria-label={t(`designer.dock.node.${item.id}`)}
             title={t(`designer.dock.node.${item.id}`)}
             data-testid={`designer-canvas-dock-add-${item.id}`}
@@ -130,11 +135,15 @@ export function DesignerCanvasDock() {
         ))}
         <button
           type="button"
-          className="designer-canvas-dock__btn"
+          className={`designer-canvas-dock__btn${editingLocked ? ' designer-edit-control' : ''}`}
+          disabled={editingLocked}
           aria-label={t('designer.dock.node.comfyui')}
           title={t('designer.dock.comfyuiHint')}
           data-testid="designer-canvas-dock-add-comfyui"
-          onClick={() => fileInputRef.current?.click()}
+          onClick={() => {
+            if (editingLocked) return;
+            fileInputRef.current?.click();
+          }}
         >
           <Workflow size={18} aria-hidden />
         </button>
@@ -184,11 +193,15 @@ export function DesignerCanvasDock() {
         </button>
         <button
           type="button"
-          className="designer-canvas-dock__btn"
+          className={`designer-canvas-dock__btn${editingLocked ? ' designer-edit-control' : ''}`}
+          disabled={editingLocked}
           aria-label={t('designer.dock.upload')}
           title={t('designer.dock.uploadHint')}
           data-testid="designer-canvas-dock-upload-btn"
-          onClick={() => uploadInputRef.current?.click()}
+          onClick={() => {
+            if (editingLocked) return;
+            uploadInputRef.current?.click();
+          }}
         >
           <Upload size={18} aria-hidden />
         </button>

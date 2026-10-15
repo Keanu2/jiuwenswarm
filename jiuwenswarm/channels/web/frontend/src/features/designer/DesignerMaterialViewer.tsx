@@ -5,6 +5,7 @@ import { DesignerTextEditor } from './DesignerTextEditor';
 import {
   classifyDesignerOutput,
   isEditableDesignerMaterial,
+  resolveDesignerViewerMaterial,
   type DesignerMaterial,
 } from './designerMaterials';
 
@@ -37,11 +38,8 @@ export function DesignerMaterialViewer({
   const [editing, setEditing] = useState(false);
   const [editKey, setEditKey] = useState(0);
   const viewable = useMemo(() => viewableDesignerMaterials(materials), [materials]);
-  const index = Math.max(
-    0,
-    viewable.findIndex((item) => item.id === selectedId || item.nodeId === selectedId),
-  );
-  const current = viewable[index] ?? viewable[0];
+  const current = resolveDesignerViewerMaterial(viewable, selectedId);
+  const index = current ? viewable.findIndex((item) => item.id === current.id) : -1;
   const kind = current ? classifyDesignerOutput(current) : 'placeholder';
   const canEdit = Boolean(current && isEditableDesignerMaterial(current));
 
@@ -63,7 +61,7 @@ export function DesignerMaterialViewer({
         onClose();
         return;
       }
-      if (editing || typing || viewable.length < 2) return;
+      if (editing || typing || viewable.length < 2 || index < 0) return;
       if (event.key === 'ArrowLeft') {
         event.preventDefault();
         const next = viewable[(index - 1 + viewable.length) % viewable.length];
@@ -140,6 +138,7 @@ export function DesignerMaterialViewer({
               <audio key={current.uri} src={current.previewUrl} controls />
             ) : (kind === 'text' || current.kind === 'table') && current.textUrl ? (
               <DesignerTextEditor
+                key={current.id}
                 material={current}
                 showStartButton={false}
                 startEditKey={editKey}

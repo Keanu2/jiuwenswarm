@@ -10,7 +10,6 @@ from typing import Any
 from jiuwenswarm.common.cron_session import cron_session_matches_job
 from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_CODE,
-    DEFAULT_PROJECT_ID_DESIGN,
     DEFAULT_PROJECT_ID_WORK,
     DEFAULT_TUI_WORK_MODE,
     DEFAULT_WEB_WORK_MODE,
@@ -49,12 +48,11 @@ def attribute_session_project(
             return project_id
         if project_id in removed_project_ids:
             return ""
-    work_mode = str(metadata.get("work_mode") or "")
-    if work_mode == DEFAULT_TUI_WORK_MODE:
-        return DEFAULT_PROJECT_ID_CODE
-    if work_mode == DESIGN_WORK_MODE:
-        return DEFAULT_PROJECT_ID_DESIGN
-    return DEFAULT_PROJECT_ID_WORK
+    return (
+        DEFAULT_PROJECT_ID_CODE
+        if str(metadata.get("work_mode") or "") == DEFAULT_TUI_WORK_MODE
+        else DEFAULT_PROJECT_ID_WORK
+    )
 
 
 def project_info_payload(
@@ -84,12 +82,6 @@ def project_info_payload(
     raw_git = getattr(project, "git", {}) if project is not None else {}
     git = {**git_defaults, **dict(raw_git)} if isinstance(raw_git, dict) and raw_git else git_defaults
     if default_id is not None:
-        if default_id == DEFAULT_PROJECT_ID_CODE:
-            work_mode = DEFAULT_TUI_WORK_MODE
-        elif default_id == DEFAULT_PROJECT_ID_DESIGN:
-            work_mode = DESIGN_WORK_MODE
-        else:
-            work_mode = DEFAULT_WEB_WORK_MODE
         return {
             "project_id": default_id,
             "name": "默认项目",
@@ -101,7 +93,11 @@ def project_info_payload(
             "lifecycle_operation": None,
             "execution_blocked": False,
             "stop_pending": False,
-            "work_mode": work_mode,
+            "work_mode": (
+                DEFAULT_TUI_WORK_MODE
+                if default_id == DEFAULT_PROJECT_ID_CODE
+                else DEFAULT_WEB_WORK_MODE
+            ),
             "git": git,
             "session_count": statistics["session_count"],
             "last_message_at": statistics["last_message_at"],
@@ -383,7 +379,7 @@ def load_project_list(
     if isinstance(raw_work_mode, str) and raw_work_mode.strip():
         candidate = raw_work_mode.strip().lower()
         if candidate not in SUPPORTED_WORK_MODES:
-            return None, f"invalid work_mode: {candidate!r}, must be one of {sorted(SUPPORTED_WORK_MODES)}", "BAD_REQUEST"
+            return None, f"invalid work_mode: {candidate!r}", "BAD_REQUEST"
         work_mode = candidate
 
     all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
@@ -434,8 +430,6 @@ def load_project_list(
         default_ids.append(DEFAULT_PROJECT_ID_WORK)
     if work_mode in (None, DEFAULT_TUI_WORK_MODE):
         default_ids.append(DEFAULT_PROJECT_ID_CODE)
-    if work_mode in (None, DESIGN_WORK_MODE):
-        default_ids.append(DEFAULT_PROJECT_ID_DESIGN)
     default_items = [item(None, default_id) for default_id in default_ids]
 
     def user_sort(info: dict[str, Any]) -> float:

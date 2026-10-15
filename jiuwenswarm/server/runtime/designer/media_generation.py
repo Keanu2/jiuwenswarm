@@ -29,6 +29,8 @@ from urllib.parse import unquote, urlparse
 from jiuwenswarm.agents.harness.common.tools import gen_toolkits
 from jiuwenswarm.agents.harness.common.tools.video_gen_tools import video_gen_enabled
 from jiuwenswarm.agents.harness.common.tools.visual_gen_tools import visual_gen_enabled
+from jiuwenswarm.server.runtime.designer.pipeline.image_capacity import IMAGE_RATIOS
+from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import capacity_for_model, snap_duration
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +38,11 @@ Kind = Literal["image", "video"]
 
 _ENV_PREFIX: dict[Kind, str] = {"image": "VISUAL_GEN", "video": "VIDEO_GEN"}
 _SETTINGS_LABEL: dict[Kind, str] = {"image": "Image generation", "video": "Video generation"}
-_IMAGE_RATIOS = ("1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9")
-_VIDEO_RATIOS = ("16:9", "21:9", "4:3", "1:1", "3:4", "9:16")
 _VIDEO_POLL_SECONDS = 15.0
 _VIDEO_TIMEOUT_SECONDS = 1800.0
+# The agent tool budget stays under the node cap so a cloud job can still be
+# cancelled with a little time left on the node.
+_VIDEO_TOOL_TIMEOUT_SECONDS = 1500.0
 # A 50-step MiniMax-H3 render on a self-deployed server can take far longer.
 _VLLM_OMNI_VIDEO_TIMEOUT_SECONDS = 7200.0
 _SAVED_TO = re.compile(r"^Saved to: (.+)$", re.MULTILINE)
@@ -76,6 +79,17 @@ def slot_settings(kind: Kind) -> SlotSettings:
 def configured_model(kind: Kind) -> str:
     """User-configured model only; never a fallback model id."""
     return slot_settings(kind).model
+
+
+def video_tool_timeout_seconds() -> float:
+    """How long one clip video call may run.
+
+    vLLM-Omni shares the long poll budget. Other backends keep the shorter
+    tool budget that sits inside the 1800s node cap.
+    """
+    if slot_settings("video").backend == gen_toolkits.VLLM_OMNI:
+        return _VLLM_OMNI_VIDEO_TIMEOUT_SECONDS
+    return _VIDEO_TOOL_TIMEOUT_SECONDS
 
 
 def generation_enabled(kind: Kind) -> bool:
@@ -156,14 +170,14 @@ async def generate_image(
     reference_images: list[str] | None = None,
     save_dir: str | None = None,
 ) -> dict[str, str]:
-    """Generate one still; returns ``{"image_path": ...}`` or ``{"error": ...}``."""
+    """Generate one image; returns ``{"image_path": ...}`` or ``{"error": ...}``."""
     target = _target("image")
     if isinstance(target, str):
         return {"error": target}
     refs, error = _reference_uris(reference_images)
     if error:
         return {"error": error}
-    aspect_ratio = gen_toolkits.aspect_ratio_for_size(size, _IMAGE_RATIOS, "1:1")
+    aspect_ratio = gen_toolkits.aspect_ratio_for_size(size, IMAGE_RATIOS, "1:1")
     options = gen_toolkits.ImageOptions(size=size, reference_image_uris=refs)
     logger.info(
         "Designer image generation backend=%s model=%s size=%s references=%d",
@@ -176,12 +190,16 @@ async def generate_image(
 
 @dataclass(frozen=True)
 class DesignerVideoRequest:
-    """One clip for ``generate_video``; paths may be local files or URLs."""
+    """One clip for ``generate_video``; paths may be local files or URLs.
+
+    ``aspect_ratio`` and ``resolution`` come from the canvas video settings; each
+    backend derives its own pixel size from them.
+    """
 
     prompt: str
+    aspect_ratio: str
+    resolution: str
     duration: int = 5
-    size: str | None = None
-    resolution: str | None = None
     first_frame: str | None = None
     reference_images: tuple[str, ...] = ()
     reference_file: str | None = None
@@ -203,20 +221,19 @@ async def generate_video(request: DesignerVideoRequest, *, save_dir: str | None 
         return {"error": f"[ERROR]: first frame {request.first_frame!r} is not a readable image file or URL."}
     video_request = gen_toolkits.VideoRequest(
         prompt=request.prompt,
-        aspect_ratio=gen_toolkits.aspect_ratio_for_size(request.size, _VIDEO_RATIOS, "16:9"),
-        resolution=(request.resolution or "720p").strip().lower(),
-        duration_seconds=int(request.duration),
+        aspect_ratio=request.aspect_ratio,
+        resolution=request.resolution.strip().lower(),
+        duration_seconds=snap_duration(request.duration, capacity_for_model(target.model)),
         generate_audio=bool(request.audio),
         first_frame_data_uri=first_frame,
-        size=request.size,
         reference_image_uris=refs,
         reference_mode=request.reference_mode,
         reference_file_path=request.reference_file,
     )
     logger.info(
-        "Designer video generation backend=%s model=%s size=%s resolution=%s first_frame=%s references=%d "
-        "reference_mode=%s file=%s",
-        target.backend, target.model, request.size, video_request.resolution, bool(first_frame), len(refs),
+        "Designer video generation backend=%s model=%s aspect_ratio=%s resolution=%s first_frame=%s "
+        "references=%d reference_mode=%s file=%s",
+        target.backend, target.model, request.aspect_ratio, video_request.resolution, bool(first_frame), len(refs),
         request.reference_mode, bool(request.reference_file),
     )
     result = await gen_toolkits.submit_video(target, video_request, save_dir)

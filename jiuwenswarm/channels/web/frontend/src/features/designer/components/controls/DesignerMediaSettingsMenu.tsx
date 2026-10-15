@@ -10,6 +10,7 @@ import {
   generatesTimedVideo,
   generationModelLabel,
 } from '../../designerMediaSettings';
+import { useDesignerGraphEditingLocked } from '../../useDesignerGraphEditingLocked';
 import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
 import type { DesignerMediaCapabilities, DesignerMediaSettingsPatch } from '../../executionGraphTypes';
@@ -77,6 +78,7 @@ export function DesignerMediaSettingsMenu({ nodeId, nodeType }: DesignerMediaSet
   // A finished storyboard run can change clip lengths, so refetch with the run.
   const runVersion = useDesignerRunStore((state) => `${state.run?.run_id ?? ''}:${state.run?.updated_at ?? ''}`);
   const patchMediaSettings = useDesignerStore((state) => state.patchMediaSettings);
+  const editingLocked = useDesignerGraphEditingLocked();
   const [caps, setCaps] = useState<DesignerMediaCapabilities | null>(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -158,7 +160,11 @@ export function DesignerMediaSettingsMenu({ nodeId, nodeType }: DesignerMediaSet
 
   return (
     <>
-      <div className="designer-media-settings" ref={rootRef} data-media-type={nodeType}>
+      <div
+        className={`designer-media-settings${editingLocked ? ' designer-edit-control' : ''}`}
+        ref={rootRef}
+        data-media-type={nodeType}
+      >
         <button
           type="button"
           className={`designer-media-settings__trigger${open ? ' is-open' : ''}`}
@@ -166,8 +172,11 @@ export function DesignerMediaSettingsMenu({ nodeId, nodeType }: DesignerMediaSet
           aria-haspopup="dialog"
           aria-expanded={open}
           title={isVideo ? t('designer.mediaSettings.videoTitle') : t('designer.mediaSettings.imageTitle')}
-          disabled={!caps}
-          onClick={() => setOpen((prev) => !prev)}
+          disabled={!caps || editingLocked}
+          onClick={() => {
+            if (editingLocked) return;
+            setOpen((prev) => !prev);
+          }}
         >
           <span className="designer-media-settings__summary">{summary}</span>
           <ChevronDown size={14} aria-hidden />
@@ -183,7 +192,7 @@ export function DesignerMediaSettingsMenu({ nodeId, nodeType }: DesignerMediaSet
               label={t('designer.toolbar.aspectRatio')}
               options={isVideo ? caps.video.ratios : caps.image.ratios}
               value={isVideo ? video.aspect_ratio : image.aspect_ratio}
-              disabled={saving}
+              disabled={saving || editingLocked}
               testId={isVideo ? 'designer-media-settings-video-ratio' : 'designer-media-settings-image-ratio'}
               showAspectIcons
               onSelect={(aspect_ratio) =>
@@ -194,7 +203,7 @@ export function DesignerMediaSettingsMenu({ nodeId, nodeType }: DesignerMediaSet
               label={t('designer.toolbar.resolution')}
               options={isVideo ? caps.video.resolutions : caps.image.resolutions}
               value={isVideo ? video.resolution : image.resolution}
-              disabled={saving}
+              disabled={saving || editingLocked}
               testId={isVideo ? 'designer-media-settings-video-resolution' : 'designer-media-settings-image-resolution'}
               onSelect={(resolution) =>
                 apply(isVideo ? { video_settings: { resolution } } : { image_settings: { resolution } })
@@ -215,7 +224,9 @@ export function DesignerMediaSettingsMenu({ nodeId, nodeType }: DesignerMediaSet
                   max={caps.video.max_sec}
                   step={1}
                   value={seconds}
+                  disabled={editingLocked}
                   onChange={(event) => {
+                    if (editingLocked) return;
                     const next = Number(event.target.value);
                     updateNodeConfig(nodeId, (config) => ({ ...config, duration_sec: next }));
                   }}

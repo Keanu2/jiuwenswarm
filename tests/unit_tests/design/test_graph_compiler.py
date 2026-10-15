@@ -32,8 +32,8 @@ def _chain_graph():
     return {
         "graph_id": "g_chain",
         "nodes": [
-            {"id": "n1", "type": "text", "label": "A", "config": {"prompt": "a"}},
-            {"id": "n2", "type": "text", "label": "B", "config": {"prompt": "b"}},
+            {"id": "n1", "type": "text", "label": "A", "config": {"prompt": "a", "pipeline": "brief"}},
+            {"id": "n2", "type": "text", "label": "B", "config": {"prompt": "b", "pipeline": "brief"}},
         ],
         "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
     }
@@ -43,10 +43,10 @@ def _fanout_graph():
     return {
         "graph_id": "g_fan",
         "nodes": [
-            {"id": "n0", "type": "text", "label": "outline", "config": {"prompt": "o"}},
-            {"id": "n1", "type": "text", "label": "B1", "config": {"prompt": "b1"}},
-            {"id": "n2", "type": "text", "label": "B2", "config": {"prompt": "b2"}},
-            {"id": "n3", "type": "text", "label": "C", "config": {"prompt": "c"}},
+            {"id": "n0", "type": "text", "label": "outline", "config": {"prompt": "o", "pipeline": "brief"}},
+            {"id": "n1", "type": "text", "label": "B1", "config": {"prompt": "b1", "pipeline": "brief"}},
+            {"id": "n2", "type": "text", "label": "B2", "config": {"prompt": "b2", "pipeline": "brief"}},
+            {"id": "n3", "type": "text", "label": "C", "config": {"prompt": "c", "pipeline": "brief"}},
         ],
         "edges": [
             {"id": "e1", "source": "n0", "target": "n1"},
@@ -109,9 +109,27 @@ def test_explicit_agent_template_wins():
 
 def test_default_template_per_type():
     src = GraphScriptCompiler().compile(_chain_graph(), {})
-    # text nodes default to the designer text member (bare name, SDD-0030)
+    # pipeline nodes default to their designer member (bare name, SDD-0030)
     normalized = src.replace('"', "'")
-    assert "'agent_template': 'text'" in normalized
+    assert "'agent_template': 'brief'" in normalized
+
+
+def test_member_calls_carry_ticket_and_output_schema():
+    src = GraphScriptCompiler().compile(_chain_graph(), {}, run_id="run_1")
+    assert "NODE_OUTPUT_SCHEMA = {" in src
+    assert "shot_ticket: design:g_chain:run_1:n1" in src
+    agent_lines = [ln for ln in src.splitlines() if "await agent(" in ln]
+    assert agent_lines and all("schema=NODE_OUTPUT_SCHEMA" in ln for ln in agent_lines)
+
+
+def test_generic_text_node_is_rejected():
+    g = {
+        "graph_id": "g_plain",
+        "nodes": [{"id": "n1", "type": "text", "label": "A", "config": {"prompt": "a"}}],
+        "edges": [],
+    }
+    with pytest.raises(ValueError, match="no pipeline"):
+        GraphScriptCompiler().compile(g, {})
 
 
 def test_version_in_phase_and_frozen_literal():
@@ -124,6 +142,29 @@ def test_version_in_phase_and_frozen_literal():
     agent_lines = [ln for ln in src.splitlines() if "await agent(" in ln]
     assert 'label="n1"' not in " ".join(agent_lines)  # frozen → no call
     assert '"frozen"' in src  # n1 contributes its text as a literal
+
+
+def test_frozen_literal_reads_edited_output_file(tmp_path: Path):
+    output = tmp_path / "n1.md"
+    output.write_text("edited by user", encoding="utf-8")
+    ref = {"kind": "text", "uri": output.as_uri(), "mime_type": "text/markdown"}
+    src = GraphScriptCompiler().compile(
+        _chain_graph(), {"n1": {"text": "stale", "output_ref": ref}}
+    )
+    assert '"edited by user"' in src
+    assert '"stale"' not in src
+
+
+def test_frozen_literal_falls_back_to_stored_text(tmp_path: Path):
+    missing = {"kind": "text", "uri": (tmp_path / "gone.md").as_uri()}
+    image = tmp_path / "n1.png"
+    image.write_bytes(b"\x89PNG")
+    media = {"kind": "image", "uri": image.as_uri(), "mime_type": "image/png"}
+    for ref in (missing, media):
+        src = GraphScriptCompiler().compile(
+            _chain_graph(), {"n1": {"text": "stored", "output_ref": ref}}
+        )
+        assert '"stored"' in src
 
 
 # ── engine option whitelist ───────────────────────────────────────
@@ -173,7 +214,7 @@ def test_handler_reference_nodes_compile_to_literals():
                 },
             },
             {"id": "n_char", "type": "text", "label": "角色",
-             "config": {"prompt": "参考 hero.png 设计角色"}},
+             "config": {"prompt": "参考 hero.png 设计角色", "pipeline": "character"}},
         ],
         "edges": [{"id": "e1", "source": "n_ref_01", "target": "n_char"}],
     }
@@ -195,10 +236,10 @@ def test_wave_concurrency_cap_batches_large_waves():
     g = {
         "graph_id": "g_wide",
         "nodes": [
-            {"id": "root", "type": "text", "label": "R", "config": {"prompt": "r"}},
+            {"id": "root", "type": "text", "label": "R", "config": {"prompt": "r", "pipeline": "brief"}},
             *[{
                 "id": f"b{i}", "type": "text", "label": f"B{i}",
-                "config": {"prompt": f"b{i}"},
+                "config": {"prompt": f"b{i}", "pipeline": "brief"},
             } for i in range(5)],
         ],
         "edges": [
@@ -239,7 +280,8 @@ def test_fanout_engine_run_gates_downstream():
                 label = str(opts.get("label"))
                 if label == "n1":
                     raise RuntimeError("injected n1 failure")
-                return AgentResult(text=f"<<{label}>>")
+                ref = {"kind": "text", "uri": f"file:///tmp/{label}.md"}
+                return AgentResult(text=f"<<{label}>>", structured={"output_ref": ref})
             finally:
                 self.concurrent -= 1
 
@@ -254,7 +296,7 @@ def test_fanout_engine_run_gates_downstream():
     assert "n0" in backend.calls and "n1" in backend.calls and "n2" in backend.calls
     assert "n3" not in backend.calls
     assert backend.max_concurrent >= 2  # branches overlapped
-    assert result.get("n0") == "<<n0>>"
+    assert result.get("n0")["output_ref"]["uri"] == "file:///tmp/n0.md"
     assert result.get("n1") is None
-    assert result.get("n2") == "<<n2>>"
+    assert result.get("n2")["output_ref"]["uri"] == "file:///tmp/n2.md"
     assert result.get("n3") is None

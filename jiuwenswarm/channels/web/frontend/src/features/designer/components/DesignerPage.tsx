@@ -1,15 +1,16 @@
-import { LayoutPanelTop, Loader2, MapPinned, Route, RouteOff } from 'lucide-react';
+import { LayoutPanelTop, Loader2, MapPinned, PanelLeft, Route, RouteOff } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import PanelCollapseIcon from '../../../assets/panel-collapse.svg?react';
-import chatOrbIcon from '../../../assets/designer-chat-orb.png';
+import chatOrbIcon from '../../../assets/designer/xiaoyi-app-icon.png';
 import {
   collectDesignerMaterials,
   collectPendingRevisions,
 } from '../designerMaterials';
 import { useDesignerChatStore } from '../designerChatStore';
+import { seedDesignerChatHistory } from '../designerEntry';
 import { bindDesignerRuntime, useDesignerRunStore } from '../designerRunStore';
 import { isDesignerPreviewGraph } from '../designerBootstrapGraph';
+import { useDesignerGraphEditingLocked } from '../useDesignerGraphEditingLocked';
 import { useDesignerStore } from '../designerStore';
 import { useDesignerUiStore } from '../designerUiStore';
 import { DesignerMaterialViewer } from '../DesignerMaterialViewer';
@@ -22,6 +23,7 @@ import { DesignerChatPanel, DesignerEmptyState } from './DesignerChatPanel';
 import { DesignerRunControl } from './DesignerRunControl';
 import { designerWorkspaceClient } from '../designerGraphClient';
 import { useWorkspaceStore } from '../../../stores/workspaceStore';
+import './DesignerErrorToast.css';
 import './DesignerPage.css';
 
 type DesignerPageProps = {
@@ -126,23 +128,33 @@ export function DesignerPage({
   useEffect(() => bindDesignerRuntime(), []);
 
   useEffect(() => {
-    if (!sessionId || bootstrapInProgress) return;
+    if (!effectiveProjectId || bootstrapInProgress) return;
     const requestedKey = `${effectiveProjectId}:${sessionId || ''}`;
     if (sessionId && loadedKeyRef.current === requestedKey) return;
     const loadSeq = ++workspaceLoadSeqRef.current;
-    useDesignerStore.getState().reset();
+    // The composer hands over this session's graph before navigating while
+    // the first leader round is already pushing designer.graph.updated;
+    // resetting would drop those pushes until workspace.get returns.
+    const held = useDesignerStore.getState().domainGraph;
+    if (!sessionId || held?.metadata?.session_id !== sessionId) {
+      useDesignerStore.getState().reset();
+    }
     void designerWorkspaceClient.get(effectiveProjectId, sessionId)
       .then((workspace) => {
         if (workspaceLoadSeqRef.current !== loadSeq) return;
         const opened = String(workspace.session?.session_id || '');
         loadedKeyRef.current = `${effectiveProjectId}:${opened}`;
-        useDesignerStore.getState().applyGraph(workspace.graph);
+        const current = useDesignerStore.getState().domainGraph;
+        const newer = current?.graph_id === workspace.graph.graph_id
+          && (current.updated_at ?? 0) > (workspace.graph.updated_at ?? 0);
+        if (!newer) useDesignerStore.getState().applyGraph(workspace.graph);
         useDesignerChatStore.getState().replaceMessages(
           workspace.graph.graph_id,
           workspace.messages,
         );
+        if (opened) seedDesignerChatHistory(opened, workspace.messages);
         if (opened && opened !== sessionId) {
-          onOpenSessionRef.current?.(effectiveProjectId || '', opened, { replace: true });
+          onOpenSessionRef.current?.(effectiveProjectId, opened, { replace: true });
         }
       })
       .catch((reason) => {
@@ -225,6 +237,7 @@ export function DesignerPage({
   );
   const canvasInteractive =
     showCanvas && !bootstrapInProgress && !isDesignerPreviewGraph(domainGraph);
+  const editingLocked = useDesignerGraphEditingLocked();
 
   return (
     <div className="designer-page app-section" data-testid="designer-page">
@@ -241,7 +254,7 @@ export function DesignerPage({
               data-testid="designer-page-sidebar-collapse"
               data-variant={sidebarCollapsed ? 'expand' : 'collapse'}
             >
-              <PanelCollapseIcon aria-hidden />
+              <PanelLeft size={18} aria-hidden />
             </button>
           ) : null}
           <div className="designer-page__heading">
@@ -271,11 +284,11 @@ export function DesignerPage({
             </button>
             <button
               type="button"
-              className="designer-page__toolbar-icon-btn"
+              className={`designer-page__toolbar-icon-btn${editingLocked ? ' designer-edit-control' : ''}`}
               aria-label={t('designer.toolbar.layoutNodes')}
               title={t('designer.toolbar.layoutNodes')}
               data-testid="designer-page-layout"
-              disabled={!canvasInteractive || !domainGraph?.nodes.length}
+              disabled={!canvasInteractive || editingLocked || !domainGraph?.nodes.length}
               onClick={requestAutoLayout}
             >
               <LayoutPanelTop size={18} aria-hidden />
@@ -315,7 +328,7 @@ export function DesignerPage({
             className="app-toast-wrapper app-toast-wrapper--top-center"
             data-testid="designer-run-error-toast"
           >
-            <div className="app-connection-toast" role="alert" data-testid="designer-error">
+            <div className="designer-error-toast" role="alert" data-testid="designer-error">
               {runError}
             </div>
           </div>

@@ -315,3 +315,43 @@ export function preferredDesignerMaterial(
   }
   return materials.find(usable) ?? materials[0];
 }
+
+const NODE_MEDIA_KINDS = new Set(['image', 'video', 'audio']);
+
+/** Outputs that belong to the node. Uploaded references reuse the brief node id and are not its markdown. */
+export function ownedDesignerMaterials(
+  materials: DesignerMaterial[],
+  nodeId: string,
+): DesignerMaterial[] {
+  return materials.filter(
+    (item) =>
+      item.nodeId === nodeId &&
+      item.role !== 'user_reference' &&
+      item.id.startsWith(`${nodeId}:`) &&
+      !item.placeholder &&
+      Boolean(item.previewUrl || item.textUrl),
+  );
+}
+
+export function previewMaterialForNode(
+  materials: DesignerMaterial[],
+  nodeId: string,
+  nodeType?: string,
+): DesignerMaterial | undefined {
+  const owned = ownedDesignerMaterials(materials, nodeId);
+  if (nodeType === 'text' || nodeType === 'table') {
+    return owned.find((item) => item.kind === 'text' || item.kind === 'table') ?? owned[0];
+  }
+  return owned.find((item) => NODE_MEDIA_KINDS.has(item.kind)) ?? owned[0];
+}
+
+/** Exact material ids win. A bare node id opens that node's own output, not a reference attached to it. */
+export function resolveDesignerViewerMaterial(
+  materials: DesignerMaterial[],
+  selectedId: string,
+): DesignerMaterial | undefined {
+  if (!selectedId) return undefined;
+  const exact = materials.find((item) => item.id === selectedId && !item.placeholder);
+  if (exact) return exact;
+  return previewMaterialForNode(materials, selectedId);
+}

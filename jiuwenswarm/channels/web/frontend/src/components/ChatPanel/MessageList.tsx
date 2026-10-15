@@ -47,7 +47,7 @@ interface MessageListProps {
   teamLeaderIdentityOverride?: TeamLeaderIdentity | null;
   teamGroupIdentityOverride?: AgentGroupIdentity | null;
   onForkFromMessage?: (message: Message) => Promise<void>;
-  /** Designer dock is narrow; disable virtualization so normal flow handles expanding/collapsing content. */
+  /** The designer dock is narrow; render in normal flow so expanding content reflows. */
   virtualized?: boolean;
 }
 

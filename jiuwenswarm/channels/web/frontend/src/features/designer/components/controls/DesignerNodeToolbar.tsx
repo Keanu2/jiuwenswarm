@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import SendPlaneIcon from '../../../../assets/send_plane.svg?react';
 import { isComfyuiNodeConfig } from '../../comfyuiWorkflow';
 import { hasPendingDesignerRevision } from '../../designerMaterials';
+import { useDesignerGraphEditingLocked } from '../../useDesignerGraphEditingLocked';
 import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
@@ -33,6 +34,7 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
   const updateNodeConfig = useDesignerStore((state) => state.updateNodeConfig);
   const rerunNode = useDesignerRunStore((state) => state.rerunNode);
   const isRunning = useDesignerRunStore((state) => state.isRunning);
+  const editingLocked = useDesignerGraphEditingLocked();
   const nodeState = useDesignerRunStore((state) => state.nodeStates[nodeId]);
   const domainGraph = useDesignerStore((state) => state.domainGraph);
   const openRevision = useDesignerUiStore((state) => state.openRevision);
@@ -57,15 +59,16 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
 
   const patchGenerate = useCallback(
     (patch: Parameters<typeof writeMediaGeneratePatch>[1]) => {
+      if (editingLocked) return;
       updateNodeConfig(nodeId, (current) => writeMediaGeneratePatch(current, patch));
     },
-    [nodeId, updateNodeConfig],
+    [editingLocked, nodeId, updateNodeConfig],
   );
 
   const onGenerateNode = useCallback(() => {
-    if (!domainGraph || isRunning) return;
+    if (!domainGraph || isRunning || editingLocked) return;
     void rerunNode(domainGraph, nodeId);
-  }, [domainGraph, isRunning, nodeId, rerunNode]);
+  }, [domainGraph, editingLocked, isRunning, nodeId, rerunNode]);
 
   // Audio no longer has upload; only revision compare remains when needed.
   if (isMedia && !canGenerate && !pendingRevision) {
@@ -111,7 +114,8 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
           {comfyui ? <DesignerComfyuiParamsForm nodeId={nodeId} comfyui={comfyui} /> : null}
           <div className="designer-node-toolbar__composer">
             <textarea
-              className="designer-node-toolbar__prompt nodrag nopan nowheel"
+              className={`designer-node-toolbar__prompt nodrag nopan nowheel${editingLocked ? ' designer-edit-control' : ''}`}
+              readOnly={editingLocked}
               value={promptDraft}
               placeholder={t('designer.toolbar.promptPlaceholder')}
               rows={4}
@@ -127,6 +131,7 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
                 setPromptDraft(readMediaConfig(latestConfig, nodeType).generate?.prompt ?? '');
               }}
               onChange={(event) => {
+                if (editingLocked) return;
                 const value = event.target.value;
                 setPromptDraft(value);
                 patchGenerate({ prompt: value });
@@ -139,9 +144,9 @@ export function DesignerNodeToolbar({ nodeId, nodeType }: DesignerNodeToolbarPro
               ) : null}
               <button
                 type="button"
-                className="designer-node-toolbar__send"
+                className={`designer-node-toolbar__send${editingLocked ? ' designer-edit-control' : ''}`}
                 data-testid="designer-node-toolbar-generate-action"
-                disabled={isRunning || !domainGraph}
+                disabled={isRunning || !domainGraph || editingLocked}
                 title={t('designer.toolbar.rerunHint')}
                 aria-label={t('designer.toolbar.generateAction')}
                 onClick={onGenerateNode}

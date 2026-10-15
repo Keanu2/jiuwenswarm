@@ -17,7 +17,10 @@ run is many worker LLM turns plus media generation — the tool call must not
 hold the leader's round hostage. ``invoke`` launches the trigger on the
 harness's ``async_tool_runtime`` and returns a "launched" message at once;
 progress streams to the canvas meanwhile, and the run summary is injected
-back as a follow-up message when the trigger finishes.
+back as a follow-up message when the trigger finishes. That follow-up round
+is report-only: whatever the run status, the leader states the outcome and
+waits for the user. ``report_pending`` on the spawner enforces it — run and
+rebuild tools refuse until the next user chat round clears it.
 """
 
 from __future__ import annotations
@@ -37,6 +40,14 @@ SECTION_NAME = "designer_execution"
 # Per-node text preview cap in the tool result: enough for the leader to
 # report outcomes, never a full document dump.
 _NODE_TEXT_PREVIEW_CHARS = 240
+_REPORT_ONLY_NOTE = (
+    "画布运行已结束。本轮只如实向用户汇报下列结果（无论成功或失败），"
+    "不要重新运行、不要改图，等待用户下一条消息。"
+)
+REPORT_ONLY_REFUSAL = (
+    "已拒绝：刚结束的运行还在汇报阶段。如实向用户汇报运行结果即可，"
+    "是否重跑由用户下一条消息决定。"
+)
 
 _PROMPT_CN = """# 画布执行（designer_run_graph）
 
@@ -47,9 +58,10 @@ _PROMPT_CN = """# 画布执行（designer_run_graph）
 - `node_id` + `cascade=true`：从该节点起连同它的所有下游一起重跑（结果直接覆盖）；上游节点保持现有产出不变，即使它的产出基于更早的输入也原样使用。
 
 调用约定：
-- 工具调用**立即返回**（执行在后台进行），进度实时推送到画布；执行结束后你会收到一条运行摘要消息，届时用一两句话向用户汇报各节点的结果与状态，不要粘贴全文。
+- 工具调用**立即返回**（执行在后台进行），进度实时推送到画布；执行结束后你会收到一条运行摘要消息，届时用一两句话如实向用户汇报各节点的结果与状态，不要粘贴全文。
+- 收到运行摘要的这一轮**只汇报**：不论成功、部分失败还是全部失败，跑完了就是跑完了。不要再次调用 designer_run_graph / designer_graph_autorun，也不要为了"修复"而改图；等用户下一条消息再决定。
 - 同一时刻只允许一个执行；执行中再次调用会被拒绝，此时告诉用户稍候。
-- 节点失败时摘要里会带 error，向用户说明失败节点与原因，建议下一步（改提示词重跑该节点 / 从该节点续跑）。
+- 节点失败时摘要里会带 error，向用户说明失败节点与原因，可以给出建议（改提示词重跑该节点 / 从该节点续跑），但不要自行执行。
 - 调用后先告诉用户"已开始执行，画布可看进度"，不要在原地等待结果。
 """
 
@@ -70,12 +82,17 @@ semantics as the canvas run button):
 Conventions:
 - The tool call returns IMMEDIATELY (the run executes in the background);
   progress streams to the canvas meanwhile. A run-summary message is
-  delivered to you when it finishes — report each node's outcome in a
-  sentence or two then, never paste full texts.
+  delivered to you when it finishes — report each node's outcome truthfully
+  in a sentence or two then, never paste full texts.
+- The round that receives the run summary is REPORT-ONLY: succeeded,
+  partially failed or failed, the run is over. Do not call
+  designer_run_graph / designer_graph_autorun again and do not edit the
+  graph to "fix" it; wait for the user's next message.
 - Only one execution at a time; a second call while one runs is rejected —
   tell the user to wait.
 - Node failures carry an error in the summary: name the node, the reason,
-  and suggest the next step (edit the prompt and rerun / rerun from there).
+  and you may suggest the next step (edit the prompt and rerun / rerun from
+  there) — never carry it out yourself.
 - After launching, tell the user "execution started, watch the canvas" —
   do not wait in place for the result.
 """
@@ -98,7 +115,7 @@ def _run_summary(run: dict[str, Any]) -> str:
         if error:
             entry["error"] = error[:200]
         nodes[node_id] = entry
-    return json.dumps(
+    digest = json.dumps(
         {
             "run_id": run.get("run_id"),
             "status": run.get("status"),
@@ -106,6 +123,7 @@ def _run_summary(run: dict[str, Any]) -> str:
         },
         ensure_ascii=False,
     )
+    return f"{_REPORT_ONLY_NOTE}\n{digest}"
 
 
 class DesignerExecutionRail(DeepAgentRail):
@@ -136,6 +154,8 @@ class DesignerExecutionRail(DeepAgentRail):
                 run = await spawner.run_graph(node_ids=node_ids, cascade=cascade)
             except RuntimeError as exc:
                 return f"执行被拒绝：{exc}"
+            finally:
+                spawner.report_pending = True
             return _run_summary(run)
 
         async def _run_graph(**kwargs: Any) -> str:
@@ -143,6 +163,8 @@ class DesignerExecutionRail(DeepAgentRail):
             cascade = bool(kwargs.get("cascade"))
             if cascade and not node_id:
                 return "cascade requires node_id"
+            if spawner.report_pending:
+                return REPORT_ONLY_REFUSAL
             mode = "单点重跑" if node_id and not cascade else (
                 "从该节点续跑" if node_id else "全量运行"
             )
@@ -237,4 +259,4 @@ class DesignerExecutionRail(DeepAgentRail):
         )
 
 
-__all__ = ["DesignerExecutionRail", "TOOL_NAME"]
+__all__ = ["DesignerExecutionRail", "REPORT_ONLY_REFUSAL", "TOOL_NAME"]

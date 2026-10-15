@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useDesignerGraphEditingLocked } from '../../useDesignerGraphEditingLocked';
 import { useDesignerStore } from '../../designerStore';
 import type {
   DesignerComfyuiConfig,
@@ -61,12 +62,15 @@ function NumberInput({
 export function DesignerComfyuiParamsForm({ nodeId, comfyui }: { nodeId: string; comfyui: DesignerComfyuiConfig }) {
   const { t } = useTranslation();
   const updateNodeConfig = useDesignerStore((state) => state.updateNodeConfig);
+  const editingLocked = useDesignerGraphEditingLocked();
 
-  const patch = (next: (previous: DesignerComfyuiConfig) => Partial<DesignerComfyuiConfig>) =>
+  const patch = (next: (previous: DesignerComfyuiConfig) => Partial<DesignerComfyuiConfig>) => {
+    if (editingLocked) return;
     updateNodeConfig(nodeId, (current) => {
       const previous = (current.comfyui ?? comfyui) as DesignerComfyuiConfig;
       return { ...current, comfyui: { ...previous, ...next(previous) } };
     });
+  };
   const patchField = (key: keyof DesignerComfyuiFields, value: string | number) =>
     patch((previous) => ({ fields: { ...previous.fields, [key]: value } }));
   const patchSampling = (key: keyof DesignerComfyuiSamplingParams, value: number | boolean) =>
@@ -81,7 +85,11 @@ export function DesignerComfyuiParamsForm({ nodeId, comfyui }: { nodeId: string;
   const sampling = comfyui.sampling_params;
 
   return (
-    <div className="designer-node-toolbar__comfyui" data-testid="designer-node-toolbar-comfyui">
+    <fieldset
+      className={`designer-node-toolbar__comfyui${editingLocked ? ' designer-edit-control' : ''}`}
+      data-testid="designer-node-toolbar-comfyui"
+      disabled={editingLocked}
+    >
       <div className="designer-node-toolbar__params" data-testid="designer-node-toolbar-comfyui-fields">
         {(['url', 'model'] as const).map((key) => (
           <label key={key} className="designer-node-toolbar__param designer-node-toolbar__param--wide">
@@ -145,6 +153,6 @@ export function DesignerComfyuiParamsForm({ nodeId, comfyui }: { nodeId: string;
           ))}
         </div>
       ) : null}
-    </div>
+    </fieldset>
   );
 }

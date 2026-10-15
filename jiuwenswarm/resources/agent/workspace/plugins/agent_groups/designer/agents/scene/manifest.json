@@ -1,37 +1,42 @@
 {
-  "version": "1.0.0",
   "package_type": "agent_template",
-  "name": "designer-scene",
-  "description": "场景设计师：产出空场景板（无人物的场景基准图）",
-  "persona": {
-    "dir": "./persona"
-  },
+  "name": "scene",
   "display_name": {
     "zh": "场景设计师",
     "en": "Scene Designer"
   },
+  "description": "为单个场景制作可复用的空场景图，并交回图像产物。",
+  "persona": {
+    "dir": "persona"
+  },
   "tools": [
     {
-      "file": "./tools.py",
-      "class": "ReadNodeContextTool"
+      "file": "tools/read_node_context.py",
+      "class": "ReadNodeContext"
     },
     {
-      "file": "./tools.py",
-      "class": "CallModelTool"
+      "file": "tools/generate_scene.py",
+      "class": "GenerateScene"
     },
     {
-      "file": "./tools.py",
-      "class": "GenerateImageTool"
-    },
-    {
-      "file": "./tools.py",
-      "class": "SubmitNodeOutputTool"
+      "file": "tools/submit_node_output.py",
+      "class": "SubmitNodeOutput"
     }
   ],
   "rails": [
     {
-      "file": "./ticket_rail.py",
-      "class": "NodeTicketBindingRail"
+      "file": "rails/node_guard.py",
+      "class": "NodeGuardRail"
     }
-  ]
+  ],
+  "skills": [
+    {
+      "dir": "skills/scene",
+      "mode": "all"
+    }
+  ],
+  "metadata": {
+    "node_type": "scene",
+    "output_kind": "image"
+  }
 }

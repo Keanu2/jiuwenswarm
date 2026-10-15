@@ -23,12 +23,9 @@ from jiuwenswarm.common.schema.designer_graph import (
 
 _PIPELINE_STAGE_TEXT = {
     "brief": "writing the brief",
-    "character_design": "generating character image",
     "character": "generating character image",
     "scene": "generating scene image",
     "storyboard": "building the storyboard",
-    "frame": "generating keyframe",
-    "keyframe": "generating keyframe",
     "clip": "generating clip video",
     "compose": "composing the film",
     "speech": "generating speech",
@@ -57,17 +54,6 @@ PublishFn = Callable[[DesignerExecutionRun, str | None], None]
 _THROTTLE_MS = 320
 _lock = threading.Lock()
 _last_publish_at: dict[tuple[str, str], int] = {}
-
-
-def graph_node_states(run: dict[str, Any] | None) -> dict[str, Any]:
-    states = (run or {}).get("node_states") or {}
-    if not isinstance(states, dict):
-        return {}
-    return {
-        str(node_id): state
-        for node_id, state in states.items()
-        if not is_leader_node_id(node_id)
-    }
 
 
 def should_publish(run_id: str, node_id: str, *, now: int | None = None, force: bool = False) -> bool:

@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Spatial / motion continuity locks for keyframe and clip prompts."""
+"""Spatial / motion continuity locks for scene-spec and clip prompts."""
 
 from __future__ import annotations
 

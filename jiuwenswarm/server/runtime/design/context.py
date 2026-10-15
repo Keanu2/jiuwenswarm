@@ -66,6 +66,18 @@ class StoreNodeSpawner:
         # Set while a leader conversation round is in flight (DesignTeamBridge
         # turn). Purely advisory state; see ``conversation_round_active``.
         self._conversation_round_active = False
+        # Set when a leader-triggered run finishes and its summary is fed
+        # back to the leader; cleared by the next user chat round. While set,
+        # the leader may only report: run/rebuild tools refuse.
+        self._report_pending = False
+
+    @property
+    def report_pending(self) -> bool:
+        return self._report_pending
+
+    @report_pending.setter
+    def report_pending(self, value: bool) -> None:
+        self._report_pending = bool(value)
 
     @property
     def conversation_round_active(self) -> bool:
@@ -167,6 +179,10 @@ class _DesignContext:
         # Active trigger's node-result sink (set by RunCoordinator while a
         # trigger executes; manifest-package worker tools submit through it).
         self.node_result_sink: Any = None
+        # Active trigger's execution environment (graph / run / bridge) the
+        # designer member tools resolve their shot tickets against (same
+        # lifecycle as the sinks).
+        self.node_run_env: Any = None
         # Active trigger's live-activity sink (same lifecycle): worker tools
         # push "calling image model" style stage lines through it so the node
         # card's activity peek shows handler-level progress (the old
@@ -245,19 +261,6 @@ class DesignContextRegistry:
 
 
 _REGISTRY = DesignContextRegistry()
-
-# Process-wide, async-flow-scoped node ticket for manifest-package workers.
-# The package's ticket rail binds it from the task prompt; the package's
-# worker tools read it (graph/run/node identity for Store self-service).
-# A ContextVar (not module state in the package): the extension loader
-# materializes each canonical load as a fresh module object, so module-level
-# state in the package would NOT be shared between the rail and the tools —
-# this installed-package slot is the one stable reference both import.
-import contextvars as _contextvars
-
-DESIGN_NODE_TICKET: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
-    "designer_node_ticket", default=None
-)
 
 # Process-wide RunCoordinator per graph: the adapter (run.start/cancel),
 # DesignTeamBridge (leader node_run) and the capability provider must observe

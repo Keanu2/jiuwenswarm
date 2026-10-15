@@ -36,11 +36,39 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.schema.designer_graph import (
+    NODE_TYPE_TEXT,
     DesignerExecutionGraph,
     node_agent_template,
+    node_pipeline,
+    node_role,
     node_uses_agent_runtime,
 )
+from jiuwenswarm.server.runtime.designer.handlers.common import path_from_uri
 
+_FROZEN_TEXT_MAX_CHARS = 20000
+
+_ASSET_REF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string"},
+        "uri": {"type": "string"},
+        "mime_type": {"type": "string"},
+        "label": {"type": "string"},
+    },
+    "required": ["kind", "uri"],
+}
+
+#: The receipt a member returns through ``structured_output``: the
+#: ``output_ref`` its ``submit_node_output`` call wrote.
+NODE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "output_ref": _ASSET_REF_SCHEMA,
+        "output_refs": {"type": "array", "items": _ASSET_REF_SCHEMA},
+        "message": {"type": "string"},
+    },
+    "required": ["output_ref"],
+}
 _UPSTREAM_HEADER = "\n\n## Upstream node inputs\n"
 _NO_OUTPUT_PLACEHOLDER = "(Upstream node {node_id} has no output yet.)"
 _UPSTREAM_REFS_HEADER = "\nUpstream artifacts (reference these files by uri in media tools):"
@@ -104,10 +132,33 @@ def _node_prompt(node: dict[str, Any]) -> str:
     return str(node.get("description") or node.get("title") or _node_label(node))
 
 
+def _text_file_body(ref: Any) -> str:
+    if not isinstance(ref, dict):
+        return ""
+    mime = str(ref.get("mime_type") or "")
+    if ref.get("kind") != "text" and not mime.startswith("text/"):
+        return ""
+    path = path_from_uri(str(ref.get("uri") or ""))
+    if path is None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")[:_FROZEN_TEXT_MAX_CHARS]
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+
+
 def _frozen_text(state: dict[str, Any] | None) -> str | None:
+    """A produced node's current output text.
+
+    The output file wins over ``state["text"]``: the canvas text editor saves
+    user edits straight to that file (``/file-api/file-content``) and never
+    touches the run record, so the stored text can be stale.
+    """
     if not isinstance(state, dict):
         return None
-    text = str(state.get("text") or "").strip()
+    text = _text_file_body(state.get("output_ref")).strip()
+    if not text:
+        text = str(state.get("text") or "").strip()
     return text or None
 
 
@@ -176,8 +227,7 @@ class GraphScriptCompiler:
 
     def __init__(self) -> None:
         # Ticket-line state (per compile call): set in compile() so every
-        # _prompt_expr call can open with the node ticket the manifest
-        # package's worker tools self-parse.
+        # _prompt_expr call can open with the node's shot ticket.
         self._run_id = ""
         self._graph_id = ""
 
@@ -203,10 +253,8 @@ class GraphScriptCompiler:
                 ancestors stay frozen at their current values. The user picks
                 where the refresh starts; upstream is never re-executed.
             run_id: The graph's lifelong run id; when set each agent() prompt
-                opens with the node ticket line the manifest-package worker
-                tools self-parse (``node_ticket: design:{graph}:{run}:{node}``
-                — the colleague's ticket model; the claw repo's only job is
-                writing this mapping).
+                opens with the shot ticket the member tools resolve
+                (``shot_ticket: design:{graph}:{run}:{node}``).
         """
         self._run_id = str(run_id or "")
         self._graph_id = str(graph.get("graph_id") or "")
@@ -248,6 +296,10 @@ class GraphScriptCompiler:
             ),
             "",
             "from swarmflow import agent, parallel",
+            "",
+            # Member receipt (output_ref) every AgentGroup member submits via
+            # structured_output; Python literal, not JSON (true/false/null).
+            f"NODE_OUTPUT_SCHEMA = {NODE_OUTPUT_SCHEMA!r}",
             "",
             "",
             "async def run(args):",
@@ -476,12 +528,21 @@ class GraphScriptCompiler:
 
         ``options.agent_template`` carries the node's AgentGroup member name
         (bare, SDD-0030 — the engine gate rejects "group/member" refs); the
-        engine resolves it against the design session's expert table.
+        engine resolves it against the design session's expert table. A
+        member call also requests the ``NODE_OUTPUT_SCHEMA`` receipt.
+
+        Raises:
+            ValueError: A text node with no pipeline — no member runs it.
         """
         version = self._node_version(node_id, run_outputs)
         model = json.dumps(str(node.get("type") or "text"), ensure_ascii=False)
         options = {"model": model}
         template_ref = str(node_agent_template(node) or "").strip()
+        if not template_ref and not node_pipeline(node) and node_role(node) == NODE_TYPE_TEXT:
+            raise ValueError(
+                f"text node {node_id!r} has no pipeline; no designer member runs "
+                "generic text nodes"
+            )
         if template_ref:
             options["agent_template"] = json.dumps(template_ref, ensure_ascii=False)
         # Keys AND values through json.dumps — uniform double quoting, the
@@ -494,7 +555,8 @@ class GraphScriptCompiler:
         return (
             f"{prompt_expr}, label={json.dumps(node_id, ensure_ascii=False)}, "
             f"phase={json.dumps(f'v{version}', ensure_ascii=False)}, "
-            f"options={{{options_expr}}}"
+            + ("schema=NODE_OUTPUT_SCHEMA, " if template_ref else "")
+            + f"options={{{options_expr}}}"
         )
 
     @staticmethod
@@ -579,9 +641,7 @@ class GraphScriptCompiler:
         nid = str(node.get("id") or "")
         ticket = ""
         if self._run_id:
-            ticket = (
-                f"node_ticket: design:{self._graph_id}:{self._run_id}:{nid}\n"
-            )
+            ticket = f"shot_ticket: design:{self._graph_id}:{self._run_id}:{nid}\n"
         base = json.dumps(ticket + _node_prompt(node), ensure_ascii=False)
         upstream_ids = [
             str(edge.get("source") or "")

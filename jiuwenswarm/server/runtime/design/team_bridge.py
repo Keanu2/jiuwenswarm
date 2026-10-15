@@ -322,15 +322,13 @@ class DesignTeamBridge:
                     channel_id, session_id, run, node_id
                 ),
             )
-        # Worker media assets live under the owning team's team-workspace so
-        # they age with the team (one workspace per design session).
+        # Worker media assets land where the canvas keeps its outputs: the
+        # project directory, or the per-session workspace without a project.
         coordinator = get_graph_coordinator(store, graph_id)
         if coordinator.media_root is None:
-            from jiuwenswarm.server.runtime.designer.graph_store import design_team_workspace
+            from jiuwenswarm.server.runtime.designer.handlers.common import canvas_output_dir
 
-            coordinator.media_root = (
-                design_team_workspace(session_id) / "media" / "designer"
-            )
+            coordinator.media_root = canvas_output_dir(store.get_graph(graph_id))
         # Worker base for the TeamWorkerBackend: derive from the design team's
         # teammate spec (same enriched-spec source the team chain uses;
         # idempotent — same session/mode/agent_group inputs), cached on the
@@ -387,6 +385,8 @@ class DesignTeamBridge:
         # message instead of embedding a real node execution inside the
         # leader's turn (which would hold the chat stream hostage).
         context.spawner.conversation_round_active = True
+        # A user message ends any report-only round left by a finished run.
+        context.spawner.report_pending = False
         return _DesignRoundBindings(context, channel_id, session_id)
 
 

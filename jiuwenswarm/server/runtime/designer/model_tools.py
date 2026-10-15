@@ -81,8 +81,11 @@ def _message_text(msg: Any) -> str:
     return ""
 
 
-# Process-wide: a 402 / insufficient-balance reply means Designer must not
-# label nodes as live chat agents. Cleared only when this process restarts.
+# Process-wide latch: a 402 / insufficient-balance reply means later model
+# calls in the *same* user action (Play / chat turn) fail closed without
+# hammering the provider. Cleared at the next user-visible entry
+# (``require_llm``) and after a successful model call so a recharged account
+# recovers without restarting the server — same recovery model as Work/Code.
 _chat_billing_block: str = ""
 _chat_confirmed: bool = False
 
@@ -177,6 +180,12 @@ def chat_model_billing_block() -> str:
     return _chat_billing_block
 
 
+def clear_chat_model_billing_block() -> None:
+    """Drop a prior 402 latch so the next model call can probe the provider again."""
+    global _chat_billing_block
+    _chat_billing_block = ""
+
+
 def note_chat_model_unavailable(detail: object) -> bool:
     """Record a payment block. Returns True only for 402-style failures."""
     global _chat_billing_block
@@ -186,12 +195,11 @@ def note_chat_model_unavailable(detail: object) -> bool:
     return True
 
 
-
 def llm_available() -> bool:
     """True when Settings has a usable chat model with credentials for Designer agents.
 
-    A recorded 402 / insufficient balance makes this False so entry gates and
-    model calls fail closed with a billing error.
+    A recorded 402 / insufficient balance makes this False so in-flight model
+    calls fail closed; ``require_llm`` clears that latch on the next user entry.
     """
     if _chat_billing_block:
         return False
@@ -233,13 +241,11 @@ def require_llm() -> None:
     call ``call_model_tool`` bluntly and raise via ``model_text_or_raise`` —
     including billing/402, which Work/Code also surfaces on the model call
     rather than with a preflight network probe.
+
+    Clears any prior in-process billing latch so a recharged account is
+    re-probed on this user action without requiring a server restart.
     """
-    block = chat_model_billing_block()
-    if block:
-        raise DesignerLlmError(
-            f"Chat model unavailable (billing / insufficient credit): {block}",
-            code=LLM_BILLING,
-        )
+    clear_chat_model_billing_block()
     if not llm_available():
         raise DesignerLlmError(
             "Chat model is not configured. Configure a model in Settings before using Design.",
@@ -331,19 +337,13 @@ def list_configured_models() -> list[dict[str, Any]]:
     return out
 
 
-def pick_model_for_optimize(optimize_for: str) -> dict[str, Any] | None:
+def pick_default_model() -> dict[str, Any] | None:
+    """Pick a chat model from Settings (prefer pro/reason when present)."""
     models = list_configured_models()
     if not models:
         return None
     defaults = [m for m in models if m.get("is_default")]
     pool = defaults or models
-    if optimize_for == "cost":
-        # Prefer flash / mini style names when present.
-        for m in pool:
-            nid = str(m.get("id") or "").lower()
-            if "flash" in nid or "mini" in nid or "fast" in nid:
-                return m
-        return pool[-1]
     for m in pool:
         nid = str(m.get("id") or "").lower()
         if "pro" in nid or "reason" in nid:
@@ -408,7 +408,6 @@ async def call_model_tool(
     *,
     prompt: str,
     system: str,
-    optimize_for: str,
     preferred_model: str | None = None,
     max_tokens: int = _DESIGNER_DEFAULT_MAX_TOKENS,
     images: list[str] | None = None,
@@ -444,7 +443,7 @@ async def call_model_tool(
                 chosen = m
                 break
     if chosen is None:
-        chosen = pick_model_for_optimize(optimize_for)
+        chosen = pick_default_model()
     if chosen is None:
         return {
             "ok": False,
@@ -568,11 +567,12 @@ async def call_model_tool(
                     pass
 
         first = await _once(
-            temperature=0.4 if optimize_for == "quality" else 0.7,
+            temperature=0.4,
             attempt=1,
         )
         if first.get("ok"):
             _chat_confirmed = True
+            clear_chat_model_billing_block()
             return first
         if first.get("error") == "empty_model_response":
             logger.warning(
@@ -581,7 +581,11 @@ async def call_model_tool(
                 first.get("finish_reason"),
                 max_tokens,
             )
-            return await _once(temperature=0.2, attempt=2)
+            second = await _once(temperature=0.2, attempt=2)
+            if second.get("ok"):
+                _chat_confirmed = True
+                clear_chat_model_billing_block()
+            return second
         return first
     except Exception as exc:  # noqa: BLE001
         blocked = note_chat_model_unavailable(exc)

@@ -1,41 +1,42 @@
 {
-  "version": "1.0.0",
   "package_type": "agent_template",
-  "name": "designer-clip",
-  "description": "视频镜头师：把分镜表的一行转成参考图驱动的短视频镜头，严格服从锁与连续性",
-  "persona": {
-    "dir": "./persona"
-  },
+  "name": "clip",
   "display_name": {
     "zh": "视频镜头师",
-    "en": "Video Shot Artist"
+    "en": "Shot Video Artist"
+  },
+  "description": "按分镜行用角色设定和场景图生成一个镜头视频，并交回视频产物。",
+  "persona": {
+    "dir": "persona"
   },
   "tools": [
     {
-      "file": "./tools.py",
-      "class": "ReadNodeContextTool"
+      "file": "tools/read_node_context.py",
+      "class": "ReadNodeContext"
     },
     {
-      "file": "./tools.py",
-      "class": "CallModelTool"
+      "file": "tools/generate_shot_video.py",
+      "class": "GenerateShotVideo"
     },
     {
-      "file": "./tools.py",
-      "class": "GenerateImageTool"
-    },
-    {
-      "file": "./tools.py",
-      "class": "GenerateVideoTool"
-    },
-    {
-      "file": "./tools.py",
-      "class": "SubmitNodeOutputTool"
+      "file": "tools/submit_node_output.py",
+      "class": "SubmitNodeOutput"
     }
   ],
   "rails": [
     {
-      "file": "./ticket_rail.py",
-      "class": "NodeTicketBindingRail"
+      "file": "rails/node_guard.py",
+      "class": "NodeGuardRail"
     }
-  ]
+  ],
+  "skills": [
+    {
+      "dir": "skills/clip",
+      "mode": "all"
+    }
+  ],
+  "metadata": {
+    "node_type": "clip",
+    "output_kind": "video"
+  }
 }

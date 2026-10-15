@@ -2,16 +2,18 @@
 """The Director chain (creative request → execution graph) as one tool call.
 
 This is the authoring half of the design layer, exposed to the leader as the
-``designer_graph_autorun`` tool (user ruling 2026-10-12): the creative-request
-→ execution-graph pipeline that used to be the old bootstrap flow. The chain's
-steps are NOT reimplemented here — every step delegates to the original
-``Director`` methods in ``jiuwenswarm.server.runtime.designer.orchestration``
-and to ``script_analysis.analyze_creative_brief``. This module only owns:
+``designer_graph_autorun`` tool: the creative-request → execution-graph
+pipeline that used to run as the canvas bootstrap. The chain's steps are NOT
+reimplemented here — every step delegates to the ``Director`` methods in
+``jiuwenswarm.server.runtime.designer.orchestration`` and to
+``script_analysis.analyze_creative_brief``. This module only owns:
 
-* step sequencing (analyze → author brief → review brief → author storyboard
-  → review storyboard → design execution graph → validate → delegate stamp);
-* stage-progress reporting for the caller (the tool surfaces it in its
-  result; the adapter's bootstrap path forwards it to the frontend);
+* step sequencing (media intent → analyze → reference reads → materialize
+  graph → author brief → review brief → author storyboard → review
+  storyboard → design execution graph → validate → delegate stamp);
+* keeping the bound canvas identity (graph id, session, project, references,
+  canvas media settings) across the Director's graph rebuilds;
+* stage-progress reporting for the caller;
 * error translation (``DesignerLlmError`` → ``DirectorChainError`` with a
   user-presentable message).
 
@@ -21,9 +23,6 @@ Module boundary — the design layer's three orchestration modules:
   are independent service-side ``call_model_tool`` calls, NOT the leader's);
 * ``graph_compiler``  — graph → swarmflow script;
 * ``run_coordinator`` — trigger execution / lifecycle.
-
-The manifest package stays worker-facing only; graph authoring is a
-design-layer responsibility (F11 separation).
 """
 
 from __future__ import annotations
@@ -32,6 +31,15 @@ import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Canvas identity the Director rebuilds would otherwise drop: each rebuild
+# starts from ``build_smart_video_graph``'s fresh metadata.
+_IDENTITY_META_KEYS = (
+    "session_id",
+    "project_dir",
+    "project_name",
+    "model_name",
+)
 
 
 class DirectorChainError(Exception):
@@ -42,26 +50,90 @@ class DirectorChainError(Exception):
         self.user_message = message
 
 
+def _media_settings_for(graph: dict[str, Any], intent: Any) -> tuple[Any, Any]:
+    """Canvas settings after a fresh request.
+
+    The prompt's stated ratio / resolution win; anything the prompt leaves
+    unstated keeps what the canvas already holds (toolbar edits or defaults).
+    """
+    from jiuwenswarm.server.runtime.designer.media_intent import media_settings_from_intent
+    from jiuwenswarm.server.runtime.designer.media_settings import (
+        ImageSettings,
+        VideoSettings,
+        image_settings,
+        video_settings,
+    )
+
+    video_now = video_settings(graph)
+    image_now = image_settings(graph)
+    if not (intent.aspect_ratio or intent.resolution):
+        return video_now, image_now
+    video_intent, image_intent = media_settings_from_intent(intent)
+    video = VideoSettings(
+        aspect_ratio=video_intent.aspect_ratio if intent.aspect_ratio else video_now.aspect_ratio,
+        resolution=video_intent.resolution if intent.resolution else video_now.resolution,
+    )
+    image = ImageSettings(
+        aspect_ratio=image_intent.aspect_ratio if intent.aspect_ratio else image_now.aspect_ratio,
+        resolution=image_now.resolution,
+    )
+    return video, image
+
+
+def _restore_identity(
+    graph: dict[str, Any],
+    *,
+    graph_id: str,
+    project_id: str,
+    identity: dict[str, Any],
+    video: Any,
+    image: Any,
+) -> None:
+    from jiuwenswarm.server.runtime.designer.media_settings import write_media_settings
+
+    graph["graph_id"] = graph_id
+    graph["project_id"] = project_id
+    meta = dict(graph.get("metadata") or {})
+    meta.update(identity)
+    graph["metadata"] = meta
+    write_media_settings(graph, video=video, image=image)
+
+
 async def run_director_chain(
     graph: dict[str, Any],
     *,
     prompt: str,
-    optimize_for: str = "quality",
     on_stage: Any | None = None,
 ) -> dict[str, Any]:
-    """Run the Director chain against ``graph``; returns the composed graph.
+    """Run the Director chain for the bound canvas; returns the composed graph.
 
-    ``graph`` may already carry ``metadata.script_analysis`` (the caller's
-    seed); when absent the chain produces it first. Every step mutates the
-    graph through the original Director methods; the caller persists the
-    result. ``on_stage(kind, text[, tool])`` receives per-stage progress.
+    ``graph`` is the session's canvas (possibly empty, possibly carrying user
+    references). The composed graph keeps its graph id, project, session and
+    references; the caller persists it. ``on_stage(kind, text[, tool])``
+    receives per-stage progress.
     """
+    from jiuwenswarm.server.runtime.designer.media_intent import extract_media_intent
     from jiuwenswarm.server.runtime.designer.model_tools import DesignerLlmError
     from jiuwenswarm.server.runtime.designer.orchestration import Director
+    from jiuwenswarm.server.runtime.designer.pipeline.reference_led import (
+        ReferenceIntentError,
+        stamp_creative_intent,
+    )
     from jiuwenswarm.server.runtime.designer.script_analysis import (
         analyze_creative_brief,
     )
-    from jiuwenswarm.server.runtime.designer.smart_graph import apply_runtime_delegate
+    from jiuwenswarm.server.runtime.designer.skills_loader import attach_skills_metadata
+    from jiuwenswarm.server.runtime.designer.smart_graph import (
+        apply_runtime_delegate,
+        build_smart_video_graph,
+    )
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        analysis_prompt_with_references,
+        carry_user_references,
+        classify_reference_images,
+        graph_user_references,
+        image_reference_records,
+    )
 
     def _stage(kind: str, text: str, tool: str = "") -> None:
         if callable(on_stage):
@@ -70,62 +142,99 @@ async def run_director_chain(
             except Exception:  # noqa: BLE001 — progress is best-effort
                 logger.debug("graph authoring stage emit failed", exc_info=True)
 
-    prompt = str(prompt or "").strip()
+    refs = graph_user_references(graph)
+    prompt = str(prompt or "").strip() or ("根据参考素材创作" if refs else "")
     if not prompt:
         raise DirectorChainError("prompt 不能为空")
 
-    meta = dict(graph.get("metadata") or {})
-    analysis = (
-        dict(meta.get("script_analysis") or {})
-        if isinstance(meta.get("script_analysis"), dict)
-        else {}
-    )
-    # The original bootstrap built its graph from the CURRENT prompt
-    # (``build_smart_video_graph(prompt=prompt)`` → ``description`` = the full
-    # prompt); the brief / storyboard / execution-graph steps read their
-    # ``user_prompt`` off ``graph["description"]``. The lightweight
-    # workspace-create graph carries a stale, 200-char-truncated description,
-    # so stamp the current prompt before the chain runs — original behavior.
-    graph["description"] = prompt
-    director = Director()
+    source_meta = dict(graph.get("metadata") or {})
+    graph_id = str(graph.get("graph_id") or "")
+    project_id = str(graph.get("project_id") or "")
+    identity = {
+        key: source_meta[key]
+        for key in _IDENTITY_META_KEYS
+        if source_meta.get(key) not in (None, "")
+    }
+    image_refs = image_reference_records(refs)
     try:
-        # Step 1 — seed analysis (skipped when the caller already stamped one).
-        if not analysis:
-            _stage("thinking", "Director · Extracting cast and scenes (LLM)")
-            analysis = await analyze_creative_brief(prompt, timeout_sec=120.0)
-            if (
-                not isinstance(analysis, dict)
-                or str(analysis.get("source") or "") != "llm"
-            ):
-                raise DirectorChainError("模型未返回可用的角色/镜头分析")
-            meta["script_analysis"] = analysis
-            graph["metadata"] = meta
-        # Steps 2-3 — creative brief author + review.
+        _stage("thinking", "Director · Reading video format")
+        intent = await extract_media_intent(prompt)
+        video, image = _media_settings_for(graph, intent)
+        _stage("thinking", "Director · Extracting cast and scenes (LLM)")
+        analysis = await analyze_creative_brief(
+            analysis_prompt_with_references(prompt, refs),
+            timeout_sec=120.0,
+            reference_images=[str(item.get("path") or "") for item in image_refs],
+            film_duration_sec=intent.film_duration_sec,
+        )
+        if not isinstance(analysis, dict) or str(analysis.get("source") or "") != "llm":
+            raise DirectorChainError("模型未返回可用的角色/镜头分析")
+        _stage(
+            "stage",
+            f"Director · LLM cast locked ({len(analysis.get('characters') or [])} characters)",
+        )
+        if image_refs:
+            _stage("thinking", "Supervisor · Reading reference images")
+            reads = await classify_reference_images(prompt, image_refs, analysis)
+            if not reads:
+                raise DirectorChainError("参考图无法判定用途，请重试")
+            try:
+                analysis = stamp_creative_intent(analysis, reads, image_refs)
+            except ReferenceIntentError as exc:
+                raise DirectorChainError(str(exc)) from exc
+
+        _stage("tool_call", "Director · Materializing graph", "build_smart_video_graph")
+        composed = apply_runtime_delegate(
+            build_smart_video_graph(project_id=project_id, prompt=prompt, analysis=analysis)
+        )
+        meta = dict(composed.get("metadata") or {})
+        meta["scenario"] = "video"
+        meta["script_analysis"] = analysis
+        meta["director_composed_on_bootstrap"] = True
+        meta["freeze_clip_topology"] = True
+        if isinstance(analysis.get("scene_locks"), dict) and analysis["scene_locks"]:
+            meta["scene_locks"] = analysis["scene_locks"]
+        composed["metadata"] = meta
+        composed = attach_skills_metadata(composed, prompt)
+        carry_user_references(source_meta, composed)
+        _restore_identity(
+            composed,
+            graph_id=graph_id,
+            project_id=project_id,
+            identity=identity,
+            video=video,
+            image=image,
+        )
+
+        director = Director()
         _stage("thinking", "Director · Authoring brief (LLM)")
-        await director.author_creative_brief(graph)
+        await director.author_creative_brief(composed)
         _stage("thinking", "Director · Reviewing / approving brief")
-        await director.review_brief(graph)
-        # Steps 4-5 — storyboard author + review.
+        await director.review_brief(composed)
         _stage("thinking", "Director · Designing storyboard (LLM)")
-        await director.author_storyboard(graph)
+        await director.author_storyboard(composed)
         _stage("thinking", "Director · Reviewing / approving storyboard")
-        await director.review_storyboard(graph)
-        # Step 6 — execution graph (LLM shot expansion + deterministic
-        # build_smart_video_graph composition inside).
+        await director.review_storyboard(composed)
         _stage(
             "tool_call",
             "Director · Designing execution graph (LLM)",
             "design_execution_graph",
         )
-        await director.design_execution_graph(graph, optimize_for=optimize_for)
-        # Final — structural validation + delegate stamp.
+        await director.design_execution_graph(composed)
         _stage("thinking", "Director · Validating / approving graph + locks")
-        await director.validate_plan(graph)
-        graph = apply_runtime_delegate(graph)
-        meta = dict(graph.get("metadata") or {})
+        await director.validate_plan(composed)
+        composed = apply_runtime_delegate(composed)
+        _restore_identity(
+            composed,
+            graph_id=graph_id,
+            project_id=project_id,
+            identity=identity,
+            video=video,
+            image=image,
+        )
+        meta = dict(composed.get("metadata") or {})
         meta["director_composed_on_bootstrap"] = True
-        meta["freeze_shot_topology"] = True
-        graph["metadata"] = meta
+        composed["metadata"] = meta
     except DesignerLlmError as exc:
         raise DirectorChainError(str(exc.user_message or exc)) from exc
     except DirectorChainError:
@@ -136,16 +245,16 @@ async def run_director_chain(
 
     cast_n = sum(
         1
-        for n in (graph.get("nodes") or [])
+        for n in (composed.get("nodes") or [])
         if str(n.get("id") or "").startswith("n_character")
     )
-    shot_n = sum(
+    clip_n = sum(
         1
-        for n in (graph.get("nodes") or [])
+        for n in (composed.get("nodes") or [])
         if str(n.get("id") or "").startswith("n_clip")
     )
-    _stage("stage", f"Director · Approved — {cast_n} solo cards, {shot_n} shots")
-    return graph
+    _stage("stage", f"Director · Approved — {cast_n} character specs, {clip_n} clips")
+    return composed
 
 
 __all__ = ["DirectorChainError", "run_director_chain"]

@@ -1,37 +1,42 @@
 {
-  "version": "1.0.0",
   "package_type": "agent_template",
-  "name": "designer-character",
-  "description": "角色设计师：产出角色单人设定图（solo sheet），全部服装/面部特征与设定一致",
-  "persona": {
-    "dir": "./persona"
-  },
+  "name": "character",
   "display_name": {
     "zh": "角色设计师",
     "en": "Character Designer"
   },
+  "description": "为单个角色制作可复用的角色设定图，并交回图像产物。",
+  "persona": {
+    "dir": "persona"
+  },
   "tools": [
     {
-      "file": "./tools.py",
-      "class": "ReadNodeContextTool"
+      "file": "tools/read_node_context.py",
+      "class": "ReadNodeContext"
     },
     {
-      "file": "./tools.py",
-      "class": "CallModelTool"
+      "file": "tools/generate_character.py",
+      "class": "GenerateCharacter"
     },
     {
-      "file": "./tools.py",
-      "class": "GenerateImageTool"
-    },
-    {
-      "file": "./tools.py",
-      "class": "SubmitNodeOutputTool"
+      "file": "tools/submit_node_output.py",
+      "class": "SubmitNodeOutput"
     }
   ],
   "rails": [
     {
-      "file": "./ticket_rail.py",
-      "class": "NodeTicketBindingRail"
+      "file": "rails/node_guard.py",
+      "class": "NodeGuardRail"
     }
-  ]
+  ],
+  "skills": [
+    {
+      "dir": "skills/character",
+      "mode": "all"
+    }
+  ],
+  "metadata": {
+    "node_type": "character",
+    "output_kind": "image"
+  }
 }

@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlparse
 from jiuwenswarm.common.schema.designer_graph import (
     EDGE_KIND_DATA,
     NODE_ROLE_BRIEF,
-    NODE_ROLE_CHARACTER_DESIGN,
+    NODE_ROLE_CHARACTER,
     NODE_ROLE_CLIP,
     NODE_ROLE_SCENE,
     AssetRef,
@@ -23,8 +23,11 @@ from jiuwenswarm.common.schema.designer_graph import (
     node_config,
     node_pipeline,
 )
-from jiuwenswarm.common.utils import get_agent_root_dir, get_agent_workspace_dir
-from jiuwenswarm.common.work_mode import DESIGN_WORK_MODE
+from jiuwenswarm.common.utils import (
+    get_agent_workspace_dir,  # re-exported; image/compose handlers call it on this module
+    get_default_project_session_workspace_dir,
+)
+from jiuwenswarm.common.work_mode import is_default_project_id
 from jiuwenswarm.server.runtime.designer.handlers.types import NodeExecutionContext
 from jiuwenswarm.server.runtime.designer.user_references import user_reference_image_paths
 from jiuwenswarm.server.runtime.session import project_store
@@ -43,7 +46,7 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
         if node_pipeline(node) == NODE_ROLE_CLIP:
             user = str(graph.get("description") or "")
             try:
-                from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
+                from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
                     clip_assignment_text,
                     duration_from_timeline,
                     looks_like_full_story_restatement,
@@ -77,11 +80,18 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
                 return node_prompt
             if clip_assignment_text is not None:
                 dur = 5
-                if duration_from_timeline is not None:
+                override = config.get("duration_sec")
+                if isinstance(override, (int, float)) and not isinstance(override, bool):
+                    from jiuwenswarm.server.runtime.designer.pipeline.clip_scope import (
+                        clamp_clip_duration,
+                    )
+
+                    dur = clamp_clip_duration(override)
+                elif duration_from_timeline is not None:
                     dur = duration_from_timeline(str(config.get("timeline") or ""), default=5)
                 assignment = clip_assignment_text(
-                    shot_index=int(config.get("shot_index") or 1),
-                    action=str(config.get("shot_action") or config.get("character_action") or ""),
+                    clip_index=int(config.get("clip_index") or 1),
+                    action=str(config.get("clip_action") or config.get("character_action") or ""),
                     camera=str(config.get("camera") or ""),
                     speech_line=str(config.get("speech_line") or ""),
                     duration_sec=dur,
@@ -98,7 +108,7 @@ def graph_prompt(graph: DesignerExecutionGraph, node: DesignerGraphNode | None =
                     if val:
                         lock_bits.append(f"{label}: {val[:400]}")
                 return "\n".join(lock_bits)
-            return str(config.get("shot_action") or "")[:500] or "this storyboard shot only"
+            return str(config.get("clip_action") or "")[:500] or "this storyboard shot only"
         if node_prompt:
             return node_prompt
         if generate_prompt:
@@ -142,28 +152,52 @@ def path_from_uri(uri: str) -> Path | None:
             path = path[1:]
         return Path(path)
     candidate = Path(value)
-    return candidate if candidate.exists() else None
+    if candidate.exists():
+        return candidate
+    return None
 
 
 def graph_workspace_dir(graph: DesignerExecutionGraph | None = None) -> Path:
-    """Return the asset directory owned by a Design project graph."""
+    """Return the directory for this canvas's generated files.
+
+    A selected project uses that project's own directory, the same folder a
+    work session would use. No project uses the per-session workspace under
+    ``agent/workspace/projects/<session_id>``. A canvas without a session id
+    does not use that shared projects root.
+    """
+    metadata = graph.get("metadata") if isinstance(graph, dict) and isinstance(graph.get("metadata"), dict) else {}
     project_id = str(graph.get("project_id") or "").strip() if isinstance(graph, dict) else ""
-    if not project_id:
+    session_id = str((metadata or {}).get("session_id") or "").strip()
+    project_dir = ""
+    if project_id and not is_default_project_id(project_id):
+        project = project_store.get_project_by_id(project_id, cache_bust=True)
+        if project is None or project.hidden:
+            raise ValueError(f"Design project not found for graph: {project_id!r}")
+        project_dir = str(project.project_dir or "").strip()
+    if project_dir:
+        directory = Path(project_dir).expanduser().resolve()
+    elif isinstance(graph, dict) and session_id:
+        directory = get_default_project_session_workspace_dir(session_id)
+    else:
+        directory = get_agent_workspace_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def canvas_output_dir(graph: DesignerExecutionGraph | None = None) -> Path:
+    """Directory for generated image, video, and audio on this canvas.
+
+    A stored project uses that project's own directory. No project uses the
+    per-session workspace. A project id that is not in the registry keeps the
+    agent workspace so generation can still write a file.
+    """
+    try:
+        return graph_workspace_dir(graph)
+    except ValueError:
+        logger.info("Design project directory unavailable; using the agent workspace")
         directory = get_agent_workspace_dir()
         directory.mkdir(parents=True, exist_ok=True)
         return directory
-
-    project = project_store.get_project_by_id(project_id, cache_bust=True)
-    if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
-        raise ValueError(f"Design project not found for graph: {project_id!r}")
-
-    design_root = (get_agent_root_dir() / "workspace" / DESIGN_WORK_MODE).resolve()
-    project_dir = Path(project.project_dir).expanduser().resolve()
-    if project_dir.parent != design_root:
-        raise ValueError(f"Design project directory is outside the managed root: {project_id!r}")
-    directory = project_dir / "assets"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
 
 
 def write_workspace_text(
@@ -217,7 +251,7 @@ def _is_image_file(path: Path, ref: dict | None = None) -> bool:
 
 
 def uploaded_material_image_paths(node: dict | None) -> list[Path]:
-    """Image files the user attached on this node, ahead of generated upstream stills."""
+    """Image files the user attached on this node, ahead of generated upstream images."""
     if not isinstance(node, dict):
         return []
     config = node.get("config") if isinstance(node.get("config"), dict) else {}
@@ -241,7 +275,7 @@ def uploaded_material_image_paths(node: dict | None) -> list[Path]:
 
 
 def user_replaced_output_image(graph: dict | None, node_id: str) -> list[Path]:
-    """The file the user uploaded in place of this node's generated still."""
+    """The file the user uploaded in place of this node's generated image."""
     if not isinstance(graph, dict) or not node_id:
         return []
     for node in graph.get("nodes") or []:
@@ -267,7 +301,7 @@ def user_replaced_output_image(graph: dict | None, node_id: str) -> list[Path]:
 
 
 def apply_uploaded_outputs_to_run(run: dict, graph: dict) -> bool:
-    """Copy a user-uploaded still into the run so a rerun does not restore the old file."""
+    """Copy a user-uploaded image into the run so a rerun does not restore the old file."""
     from jiuwenswarm.common.schema.designer_graph import NODE_STATUS_COMPLETED
 
     if not isinstance(run, dict) or not isinstance(graph, dict):
@@ -391,22 +425,6 @@ def _locked_replacement_refs(graph: dict | None, node_id: str) -> list[dict] | N
     if path is not None and path.is_file():
         return [dict(ref)]
     return []
-
-
-def uploaded_output_ref(graph: dict | None, node_id: str) -> dict | None:
-    """Run output ref for the media file the user uploaded over this node, if it exists."""
-    refs = _locked_replacement_refs(graph, node_id)
-    if not refs:
-        return None
-    ref = dict(refs[0])
-    path = path_from_uri(str(ref.get("uri") or ""))
-    if path is None:
-        return None
-    kind = _file_kind(path, ref)
-    if kind not in {"image", "video", "audio"}:
-        return None
-    ref["kind"] = kind
-    return ref
 
 
 def _graph_saved_refs(node: dict | None) -> list[dict]:
@@ -597,11 +615,11 @@ def node_ids_output_image_paths(ctx: NodeExecutionContext, node_ids: list[str]) 
     return paths
 
 
-def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
-    """Continuity refs for keyframes: on_screen solo sheets only (+ optional user refs).
+def collect_compose_reference_images(ctx: NodeExecutionContext, node: dict) -> list[Path]:
+    """Continuity refs for clip images: on_screen character spec sheets only (+ optional user refs).
 
-    A file the user attached on this node replaces those generated stills.
-    Scene consistency comes from scene_specs + prompt handoff text — not prior KF images.
+    A file the user attached on this node replaces those generated images.
+    Scene consistency comes from scene_specs + prompt handoff text — not prior clip images.
     Never attach scene specs or off-screen cast sheets.
     """
     attached = uploaded_material_image_paths(node)
@@ -627,7 +645,7 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
         )
         if str(x).strip()
     ]
-    # Prefer preferred list when it already matches on_screen; otherwise resolve solos by cid.
+    # Prefer preferred list when it already matches on_screen; otherwise resolve character specs by cid.
     paths = node_ids_output_image_paths(ctx, preferred) if preferred else []
     if on_screen:
         solo_by_cid: dict[str, str] = {}
@@ -635,7 +653,7 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
             if not isinstance(other, dict):
                 continue
             oc = other.get("config") if isinstance(other.get("config"), dict) else {}
-            if node_pipeline(other) != NODE_ROLE_CHARACTER_DESIGN:
+            if node_pipeline(other) != NODE_ROLE_CHARACTER:
                 continue
             if oc.get("combined_cast"):
                 continue
@@ -652,8 +670,8 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
     handoff_id = str(
         identity.get("scene_prompt_handoff_from")
         or cfg.get("scene_prompt_handoff_from")
-        or identity.get("scene_master_frame_id")
-        or cfg.get("scene_master_frame_id")
+        or identity.get("scene_master_node_id")
+        or cfg.get("scene_master_node_id")
         or ""
     ).strip()
     # If master prompt was handed off onto this config, prefer it in the leaf prompt path.
@@ -678,8 +696,8 @@ def collect_frame_reference_images(ctx: NodeExecutionContext, node: dict) -> lis
 
     user_paths = user_reference_image_paths(ctx.graph if isinstance(ctx.graph, dict) else None)
 
-    # Do NOT pull empty NODE_ROLE_Scene specs or prior keyframe images into refs.
-    # Continuity is scene_specs + prompt handoff; visual identity is on_screen solos only.
+    # Do NOT pull empty NODE_ROLE_Scene specs or prior clip images into refs.
+    # Continuity is scene_specs + prompt handoff; visual identity is on_screen character specs only.
     ordered = [*user_paths, *paths]
 
     merged: list[Path] = []

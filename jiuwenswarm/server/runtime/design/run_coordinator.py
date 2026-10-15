@@ -99,6 +99,19 @@ class RunCoordinator:
         run = self._store.get_run(run_id)
         if run is None:
             raise KeyError(run_id)
+        if not self.is_active():
+            # No trigger is executing, so a 'running' record is a leftover of
+            # a process that died mid-trigger; nothing else would ever end it,
+            # and the canvas stays read-only while the run looks active.
+            if run.get("status") == "running":
+                run["status"] = "cancelled"
+                run["current_node_ids"] = []
+                for state in (run.get("node_states") or {}).values():
+                    if isinstance(state, dict) and state.get("status") == "running":
+                        state["status"] = "failed"
+                        state["error"] = "interrupted by process restart"
+                self._store.save_run(run)
+            return dict(run)
         if self._abort is not None and self._loop is not None:
             self._loop.call_soon_threadsafe(lambda: self._abort.set("stop"))
         return dict(run)
@@ -358,6 +371,15 @@ class RunCoordinator:
             # Worker-tool live activity (handler-level stage lines): resolved
             # by manifest tools through the design context like the result sink.
             context.node_activity_sink = bridge.node_activity_sink
+            # Member tools (the designer bundle's tools/node_tools.py) resolve
+            # their shot tickets against this trigger's graph / run / bridge.
+            context.node_run_env = {
+                "graph": graph,
+                "run": run,
+                "bridge": bridge,
+                "media_root": self.media_root,
+                "generations": {},
+            }
         # Concurrency observability: keep the last trigger's backend alive on
         # the coordinator so STs / diagnostics can read max_in_flight (a
         # parallel wave compiles to engine parallel(); the backend sees the
@@ -409,6 +431,7 @@ class RunCoordinator:
             if context is not None:
                 context.node_result_sink = None
                 context.node_activity_sink = None
+                context.node_run_env = None
         # The engine's failure semantics are soft: a node whose backend call
         # exhausted its retries returns None (AGENT_FAILED event, no
         # exception) and the workflow keeps running. A trigger whose result

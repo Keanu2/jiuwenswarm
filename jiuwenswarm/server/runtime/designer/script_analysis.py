@@ -408,6 +408,30 @@ def _focus_character_ids(chunk: str, characters: list[dict[str, Any]]) -> list[s
     return list(dict.fromkeys(focus))
 
 
+_NON_STORY_BEAT_RE = re.compile(
+    r"(?i)^(?:"
+    r"visual style|style lock|style:|logo|watermark|no logo|no watermark|"
+    r"no text|aspect(?:\s+ratio)?|color grade|film look|"
+    r"do not (?:add|include|show) (?:any )?(?:text|logo|watermark|subtitles?)"
+    r")\b"
+)
+
+
+def _is_non_story_beat(text: str) -> bool:
+    """True for style/logo/meta lines that are not a story action."""
+    raw = re.sub(r"\s+", " ", str(text or "").strip())
+    if not raw:
+        return True
+    if not _NON_STORY_BEAT_RE.search(raw):
+        return False
+    return not re.search(
+        r"\b(?:walks?|sits?|stands?|says?|looks?|enters?|leaves?|holds?|opens?|"
+        r"runs?|speaks?|turns?|smiles?|cries?)\b",
+        raw,
+        flags=re.I,
+    )
+
+
 def _split_prompt_beats(prompt: str) -> list[str]:
     """Split into cinematic beats; avoid treating continuity 'while still…' as a new shot."""
     text = _strip_prompt_filler(_strip_reference_appendix(prompt))
@@ -482,7 +506,7 @@ def _split_prompt_beats(prompt: str) -> list[str]:
     return out
 
 
-def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict[str, Any]]:
+def _heuristic_clips(prompt: str, characters: list[dict[str, str]]) -> list[dict[str, Any]]:
     """Split prompt into camera/action beats with focus cast per beat."""
     chunks = _split_prompt_beats(prompt)
     shots: list[dict[str, Any]] = []
@@ -499,12 +523,12 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
         action = _strip_prompt_filler(chunk)[:400]
         shots.append(
             {
-                "shot_index": idx,
+                "clip_index": idx,
                 "title": f"Shot {idx}",
                 "action": action,
                 "camera": camera,
                 "character_ids": focus,
-                "keyframe_prompt": action[:500],
+                "clip_prompt": action[:500],
                 "timeline": f"{(idx - 1) * 2.0:.1f}-{idx * 2.0:.1f}s",
             }
         )
@@ -514,10 +538,10 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
     # Respect explicit N-shot / N分镜 ceiling when present.
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-            _explicit_shot_count_from_prompt,
+            _explicit_clip_count_from_prompt,
         )
 
-        shot_ceiling = _explicit_shot_count_from_prompt(prompt)
+        shot_ceiling = _explicit_clip_count_from_prompt(prompt)
     except Exception:  # noqa: BLE001
         shot_ceiling = 0
     covered = {cid for s in shots for cid in s.get("character_ids") or []}
@@ -542,12 +566,12 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
         if shot_ceiling < 1 or len(shots) < shot_ceiling:
             shots.append(
                 {
-                    "shot_index": len(shots) + 1,
+                    "clip_index": len(shots) + 1,
                     "title": f"Focus {ch.get('name')}",
                     "action": f"Feature {ch.get('name')}: {desc}"[:400],
                     "camera": "medium / eye-level",
                     "character_ids": [cid],
-                    "keyframe_prompt": desc[:500],
+                    "clip_prompt": desc[:500],
                     "timeline": f"{len(shots) * 2.0:.1f}-{(len(shots) + 1) * 2.0:.1f}s",
                 }
             )
@@ -560,10 +584,10 @@ def _heuristic_shots(prompt: str, characters: list[dict[str, str]]) -> list[dict
             covered.add(cid)
 
     for i, shot in enumerate(shots, start=1):
-        shot["shot_index"] = i
-        from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
+        shot["clip_index"] = i
+        from jiuwenswarm.server.runtime.designer.node_labels import derive_clip_name
 
-        shot["title"] = derive_shot_name(shot, fallback_index=i)
+        shot["title"] = derive_clip_name(shot, fallback_index=i)
         # If a shot still has no cast, pick the single best character — not a round-robin leak.
         if not shot.get("character_ids") and characters:
             ranked = sorted(
@@ -637,7 +661,7 @@ def _heuristic_scenes(prompt: str) -> list[dict[str, str]]:
     return _clamp_list(scenes, _MAX_SCENES)
 
 
-def _select_shots_for_budget(
+def _select_clips_for_budget(
     shots: list[dict[str, Any]],
     budget: int,
     characters: list[dict[str, Any]],
@@ -675,7 +699,7 @@ def _select_shots_for_budget(
     # Never fold into on_screen/character_ids via action-text scoring — that bleeds
     # later-meet people into early beats.
     for i, shot in enumerate(selected, start=1):
-        shot["shot_index"] = i
+        shot["clip_index"] = i
     return selected
 
 
@@ -700,10 +724,10 @@ def _director_pipeline_decisions(
     # Explicit N-shot / N分镜 language is a HARD ceiling (and floor when larger).
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-            _explicit_shot_count_from_prompt,
+            _explicit_clip_count_from_prompt,
         )
 
-        explicit = _explicit_shot_count_from_prompt(prompt or "")
+        explicit = _explicit_clip_count_from_prompt(prompt or "")
         if explicit >= 1:
             budget = explicit
     except Exception:  # noqa: BLE001
@@ -711,12 +735,14 @@ def _director_pipeline_decisions(
     budget = max(1, budget)
 
     multi = any(len(s.get("character_ids") or []) >= 2 for s in shots if isinstance(s, dict))
-    solo = any(len(s.get("character_ids") or []) == 1 for s in shots if isinstance(s, dict))
+    has_single_character = any(
+        len(s.get("character_ids") or []) == 1 for s in shots if isinstance(s, dict)
+    )
     if n_chars <= 1:
         cast_layout = "single"
         prefer_combined = False
         prefer_split = False
-    elif multi and solo:
+    elif multi and has_single_character:
         cast_layout = "hybrid"
         prefer_combined = True
         prefer_split = True
@@ -730,7 +756,7 @@ def _director_pipeline_decisions(
         prefer_split = True
 
     return {
-        "target_shot_count": budget,
+        "target_clip_count": budget,
         "cast_layout": cast_layout,
         "prefer_combined_cast": prefer_combined,
         "prefer_split_cast": prefer_split,
@@ -744,17 +770,17 @@ def _heuristic_lean_shot(
     story_name: str = "",
     setting_id: str = "set_1",
 ) -> dict[str, Any]:
-    """One full-narrative beat: no LLM → one scene card + one clip (no keyframe)."""
-    from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
+    """One full-narrative beat: no LLM → one scene spec + one clip."""
+    from jiuwenswarm.server.runtime.designer.node_labels import derive_clip_name
 
     all_ids = [str(c.get("id")) for c in characters if str(c.get("id") or "").strip()]
-    title = (story_name or derive_shot_name({"title": "", "action": prompt}, fallback_index=1))[:80]
+    title = (story_name or derive_clip_name({"title": "", "action": prompt}, fallback_index=1))[:80]
     body = _strip_prompt_filler(prompt)[:1200] or prompt[:1200]
     cast_actions = {
         cid: body[:180] for cid in all_ids[:3]
     }
     return {
-        "shot_index": 1,
+        "clip_index": 1,
         "title": title or "Full narrative",
         "action": body[:800],
         "camera": "medium / eye-level",
@@ -763,7 +789,7 @@ def _heuristic_lean_shot(
         "featured_cast_ids": list(all_ids[:1]),
         "ensemble_cast_ids": list(all_ids),
         "offscreen": [],
-        "keyframe_prompt": body[:1200],
+        "clip_prompt": body[:1200],
         "setting_id": str(setting_id or "set_1").strip() or "set_1",
         "timeline": "0-8s",
         "cast_actions": cast_actions,
@@ -839,28 +865,28 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
     explicit = 0
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-            _explicit_shot_count_from_prompt,
+            _explicit_clip_count_from_prompt,
         )
 
-        explicit = int(_explicit_shot_count_from_prompt(prompt) or 0)
+        explicit = int(_explicit_clip_count_from_prompt(prompt) or 0)
     except Exception:  # noqa: BLE001
         explicit = 0
 
     primary_setting = str((scenes[0] or {}).get("id") or "set_1") if scenes else "set_1"
 
-    # No LLM: default to ONE scene card + ONE clip (Wan reference mode: solos + scene refs).
+    # No LLM: default to ONE scene spec + ONE clip (Wan reference mode: character specs + scene refs).
     # Explicit N-shot / N分镜 is the only general multi-shot escape hatch.
     if explicit >= 2:
-        shots = _heuristic_shots(prompt, characters)
+        shots = _heuristic_clips(prompt, characters)
         decisions = _director_pipeline_decisions(prompt, characters, shots)
-        decisions["target_shot_count"] = max(1, explicit)
-        shots = _select_shots_for_budget(
-            shots, int(decisions["target_shot_count"]), characters
+        decisions["target_clip_count"] = max(1, explicit)
+        shots = _select_clips_for_budget(
+            shots, int(decisions["target_clip_count"]), characters
         )
         for i, shot in enumerate(shots, start=1):
-            shot["shot_index"] = i
+            shot["clip_index"] = i
         decisions = _director_pipeline_decisions(prompt, characters, shots)
-        decisions["target_shot_count"] = max(1, explicit)
+        decisions["target_clip_count"] = max(1, explicit)
         if len(shots) > explicit:
             shots = shots[:explicit]
         _assign_heuristic_setting_ids(shots, scenes)
@@ -872,7 +898,7 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         ]
         n_chars = len(characters)
         decisions = {
-            "target_shot_count": 1,
+            "target_clip_count": 1,
             "cast_layout": "combined" if n_chars > 1 else "single",
             "prefer_combined_cast": n_chars > 1,
             "prefer_split_cast": False,
@@ -885,13 +911,13 @@ def heuristic_analysis(prompt: str) -> dict[str, Any]:
         "story_name": story_name,
         "characters": characters,
         "scenes": scenes,
-        "shots": shots,
+        "clips": shots,
         "style_lock": default_style_lock(prompt),
         "audio": audio,
-        "scene_continuity_mode": "scene_card_plus_clip_shots",
+        "scene_consistency_mode": "scene_specs_plus_clips",
         "summary": (
             f"{len(characters)} characters, {len(scenes)} scenes, {len(shots)} shots, "
-            f"cast={decisions['cast_layout']}, lean={explicit < 2}, scene_cards=on"
+            f"cast={decisions['cast_layout']}, lean={explicit < 2}, scene_specs=on"
         ),
         **decisions,
     }
@@ -960,21 +986,6 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
                 except json.JSONDecodeError:
                     return None
     return None
-
-
-def _prompt_mentions_duration(prompt: str) -> tuple[bool, int | None]:
-    """Detect duration cues; return (has_explicit_runtime, target_duration_sec)."""
-    from jiuwenswarm.server.runtime.designer.pipeline.clip_shot_scope import (
-        requested_film_duration_sec,
-    )
-
-    dur = requested_film_duration_sec(prompt)
-    if dur is not None:
-        return True, dur
-    low = (prompt or "").lower()
-    if re.search(r"\b(short|one[- ]shot|single[- ]shot|movie clip|6s)\b", low):
-        return True, 6
-    return False, None
 
 
 _REFERENCE_SUBJECTS = {
@@ -1049,11 +1060,11 @@ def _normalize_llm_analysis(
 ) -> dict[str, Any] | None:
     characters = parsed.get("characters") if isinstance(parsed.get("characters"), list) else []
     scenes = parsed.get("scenes") if isinstance(parsed.get("scenes"), list) else []
-    shots = parsed.get("shots") if isinstance(parsed.get("shots"), list) else []
+    shots = parsed.get("clips") if isinstance(parsed.get("clips"), list) else []
     if allow_empty_cast and len(shots) < 1:
         shots = [
             {
-                "shot_index": 1,
+                "clip_index": 1,
                 "action": str(base.get("user_prompt") or "")[:500],
                 "setting_id": "set_1",
             }
@@ -1146,12 +1157,12 @@ def _normalize_llm_analysis(
                 cid = resolve_cast_token(k, valid_ids=valid_ids, by_name=by_name)
                 if cid and str(v or "").strip():
                     cast_actions[cid] = str(v).strip()[:240]
-        strategy = str(sh.get("keyframe_strategy") or "").strip()
+        strategy = str(sh.get("clip_strategy") or "").strip()
         setting_id = str(sh.get("setting_id") or sh.get("scene_id") or f"set_{i}").strip()
         # Prefer on_screen as the drawn cast for this shot.
         cids = list(on_screen) or cids
         entry: dict[str, Any] = {
-            "shot_index": i,
+            "clip_index": i,
             "title": str(sh.get("title") or ""),
             "action": str(sh.get("action") or "")[:500],
             "camera": str(sh.get("camera") or "medium / eye-level"),
@@ -1164,12 +1175,12 @@ def _normalize_llm_analysis(
             "featured_cast_ids": featured,
             "exiting_character_ids": exiting,
             "setting_id": setting_id or f"set_{i}",
-            "keyframe_prompt": str(sh.get("keyframe_prompt") or sh.get("action") or "")[:600],
+            "clip_prompt": str(sh.get("clip_prompt") or sh.get("action") or "")[:600],
             "timeline": str(sh.get("timeline") or f"{(i - 1) * 2:.1f}-{i * 2:.1f}s"),
         }
         if cast_actions:
             entry["cast_actions"] = cast_actions
-        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
+        from jiuwenswarm.server.runtime.designer.pipeline.storyboard_clip_state import (
             emotion_label,
         )
 
@@ -1181,11 +1192,11 @@ def _normalize_llm_analysis(
             entry["irreversible"] = irreversible[:160]
         if isinstance(sh.get("cast_states"), dict) and sh.get("cast_states"):
             entry["cast_states"] = sh["cast_states"]
-        if strategy in {"compose_from_solo_refs", "edit_prior_keyframe"}:
-            entry["keyframe_strategy"] = strategy
-        from jiuwenswarm.server.runtime.designer.node_labels import derive_shot_name
+        if strategy in {"compose_from_character_specs", "edit_prior_image"}:
+            entry["clip_strategy"] = strategy
+        from jiuwenswarm.server.runtime.designer.node_labels import derive_clip_name
 
-        entry["title"] = derive_shot_name(entry, fallback_index=i)
+        entry["title"] = derive_clip_name(entry, fallback_index=i)
         norm_shots.append(entry)
     if not norm_scenes and norm_shots:
         seen: dict[str, str] = {}
@@ -1200,7 +1211,7 @@ def _normalize_llm_analysis(
         return None
     audio = parsed.get("audio") if isinstance(parsed.get("audio"), dict) else base.get("audio")
     try:
-        tsc = int(parsed.get("target_shot_count") or 0)
+        tsc = int(parsed.get("target_clip_count") or 0)
     except (TypeError, ValueError):
         tsc = 0
     from jiuwenswarm.server.runtime.designer.node_labels import derive_story_name
@@ -1245,26 +1256,26 @@ def _normalize_llm_analysis(
     else:
         style_lock = user_style
     decisions = _director_pipeline_decisions(user_prompt, norm_chars, norm_shots)
-    heuristic_budget = int(decisions["target_shot_count"])
+    heuristic_budget = int(decisions["target_clip_count"])
     explicit = 0
     try:
         from jiuwenswarm.server.runtime.designer.pipeline.director_contract import (
-            _explicit_shot_count_from_prompt,
+            _explicit_clip_count_from_prompt,
         )
 
-        explicit = int(_explicit_shot_count_from_prompt(user_prompt) or 0)
+        explicit = int(_explicit_clip_count_from_prompt(user_prompt) or 0)
     except Exception:  # noqa: BLE001
         explicit = 0
     # The user's explicit N-shot is the only ceiling. Otherwise keep every shot.
     # Heuristic budget is only a fallback when the model returned no shots.
     if explicit >= 1:
-        decisions["target_shot_count"] = max(1, explicit)
+        decisions["target_clip_count"] = max(1, explicit)
     elif norm_shots:
-        decisions["target_shot_count"] = max(1, len(norm_shots))
+        decisions["target_clip_count"] = max(1, len(norm_shots))
     elif tsc >= 1:
-        decisions["target_shot_count"] = tsc
+        decisions["target_clip_count"] = tsc
     else:
-        decisions["target_shot_count"] = heuristic_budget
+        decisions["target_clip_count"] = heuristic_budget
     # Honor explicit LLM layout only when it matches co-appearance reality.
     raw_layout = str(parsed.get("cast_layout") or "").strip().lower()
     if raw_layout in {"single", "split", "combined", "hybrid"}:
@@ -1286,37 +1297,37 @@ def _normalize_llm_analysis(
             decisions["prefer_combined_cast"] = False
             decisions["prefer_split_cast"] = False
     # Prefer coverage-preserving selection over naive first-N truncate.
-    ceiling = max(1, int(decisions["target_shot_count"]))
+    ceiling = max(1, int(decisions["target_clip_count"]))
     if explicit < 1 and len(norm_shots) > ceiling:
         ceiling = len(norm_shots)
-    decisions["target_shot_count"] = ceiling
-    norm_shots = _select_shots_for_budget(norm_shots, ceiling, norm_chars)
+    decisions["target_clip_count"] = ceiling
+    norm_shots = _select_clips_for_budget(norm_shots, ceiling, norm_chars)
     layout_decisions = _director_pipeline_decisions(user_prompt, norm_chars, norm_shots)
     for key in ("cast_layout", "prefer_combined_cast", "prefer_split_cast"):
         if key in layout_decisions:
             decisions[key] = layout_decisions[key]
     # Keep LLM-owned N after layout refresh (do not re-clamp to heuristic 2–4).
     if explicit >= 1:
-        decisions["target_shot_count"] = max(1, explicit)
+        decisions["target_clip_count"] = max(1, explicit)
     else:
-        decisions["target_shot_count"] = max(1, len(norm_shots) or ceiling)
-    if len(norm_shots) > int(decisions["target_shot_count"]):
-        norm_shots = norm_shots[: int(decisions["target_shot_count"])]
-    from jiuwenswarm.server.runtime.designer.pipeline.storyboard_shot_state import (
-        ensure_shot_start_end_states,
+        decisions["target_clip_count"] = max(1, len(norm_shots) or ceiling)
+    if len(norm_shots) > int(decisions["target_clip_count"]):
+        norm_shots = norm_shots[: int(decisions["target_clip_count"])]
+    from jiuwenswarm.server.runtime.designer.pipeline.storyboard_clip_state import (
+        ensure_clip_start_end_states,
     )
 
-    norm_shots = ensure_shot_start_end_states(norm_shots)
+    norm_shots = ensure_clip_start_end_states(norm_shots)
     out: dict[str, Any] = {
         "schema_version": "designer-script-analysis.v1",
         "source": "llm",
         "story_name": story_name,
         "characters": norm_chars,
         "scenes": norm_scenes,
-        "shots": norm_shots,
+        "clips": norm_shots,
         "style_lock": style_lock,
         "audio": audio,
-        "scene_continuity_mode": "scene_card_plus_clip_shots",
+        "scene_consistency_mode": "scene_specs_plus_clips",
         "summary": str(parsed.get("summary") or "")[:500]
         or f"{len(norm_chars)} characters, {len(norm_shots)} shots",
         **decisions,
@@ -1338,8 +1349,13 @@ async def analyze_creative_brief(
     *,
     timeout_sec: float = _DEFAULT_LLM_TIMEOUT_SEC,
     reference_images: list[str] | None = None,
+    film_duration_sec: int | None = None,
 ) -> dict[str, Any]:
-    """LLM cast/shot analysis. Designer requires a configured chat model."""
+    """LLM cast/shot analysis. Designer requires a configured chat model.
+
+    ``film_duration_sec`` is the runtime the user asked for (see ``media_intent``).
+    It only steers how many shots the plan spans; clips keep their own timelines.
+    """
     from jiuwenswarm.server.runtime.designer.model_tools import (
         DesignerLlmError,
         LLM_API_ERROR,
@@ -1355,8 +1371,7 @@ async def analyze_creative_brief(
         "audio": {},
     }
 
-    short_clip, target_duration_sec = _prompt_mentions_duration(prompt)
-    duration_sec = target_duration_sec or 6
+    duration_sec = int(film_duration_sec or 0)
     try:
 
         story_enrichment_rule = (
@@ -1380,13 +1395,13 @@ async def analyze_creative_brief(
             "into actions and do not restage the whole story from a new camera "
             "(angle coverage only if the user asked for multi-cam / same-moment angles). "
             "New setting_id / hard cut / wardrobe / on-screen cast change → new shot. "
-            "Qwen KF: lock identity+wardrobe; first setting KF = compose_from_solo_refs, "
-            "later same setting = edit_prior_keyframe; prefer ≤2–3 people with refs. "
+            "Qwen image: lock identity+wardrobe; first setting clip = compose_from_character_specs, "
+            "later same setting = edit_prior_image; prefer ≤2–3 people with refs. "
             "Clip prompt = this shot's motion and camera only. "
             "Explicit user N-shot / N分镜 is the only shot ceiling. "
             "Do not drop shots to fit a fixed count. "
         )
-        if target_duration_sec:
+        if duration_sec:
             duration_rule = (
                 f"Film ~{duration_sec}s total: set target_duration_sec={duration_sec}. "
                 "Each clip covers only its own advancing story window and may be as long as that window."
@@ -1418,8 +1433,9 @@ async def analyze_creative_brief(
             + duration_rule
             + (
                 "Attached images are image 1, image 2, ... in that order. Look at each one. "
-                "reference_reads.subject is character when the image is a person who still "
-                "needs a character-sheet pass (set character_id to that characters[].id); "
+                "reference_reads.subject is character when the image is a person who will "
+                "perform (set character_id to that characters[].id) — default is use the "
+                "file as-is, not an automatic character-sheet pass; "
                 "scene when it is a place (set setting_id to the matching shot setting_id); "
                 "object when it is a prop or product that must appear inside the clips. "
                 if reference_images
@@ -1429,14 +1445,14 @@ async def analyze_creative_brief(
             '{"story_name":"short film title any language",'
             '"style_lock":{"look":"...","medium":"..."},'
             '"characters":[{"id":"char_1","name":"...","description":"..."}],'
-            '"shots":[{"shot_index":1,"title":"2-4 word beat name NEVER Shot N",'
+            '"clips":[{"clip_index":1,"title":"2-4 word beat name NEVER Shot N",'
             '"action":"...","camera":"...","on_screen":["char_1"],'
             '"offscreen":[],"cast_actions":{"char_1":"..."},"featured_cast_ids":["char_1"],'
-            '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","keyframe_prompt":"...","timeline":"0-5s",'
+            '"ensemble_cast_ids":["char_1"],"setting_id":"set_1","clip_prompt":"...","timeline":"0-5s",'
             '"emotion":"setup","irreversible":"what is newly true at the end",'
             '"cast_states":{"char_1":{"wardrobe":"","emotion":"","presence":"on_screen"}}}],'
-            '"target_shot_count":N'
-            + (f',"target_duration_sec":{duration_sec}' if target_duration_sec else "")
+            '"target_clip_count":N'
+            + (f',"target_duration_sec":{duration_sec}' if duration_sec else "")
             + (
                 ',"reference_reads":[{"slot":1,"subject":"character",'
                 '"character_id":"char_1","setting_id":""}]'
@@ -1461,16 +1477,15 @@ async def analyze_creative_brief(
                     "requested duration without repetition. "
                     '{"style_lock":{"look":"...","medium":"..."},'
                     '"characters":[{"id":"char_1","name":"...","description":"..."}],'
-                    '"shots":[{"shot_index":1,"action":"...","camera":"...",'
+                    '"clips":[{"clip_index":1,"action":"...","camera":"...",'
                     '"character_ids":["char_1"],"ensemble_cast_ids":["char_1"],'
                     '"featured_cast_ids":["char_1"],"setting_id":"set_1",'
-                    '"keyframe_prompt":"...","timeline":"0-5s"}]}'
+                    '"clip_prompt":"...","timeline":"0-5s"}]}'
                 )
                 payload["retry"] = True
             result = await call_model_tool(
                 prompt=json.dumps(payload, ensure_ascii=False),
                 system=sys_msg,
-                optimize_for="quality",
                 max_tokens=32768,
                 images=list(reference_images or []) or None,
             )
@@ -1495,11 +1510,11 @@ async def analyze_creative_brief(
                     break
             allow_empty_cast = bool(reference_images)
             if allow_empty_cast and (
-                not isinstance(parsed.get("shots"), list) or not parsed.get("shots")
+                not isinstance(parsed.get("clips"), list) or not parsed.get("clips")
             ):
-                parsed["shots"] = [
+                parsed["clips"] = [
                     {
-                        "shot_index": 1,
+                        "clip_index": 1,
                         "action": (prompt or "")[:500],
                         "setting_id": "set_1",
                     }
@@ -1507,24 +1522,24 @@ async def analyze_creative_brief(
             if placeholder or (not chars and not allow_empty_cast):
                 logger.info("LLM script analysis looked like schema echo; soft-fail")
                 return None
-            if short_clip:
+            if duration_sec:
                 parsed.setdefault("target_duration_sec", duration_sec)
             normalized = _normalize_llm_analysis(
                 parsed, base, allow_empty_cast=allow_empty_cast
             )
             if not normalized:
                 return None
-            if short_clip and normalized.get("shots"):
-                shots_n = list(normalized["shots"])
+            if duration_sec and normalized.get("clips"):
+                shots_n = list(normalized["clips"])
                 n = max(1, len(shots_n))
                 for i, shot in enumerate(shots_n, start=1):
-                    shot["shot_index"] = i
+                    shot["clip_index"] = i
                     if not str(shot.get("timeline") or "").strip():
                         half = float(duration_sec) / n
                         shot["timeline"] = f"{(i - 1) * half:.1f}-{i * half:.1f}s"
-                normalized["shots"] = shots_n
+                normalized["clips"] = shots_n
                 normalized["target_duration_sec"] = duration_sec
-                normalized["target_shot_count"] = len(shots_n)
+                normalized["target_clip_count"] = len(shots_n)
             normalized["source"] = "llm"
             return normalized
 
@@ -1557,30 +1572,3 @@ async def analyze_creative_brief(
         ) from exc
 
 
-def analyze_creative_brief_sync(
-    prompt: str,
-    *,
-    timeout_sec: float = _DEFAULT_LLM_TIMEOUT_SEC,
-    reference_images: list[str] | None = None,
-) -> dict[str, Any]:
-    """Sync wrapper — always uses a dedicated event loop (never skips LLM on nest)."""
-
-    def _run() -> dict[str, Any]:
-        return asyncio.run(
-            analyze_creative_brief(
-                prompt,
-                timeout_sec=timeout_sec,
-                reference_images=reference_images,
-            )
-        )
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return _run()
-    # Already on a loop: run in a worker thread with its own loop.
-    import concurrent.futures
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(_run)
-        return fut.result(timeout=max(30.0, float(timeout_sec) + 30.0))

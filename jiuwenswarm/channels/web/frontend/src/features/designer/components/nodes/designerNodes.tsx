@@ -21,6 +21,7 @@ import {
 import type { DesignerReactFlowNode } from '../../designerGraphAdapter';
 import { DesignerModalityTypeIcon } from '../../designerIcons';
 import { useDesignerRunStore } from '../../designerRunStore';
+import { useDesignerGraphEditingLocked } from '../../useDesignerGraphEditingLocked';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
 import {
@@ -34,6 +35,7 @@ import {
 } from '../../designerCanvasNodes';
 import { isDesignerPreviewGraph } from '../../designerBootstrapGraph';
 import { isMediaNodeType, supportsNodeToolbar } from '../../mediaNodeConfig';
+import { MarkdownRenderer } from '../../../../components/MarkdownRenderer';
 import { DesignerStoryboardTable } from '../../DesignerStoryboardTable';
 import { DesignerActivityPeek } from '../DesignerActivityPeek';
 import { DesignerNodeActionBar } from '../controls/DesignerNodeActionBar';
@@ -58,10 +60,12 @@ function PlaceholderBody({ nodeType }: { nodeType: string }) {
 function NodeOutputFrame({
   nodeId,
   running,
+  shimmer = false,
   children,
 }: {
   nodeId: string;
   running: boolean;
+  shimmer?: boolean;
   children: ReactNode;
 }) {
   const activity = useDesignerRunStore((state) => {
@@ -77,8 +81,12 @@ function NodeOutputFrame({
     <span className="designer-node__output-frame">
       {children}
       {running ? (
-        <span className="designer-node__running-overlay" data-testid="designer-node-running">
-          <Loader2 className="designer-node__running-icon" size={18} aria-hidden />
+        <span
+          className={`designer-node__running-overlay${shimmer ? ' designer-node__running-overlay--shimmer' : ''}`}
+          data-testid="designer-node-running"
+          data-variant={shimmer ? 'shimmer' : 'spinner'}
+        >
+          {shimmer ? null : <Loader2 className="designer-node__running-icon" size={18} aria-hidden />}
           <DesignerActivityPeek state={activity} testId="designer-node-activity" />
         </span>
       ) : null}
@@ -92,12 +100,14 @@ function DesignerNodeResizeHandle({ nodeId }: { nodeId: string }) {
   const locked = useDesignerStore(
     (state) => state.bootstrapInProgress || isDesignerPreviewGraph(state.domainGraph),
   );
+  const editingLocked = useDesignerGraphEditingLocked();
   const handMode = useDesignerUiStore((state) => state.canvasTool === 'hand');
   const onResizeEnd = useCallback(
     (_event: unknown, params: { width: number; height: number }) => {
+      if (editingLocked) return;
       updateNodeLayoutSize(nodeId, { width: params.width, height: params.height }, { userResized: true });
     },
-    [nodeId, updateNodeLayoutSize],
+    [editingLocked, nodeId, updateNodeLayoutSize],
   );
   if (locked || handMode) return null;
   return (
@@ -106,7 +116,8 @@ function DesignerNodeResizeHandle({ nodeId }: { nodeId: string }) {
       minWidth={DESIGNER_DOC_FIT_MIN_WIDTH}
       minHeight={DESIGNER_NODE_HEADER_HEIGHT + DESIGNER_DOC_FIT_MIN_BODY}
       autoScale={false}
-      className="designer-node__resize nodrag nopan"
+      shouldResize={() => !editingLocked}
+      className={`designer-node__resize nodrag nopan${editingLocked ? ' designer-edit-control' : ''}`}
       onResizeEnd={onResizeEnd}
     >
       <span
@@ -129,6 +140,7 @@ function DesignerNodeShell({
   selected = false,
   resolutionLabel = null,
   toolbar = null,
+  generatingShimmer = false,
 }: {
   nodeId: string;
   label: string;
@@ -140,6 +152,8 @@ function DesignerNodeShell({
   /** Pixel size label for image/video content, e.g. "1920×1080". */
   resolutionLabel?: string | null;
   toolbar?: ReactNode;
+  /** Image and video generation replaces the spinner with a scrolling fill. */
+  generatingShimmer?: boolean;
 }) {
   const { t } = useTranslation();
   const status = useDesignerRunStore(
@@ -165,7 +179,7 @@ function DesignerNodeShell({
 
   return (
     <div
-      className={`designer-node${media ? ' designer-node--media' : ''}${showMediaFill ? ' designer-node--media-filled' : ''}${selected ? ' is-selected' : ''}${statusClass} group`}
+      className={`designer-node${media ? ' designer-node--media' : ''}${showMediaFill ? ' designer-node--media-filled' : ''}${generatingShimmer ? ' is-generating-shimmer' : ''}${selected ? ' is-selected' : ''}${statusClass} group`}
       data-testid="designer-node"
       data-selected={selected ? 'true' : 'false'}
       data-status={status}
@@ -338,9 +352,11 @@ function TextPreviewBody({ nodeId, nodeType }: { nodeId: string; nodeType: strin
   if (!text) return <PlaceholderBody nodeType={nodeType} />;
   return (
     <DocumentFitBody nodeId={nodeId} contentKey={text}>
-      <p className="designer-node__text-preview" data-testid="designer-node-text-preview">
-        {text}
-      </p>
+      <MarkdownRenderer
+        content={text}
+        className="designer-node__text-preview chat-markdown"
+        testId="designer-node-text-preview"
+      />
     </DocumentFitBody>
   );
 }
@@ -471,6 +487,14 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
     );
   }
 
+  const generatingShimmer =
+    status === DESIGNER_NODE_STATUS_RUNNING
+    && (
+      nodeType === DESIGNER_NODE_TYPE_IMAGE
+      || nodeType === DESIGNER_NODE_TYPE_VIDEO
+      || nodeType === DESIGNER_NODE_TYPE_AUDIO
+    );
+
   const toolbar = supportsNodeToolbar(nodeType) ? (
     <NodeToolbar
       isVisible={selected}
@@ -496,8 +520,13 @@ export function DesignerMediaNode({ id, data, selected }: NodeProps<DesignerFlow
           ? resolutionLabel
           : null
       }
+      generatingShimmer={generatingShimmer}
       body={
-        <NodeOutputFrame nodeId={id} running={status === DESIGNER_NODE_STATUS_RUNNING}>
+        <NodeOutputFrame
+          nodeId={id}
+          running={status === DESIGNER_NODE_STATUS_RUNNING}
+          shimmer={generatingShimmer}
+        >
           {inner}
         </NodeOutputFrame>
       }

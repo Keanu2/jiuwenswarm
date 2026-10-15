@@ -28,7 +28,6 @@ _DIRECTOR_LLM_PHASES = (
     "review_storyboard_once",
     "finalize",
     "review",
-    "assign_dual_raters",
 )
 
 
@@ -36,8 +35,8 @@ _DIRECTOR_LLM_PHASES = (
 def stub_director_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace the Director's chat-model phases with empty acknowledgements.
 
-    Executor scheduling tests run full waves; the Director fails closed without a
-    configured chat model, so its LLM phases are answered with no-op results.
+    The Director fails closed without a configured chat model, so its LLM phases
+    are answered with no-op results.
     """
     from jiuwenswarm.server.runtime.designer.orchestration import Director
 

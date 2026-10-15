@@ -4,7 +4,7 @@
 Last-frame media is used ONLY when the next clip continues the same setting
 (soft cut). Hard cuts / new settings break the chain.
 
-Within one scene we accumulate ending stills from every prior same-scene clip
+Within one scene we accumulate ending images from every prior same-scene clip
 (back to the first shot of that setting) so exited cast can still be localized.
 The immediate prior ending remains the primary continuity start; older endings
 are history refs. The Wan prompt narrates what led to what.
@@ -23,7 +23,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Leave headroom for character solos + scene card in Wan reference_images.
+# Leave headroom for character specs + scene spec in Wan reference_images.
 MAX_SCENE_LAST_FRAME_REFS = 4
 
 
@@ -53,7 +53,7 @@ def _looks_like_hard_cut(this_cfg: dict[str, Any] | None, prev_cfg: dict[str, An
     blob = " ".join(
         str(x)
         for x in (
-            this_cfg.get("shot_action"),
+            this_cfg.get("clip_action"),
             this_cfg.get("scene_change"),
             this_cfg.get("scene_distinctness"),
             (this_cfg.get("continuity_lock") or {}).get("forbid")
@@ -121,7 +121,7 @@ def should_keep_scene_frame_chain(
     later_cfg: dict[str, Any] | None,
     earlier_cfg: dict[str, Any] | None,
 ) -> bool:
-    """Softer gate for history stills inside one scene (exited cast allowed)."""
+    """Softer gate for history images inside one scene (exited cast allowed)."""
     return should_use_prior_last_frame(
         this_cfg=later_cfg,
         prev_cfg=earlier_cfg,
@@ -140,20 +140,20 @@ def _clip_nodes_sorted(graph: dict[str, Any] | None) -> list[dict[str, Any]]:
         nid = str(node.get("id") or "")
         if role not in {"clip", "video"} and not nid.startswith("n_clip_"):
             continue
-        idx = int(cfg.get("shot_index") or 0) or 0
+        idx = int(cfg.get("clip_index") or 0) or 0
         if idx <= 0:
             continue
         clips.append(node)
     return sorted(
         clips,
-        key=lambda n: int((n.get("config") or {}).get("shot_index") or 0) or 0,
+        key=lambda n: int((n.get("config") or {}).get("clip_index") or 0) or 0,
     )
 
 
 def _short_beat(cfg: dict[str, Any] | None, *, limit: int = 140) -> str:
     cfg = cfg if isinstance(cfg, dict) else {}
     raw = str(
-        cfg.get("shot_action")
+        cfg.get("clip_action")
         or cfg.get("character_action")
         or cfg.get("previous_clip_action")
         or ""
@@ -353,26 +353,26 @@ def last_frame_continuity_clause(
     path: str = "",
     chain: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Narrate same-scene ending stills: what led to what → continue from latest."""
+    """Narrate same-scene ending images: what led to what → continue from latest."""
     items = [c for c in (chain or []) if isinstance(c, dict) and str(c.get("path") or "").strip()]
     if not items and not used:
         return ""
     if not items and used:
         return (
             "CONTINUITY FIRST FRAME = last frame of the previous clip "
-            f"({path or 'prior ending still'}). "
+            f"({path or 'prior ending image'}). "
             "Use it only to localize last-seen people and place. "
             "THIS clip's action/camera come from the storyboard shot — "
-            "do not replace that beat with a different plot from the still. "
-            "Face/wardrobe authority remains character solo reference images."
+            "do not replace that beat with a different plot from the image. "
+            "Face/wardrobe authority remains character specs reference images."
         )
 
     lines: list[str] = [
-        "SAME-SCENE CONSISTENCY CHAIN (ending stills localize last-seen people/place; "
+        "SAME-SCENE CONSISTENCY CHAIN (ending images localize last-seen people/place; "
         "they are NOT the plot for THIS clip):",
     ]
     for i, item in enumerate(items):
-        idx = int(item.get("shot_index") or 0) or "?"
+        idx = int(item.get("clip_index") or 0) or "?"
         beat = str(item.get("action") or "").strip() or "(prior beat)"
         speech = str(item.get("speech") or "").strip()
         bit = f"- Shot {idx} ENDED here: {beat}"
@@ -384,11 +384,11 @@ def last_frame_continuity_clause(
             bit += " (history — localize exited / off-screen people who were last seen here)."
         lines.append(bit)
     if len(items) > 1:
-        arrow = " → ".join(f"shot {int(c.get('shot_index') or 0)}" for c in items)
+        arrow = " → ".join(f"shot {int(c.get('clip_index') or 0)}" for c in items)
         lines.append(f"Beat progression in this setting: {arrow} → THIS shot.")
     lines.append(
-        "Do NOT attach these stills as Wan refs (they steal character1 and restage a crop). "
-        "Identity = on-screen solos; geography = scene card LAST; plot = THIS storyboard shot "
+        "Do NOT attach these images as Wan refs (they steal character1 and restage a crop). "
+        "Identity = on-screen character specs; geography = scene spec LAST; plot = THIS storyboard shot "
         "continuing the previous Wan prompt. People who left stay off-screen — "
         "do not teleport them back or restage walking away unless the storyboard asks."
     )
@@ -402,16 +402,16 @@ def collect_same_scene_last_frame_chain(
     ctx: Any = None,
     max_frames: int = MAX_SCENE_LAST_FRAME_REFS,
 ) -> list[dict[str, Any]]:
-    """Oldest→newest gated ending stills from the first clip of this setting to N-1.
+    """Oldest→newest gated ending images from the first clip of this setting to N-1.
 
     Walks prior clips with the same setting_id. A hard cut / setting change breaks
     the chain. Cast overlap is NOT required for history frames (exits allowed);
-    the immediate prior still prefers cast overlap when deciding primary continuity,
+    the immediate prior image prefers cast overlap when deciding primary continuity,
     but same-setting history is kept for localization.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     graph = graph if isinstance(graph, dict) else {}
-    this_idx = int(cfg.get("shot_index") or 0) or 0
+    this_idx = int(cfg.get("clip_index") or 0) or 0
     if this_idx <= 1:
         return []
     if bool(cfg.get("forbid_prior_last_frame")) or bool(cfg.get("hard_cut")):
@@ -422,7 +422,7 @@ def collect_same_scene_last_frame_chain(
     priors = [
         n
         for n in _clip_nodes_sorted(graph)
-        if int((n.get("config") or {}).get("shot_index") or 0) < this_idx
+        if int((n.get("config") or {}).get("clip_index") or 0) < this_idx
     ]
     if not priors:
         return []
@@ -447,7 +447,7 @@ def collect_same_scene_last_frame_chain(
             continue
         selected_rev.append(
             {
-                "shot_index": int(pcfg.get("shot_index") or 0) or 0,
+                "clip_index": int(pcfg.get("clip_index") or 0) or 0,
                 "node_id": str(node.get("id") or ""),
                 "path": str(path),
                 "action": _short_beat(pcfg),
@@ -474,7 +474,7 @@ def resolve_gated_last_frame_chain(
 ) -> list[dict[str, Any]]:
     """Resolve same-scene chain; empty when gate forbids continuity."""
     cfg = cfg if isinstance(cfg, dict) else {}
-    this_idx = int(cfg.get("shot_index") or 0) or 0
+    this_idx = int(cfg.get("clip_index") or 0) or 0
     # Hard guard: first clip of a film/shot never attaches prior endings.
     if this_idx <= 1:
         return []
@@ -501,7 +501,7 @@ def resolve_gated_last_frame_chain(
         if path.is_file():
             stamped.append(
                 {
-                    "shot_index": int(item.get("shot_index") or 0) or 0,
+                    "clip_index": int(item.get("clip_index") or 0) or 0,
                     "node_id": str(item.get("node_id") or ""),
                     "path": str(path.resolve()),
                     "action": str(item.get("action") or "")[:140],
@@ -516,7 +516,7 @@ def resolve_gated_last_frame_chain(
     if one.is_file() and bool(cfg.get("use_prior_last_frame")):
         return [
             {
-                "shot_index": int(cfg.get("previous_clip_shot_index") or 0) or 0,
+                "clip_index": int(cfg.get("previous_clip_clip_index") or 0) or 0,
                 "node_id": str(cfg.get("previous_clip_node_id") or ""),
                 "path": str(one.resolve()),
                 "action": str(cfg.get("previous_clip_action") or "")[:140],
@@ -556,7 +556,7 @@ def stamp_scene_last_frame_chain(
             continue
         compact.append(
             {
-                "shot_index": int(item.get("shot_index") or 0) or 0,
+                "clip_index": int(item.get("clip_index") or 0) or 0,
                 "node_id": str(item.get("node_id") or ""),
                 "path": path,
                 "action": str(item.get("action") or "")[:140],
@@ -586,7 +586,7 @@ def chain_prior_speech_across_clips(graph: dict[str, Any]) -> list[str]:
         nid = str(node.get("id") or "")
         if role not in {"clip", "video"} and not nid.startswith("n_clip_"):
             continue
-        idx = int(cfg.get("shot_index") or 0) or 0
+        idx = int(cfg.get("clip_index") or 0) or 0
         if idx <= 0:
             continue
         clips.append((idx, node))
@@ -604,7 +604,7 @@ def chain_prior_speech_across_clips(graph: dict[str, Any]) -> list[str]:
             cfg["forbidden_speech"] = forbid[:8]
             if prev_id and not str(cfg.get("previous_clip_node_id") or "").strip():
                 cfg["previous_clip_node_id"] = prev_id
-                cfg["previous_clip_shot_index"] = prev_idx
+                cfg["previous_clip_clip_index"] = prev_idx
             before = str(cfg.get("speech_line") or "").strip()
             cfg = scrub_restated_speech(cfg)
             after = str(cfg.get("speech_line") or "").strip()
@@ -631,7 +631,7 @@ def stamp_last_frame_onto_next_clips(
     *,
     completed_clip_id: str,
     last_frame_path: str,
-    shot_index: int,
+    clip_index: int,
     speech_line: str = "",
 ) -> list[str]:
     """After clip N completes: stamp last-frame path + scene chain + speech onto N+1."""
@@ -652,14 +652,14 @@ def stamp_last_frame_onto_next_clips(
     if src is not None:
         src["config"] = src_cfg
 
-    # Build same-scene history ending stills on the completed clip, then extend for next.
+    # Build same-scene history ending images on the completed clip, then extend for next.
     prior_chain = [
         c
         for c in (src_cfg.get("scene_last_frame_chain") or [])
         if isinstance(c, dict) and str(c.get("path") or "").strip()
     ]
     this_entry = {
-        "shot_index": int(shot_index or 0),
+        "clip_index": int(clip_index or 0),
         "node_id": str(completed_clip_id or ""),
         "path": frame,
         "action": _short_beat(src_cfg),
@@ -682,11 +682,11 @@ def stamp_last_frame_onto_next_clips(
             node.get("id") or ""
         ).startswith("n_clip_"):
             continue
-        idx = int(cfg.get("shot_index") or 0) or 0
+        idx = int(cfg.get("clip_index") or 0) or 0
         nid = str(node.get("id") or "")
-        if idx == int(shot_index or 0) or nid == completed_clip_id:
+        if idx == int(clip_index or 0) or nid == completed_clip_id:
             continue
-        is_next = idx == int(shot_index or 0) + 1
+        is_next = idx == int(clip_index or 0) + 1
         cont = str(cfg.get("continuity_clip_node_id") or "") == str(completed_clip_id)
         if not (is_next or cont):
             continue
@@ -702,7 +702,7 @@ def stamp_last_frame_onto_next_clips(
                 cfg["prior_last_frame_history_only"] = True
             notes.append(
                 f"{nid}: gated scene last-frame chain ON "
-                f"({len(prior_chain)} stills) from {completed_clip_id}"
+                f"({len(prior_chain)} images) from {completed_clip_id}"
             )
         else:
             cfg.pop("previous_clip_last_frame", None)

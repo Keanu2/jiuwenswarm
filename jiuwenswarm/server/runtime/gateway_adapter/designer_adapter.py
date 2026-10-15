@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import shutil
-import time
 import uuid
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -22,7 +21,8 @@ import portalocker
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 
 from jiuwenswarm.common.schema.designer_graph import (
-    CONFIG_DELEGATE_HANDLER,
+    GRAPH_SOURCE_MANUAL,
+    SCHEMA_VERSION,
     DesignerGraphValidationError,
     apply_graph_patch,
     new_graph_id,
@@ -32,24 +32,29 @@ from jiuwenswarm.common.schema.designer_graph import (
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import get_agent_root_dir, get_agent_sessions_dir
 from jiuwenswarm.common.work_mode import (
-    DEFAULT_WEB_WORK_MODE,
+    DEFAULT_PROJECT_ID_WORK,
     DESIGN_WORK_MODE,
     is_default_project_id,
 )
 from jiuwenswarm.server.runtime.design import RunCoordinator
 from jiuwenswarm.server.runtime.design.context import get_graph_coordinator
 from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
+from jiuwenswarm.server.runtime.designer.media_settings import (
+    MediaSettingsError,
+    media_capabilities,
+    update_media_settings,
+)
 from jiuwenswarm.server.runtime.designer.model_tools import DesignerLlmError
 from jiuwenswarm.server.runtime.gateway_adapter.base import (
     GatewayAdapter,
     build_error_response,
 )
 from jiuwenswarm.server.runtime.session import project_store
-from jiuwenswarm.server.runtime.session.work_mode import resolve_request_work_mode
-
 logger = logging.getLogger(__name__)
 
 _store = DesignerGraphStore()
+
+DESIGNER_AGENT_GROUP = "designer"
 
 
 def _coordinator_for(graph_id: str) -> RunCoordinator:
@@ -59,10 +64,6 @@ def _coordinator_for(graph_id: str) -> RunCoordinator:
     every entry point observes the same in-flight trigger.
     """
     return get_graph_coordinator(_store, graph_id)
-
-
-def _design_run_active(graph_id: str) -> bool:
-    return _coordinator_for(graph_id).is_active()
 
 
 def _workspace_receipt_path(token: str) -> Path:
@@ -110,15 +111,13 @@ def _read_workspace_receipt(
         return None
     if str(receipt.get("signature") or "") != signature:
         return None, "create_token was already used with different parameters", "CONFLICT"
-    session_id = str(receipt.get("session_id") or "")
-    if not session_id:
-        # Compatibility for receipts written by the project-keyed implementation.
-        project_id = str(receipt.get("project_id") or "")
-        if not project_id:
-            return None
-        current, error, _ = _get_design_workspace({"project_id": project_id})
-    else:
-        current, error, _ = _get_design_workspace({"session_id": session_id})
+    project_id = str(receipt.get("project_id") or "")
+    if not project_id:
+        # Compatibility for receipts written by the initial implementation.
+        payload = receipt.get("payload")
+        project = payload.get("project") if isinstance(payload, dict) else None
+        project_id = str(project.get("project_id") or "") if isinstance(project, dict) else ""
+    current, error, _ = _get_design_workspace({"project_id": project_id})
     if error is not None or current is None:
         try:
             path.unlink()
@@ -136,11 +135,11 @@ def _write_workspace_receipt(
     path = _workspace_receipt_path(token)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    session = payload.get("session")
-    session_id = str(session.get("session_id") or "") if isinstance(session, dict) else ""
+    project = payload.get("project")
+    project_id = str(project.get("project_id") or "") if isinstance(project, dict) else ""
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(
-            {"signature": signature, "session_id": session_id},
+            {"signature": signature, "project_id": project_id},
             handle,
             ensure_ascii=False,
         )
@@ -238,24 +237,23 @@ def _run_clip_summary(run: dict[str, Any] | None) -> tuple[bool, str | None]:
     return False, None
 
 
-def _summarize_graph(graph: dict[str, Any], run: dict[str, Any] | None = None) -> dict[str, Any]:
+def _summarize_graph(
+    graph: dict[str, Any],
+    run: dict[str, Any] | None = None,
+    project: Any | None = None,
+) -> dict[str, Any]:
     if run is None:
         run = _store.get_latest_run_for_graph(str(graph.get("graph_id") or ""))
     has_video, clip_label = _run_clip_summary(run)
     project_id = str(graph.get("project_id") or "")
-    project_dir: str | None = None
-    project_name: str | None = None
-    if project_id:
+    if project is None and project_id and not is_default_project_id(project_id):
         project = project_store.get_project_by_id(project_id, cache_bust=True)
-        if project is not None:
-            project_dir = project.project_dir
-            project_name = project.name
     return {
         "graph_id": graph.get("graph_id"),
-        "session_id": str((graph.get("metadata") or {}).get("session_id") or ""),
+        "session_id": _graph_session_id(graph),
         "project_id": project_id,
-        "project_dir": project_dir,
-        "project_name": project_name,
+        "project_dir": project.project_dir if project is not None else None,
+        "project_name": project.name if project is not None else None,
         "title": graph.get("title") or graph.get("graph_id"),
         "updated_at": graph.get("updated_at"),
         "run_id": run.get("run_id") if run else None,
@@ -272,25 +270,6 @@ def _design_title(prompt: str) -> str:
 
 
 _DESIGN_PLACEHOLDER_TITLE = "设计项目"
-
-
-def _stamp_canvas_title(graph: dict[str, Any], prompt: str) -> str:
-    """Set the canvas title from the model's short name, never the raw prompt."""
-    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
-
-    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
-    name = usable_story_title(analysis.get("story_name"), prompt)
-    if not name:
-        current = "".join(ch for ch in str(graph.get("title") or "") if ch.isalnum())
-        reference = "".join(ch for ch in str(prompt or "") if ch.isalnum())
-        # Creation stamps a sanitized copy of the prompt as the title (quotes
-        # and punctuation dropped); any alphanumeric prefix of the prompt is
-        # that echo, not a user-chosen name.
-        if not (current and reference.startswith(current)):
-            name = usable_story_title(graph.get("title"), prompt)
-    graph["title"] = name or _DESIGN_PLACEHOLDER_TITLE
-    return name
 
 
 _retitled_design_projects: set[str] = set()
@@ -316,59 +295,6 @@ def _graph_story_prompt(graph: dict[str, Any]) -> tuple[str, str]:
     meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
     analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
     return str(analysis.get("story_name") or ""), str(graph.get("description") or "")
-
-
-def _graph_session_id(graph: dict[str, Any]) -> str:
-    metadata = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-    return str((metadata or {}).get("session_id") or "").strip()
-
-
-def _design_sessions(project_id: str) -> list[dict[str, Any]]:
-    from jiuwenswarm.server.runtime.session.session_metadata import (
-        collect_all_sessions_metadata,
-    )
-
-    return [
-        item
-        for item in collect_all_sessions_metadata()
-        if str(item.get("project_id") or "") == project_id
-        and str(item.get("work_mode") or "") == DESIGN_WORK_MODE
-    ]
-
-
-def _pair_design_canvases(
-    sessions: list[dict[str, Any]],
-    graphs: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Bind each design session to one canvas.
-
-    A project may hold many sessions. Chat history stays on the session, and
-    the canvas is the graph whose metadata.session_id matches it. Graphs saved
-    before sessions were explicit fill sessions that do not yet have one.
-    """
-    ordered = sorted(sessions, key=lambda item: float(item.get("created_at") or 0))
-    owned: dict[str, list[dict[str, Any]]] = {}
-    unmatched: list[dict[str, Any]] = []
-    for graph in graphs:
-        session_id = _graph_session_id(graph)
-        if session_id:
-            owned.setdefault(session_id, []).append(graph)
-        else:
-            unmatched.append(graph)
-    unmatched.sort(key=lambda item: int(item.get("created_at") or item.get("updated_at") or 0))
-    pairs: list[dict[str, Any]] = []
-    for session in ordered:
-        session_id = str(session.get("session_id") or "").strip()
-        if not session_id:
-            continue
-        candidates = list(owned.get(session_id) or [])
-        if not candidates and unmatched:
-            candidates = [unmatched.pop(0)]
-        if not candidates:
-            continue
-        graph = max(candidates, key=lambda item: int(item.get("updated_at") or 0))
-        pairs.append({"session": session, "graph": graph})
-    return pairs
 
 
 def sync_design_display_name(project: Any) -> Any:
@@ -437,21 +363,49 @@ def sync_design_display_names(projects: list[Any]) -> list[Any]:
     return [sync_design_display_name(project) for project in projects]
 
 
+def _stamp_canvas_title(graph: dict[str, Any], prompt: str) -> str:
+    """Set the canvas title from the model's short name, never the raw prompt."""
+    from jiuwenswarm.server.runtime.designer.node_labels import usable_story_title
+
+    meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    analysis = meta.get("script_analysis") if isinstance(meta.get("script_analysis"), dict) else {}
+    name = usable_story_title(analysis.get("story_name"), prompt) or usable_story_title(
+        graph.get("title"), prompt
+    )
+    graph["title"] = name or _DESIGN_PLACEHOLDER_TITLE
+    return name
+
+
 def _design_workspace_messages(session_id: str) -> list[dict[str, Any]]:
+    """Chat history for one design session.
+
+    Leader turns are standard ``chat.send(mode='team.design')`` rounds: the
+    leader's own finals are persisted with role ``leader`` and belong to the
+    canvas chat like any assistant reply. Teammate output stays off the main
+    thread, as in work/code team mode. Records of one turn share the id
+    ``<request_id>:<role>``, so repeats get a suffix to stay addressable.
+    """
     from jiuwenswarm.server.runtime.session.session_history import load_history_records
 
     messages: list[dict[str, Any]] = []
+    seen_ids: dict[str, int] = {}
     for record in load_history_records(session_id):
         role = str(record.get("role") or "")
+        if role == "leader":
+            role = "assistant"
         if role not in {"user", "assistant"}:
             continue
         content = str(record.get("content") or "")
         if not content:
             continue
-        event_type = str(record.get("event_type") or "")
+        message_id = str(record.get("id") or uuid.uuid4())
+        repeat = seen_ids.get(message_id, 0)
+        seen_ids[message_id] = repeat + 1
+        if repeat:
+            message_id = f"{message_id}#{repeat}"
         messages.append(
             {
-                "id": str(record.get("id") or uuid.uuid4()),
+                "id": message_id,
                 "role": role,
                 "content": content,
                 "kind": str(record.get("design_kind") or (
@@ -469,195 +423,324 @@ def _design_workspace_messages(session_id: str) -> list[dict[str, Any]]:
     return messages
 
 
+def _graph_session_id(graph: dict[str, Any]) -> str:
+    metadata = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
+    return str((metadata or {}).get("session_id") or "").strip()
+
+
+def _design_sessions(project_id: str) -> list[dict[str, Any]]:
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        collect_all_sessions_metadata,
+    )
+
+    return [
+        item
+        for item in collect_all_sessions_metadata()
+        if str(item.get("project_id") or "") == project_id
+        and str(item.get("work_mode") or "") == DESIGN_WORK_MODE
+    ]
+
+
+def _pair_design_canvases(
+    sessions: list[dict[str, Any]],
+    graphs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bind each design session to one canvas.
+
+    A project may hold many sessions. Chat history stays on the session, and
+    the canvas is the graph whose metadata.session_id matches it. Graphs saved
+    before sessions were explicit fill sessions that do not yet have one.
+    """
+    ordered = sorted(sessions, key=lambda item: float(item.get("created_at") or 0))
+    owned: dict[str, list[dict[str, Any]]] = {}
+    unmatched: list[dict[str, Any]] = []
+    for graph in graphs:
+        session_id = _graph_session_id(graph)
+        if session_id:
+            owned.setdefault(session_id, []).append(graph)
+        else:
+            unmatched.append(graph)
+    unmatched.sort(key=lambda item: int(item.get("created_at") or item.get("updated_at") or 0))
+    pairs: list[dict[str, Any]] = []
+    for session in ordered:
+        session_id = str(session.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        candidates = list(owned.get(session_id) or [])
+        if not candidates and unmatched:
+            candidates = [unmatched.pop(0)]
+        if not candidates:
+            continue
+        graph = max(candidates, key=lambda item: int(item.get("updated_at") or 0))
+        pairs.append({"session": session, "graph": graph})
+    return pairs
+
+
+def _canvas_summary(session: dict[str, Any], graph: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_id": str(session.get("session_id") or ""),
+        "title": str(session.get("title") or graph.get("title") or "画布"),
+        "graph_id": str(graph.get("graph_id") or ""),
+        "project_id": str(graph.get("project_id") or session.get("project_id") or ""),
+        "updated_at": int(graph.get("updated_at") or 0),
+    }
+
+
+def _workspace_from_pair(
+    project: Any,
+    pair: dict[str, Any],
+    pairs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    session = pair["session"]
+    graph = pair["graph"]
+    project_id = str(project.project_id)
+    run = _store.get_latest_run_for_graph(str(graph.get("graph_id") or ""))
+    return {
+        "project": {
+            "project_id": project_id,
+            "name": project.name,
+            "project_dir": project.project_dir,
+            "work_mode": project.work_mode,
+        },
+        "session": {
+            "session_id": session.get("session_id"),
+            "title": session.get("title"),
+            "project_id": project_id,
+            "project_dir": project.project_dir,
+            "work_mode": DESIGN_WORK_MODE,
+        },
+        "graph": dict(hydrate_graph_node_outputs(graph, run)),
+        "messages": _design_workspace_messages(str(session.get("session_id") or "")),
+        "sessions": [
+            _canvas_summary(item["session"], item["graph"])
+            for item in pairs
+        ],
+    }
+
+
+def _virtual_default_design_project() -> Any:
+    """Design tasks with no chosen directory live on the shared default project."""
+    return project_store.Project(
+        project_id=DEFAULT_PROJECT_ID_WORK,
+        name="默认项目",
+        project_dir="",
+        work_mode=DESIGN_WORK_MODE,
+    )
+
+
+def _hide_abandoned_design_project(project_id: str, keep_project_id: str) -> None:
+    """Hide a project that bootstrap created and then left without a canvas."""
+    if (
+        not project_id
+        or project_id == keep_project_id
+        or is_default_project_id(project_id)
+    ):
+        return
+    project = project_store.get_project_by_id(project_id, cache_bust=True)
+    if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
+        return
+    if _design_sessions(project_id) or _store.list_graphs_for_project(project_id):
+        return
+    try:
+        project_store.hide_project(project_id)
+    except Exception:
+        logger.warning(
+            "Failed to hide abandoned design project %s",
+            project_id,
+            exc_info=True,
+        )
+
+
+def _graphs_for_design_project(
+    project_id: str,
+    sessions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return canvases for these sessions, including ones saved under another project.
+
+    Composing a default-project session used to clear the project id and create
+    a new design project. The session stayed on ``default`` while the graph
+    was stored on that new id, so opening the session found no canvas.
+    """
+    graphs = list(_store.list_graphs_for_project(project_id))
+    session_ids = {
+        str(item.get("session_id") or "").strip()
+        for item in sessions
+        if str(item.get("session_id") or "").strip()
+    }
+    covered = {_graph_session_id(graph) for graph in graphs}
+    missing = session_ids - covered
+    if not missing:
+        return graphs
+    known_ids = {str(graph.get("graph_id") or "") for graph in graphs}
+    for graph in _store.list_graphs():
+        session_id = _graph_session_id(graph)
+        graph_id = str(graph.get("graph_id") or "")
+        if session_id not in missing or not graph_id or graph_id in known_ids:
+            continue
+        previous_project_id = str(graph.get("project_id") or "")
+        repaired = dict(graph)
+        repaired["project_id"] = project_id
+        try:
+            repaired = dict(_store.save_graph(repaired))
+        except Exception:
+            logger.warning(
+                "Failed to move design graph %s onto %s",
+                graph_id,
+                project_id,
+                exc_info=True,
+            )
+        graphs.append(repaired)
+        known_ids.add(graph_id)
+        missing.discard(session_id)
+        _hide_abandoned_design_project(previous_project_id, project_id)
+    return graphs
+
+
+def _design_pairs(
+    project_id: str,
+) -> tuple[Any, list[dict[str, Any]], str | None, str | None]:
+    if is_default_project_id(project_id):
+        project = _virtual_default_design_project()
+        project_id = project.project_id
+    else:
+        project = project_store.get_project_by_id(project_id, cache_bust=True)
+        if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
+            return None, [], "design project not found", "NOT_FOUND"
+    sessions = _design_sessions(project_id)
+    pairs = _pair_design_canvases(
+        sessions,
+        _graphs_for_design_project(project_id, sessions),
+    )
+    return project, pairs, None, None
+
+
+def _select_design_pair(
+    pairs: list[dict[str, Any]],
+    session_id: str,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    if not pairs:
+        return None, "design session not found", "NOT_FOUND"
+    wanted = str(session_id or "").strip()
+    if wanted:
+        pair = next(
+            (
+                item
+                for item in pairs
+                if str(item["session"].get("session_id") or "") == wanted
+            ),
+            None,
+        )
+        if pair is None:
+            return None, "design session not found", "NOT_FOUND"
+        return pair, None, None
+    pair = max(pairs, key=lambda item: int(item["graph"].get("updated_at") or 0))
+    return pair, None, None
 
 
 def _get_design_workspace(
     params: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    """Load one design task workspace (session + graph) by session id.
-
-    The design task unit is the session (one session = one graph = one
-    canvas); ``project_id`` is only an optional grouping directory, exactly
-    like work-mode conversations. ``project_id``-only lookups (legacy) fall
-    back to the project's most recent design session.
-    """
-    from jiuwenswarm.server.runtime.session.session_metadata import (
-        collect_all_sessions_metadata,
-    )
-
-    requested_session_id = str(params.get("session_id") or "").strip()
     project_id = str(params.get("project_id") or "").strip()
-    if not requested_session_id and not project_id:
-        return None, "session_id is required", "BAD_REQUEST"
-
-    project = None
-    if project_id:
-        project = project_store.get_project_by_id(project_id, cache_bust=True)
-        if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
-            return None, "design project not found", "NOT_FOUND"
-
-    sessions = [
-        item
-        for item in collect_all_sessions_metadata()
-        if str(item.get("work_mode") or "") == DESIGN_WORK_MODE
-        and (
-            not project_id
-            or str(item.get("project_id") or "") == project_id
-        )
-    ]
-    if requested_session_id:
-        session = next(
-            (item for item in sessions if str(item.get("session_id")) == requested_session_id),
-            None,
-        )
-        if session is None:
-            return None, "design session not found", "NOT_FOUND"
-    elif sessions:
-        sessions.sort(key=lambda item: float(item.get("created_at") or 0))
-        session = sessions[-1]
-    else:
-        return None, "design workspace has no sessions", "NOT_FOUND"
-    session_id = str(session.get("session_id") or "")
-
-    if project is None:
-        session_project_id = str(session.get("project_id") or "")
-        if session_project_id:
-            project = project_store.get_project_by_id(session_project_id, cache_bust=True)
-
-    graphs = _store.list_graphs_for_project(str(session.get("project_id") or "")) if str(
-        session.get("project_id") or ""
-    ) else [
-        g
-        for g in _store.list_graphs()
-        if str((g.get("metadata") or {}).get("session_id") or "") == session_id
-    ]
-    graph = next(
-        (g for g in graphs if str((g.get("metadata") or {}).get("session_id") or "") == session_id),
-        None,
+    if not project_id:
+        return None, "project_id is required", "BAD_REQUEST"
+    project, pairs, error, code = _design_pairs(project_id)
+    if error is not None or project is None:
+        return None, error, code
+    pair, error, code = _select_design_pair(
+        pairs,
+        str(params.get("session_id") or ""),
     )
-    if graph is None and graphs:
-        graphs.sort(key=lambda g: float(g.get("updated_at") or 0))
-        graph = graphs[-1]
-    if graph is None:
-        return None, "design workspace has no graph", "NOT_FOUND"
-    # Heal canvases whose title is still the raw creation prompt: the canvas
-    # header is sized for the model's short story name, never the prompt.
-    previous_title = str(graph.get("title") or "")
-    _stamp_canvas_title(graph, str(graph.get("description") or ""))
-    if str(graph.get("title") or "") != previous_title:
-        graph = dict(_store.save_graph(graph))
-    run = _store.get_latest_run_for_graph(str(graph.get("graph_id") or ""))
-    return {
-        "project": {
-            "project_id": (project.project_id if project is not None else ""),
-            "name": (project.name if project is not None else ""),
-            "project_dir": (project.project_dir if project is not None else ""),
-            "work_mode": DESIGN_WORK_MODE,
-        },
-        "session": {
-            "session_id": session_id,
-            "title": session.get("title"),
-            "project_id": (project.project_id if project is not None else ""),
-            "project_dir": (project.project_dir if project is not None else ""),
-            "work_mode": DESIGN_WORK_MODE,
-        },
-        "graph": dict(hydrate_graph_node_outputs(graph, run)),
-        "messages": _design_workspace_messages(session_id),
-    }, None, None
+    if error is not None or pair is None:
+        return None, error, code
+    return _workspace_from_pair(project, pair, pairs), None, None
 
 
-def _design_team_workspace(session_id: str) -> Path:
-    """The owning team's team-workspace for one design task.
+def _rollback_design_workspace(
+    *,
+    project_id: str,
+    project_dir: str,
+    session_id: str,
+    graph_id: str,
+) -> None:
+    if graph_id:
+        _store.delete_graph(graph_id)
+    if session_id:
+        shutil.rmtree(get_agent_sessions_dir() / session_id, ignore_errors=True)
+    if project_id and not is_default_project_id(project_id):
+        try:
+            project_store.purge_project(project_id)
+        except Exception:
+            logger.warning("Failed to roll back design project %s", project_id, exc_info=True)
+    if project_dir and not is_default_project_id(project_id):
+        shutil.rmtree(project_dir, ignore_errors=True)
 
-    Design task artifacts (graph.json, runs, references, generated media)
-    live under the team workspace unless the user picked a project directory.
-    Resolves the real team name from session metadata (see graph_store).
-    """
-    from jiuwenswarm.server.runtime.designer.graph_store import design_team_workspace
 
-    return design_team_workspace(session_id)
+def _attach_design_references(
+    graph: dict[str, Any],
+    raw_references: Any,
+) -> dict[str, Any]:
+    """Store uploads next to the canvas outputs and seed their canvas nodes."""
+    from jiuwenswarm.server.runtime.designer.handlers.common import canvas_output_dir
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        attach_user_references_to_graph,
+        normalize_user_references,
+    )
 
-
-def _resolve_design_task_dir(params: dict[str, Any], session_id: str) -> tuple[str, str, str, str]:
-    """Resolve ``(project_id, project_name, refs_dir, leader_project_dir)``.
-
-    Work-mode semantics: a task is a session, never a directory. Directories
-    (projects) exist only when the user picked one in the landing selector —
-    artifacts then stay under that project. Without a project everything lands
-    in the owning team's team-workspace (same root the team rails use).
-    """
-    requested_project_id = str(params.get("project_id") or "").strip()
-    if requested_project_id and not is_default_project_id(requested_project_id):
-        project = project_store.get_project_by_id(requested_project_id, cache_bust=True)
-        if project is None or project.hidden or project.work_mode != DESIGN_WORK_MODE:
-            raise ValueError("design project not found")
-        project_dir = str(project.project_dir or "")
-        refs_dir = str(Path(project_dir) / ".designer" / "refs")
-        return project.project_id, project.name, refs_dir, project_dir
-    team_ws = _design_team_workspace(session_id)
-    refs_dir = team_ws / "designer" / "refs"
-    refs_dir.mkdir(parents=True, exist_ok=True)
-    return "", "", str(refs_dir), str(team_ws)
+    if not isinstance(raw_references, list) or not raw_references:
+        return graph
+    refs_dir = canvas_output_dir(graph) / ".designer" / "refs"
+    user_refs = normalize_user_references(raw_references, dest_dir=refs_dir)
+    if not user_refs:
+        return graph
+    return attach_user_references_to_graph(graph, user_refs)
 
 
 async def _create_design_workspace_once(
     request: AgentRequest,
     params: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    """Create one design task (session + empty graph); no leader round here.
+    """Create one design session on the default project with an empty canvas.
 
-    The task unit is the session — no project/directory is created (the
-    work-mode conversation semantics); an explicitly selected ``project_id``
-    only groups the task under that directory. The first user message arrives
-    as a standard ``chat.send(mode='team.design')`` — the whole leader turn
-    (streaming, interact, history persistence) rides the standard team
-    pipeline; the canvas gets its graph via the tools' designer.* pushes.
+    No leader round runs here: the first user message arrives as a standard
+    ``chat.send(mode='team.design')``, so the leader turn (streaming, history
+    persistence) rides the team pipeline and the canvas gets its graph via the
+    design tools' ``designer.*`` pushes.
     """
-    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
-    from jiuwenswarm.server.runtime.designer.user_references import (
-        UserReferenceError,
-        attach_user_references_to_graph,
-        normalize_user_references,
+    from jiuwenswarm.server.runtime.designer.user_references import UserReferenceError
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        init_session_metadata,
     )
 
     prompt = str(params.get("prompt") or "").strip()
     if not prompt:
         return None, "prompt is required", "BAD_REQUEST"
     model_name = str(params.get("model_name") or "").strip()
-    title = _design_title(prompt)
+    project_id = DEFAULT_PROJECT_ID_WORK
     session_id = f"design_{uuid.uuid4().hex}"
     graph_id = ""
     committed = False
     try:
-        try:
-            project_id, project_name, refs_dir, leader_project_dir = _resolve_design_task_dir(
-                params, session_id
-            )
-        except ValueError as exc:
-            return None, str(exc), "NOT_FOUND"
         init_session_metadata(
             session_id=session_id,
             channel_id=request.channel_id or "web",
             user_id=str(request.user_id or ""),
-            title=title,
+            title="画布 1",
             mode="designer",
-            project_dir=leader_project_dir if project_id else "",
+            project_dir="",
             project_id=project_id,
             persist_session=True,
             model=model_name,
             work_mode=DESIGN_WORK_MODE,
-            # The standard team path resolves the AgentGroup from session
-            # metadata — bind 'designer' here so every chat.send inherits it.
-            agent_group_name="designer",
+            agent_group_name=DESIGNER_AGENT_GROUP,
         )
-
         graph = normalize_execution_graph(
             {
-                "schema_version": "designer-execution-graph.v1",
+                "schema_version": SCHEMA_VERSION,
                 "graph_id": new_graph_id(),
                 "project_id": project_id,
-                "title": title,
-                "description": prompt[:200],
+                "title": _DESIGN_PLACEHOLDER_TITLE,
+                "description": prompt,
+                "source": GRAPH_SOURCE_MANUAL,
                 "nodes": [],
                 "edges": [],
                 "metadata": {
@@ -667,54 +750,41 @@ async def _create_design_workspace_once(
                 },
             }
         )
-        _stamp_canvas_title(graph, prompt)
+        try:
+            graph = _attach_design_references(graph, params.get("references"))
+        except UserReferenceError as exc:
+            return None, str(exc), exc.code
         graph = dict(_store.save_graph(graph))
         graph_id = str(graph["graph_id"])
-
-        raw_references = params.get("references")
-        user_refs: list[dict[str, Any]] = []
-        if isinstance(raw_references, list) and raw_references:
-            try:
-                user_refs = normalize_user_references(raw_references, dest_dir=Path(refs_dir))
-            except UserReferenceError as exc:
-                return None, str(exc), exc.code
-            if user_refs:
-                graph = attach_user_references_to_graph(graph, user_refs)
-                graph = dict(_store.save_graph(graph))
-
-        # No history write and no leader round here: the first user message is
-        # a standard chat.send, which persists the user record and streams the
-        # leader reply through the standard team pipeline.
-
         committed = True
         return {
             "project": {
                 "project_id": project_id,
-                "name": project_name,
-                "project_dir": leader_project_dir if project_id else "",
+                "name": "默认项目",
+                "project_dir": "",
                 "work_mode": DESIGN_WORK_MODE,
             },
             "session": {
                 "session_id": session_id,
-                "title": title,
+                "title": "画布 1",
                 "project_id": project_id,
-                "project_dir": leader_project_dir if project_id else "",
+                "project_dir": "",
                 "work_mode": DESIGN_WORK_MODE,
             },
             "graph": graph,
-            "messages": _design_workspace_messages(session_id),
+            "messages": [],
         }, None, None
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to create design workspace")
         return None, str(exc), "INTERNAL_ERROR"
     finally:
-        # Only the task-local resources (session + graph) roll back; a user
-        # project directory is never touched.
         if not committed:
-            if graph_id:
-                _store.delete_graph(graph_id)
-            if session_id:
-                shutil.rmtree(get_agent_sessions_dir() / session_id, ignore_errors=True)
+            _rollback_design_workspace(
+                project_id="",
+                project_dir="",
+                session_id=session_id,
+                graph_id=graph_id,
+            )
 
 
 async def _create_design_workspace(
@@ -748,19 +818,162 @@ async def _create_design_workspace(
         try:
             _write_workspace_receipt(token, signature, payload)
         except OSError as exc:
-            # The shared design project must survive; roll back only the
-            # task-local resources (session + graph).
+            project = payload.get("project")
             session = payload.get("session")
             graph = payload.get("graph")
-            if isinstance(graph, dict) and graph.get("graph_id"):
-                _store.delete_graph(str(graph["graph_id"]))
-            if isinstance(session, dict) and session.get("session_id"):
-                shutil.rmtree(
-                    get_agent_sessions_dir() / str(session["session_id"]), ignore_errors=True
-                )
+            _rollback_design_workspace(
+                project_id=(
+                    str(project.get("project_id") or "")
+                    if isinstance(project, dict)
+                    else ""
+                ),
+                project_dir=(
+                    str(project.get("project_dir") or "")
+                    if isinstance(project, dict)
+                    else ""
+                ),
+                session_id=(
+                    str(session.get("session_id") or "")
+                    if isinstance(session, dict)
+                    else ""
+                ),
+                graph_id=(
+                    str(graph.get("graph_id") or "")
+                    if isinstance(graph, dict)
+                    else ""
+                ),
+            )
             logger.exception("Failed to persist Design idempotency receipt")
             return None, f"failed to persist workspace receipt: {exc}", "INTERNAL_ERROR"
         return result
+
+
+def _session_title(raw: Any, fallback: str) -> str:
+    title = " ".join(str(raw or "").split())
+    if not title:
+        title = fallback
+    return title[:80]
+
+
+def _create_design_session(
+    request: AgentRequest,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Open another canvas under an existing design project."""
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        init_session_metadata,
+    )
+
+    project_id = str(params.get("project_id") or "").strip()
+    if not project_id:
+        return None, "project_id is required", "BAD_REQUEST"
+    project, _pairs, error, code = _design_pairs(project_id)
+    if error is not None or project is None:
+        return None, error, code
+    existing = _design_sessions(project_id)
+    title = _session_title(params.get("title"), f"画布 {len(existing) + 1}")
+    session_id = f"design_{uuid.uuid4().hex}"
+    init_session_metadata(
+        session_id=session_id,
+        channel_id=request.channel_id or "web",
+        user_id=str(request.user_id or ""),
+        title=title,
+        mode="designer",
+        project_dir=str(project.project_dir or ""),
+        project_id=project_id,
+        persist_session=True,
+        work_mode=DESIGN_WORK_MODE,
+        agent_group_name=DESIGNER_AGENT_GROUP,
+    )
+    try:
+        graph = normalize_execution_graph(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "graph_id": new_graph_id(),
+                "project_id": project_id,
+                "title": title,
+                "source": GRAPH_SOURCE_MANUAL,
+                "nodes": [],
+                "edges": [],
+                "metadata": {
+                    "session_id": session_id,
+                    "work_mode": DESIGN_WORK_MODE,
+                    "project_dir": str(project.project_dir or ""),
+                },
+            }
+        )
+        _store.save_graph(graph)
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(get_agent_sessions_dir() / session_id, ignore_errors=True)
+        logger.exception("Failed to create design session")
+        return None, str(exc), "INTERNAL_ERROR"
+    return _get_design_workspace({"project_id": project_id, "session_id": session_id})
+
+
+def _compose_design_session(
+    request: AgentRequest,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Prepare an empty session canvas for its first leader message.
+
+    Attaches the uploads and the chosen model to the session's canvas. The
+    prompt itself is sent by the client as ``chat.send(mode='team.design')``;
+    the leader builds the graph from it.
+    """
+    from jiuwenswarm.server.runtime.designer.user_references import (
+        UserReferenceError,
+        is_user_reference_node,
+    )
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        get_session_metadata,
+        update_session_metadata,
+    )
+
+    project_id = str(params.get("project_id") or "").strip()
+    session_id = str(params.get("session_id") or "").strip()
+    prompt = str(params.get("prompt") or "").strip()
+    references = params.get("references")
+    if not project_id or not session_id:
+        return None, "project_id and session_id are required", "BAD_REQUEST"
+    if not prompt and not (isinstance(references, list) and references):
+        return None, "prompt is required", "BAD_REQUEST"
+    current, error, code = _get_design_workspace(
+        {"project_id": project_id, "session_id": session_id}
+    )
+    if error is not None or current is None:
+        return None, error, code
+    graph = current.get("graph") if isinstance(current.get("graph"), dict) else {}
+    if graph.get("nodes") and not all(
+        is_user_reference_node(node) for node in graph.get("nodes") or []
+    ):
+        return None, "design session already has a canvas", "CONFLICT"
+    graph = dict(graph)
+    metadata = dict(graph.get("metadata") or {})
+    model_name = str(params.get("model_name") or "").strip()
+    if model_name:
+        metadata["model_name"] = model_name
+    graph["metadata"] = metadata
+    if prompt:
+        graph["description"] = prompt
+    try:
+        graph = _attach_design_references(graph, references)
+        _store.save_graph(graph)
+    except UserReferenceError as exc:
+        return None, str(exc), exc.code
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to prepare design session")
+        return None, str(exc), "INTERNAL_ERROR"
+    # Sessions created before the designer AgentGroup existed carry no group
+    # binding; the team path reads it on the first team.design round.
+    if not str(get_session_metadata(session_id).get("agent_group_name") or "").strip():
+        update_session_metadata(
+            session_id=session_id,
+            agent_group_name=DESIGNER_AGENT_GROUP,
+            touch_last_message_at=False,
+            sync_write=True,
+        )
+    _ = request
+    return _get_design_workspace({"project_id": project_id, "session_id": session_id})
 
 
 def _list_graphs(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -779,32 +992,31 @@ def _list_graphs(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
     payload: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     latest_runs = _store.latest_runs_by_graph()
-    project_cache: dict[str, tuple[str, str] | None] = {}
+    projects: dict[str, Any] = {}
 
-    def _project_dir_name(pid: str) -> tuple[str, str] | None:
-        if pid not in project_cache:
-            project = project_store.get_project_by_id(pid, cache_bust=True) if pid else None
-            project_cache[pid] = (
-                (project.project_dir, project.name) if project is not None else None
+    def _project(pid: str) -> Any:
+        if pid not in projects:
+            projects[pid] = (
+                project_store.get_project_by_id(pid, cache_bust=True)
+                if pid and not is_default_project_id(pid)
+                else None
             )
-        return project_cache[pid]
+        return projects[pid]
 
     for graph in graphs:
         item = dict(graph)
+        item_project_id = str(item.get("project_id") or "")
+        project = _project(item_project_id)
         run = latest_runs.get(str(item.get("graph_id") or ""))
-        summaries.append(_summarize_graph(item, run))
+        summaries.append(_summarize_graph(item, run, project))
         # Do not hydrate outputs or ship full node bodies here — Agent WS
         # send budget is 6MB; a page of Designer graphs with images exceeds it.
-        project_id = str(item.get("project_id") or "")
-        resolved = _project_dir_name(project_id)
-        project_dir = resolved[0] if resolved else None
-        project_name = resolved[1] if resolved else None
         payload.append(
             {
                 "graph_id": item.get("graph_id"),
-                "project_id": project_id,
-                "project_dir": project_dir,
-                "project_name": project_name,
+                "project_id": item_project_id,
+                "project_dir": project.project_dir if project is not None else None,
+                "project_name": project.name if project is not None else None,
                 "title": item.get("title"),
                 "updated_at": item.get("updated_at"),
                 "schema_version": item.get("schema_version"),
@@ -863,26 +1075,6 @@ def _run_update_callback(request: AgentRequest):
     return on_update
 
 
-
-
-def _graph_update_callback(request: AgentRequest):
-    loop = asyncio.get_running_loop()
-
-    def on_graph(graph: dict[str, Any]) -> None:
-        snapshot = deepcopy(graph)
-
-        async def _emit() -> None:
-            await _push_designer_event(
-                request=request,
-                event_type=EventType.DESIGNER_GRAPH_UPDATED.value,
-                payload={"graph": snapshot},
-            )
-
-        loop.call_soon_threadsafe(lambda: asyncio.create_task(_emit()))
-
-    return on_graph
-
-
 def _save_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
     raw_graph = params.get("graph")
     if not isinstance(raw_graph, dict):
@@ -933,9 +1125,17 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
                 "upsert_edges",
                 "remove_node_ids",
                 "remove_edge_ids",
+                "video_settings",
+                "image_settings",
             )
             if key in params
         }
+    video_patch = None
+    image_patch = None
+    if isinstance(raw_patch, dict):
+        raw_patch = dict(raw_patch)
+        video_patch = raw_patch.pop("video_settings", None)
+        image_patch = raw_patch.pop("image_settings", None)
     try:
         # Mark upserted nodes as user-added when the patch did not already set it
         # (canvas dock / successor add paths stamp this on the client).
@@ -955,6 +1155,8 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
                     stamped.append(node)
                 raw_patch = {**raw_patch, "upsert_nodes": stamped}
         next_graph = apply_graph_patch(graph, raw_patch)
+        if video_patch is not None or image_patch is not None:
+            update_media_settings(next_graph, video=video_patch, image=image_patch)
         try:
             from jiuwenswarm.server.runtime.designer.orchestration import Director
 
@@ -963,69 +1165,22 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
             logger.debug("Director user-node onboard on patch failed", exc_info=True)
         saved = _store.save_graph(next_graph)
         _persist_uploaded_outputs(saved)
-    except DesignerGraphValidationError as exc:
+    except (DesignerGraphValidationError, MediaSettingsError) as exc:
         return None, str(exc), "BAD_REQUEST"
     return {"graph": dict(saved)}, None, None
 
 
-def _media_capabilities(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    """Model limits and canvas media settings for the settings menu.
-
-    Video figures come from the configured model's capacity entry, image tiers
-    from the image capacity table; ``settings`` echoes the graph's stored
-    canvas-wide video/image settings when a graph is requested. Per-node video
-    durations are not derived on this line (no storyboard timeline), so the
-    menu falls back to each node's ``duration_sec`` and the model default.
-    """
-    from jiuwenswarm.server.runtime.designer.media_generation import slot_settings
-    from jiuwenswarm.server.runtime.designer.pipeline.image_capacity import (
-        DEFAULT_IMAGE_RATIO,
-        IMAGE_RATIOS,
-        active_image_capacity,
-    )
-    from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
-        active_video_capacity,
-    )
-
-    video_slot = slot_settings("video")
-    video_cap = active_video_capacity()
-    image_slot = slot_settings("image")
-    image_cap = active_image_capacity()
-    caps: dict[str, Any] = {
-        "video": {
-            "configured_model": video_slot.model,
-            "backend": video_slot.backend,
-            "model_id": video_cap.model_id,
-            "provider": video_cap.provider,
-            "ratios": list(video_cap.ratios),
-            "resolutions": list(video_cap.resolutions),
-            "default_ratio": "16:9" if "16:9" in video_cap.ratios else video_cap.ratios[0],
-            "default_resolution": video_cap.default_resolution,
-            "min_sec": video_cap.min_sec,
-            "max_sec": video_cap.max_sec,
-            "default_sec": video_cap.default_sec,
-        },
-        "image": {
-            "configured_model": image_slot.model,
-            "backend": image_slot.backend,
-            "ratios": list(IMAGE_RATIOS),
-            "resolutions": list(image_cap.resolutions),
-            "default_ratio": DEFAULT_IMAGE_RATIO,
-            "default_resolution": image_cap.default_resolution,
-        },
-    }
+def _media_capabilities(
+    params: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
     graph_id = str(params.get("graph_id") or "").strip()
+    graph = None
     if graph_id:
         graph = _store.get_graph(graph_id)
         if graph is None:
             return None, "graph not found", "NOT_FOUND"
-        metadata = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-        caps["settings"] = {
-            "video": dict(metadata.get("video_settings") or {}),
-            "image": dict(metadata.get("image_settings") or {}),
-        }
-    return caps, None, None
-
+        return media_capabilities(graph, _store.get_latest_run_for_graph(graph_id)), None, None
+    return media_capabilities(), None, None
 
 
 def _get_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -1044,6 +1199,73 @@ def _get_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None,
     return None, "run_id or graph_id is required", "BAD_REQUEST"
 
 
+def _is_comfyui_target(graph: dict[str, Any], node_id: str) -> bool:
+    from jiuwenswarm.common.schema.designer_graph import is_comfyui_node
+
+    return any(
+        str(node.get("id") or "") == node_id and is_comfyui_node(node)
+        for node in graph.get("nodes") or []
+        if isinstance(node, dict)
+    )
+
+
+def _start_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Resolve the run target (graph + optional node); no execution here.
+
+    ``node_id`` present → single-node trigger (only that node re-executes,
+    downstream frozen; ``cascade=true`` turns it into "rerun from X" — X plus
+    its downstream closure re-execute, upstream stays frozen at current
+    values); absent → full-graph trigger (unfrozen nodes execute in
+    topological order). The run_id is the graph's lifelong identity, minted
+    by the coordinator on first trigger.
+    """
+    graph_id = str(params.get("graph_id") or "").strip()
+    run_id = str(params.get("run_id") or "").strip()
+    node_id = str(params.get("node_id") or "").strip()
+    cascade = bool(params.get("cascade"))
+    graph = _store.get_graph(graph_id) if graph_id else None
+    if run_id:
+        existing = _store.get_run(run_id)
+        if existing is None:
+            return None, "run not found", "NOT_FOUND"
+        if graph is None:
+            graph = _store.get_graph(str(existing.get("graph_id") or ""))
+        elif str(existing.get("graph_id") or "") != str(graph.get("graph_id") or ""):
+            return None, "run does not belong to graph", "BAD_REQUEST"
+    if graph is None:
+        if graph_id or run_id:
+            return None, "graph not found", "NOT_FOUND"
+        return None, "graph_id or run_id is required", "BAD_REQUEST"
+    node_ids: list[str] | None = None
+    if node_id:
+        if not any(str(n.get("id") or "") == node_id for n in graph.get("nodes") or []):
+            return None, "node not found", "NOT_FOUND"
+        node_ids = [node_id]
+    elif cascade:
+        return None, "cascade requires node_id", "BAD_REQUEST"
+    contribution_warning = ""
+    if not (node_id and _is_comfyui_target(graph, node_id)):
+        try:
+            from jiuwenswarm.server.runtime.designer.orchestration import Director
+
+            audit = Director().audit_contribution_for_run(graph)
+            contribution_warning = str(audit.get("warning") or "")
+            graph = dict(_store.save_graph(graph))
+        except Exception:
+            logger.debug("Director contribution audit failed", exc_info=True)
+    return {
+        "graph": dict(graph),
+        "graph_id": graph["graph_id"],
+        "node_ids": node_ids,
+        "cascade": cascade,
+        "warning": contribution_warning or None,
+        "warnings": [contribution_warning] if contribution_warning else [],
+    }, None, None
+
+
+_RUN_TASKS: set[asyncio.Task[None]] = set()
+
+
 def _launch_run_trigger(
     coordinator: RunCoordinator,
     payload: dict[str, Any],
@@ -1051,7 +1273,7 @@ def _launch_run_trigger(
 ) -> None:
     """Run the trigger on a background task; failures land on the run record.
 
-    The trigger's own error handling already writes a failed run and pushes it
+    The trigger's own error handling writes a failed run and pushes it
     through ``on_update``; a task-level exception (outside the coordinator)
     is logged — the record keeps its last persisted state.
     """
@@ -1070,16 +1292,17 @@ def _launch_run_trigger(
                 payload.get("graph_id"),
             )
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _RUN_TASKS.add(task)
+    task.add_done_callback(_RUN_TASKS.discard)
 
 
 def _initial_running_run(payload: dict[str, Any]) -> dict[str, Any]:
     """The 'running' snapshot the run.start response answers with.
 
-    Mirrors the first ``on_update`` the coordinator will emit once the lock is
-    taken (status running, the trigger's nodes back to pending) without
-    racing the background task: read the minted run record, or synthesize a
-    draft-shaped one when the run_id is brand new.
+    Mirrors the first ``on_update`` the coordinator emits once the lock is
+    taken without racing the background task: read the minted run record, or
+    synthesize a draft-shaped one when the run_id is brand new.
     """
     graph = payload["graph"]
     graph_id = str(graph.get("graph_id") or "")
@@ -1088,7 +1311,7 @@ def _initial_running_run(payload: dict[str, Any]) -> dict[str, Any]:
     run = _store.get_run(run_id) if run_id else None
     if run is not None:
         return dict(run)
-    node_ids = payload.get("node_ids") or []
+    now = utc_now_ms()
     return {
         "schema_version": "designer-execution-run.v1",
         "run_id": run_id,
@@ -1101,49 +1324,12 @@ def _initial_running_run(payload: dict[str, Any]) -> dict[str, Any]:
                 "started_at": None,
                 "completed_at": None,
             }
-            for node_id in (node_ids or [])
+            for node_id in (payload.get("node_ids") or [])
         },
         "current_node_ids": [],
-        "created_at": utc_now_ms(),
-        "updated_at": utc_now_ms(),
+        "created_at": now,
+        "updated_at": now,
     }
-
-
-def _start_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    """Resolve the run target (graph + optional node); no execution here.
-
-    team.design semantics: ``node_id`` present → single-node trigger (only
-    that node re-executes, downstream frozen; ``cascade=true`` turns it into
-    "rerun from X" — X plus its downstream closure re-execute with fresh
-    outputs, upstream stays frozen at current values); absent → full-graph
-    trigger (unfrozen nodes execute in topological order). The run_id is the
-    graph's lifelong identity, minted by the coordinator on first trigger.
-    """
-    graph_id = str(params.get("graph_id") or "").strip()
-    run_id = str(params.get("run_id") or "").strip()
-    node_id = str(params.get("node_id") or "").strip()
-    cascade = bool(params.get("cascade"))
-    graph = _store.get_graph(graph_id) if graph_id else None
-    if graph is None and run_id:
-        existing = _store.get_run(run_id)
-        if existing is None:
-            return None, "run not found", "NOT_FOUND"
-        graph = _store.get_graph(str(existing.get("graph_id") or ""))
-    if graph is None:
-        return None, "graph_id or run_id is required", "BAD_REQUEST"
-    node_ids: list[str] | None = None
-    if node_id:
-        if not any(str(n.get("id") or "") == node_id for n in graph.get("nodes") or []):
-            return None, "node not found", "NOT_FOUND"
-        node_ids = [node_id]
-    elif cascade:
-        return None, "cascade requires node_id", "BAD_REQUEST"
-    return {
-        "graph": dict(graph),
-        "graph_id": graph["graph_id"],
-        "node_ids": node_ids,
-        "cascade": cascade,
-    }, None, None
 
 
 def _pause_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -1167,6 +1353,7 @@ def _cancel_run(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | No
     graph_id = str(run.get("graph_id") or "")
     if graph_id:
         _coordinator_for(graph_id).cancel(run_id)
+        run = _store.get_run(run_id) or run
     return {"run": dict(run)}, None, None
 
 
@@ -1179,36 +1366,32 @@ def _choose_output(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str |
     if not node_id:
         return None, "node_id is required", "BAD_REQUEST"
     run = _store.get_run(run_id)
-    if run is None:
-        return None, "run or node not found", "NOT_FOUND"
-    graph_id = str(run.get("graph_id") or "")
-    if not graph_id:
+    graph_id = str((run or {}).get("graph_id") or "")
+    if run is None or not graph_id:
         return None, "run or node not found", "NOT_FOUND"
     try:
         updated = _coordinator_for(graph_id).choose_output(run_id, node_id, choice)
+    except KeyError:
+        return None, "run or node not found", "NOT_FOUND"
     except ValueError as exc:
         return None, str(exc), "BAD_REQUEST"
     return {"run": dict(updated)}, None, None
 
 
-
-
-
-
-
-
-
-
 class DesignerAdapter(GatewayAdapter):
-    """Designer execution graph adapter."""
+    """Designer execution graph adapter.
 
-    # designer.graph.bootstrap / designer.graph.chat are RETIRED (2026-10-12,
-    # F01 §8): all leader conversation — including the first message — rides
-    # the standard chat.send(mode='team.design') pipeline.
+    The canvas conversation (graph authoring and edits) rides the standard
+    ``chat.send(mode='team.design')`` pipeline; this adapter only serves the
+    workspace, graph CRUD and the run triggers.
+    """
+
     methods: frozenset[str] = frozenset(
         {
             ReqMethod.DESIGNER_WORKSPACE_CREATE.value,
             ReqMethod.DESIGNER_WORKSPACE_GET.value,
+            ReqMethod.DESIGNER_WORKSPACE_SESSION_CREATE.value,
+            ReqMethod.DESIGNER_WORKSPACE_SESSION_COMPOSE.value,
             ReqMethod.DESIGNER_GRAPH_GET.value,
             ReqMethod.DESIGNER_GRAPH_LIST.value,
             ReqMethod.DESIGNER_GRAPH_SAVE.value,
@@ -1231,6 +1414,14 @@ class DesignerAdapter(GatewayAdapter):
             elif method == ReqMethod.DESIGNER_WORKSPACE_GET:
                 payload, error, code = await asyncio.to_thread(
                     _get_design_workspace, params
+                )
+            elif method == ReqMethod.DESIGNER_WORKSPACE_SESSION_CREATE:
+                payload, error, code = await asyncio.to_thread(
+                    _create_design_session, request, params
+                )
+            elif method == ReqMethod.DESIGNER_WORKSPACE_SESSION_COMPOSE:
+                payload, error, code = await asyncio.to_thread(
+                    _compose_design_session, request, params
                 )
             elif method == ReqMethod.DESIGNER_GRAPH_GET:
                 payload, error, code = await asyncio.to_thread(_get_graph, params)
@@ -1255,21 +1446,37 @@ class DesignerAdapter(GatewayAdapter):
                             "it to finish (the canvas shows its progress)",
                             code="CONFLICT",
                         )
-                    on_update = _run_update_callback(request)
-                    # Accept-and-trigger: schedule the run and answer with the
-                    # initial 'running' record at once. A real run spans many
-                    # worker LLM turns — awaiting it here would blow both the
-                    # gateway wait and the web client's 15s request timeout
-                    # (the canvas follows progress via the designer.run.updated
-                    # / designer.node.updated pushes and designer.run.get).
-                    _launch_run_trigger(coordinator, payload, on_update)
+                    # Accept-and-trigger: a run spans many worker LLM turns, so
+                    # answer with the initial 'running' record at once; the
+                    # canvas follows progress via designer.run.updated /
+                    # designer.node.updated pushes and designer.run.get.
+                    _launch_run_trigger(coordinator, payload, _run_update_callback(request))
                     run_out = _initial_running_run(payload)
+                    warning = str(payload.get("warning") or "").strip()
+                    warnings = [
+                        str(x)
+                        for x in (payload.get("warnings") or [])
+                        if str(x).strip()
+                    ]
+                    if warning:
+                        run_out["warning"] = warning
+                        if warning not in warnings:
+                            warnings = [warning, *warnings]
+                    if warnings:
+                        run_out["warnings"] = warnings[:8]
                     await _push_designer_event(
                         request=request,
                         event_type=EventType.DESIGNER_RUN_UPDATED.value,
-                        payload={"run": dict(run_out)},
+                        payload={"run": run_out},
                     )
-                    return _ok_response(request, {"run": run_out})
+                    return _ok_response(
+                        request,
+                        {
+                            "run": run_out,
+                            "warning": warning or None,
+                            "warnings": warnings,
+                        },
+                    )
             elif method == ReqMethod.DESIGNER_RUN_PAUSE:
                 payload, error, code = await asyncio.to_thread(_pause_run, params)
             elif method == ReqMethod.DESIGNER_RUN_CANCEL:

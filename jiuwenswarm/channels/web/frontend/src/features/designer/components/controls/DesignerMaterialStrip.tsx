@@ -5,6 +5,7 @@ import { designerAssetPreviewUrl } from '../../designerAssetUrl';
 import { preferredDesignerPreviewRef } from '../../designerMaterials';
 import { useDesignerAssetLibraryStore } from '../../designerAssetLibraryStore';
 import { useDesignerRunStore } from '../../designerRunStore';
+import { useDesignerGraphEditingLocked } from '../../useDesignerGraphEditingLocked';
 import { useDesignerStore } from '../../designerStore';
 import {
   DESIGNER_NODE_TYPE_AUDIO,
@@ -121,8 +122,10 @@ export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStri
     return [...linked, ...uploaded];
   }, [libraryAssets, linked, uploads]);
 
+  const editingLocked = useDesignerGraphEditingLocked();
   const onRemove = useCallback(
     (item: DisplayMaterial) => {
+      if (editingLocked) return;
       if (item.kind === 'linked') {
         removeEdges([item.edgeId]);
         return;
@@ -135,7 +138,7 @@ export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStri
         );
       });
     },
-    [nodeId, nodeType, removeEdges, updateNodeConfig],
+    [editingLocked, nodeId, nodeType, removeEdges, updateNodeConfig],
   );
 
   if (materials.length === 0) return null;
@@ -168,10 +171,11 @@ export function DesignerMaterialStrip({ nodeId, nodeType }: DesignerMaterialStri
             )}
             <button
               type="button"
-              className="designer-node-toolbar__material-remove"
+              className={`designer-node-toolbar__material-remove${editingLocked ? ' designer-edit-control' : ''}`}
               aria-label={t('designer.toolbar.removeMaterial')}
               title={t('designer.toolbar.removeMaterial')}
               data-testid="designer-node-toolbar-material-remove"
+              disabled={editingLocked}
               onClick={(event) => {
                 event.stopPropagation();
                 onRemove(item);

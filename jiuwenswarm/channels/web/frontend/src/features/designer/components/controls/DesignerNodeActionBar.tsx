@@ -2,7 +2,7 @@ import { Download, Replace, ScanSearch, Trash } from 'lucide-react';
 import { useCallback, useRef, useState, type ChangeEvent, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { downloadPreviewFile } from '../../../../components/ui/FilePreviewPanel/filePreviewShared';
-import { collectDesignerMaterials } from '../../designerMaterials';
+import { collectDesignerMaterials, previewMaterialForNode } from '../../designerMaterials';
 import {
   canReplaceUploadedNode,
   storeDesignerUpload,
@@ -12,6 +12,7 @@ import {
   uploadedNodeConfig,
 } from '../../designerNodeUpload';
 import { isTextLikeNodeType } from '../../mediaNodeConfig';
+import { useDesignerGraphEditingLocked } from '../../useDesignerGraphEditingLocked';
 import { useDesignerRunStore } from '../../designerRunStore';
 import { useDesignerStore } from '../../designerStore';
 import { useDesignerUiStore } from '../../designerUiStore';
@@ -31,27 +32,24 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
   const canReplace = canReplaceUploadedNode(domainGraph?.nodes.find((node) => node.id === nodeId));
   const replaceInputRef = useRef<HTMLInputElement>(null);
   const [replacing, setReplacing] = useState(false);
-  const inspectNode = useDesignerUiStore((state) => state.inspectNode);
+  const openViewer = useDesignerUiStore((state) => state.openViewer);
   const requestDeleteNodes = useDesignerUiStore((state) => state.requestDeleteNodes);
+  const editingLocked = useDesignerGraphEditingLocked();
   const previewLabel = isTextLikeNodeType(nodeType)
     ? t('designer.nodeActions.previewOrEdit')
     : t('designer.nodeActions.preview');
 
   const materials = collectDesignerMaterials(domainGraph, run);
-  const material =
-    materials.find((item) => item.id.startsWith(`${nodeId}:`)) ??
-    materials.find((item) => item.nodeId === nodeId);
-  const hasOutput = Boolean(
-    material && !material.placeholder && (material.previewUrl || material.textUrl),
-  );
+  const material = previewMaterialForNode(materials, nodeId, nodeType);
+  const hasOutput = Boolean(material);
 
   const onPreview = useCallback(
     (event: MouseEvent) => {
       event.stopPropagation();
-      if (!hasOutput) return;
-      inspectNode(nodeId);
+      if (!hasOutput || !material) return;
+      openViewer(material.id);
     },
-    [hasOutput, inspectNode, nodeId],
+    [hasOutput, material, openViewer],
   );
 
   const onDownload = useCallback(
@@ -83,7 +81,7 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
     async (event: ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
       event.target.value = '';
-      if (!file || uploadKindFromMime(file.type) !== nodeType) return;
+      if (editingLocked || !file || uploadKindFromMime(file.type) !== nodeType) return;
       setReplacing(true);
       try {
         const stored = await storeDesignerUpload(file);
@@ -99,16 +97,17 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
         setReplacing(false);
       }
     },
-    [applyUploadedOutput, nodeId, nodeType, setNodeOutputRef, updateNodeConfig],
+    [applyUploadedOutput, editingLocked, nodeId, nodeType, setNodeOutputRef, updateNodeConfig],
   );
 
   const onDelete = useCallback(
     (event: MouseEvent) => {
       event.stopPropagation();
       event.preventDefault();
+      if (editingLocked) return;
       requestDeleteNodes([nodeId]);
     },
-    [nodeId, requestDeleteNodes],
+    [editingLocked, nodeId, requestDeleteNodes],
   );
 
   return (
@@ -146,12 +145,13 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
         <>
           <button
             type="button"
-            className="designer-node-action-bar__btn"
             data-testid="designer-node-action-replace"
             title={t('designer.nodeActions.replaceHint')}
-            disabled={replacing}
+            disabled={replacing || editingLocked}
+            className={`designer-node-action-bar__btn${editingLocked ? ' designer-edit-control' : ''}`}
             onClick={(event) => {
               event.stopPropagation();
+              if (editingLocked) return;
               replaceInputRef.current?.click();
             }}
           >
@@ -172,10 +172,11 @@ export function DesignerNodeActionBar({ nodeId, nodeType }: DesignerNodeActionBa
       ) : null}
       <button
         type="button"
-        className="designer-node-action-bar__btn"
+        className={`designer-node-action-bar__btn${editingLocked ? ' designer-edit-control' : ''}`}
         data-testid="designer-node-action-delete"
         aria-label={t('designer.nodeActions.delete')}
         title={t('designer.nodeActions.deleteHint')}
+        disabled={editingLocked}
         onClick={onDelete}
       >
         <Trash size={14} aria-hidden />
