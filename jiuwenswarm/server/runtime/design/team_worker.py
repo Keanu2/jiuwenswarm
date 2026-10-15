@@ -48,10 +48,20 @@ def derive_design_expert_specs(team_spec: Any) -> dict[str, Any]:
     """
     from openjiuwen.agent_teams.rails.elements import TEAM_OBSERVABILITY
     from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
-    from openjiuwen.agent_teams.workflow.backends.expert_specs import (
-        derive_swarmflow_expert_specs,
-    )
     from openjiuwen.harness.manifest.builtin_elements import OBSERVABILITY
+
+    try:
+        from openjiuwen.agent_teams.workflow.backends.expert_specs import (
+            derive_swarmflow_expert_specs,
+        )
+    except ImportError:
+        # agent-core builds without the swarmflow expert-worker feature: no
+        # expert table, every node runs as a plain teammate-base worker.
+        logger.warning(
+            "[design.team_worker] agent-core lacks swarmflow expert specs; "
+            "designer members run as plain workers"
+        )
+        return {}
 
     members = _design_member_roster(team_spec)
     scratch = team_spec.model_copy(update={"predefined_members": members})
@@ -149,6 +159,9 @@ def build_worker_backend(
         TeamWorkerBackend,
     )
 
+    # Only forwarded when non-empty: agent-core builds without the expert-worker
+    # feature reject the keyword, and an empty table is the backend default.
+    expert_kwargs: dict[str, Any] = {"expert_specs": expert_specs} if expert_specs else {}
     return TeamWorkerBackend(
         model=None,
         team_name=team_name,
@@ -156,7 +169,7 @@ def build_worker_backend(
         build_context=build_context,
         run_id=run_id,
         session_id=session_id,
-        expert_specs=expert_specs or {},
+        **expert_kwargs,
     )
 
 

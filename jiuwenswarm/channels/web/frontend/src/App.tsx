@@ -3677,6 +3677,9 @@ function AppContent({
   }, [activeNav, t]);
 
   const handleSelectDesignSession = useCallback((project: ProjectInfo, nextSessionId: string) => {
+    if (!confirmLeaveSettings()) {
+      return;
+    }
     setSelectedProject(project);
     setActiveNav('chat');
     navigate({
@@ -3684,7 +3687,7 @@ function AppContent({
       projectId: project.project_id,
       sessionId: nextSessionId,
     });
-  }, [navigate, setSelectedProject]);
+  }, [confirmLeaveSettings, navigate, setSelectedProject]);
 
   const handleProjectRemoved = useCallback((projectId: string, removedWorkMode: WorkMode) => {
     // 目前Design功能页是唯一需要处理项目软删除的场景
@@ -4018,6 +4021,9 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
               onNew={(options) => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
+              onSelectDesignSession={handleSelectDesignSession}
+              activeDesignSessionId={route.kind === 'design-project' ? route.sessionId : undefined}
+              onProjectRemoved={handleProjectRemoved}
               onOpenCron={() => handleNavigate('cron')}
               isCronActive={false}
               collapsed={false}
