@@ -14,6 +14,8 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
 import { AgentManagementPanel } from './components/AgentManagementPanel';
 import { RsiPage } from './features/rsi/RsiPage';
+import { RsiRailPeek } from './features/rsi/components/RsiRailPeek';
+import { useRsiStore } from './features/rsi/rsiStore';
 import {
   normalizeRSIEnabled,
   setRSIFeatureEnabled,
@@ -69,6 +71,7 @@ import { readAgentTemplateName } from './features/agentIdentity';
 import { normalizeTeamLeaderIdentity } from './features/teamLeaderIdentity';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
+import { attachTeamSession, resetTeamAttachments } from './services/teamAttach';
 import type { WorkflowRun } from './components/teamArea/workflowTypes';
 import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
@@ -184,6 +187,11 @@ import {
 } from './features/trajectory/featureConfig';
 import './App.css';
 import { setTeamOrganizationUiEnabled } from './features/teamOrganization/featureConfig';
+import {
+  normalizeTeamDispatchMode,
+  resolveNewSessionDispatchMode,
+  setTeamScheduledDispatchEnabled,
+} from './features/teamDispatch/featureConfig';
 
 const LazyTrajectoryPanel = lazy(async () => {
   const module = await import('./features/trajectory/TrajectoryPanel');
@@ -375,6 +383,48 @@ async function waitForShareImageJob(
   return isCurrentMonitor() ? status : null;
 }
 
+// Peek 悬浮面板共用的 hover 开关：进入立即展开，移开经 150ms 宽限收起（指针跨过 nav 图标
+// 与面板边缘之间的空隙不闪烁）。close 供导航等动作立即终结 peek；卸载时清理未触发的
+// 收起定时器，避免卸载后 setState。
+function usePeekHoverOpen(): [boolean, (hovered: boolean) => void, () => void] {
+  const [open, setOpen] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+  const handleHover = useCallback(
+    (hovered: boolean) => {
+      clearCloseTimer();
+      if (hovered) {
+        setOpen(true);
+      } else {
+        closeTimerRef.current = window.setTimeout(() => {
+          closeTimerRef.current = null;
+          setOpen(false);
+        }, 150);
+      }
+    },
+    [clearCloseTimer],
+  );
+  const close = useCallback(() => {
+    clearCloseTimer();
+    setOpen(false);
+  }, [clearCloseTimer]);
+  useEffect(
+    () => () => {
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+    },
+    [],
+  );
+  return [open, handleHover, close];
+}
+
 function AppContent({
   settingsPageDefinition,
   resolveSettingsRequest,
@@ -399,6 +449,10 @@ function AppContent({
   const [trajectoryUiRequested, setTrajectoryUiRequested] = useState(false);
 
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
+  // 再次点击已激活的“实验”图标时递增，作为展开 RSI 实验栏的信号（对齐 chat 图标展开会话栏的行为）
+  const [rsiRailExpandNonce, setRsiRailExpandNonce] = useState(0);
+  // peek 内点击“新建实验”时递增：跳转实验页后自动打开创建对话框；handleNavigate 统一归零防重挂载误触发
+  const [rsiOpenCreateNonce, setRsiOpenCreateNonce] = useState(0);
   const masterEnabled = usePersonalContextStore(
     (s) => s.config.collection_enabled || s.config.agent_use_enabled,
   );
@@ -445,6 +499,25 @@ function AppContent({
     toolPanelHidden,
     setToolPanelHidden,
   } = useResponsiveLayout();
+
+  // 会话侧栏收起态的 hover 预览（peek）：hover chat 图标临时以悬浮层展开，指针移开自动收起，
+  // 点击图标经 handleNavigate 固定展开
+  const [conversationSidebarHoverOpen, handleConversationSidebarHover, closeConversationSidebarHover] =
+    usePeekHoverOpen();
+  // 左缘自有面板的页面黑名单：chat/cron 常驻会话栏；实验页在列表非空（或加载中，结果未定）时常驻实验栏。
+  // 命中时 hover 任何 nav 图标都不弹悬浮面板，避免悬浮层与页内自有面板互相遮挡产生歧义
+  const rsiHasExperiments = useRsiStore((s) => s.list.length > 0);
+  const rsiListLoading = useRsiStore((s) => s.listLoading);
+  const navFlyoutBlacklisted =
+    activeNav === 'chat' ||
+    activeNav === 'cron' ||
+    (activeNav === 'experiments' && (rsiHasExperiments || rsiListLoading));
+  // 全局会话栏 peek 可见性（唯一入口；chat/cron 内联实例已不承担 peek）
+  const globalConversationPeekVisible = conversationSidebarHoverOpen && !navFlyoutBlacklisted;
+
+  // 实验栏（RSI）收起态的 hover 预览：hover experiments 图标临时悬浮展开，移开自动收起，
+  // 点击图标经 expandRailNonce 固定展开
+  const [rsiRailPeekOpen, handleRsiRailHover, closeRsiRailPeek] = usePeekHoverOpen();
 
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
@@ -660,6 +733,18 @@ function AppContent({
     ensureSessionRuntimes(sessionId);
     useChatStore.getState().setActiveSessionId(sessionId);
     useSubagentStore.getState().hydrateRuntime(sessionId);
+  }, [sessionId]);
+
+  // 进入 team 会话时挂接实时事件订阅（attach_only）：mailbox / 后台触发的
+  // 轮次输出才能实时到达前端。失败仅记录并静默降级（下次进入或重连重试），
+  // 不打断会话使用。
+  useEffect(() => {
+    if (!sessionId || sessionId === 'new') return;
+    const sessionRuntime = useSessionStore.getState().getRuntime(sessionId);
+    if (sessionRuntime?.mode !== 'team') return;
+    attachTeamSession(sessionId, sessionRuntime.mode).catch((error) => {
+      console.warn('[teamAttach] failed to attach session:', sessionId, error);
+    });
   }, [sessionId]);
 
   const {
@@ -1049,6 +1134,18 @@ function AppContent({
       // store 静默清空，且无其它重试入口，导致 project 页签定时任务空白直到
       // 侧边栏重新挂载。这里在每次连接可用后补齐拉取。
       void useCronStore.getState().loadJobs();
+      // 断线重连后旧的 team attach 订阅已随连接终止（后端随之移除 waiter）；
+      // 清空防重复标记并对当前停留的 team 会话重挂，恢复实时事件流。
+      resetTeamAttachments();
+      const activeSessionId = sessionIdRef.current;
+      if (activeSessionId && activeSessionId !== 'new') {
+        const sessionRuntime = useSessionStore.getState().getRuntime(activeSessionId);
+        if (sessionRuntime?.mode === 'team') {
+          attachTeamSession(activeSessionId, sessionRuntime.mode).catch((error) => {
+            console.warn('[teamAttach] failed to re-attach session:', activeSessionId, error);
+          });
+        }
+      }
     },
     onDisconnect: () => {
       console.log('Disconnected');
@@ -1617,7 +1714,11 @@ function AppContent({
       const response = await request<Session>('session.get_metadata', {
         session_id: targetSessionId,
       });
-      const { queued_session_messages: queuedMessages, ...session } = response;
+      const {
+        queued_session_messages: queuedMessages,
+        can_continue_queued_session_messages: canContinueQueuedMessages,
+        ...session
+      } = response;
       if ((session as unknown as Record<string, unknown>).archived === true) {
         if (sessionIdRef.current === targetSessionId) {
           navigate({ kind: 'chat-new' }, { replace: true });
@@ -1638,6 +1739,10 @@ function AppContent({
             }))
         );
       }
+      useChatStore.getState().setCanContinueQueuedSessionMessages(
+        targetSessionId,
+        canContinueQueuedMessages === true,
+      );
       upsertSessionMetadata(session, { setCurrent: sessionIdRef.current === targetSessionId });
       useWorkspaceStore.getState().upsertSession(session);
       // is_processing 由 Gateway 在 session.get_metadata 响应入队前读取当前
@@ -1717,6 +1822,13 @@ function AppContent({
             );
           }
         }
+        // 恢复会话时同步团队调度模式：团队建好后不可再改，前端只读展示。
+        const restoredDispatchMode = normalizeTeamDispatchMode(
+          (session as unknown as Record<string, unknown> | null)?.session_team_dispatch_mode,
+        );
+        if (restoredDispatchMode) {
+          useSessionStore.getState().setTeamDispatchMode(targetSessionId, restoredDispatchMode);
+        }
       }
       return session;
     } catch (error) {
@@ -1731,6 +1843,7 @@ function AppContent({
   const handleContinueQueuedSessionMessages = useCallback(async (targetSessionId: string) => {
     try {
       await request('session.message.continue_queued', { session_id: targetSessionId });
+      useChatStore.getState().setCanContinueQueuedSessionMessages(targetSessionId, false);
     } catch {
       toast.open({ content: t('network.resumeFailed'), variant: 'error' });
     }
@@ -1756,6 +1869,7 @@ function AppContent({
       setRSIFeatureEnabled(normalizeRSIEnabled(config.rsi_enabled));
       setTrajectoryUiEnabled(normalizeTrajectoryUiEnabled(config.trajectory_ui_enabled));
       setTeamOrganizationUiEnabled(config.team_organization_ui_enabled);
+      setTeamScheduledDispatchEnabled(config.team_scheduled_dispatch_enabled);
       setServerConfig(config);
       setConfigError(null);
       if (!modelSetupGuideEvaluatedRef.current) {
@@ -2910,6 +3024,10 @@ function AppContent({
       if (pendingRuntime?.swarmflowWorktree !== undefined) {
         sessionStore.setSwarmflowWorktree(newSid, pendingRuntime.swarmflowWorktree);
       }
+      const pendingDispatchMode = resolveNewSessionDispatchMode(pendingRuntime?.teamDispatchMode);
+      if (pendingDispatchMode) {
+        sessionStore.setTeamDispatchMode(newSid, pendingDispatchMode);
+      }
       if (usePlanStore.getState().isActive(NEW_CONVERSATION_ID)) {
         usePlanStore.getState().setActive(newSid, true, {
           explicitEntry: usePlanStore.getState().hasPendingExplicitEntry(NEW_CONVERSATION_ID),
@@ -3131,6 +3249,11 @@ function AppContent({
             newSid,
             newConvSwarmflow.swarmflowWorktree,
           );
+        }
+        // 调度模式同理，且在这里落成显式值：团队按首条消息建好后就不能再改。
+        const newConvDispatchMode = resolveNewSessionDispatchMode(newConvSwarmflow?.teamDispatchMode);
+        if (newConvDispatchMode) {
+          useSessionStore.getState().setTeamDispatchMode(newSid, newConvDispatchMode);
         }
         pendingNewConversationRef.current = false;
         useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
@@ -3545,18 +3668,13 @@ function AppContent({
     [handleRestoreSession, mode, request],
   );
 
-  const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
-    if (target === 'new') {
-      enterNewConversation(mode, options, { clearPreviousSession: options?.clearPreviousSession });
-      return;
+  // 离开 settings 前的未保存更改确认（导航图标与 peek 内会话切换共用同一守卫）；返回 false 表示用户取消
+  const confirmLeaveSettings = useCallback((): boolean => {
+    if (activeNav !== 'settings' || !settingsHasChangesRef.current) {
+      return true;
     }
-    if (isToolPanelAutoHideViewport) {
-      setTeamAreaExpanded(false);
-      setSingleAgentPanelExpanded(false);
-      setToolPanelHidden(true);
-    }
-    void handleRestoreSession(target.session_id, target.mode, target);
-  }, [enterNewConversation, handleRestoreSession, isToolPanelAutoHideViewport, mode, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden]);
+    return window.confirm(t('settingsPanel.dialog.discardConfirm'));
+  }, [activeNav, t]);
 
   const handleSelectDesignSession = useCallback((project: ProjectInfo, nextSessionId: string) => {
     setSelectedProject(project);
@@ -3580,16 +3698,46 @@ function AppContent({
     }
   }, [navigate, route]);
 
-  const handleNavigate = useCallback(
-    (nav: MainNavKey) => {
-      if (
-        activeNav === 'settings' &&
-        nav !== 'settings' &&
-        settingsHasChangesRef.current &&
-        !window.confirm(t('settingsPanel.dialog.discardConfirm'))
-      ) {
+  const requestSessionNavigation = useCallback(
+    (target: Session | 'new', options?: NewConversationOptions) => {
+      // 会话切换同样尊重未保存守卫：非设置页恒放行，设置页（仅 peek 入口可达）弹确认框
+      if (!confirmLeaveSettings()) {
         return;
       }
+      if (target === 'new') {
+        enterNewConversation(mode, options, { clearPreviousSession: options?.clearPreviousSession });
+        return;
+      }
+      if (isToolPanelAutoHideViewport) {
+        setTeamAreaExpanded(false);
+        setSingleAgentPanelExpanded(false);
+        setToolPanelHidden(true);
+      }
+      void handleRestoreSession(target.session_id, target.mode, target);
+    },
+    [
+      confirmLeaveSettings,
+      enterNewConversation,
+      handleRestoreSession,
+      isToolPanelAutoHideViewport,
+      mode,
+      setSingleAgentPanelExpanded,
+      setTeamAreaExpanded,
+      setToolPanelHidden,
+    ],
+  );
+
+  const handleNavigate = useCallback(
+    (nav: MainNavKey): boolean => {
+      if (nav !== 'settings' && !confirmLeaveSettings()) {
+        return false;
+      }
+      // 导航点击终结会话栏 peek（点击 chat 即固定展开；点击其他项则离开 chat 上下文）
+      closeConversationSidebarHover();
+      // 同理终结实验栏 peek（点击 experiments 即固定展开）
+      closeRsiRailPeek();
+      // 创建对话框信号一次性消费：归零避免携带旧 nonce 重进实验页时误开对话框
+      setRsiOpenCreateNonce(0);
       if (nav !== 'settings') setRequestedSettingsModuleId(null);
       setActiveNav(nav);
       if (nav === 'chat') {
@@ -3599,6 +3747,10 @@ function AppContent({
           setSingleAgentPanelExpanded(false);
           setToolPanelHidden(true);
         }
+      }
+      if (nav === 'experiments' && activeNav === 'experiments') {
+        // 仅在已处于实验页时响应再次点击；首次进入由 RsiPage 挂载初始化直接展示实验栏
+        setRsiRailExpandNonce((n) => n + 1);
       }
       if (modelSetupGuideStep === 1 && nav === 'settings') {
         setRequestedSettingsModuleId('models');
@@ -3611,8 +3763,21 @@ function AppContent({
         setTeamAreaExpanded(false);
         setToolPanelHidden(true);
       }
+      return true;
     },
-    [activeNav, isMobile, modelSetupGuideStep, setSingleAgentPanelExpanded, setHasVisitedPersonalContext, setRequestedSettingsModuleId, setTeamAreaExpanded, setToolPanelHidden, t],
+    [
+      activeNav,
+      closeConversationSidebarHover,
+      closeRsiRailPeek,
+      confirmLeaveSettings,
+      isMobile,
+      modelSetupGuideStep,
+      setSingleAgentPanelExpanded,
+      setHasVisitedPersonalContext,
+      setRequestedSettingsModuleId,
+      setTeamAreaExpanded,
+      setToolPanelHidden,
+    ],
   );
 
   const handleNavigateToAgentManagement = useCallback(
@@ -3816,6 +3981,11 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         showNewSession={false}
         hiddenNavItems={hiddenNavItems}
         applicationPlugins={visibleApplicationPlugins}
+        onNavItemHover={(key) => {
+          handleConversationSidebarHover(key === 'chat');
+          // 实验栏 peek：hover experiments 图标触发（仅实验页挂载的 RsiPage 会消费）
+          handleRsiRailHover(key === 'experiments');
+        }}
       />
 
       {modelSetupGuideStep !== null ? (
@@ -3837,6 +4007,44 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               <span className="mono"> jiuwenswarm/channels/web/frontend/.env.local </span>
               {t('app.configErrorEnv')} <span className="mono">VITE_API_BASE</span> {t('common.and')} <span className="mono">VITE_WS_BASE</span>.
             </div>
+          </div>
+        )}
+
+        {/* 全局会话栏 peek：hover chat 图标临时悬浮会话列表，点击即跳转会话（handleNavigate 固定）。
+            黑名单页（chat/cron/实验页列表非空）不弹——见 navFlyoutBlacklisted */}
+        {globalConversationPeekVisible && (
+          <div className="chat-layout--peek-host">
+            <ConversationSidebar
+              activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
+              onNew={(options) => requestSessionNavigation('new', options)}
+              onSelect={requestSessionNavigation}
+              onOpenCron={() => handleNavigate('cron')}
+              isCronActive={false}
+              collapsed={false}
+              floating
+              peek
+              onMouseEnter={() => handleConversationSidebarHover(true)}
+              onMouseLeave={() => handleConversationSidebarHover(false)}
+              onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
+            />
+          </div>
+        )}
+
+        {/* 全局实验栏 peek：hover experiments 图标临时悬浮实验列表。
+            实验栏仅在创建实验后存在（列表为空时 RsiRailPeek 自身不渲染）；
+            黑名单页（chat/cron/实验页列表非空）不弹——见 navFlyoutBlacklisted */}
+        {rsiRailPeekOpen && !navFlyoutBlacklisted && (
+          <div className="chat-layout--peek-host">
+            <RsiRailPeek
+              onOpenExperiments={() => handleNavigate('experiments')}
+              onCreate={() => {
+                // handleNavigate 可能因守卫（如 settings 未保存确认）取消导航：仅真正跳转时才递增 nonce
+                if (handleNavigate('experiments')) {
+                  setRsiOpenCreateNonce((n) => n + 1);
+                }
+              }}
+              onPeekHover={handleRsiRailHover}
+            />
           </div>
         )}
 
@@ -4042,7 +4250,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         )}
         {activeNav === 'experiments' && (
           <div className="app-section">
-            <RsiPage />
+            <RsiPage expandRailNonce={rsiRailExpandNonce} openCreateNonce={rsiOpenCreateNonce} />
           </div>
         )}
         {hasVisitedAgents && (

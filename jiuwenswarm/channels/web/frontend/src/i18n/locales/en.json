@@ -909,8 +909,8 @@
         "description": "Show Chat and Trajectory switching in Agent and Team modes and enable the trajectory observability data path."
       },
       "team_organization_ui_enabled": {
-        "title": "Enable Team Organization UI",
-        "description": "Show experimental multi-Team views and the organization task pool. This switch does not disable backend organization capabilities."
+        "title": "Enable Team Organization",
+        "description": "Enable organization views and backend organization tools. Fully restart the backend and create a new session after changing this setting; existing organization tasks are not stopped immediately."
       },
       "team_scheduled_dispatch_enabled": {
         "title": "Enable scheduled dispatch",
@@ -1398,6 +1398,7 @@
     "agentGroupBinding": "This conversation is bound to an Expert Team and cannot be changed",
     "agentGroupFirstBuildOnly": "Expert Teams can only be selected when a Team is first created",
     "agentOnlyInSingleAgentMode": "Experts can only be selected in single-Agent mode",
+    "externalAgentRequiresNewSession": "External experts require a new conversation. Start a new session to use one.",
     "agentGroupOnlyInTeamMode": "Expert Teams can only be selected in Team mode",
     "extension": "Extensions",
     "extensionSearchPlaceholder": "Search by keyword",
@@ -1456,6 +1457,8 @@
       "permission": {
         "default": "Default",
         "defaultDesc": "Always ask when editing external files or accessing the internet",
+        "automatic": "Smart Approval",
+        "automaticDesc": "Reviews tool requests against your task and permissions, asking you when needed",
         "fullAccess": "Full Access",
         "fullAccessDesc": "Unrestricted access to the internet and any files on your computer",
         "fullAccessWarning": {
@@ -1875,6 +1878,19 @@
       "externalCliCodex": "Enable Codex"
     },
     "externalCli": {
+      "customHint": "Provided by an uploaded provider package; with \"Use built-in CLI\" the provider picks its CLI itself.",
+      "customHintWithCli": "Provided by an uploaded provider package; with \"Use built-in CLI\" it runs the CLI uploaded with it.",
+      "toggleCustom": "Enable {{agent}}",
+      "addCustomAgent": "Add third-party agent",
+      "addCustomAgentHint": "Upload an openjiuwen harness provider package (.whl), optionally with the CLI executable it drives. An agent with the same name is replaced.",
+      "customAgentWheel": "Provider package (.whl)",
+      "customAgentCli": "CLI executable (optional)",
+      "noFileSelected": "No file selected",
+      "upload": "Upload and install",
+      "uploading": "Installing",
+      "uploadFailed": "Installation failed",
+      "removeCustomAgent": "Remove this agent",
+      "removeCustomAgentConfirm": "Confirm removal",
       "claude": "Claude",
       "codex": "Codex",
       "claudeHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
@@ -3373,6 +3389,9 @@
       "charCount": "{{count}}/{{max}}",
       "tagLabel": "Domain tags (optional)",
       "tagPlaceholder": "Choose strength tags",
+      "useExternalHarness": "Use a third-party harness",
+      "useExternalHarnessHint": "Create a third-party expert with Claude or Codex as the runtime",
+      "externalHarnessProvider": "Harness type",
       "toggleTags": "Expand or collapse domain tags",
       "tagScrollPrev": "View domain tags to the left",
       "tagScrollNext": "View domain tags to the right",
@@ -4708,7 +4727,10 @@
       "nodeHint": "Nodes show each candidate, stage, and evaluation result; select one for details",
       "harnessNodeHint": "Each node is a Harness combination; select one to inspect changes and evaluation",
       "paperNodeHint": "Each node is a paper version; select one to inspect changes and rejection reasons",
-      "programNodeHint": "Each node is a program candidate; parallel candidates show their attempt number",
+      "programNodeHint": "Parallel candidates appear as they finish. Search stops when a candidate reaches the target; evaluations already in progress may finish later.",
+      "prunedReason": "Pruned reason",
+      "skippedReason": "Skip reason",
+      "viewDetail": "View details",
       "estimatedCost": "Estimated cost: ¥ {{cost}}",
       "selectedNode": "Selected",
       "inherit": "inherits",
@@ -4790,6 +4812,11 @@
       "candidateError": "Candidate {{index}}/{{total}} generation failed",
       "scoreSuffix": " · {{score}}"
     }
+    },
+  "teamDispatch": {
+    "toggleLabel": "Scheduled Dispatch",
+    "toggleHint": "When on, the leader assigns every task to a named member; when off, members claim tasks on their own",
+    "readonlyHint": "The team has started; dispatch mode can no longer be changed"
   },
   "swarmflow": {
     "statusPlanned": "Planned",

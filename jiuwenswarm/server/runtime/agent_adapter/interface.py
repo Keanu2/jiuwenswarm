@@ -23,8 +23,6 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Tuple
 
-from gateway_protocol.hooks import AgentServerHookEvents, MemoryHookContext
-
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 from jiuwenswarm.common.session_message import (
     SESSION_MESSAGE_INTERNAL_KEY,
@@ -52,6 +50,10 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
     build_statusline_setup_dispatch,
 )
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
+from jiuwenswarm.runtime.session.model import (
+    TEAM_ATTACH_ONLY_PARAM,
+    TEAM_EXECUTION_CONTEXT_METADATA_KEY,
+)
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager, SkillRpcError
 from jiuwenswarm.server.runtime.session_assets import get_session_asset_manager
 from jiuwenswarm.server.runtime.skill.archive_store import ARCHIVE_DIRNAME
@@ -92,6 +94,8 @@ from jiuwenswarm.common.context_keys import (
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.chat_final import ensure_final_mode_inplace
+from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
+from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
     apply_free_search_runtime_defaults,
@@ -339,6 +343,10 @@ def _should_record_user_history(params: Any) -> bool:
         return False
     # Second-step goal attach is host control traffic, not a user utterance.
     if params.get("attach_goal") is True:
+        return False
+    # An attach-only subscription submits no input at all; a record here would
+    # leave a dangling user turn that makes the frontend wait forever.
+    if params.get(TEAM_ATTACH_ONLY_PARAM) is True:
         return False
     if is_interrupt_resume_payload(params):
         return False
@@ -1619,6 +1627,7 @@ class JiuWenSwarm:
         param_metadata = params.get("metadata") if isinstance(params, dict) else None
         if isinstance(param_metadata, dict):
             metadata = {**metadata, **param_metadata}
+        metadata.pop(TEAM_EXECUTION_CONTEXT_METADATA_KEY, None)
         origin_kind = (
             HOST_USER_ORIGIN_EXTERNAL
             if is_external_user_authored_dispatch(
@@ -2780,6 +2789,15 @@ class JiuWenSwarm:
             )
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        external_session_checker = getattr(
+            adapter,
+            "is_external_harness_session",
+            None,
+        )
+        is_external_session = bool(
+            callable(external_session_checker)
+            and external_session_checker(request.session_id)
+        )
 
         if intent == "pause":
             # 暂停：不取消任务，只暂停 ReAct 循环
@@ -2792,6 +2810,8 @@ class JiuWenSwarm:
         if intent == "supplement":
             # 取消当前 session 的任务
             response = await adapter.process_interrupt(request)
+            if is_external_session:
+                return response
             await self._session_manager.cancel_session_task(session_id, "interrupt(supplement): ")
             return response
 
@@ -2799,6 +2819,8 @@ class JiuWenSwarm:
         # guard 能通过），再 cancel_session_task（其 finally 会把 session 从 _active_session_ids 移除）。
         # 顺序不能反，否则 process_interrupt 的 session guard 会误判为 "not active" 而跳过 abort。
         response = await adapter.process_interrupt(request)
+        if is_external_session:
+            return response
         await self._cancel_team_work_for_session(
             session_id,
             request.channel_id,
@@ -3150,11 +3172,30 @@ class JiuWenSwarm:
         # connectors before the agent runs. Always pass a list (never None):
         # empty clears selection when neither side contributes names.
         params = request.params if isinstance(request.params, dict) else {}
+        try:
+            runtime_binding = self._resolve_runtime_binding_for_request(
+                adapter,
+                request,
+                session_id,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        reconcile_kwargs: dict[str, Any] = {
+            "model_name": params.get("model_name"),
+            "history_before_request_id": request.request_id,
+        }
+        if runtime_binding is not None:
+            reconcile_kwargs["runtime_binding"] = runtime_binding
         await self.reconcile_session_mcp(
             request.session_id,
             compute_chat_send_mcp_needed(params),
-            model_name=params.get("model_name"),
-            history_before_request_id=request.request_id,
+            **reconcile_kwargs,
         )
 
         # cloud memory: before chat hook
@@ -3687,6 +3728,16 @@ class JiuWenSwarm:
         # command.goal set history is written only after a successful set inside
         # the DeepAdapter stream path (same success gate as unary process_message).
         params_for_history = request.params if isinstance(request.params, dict) else {}
+        history_channel_metadata = (
+            dict(request.metadata)
+            if isinstance(request.metadata, dict)
+            else None
+        )
+        if history_channel_metadata is not None:
+            history_channel_metadata.pop(
+                TEAM_EXECUTION_CONTEXT_METADATA_KEY,
+                None,
+            )
         if (
             request.req_method != ReqMethod.COMMAND_GOAL
             and _should_record_user_history(params_for_history)
@@ -3700,7 +3751,7 @@ class JiuWenSwarm:
                 content=_history_user_content(params_for_history, query),
                 timestamp=time.time(),
                 extra=_history_user_extra(params_for_history),
-                channel_metadata=request.metadata,
+                channel_metadata=history_channel_metadata,
                 mode=params_for_history.get("mode", "unknown"),
             )
         logger.info(
@@ -3732,11 +3783,30 @@ class JiuWenSwarm:
         # connectors before the agent runs. Always pass a list (never None):
         # empty clears selection when neither side contributes names.
         params = request.params if isinstance(request.params, dict) else {}
+        try:
+            runtime_binding = self._resolve_runtime_binding_for_request(
+                adapter,
+                request,
+                session_id,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"event_type": "chat.error", "error": str(exc)},
+                is_complete=True,
+            )
+            return
+        reconcile_kwargs: dict[str, Any] = {
+            "model_name": params.get("model_name"),
+            "history_before_request_id": request.request_id,
+        }
+        if runtime_binding is not None:
+            reconcile_kwargs["runtime_binding"] = runtime_binding
         await self.reconcile_session_mcp(
             request.session_id,
             compute_chat_send_mcp_needed(params),
-            model_name=params.get("model_name"),
-            history_before_request_id=request.request_id,
+            **reconcile_kwargs,
         )
         # Team 的交互回答走普通流式路径，不经过 deliver_control_input。
         # 与单 Agent 使用同一落盘格式，按原问题的 params.request_id 配对。
@@ -5025,6 +5095,7 @@ class JiuWenSwarm:
         *,
         model_name: str | None = None,
         history_before_request_id: str | None = None,
+        runtime_binding: dict[str, Any] | None = None,
     ) -> None:
         """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
@@ -5062,7 +5133,26 @@ class JiuWenSwarm:
                 supported_kwargs["history_before_request_id"] = (
                     history_before_request_id
                 )
+            if "runtime_binding" in parameters or accepts_kwargs:
+                supported_kwargs["runtime_binding"] = runtime_binding
         await reconcile(session_id, needed, **supported_kwargs)
+
+    @staticmethod
+    def _resolve_runtime_binding_for_request(
+        adapter: AgentAdapter,
+        request: AgentRequest,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve one chat's runtime before any session-child side effects."""
+        if request.req_method is not ReqMethod.CHAT_SEND:
+            return None
+        resolver = getattr(adapter, "resolve_runtime_binding", None)
+        if not callable(resolver):
+            return None
+        params = request.params if isinstance(request.params, dict) else {}
+        runtime_binding = resolver(session_id, params)
+        request.trusted_runtime_binding = runtime_binding
+        return runtime_binding
 
     def sync_mcp_credentials(self) -> bool:
         """Sync connected MCPs' tokens into os.environ (skill scripts).

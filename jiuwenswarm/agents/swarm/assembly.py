@@ -52,6 +52,7 @@ from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 from jiuwenswarm.agents.swarm.config_specs import (
     build_member_capability_specs,
     build_member_deep_agent_spec,
+    build_reviewer_deep_agent_spec,
 )
 from jiuwenswarm.agents.swarm.context import (
     SwarmBuildContext,
@@ -238,6 +239,11 @@ def _apply_agent_group(
         )
     templates = package.templates
     package_dir = package.package_dir
+    spec.metadata = {
+        **(spec.metadata or {}),
+        "agent_group_name": agent_group_name,
+        "capabilities": list(package.capabilities),
+    }
 
     leader_base = spec.agents.get("leader")
     teammate_base = spec.agents.get("teammate")
@@ -556,6 +562,8 @@ def enrich_team_spec_for_swarm(
             )
             member_spec = _with_project_cwd(member_spec, project_dir)
             spec.agents[role] = member_spec
+    if "teammate" in spec.agents:
+        spec.reviewer_agent = build_reviewer_deep_agent_spec(mode, spec.agents["teammate"])
 
     if agent_group_name:
         if _is_design_team_mode(mode):
@@ -568,6 +576,18 @@ def enrich_team_spec_for_swarm(
     # across a serialization boundary (spawned teammate, distributed remote,
     # cold recovery) can reconstruct the context via the registered factory.
     spec.build_context_seed = base.to_seed()
+    group_members = (request_metadata or {}).get("group_members")
+    if group_members is not None:
+        if agent_group_name:
+            raise ValueError("a public group roster cannot also select a single AgentGroup")
+        from jiuwenswarm.agents.swarm.group_chat import assemble_group_members, GROUP_MEMBER_TEMPLATE
+        from openjiuwen.harness.schema.deep_agent_spec import RailSpec
+
+        assemble_group_members(spec, group_members)
+        # Future members use the shared role without rewriting a running spec.
+        teammate = spec.agents["teammate"]
+        teammate.rails = [*(teammate.rails or []), RailSpec(type=GROUP_MEMBER_TEMPLATE,
+            params={"initial_names": [member["member_name"] for member in group_members]})]
     logger.info(
         "[swarm.assembly] enriched team spec '%s' "
         "(roles=%s, session=%s, mcps=%d, agent_group=%s)",
