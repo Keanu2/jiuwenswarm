@@ -236,6 +236,13 @@
   transform: none;
   display: flex;
   justify-content: center;
+  pointer-events: none;
+}
+
+.app-toast-wrapper--top-center > * {
+  pointer-events: auto;
+  min-width: 0;
+  max-width: min(88vw, 32rem);
 }
 
 .app-session-toast {

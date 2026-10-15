@@ -20,7 +20,7 @@
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AtSign, ChevronRight, CircleX, ListChecks, Loader2, Lock, Mic, Pencil, Plus, Settings, Square, Workflow, X } from 'lucide-react';
+import { AtSign, ChevronRight, CircleX, ListChecks, Loader2, Lock, Mic, Pencil, Plus, Settings, Square, SquarePlay, Workflow, X } from 'lucide-react';
 
 // import { stopAllTts } from '../../utils';
 import {
@@ -122,7 +122,6 @@ import SkillIcon from '../../assets/agent-management/agent-skill.svg?react';
 import CommandIcon from '../../assets/chat/command.svg?react';
 import closeSvg from '../../assets/work-mode/close.svg?raw';
 import { insertPlainText } from '../../utils/textEditCommands';
-
 // 个人上下文图标——文档/知识库隐喻，与 SessionSidebar 的 personalContextNavIcon 同源内联 SVG。
 function PersonalContextIcon(props: SVGProps<SVGSVGElement>) {
   return (
@@ -166,6 +165,8 @@ const GROUP_PICKER_ROW_HEIGHT = 40;
 function isSameAgentOption(item: AgentCatalogItem, selectedId: string | null): boolean {
   return selectedId !== null && (item.id === selectedId || item.runtimePackageName === selectedId);
 }
+/** 「+」菜单含文件/技能/计划/目标/设计。欢迎页若按 200px 判断向下展开，底部「设计」会被视口裁掉。 */
+const ATTACH_MENU_ESTIMATED_HEIGHT = 360;
 
 function resolveMenuDirection(anchorBottom: number, menuHeight: number) {
   const spaceBelow = window.innerHeight - anchorBottom - MENU_GAP;
@@ -188,6 +189,7 @@ import {
   type AgentGroupCatalogItem,
   type AgentGroupIdentity,
 } from '../../features/agentManagement';
+import { DESIGNER_REF_MAX_INLINE_BYTES } from '../../features/designer/designerReferences';
 import { ContextUsageIndicator } from './ContextUsageIndicator';
 import { isImeCompositionKey } from './imeComposition';
 import { useTaskAsr } from '../../features/taskAsr/useTaskAsr';
@@ -480,12 +482,14 @@ const ATTACHMENT_ACCEPT = [
   .filter((item) => !FORBIDDEN_DOCUMENT_EXTENSIONS.has(item.toLowerCase()))
   .join(',');
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v']);
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a']);
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 20;
 const ATTACHMENT_ALERT_DURATION_MS = 3000;
 
-type AttachmentKind = 'image' | 'document';
+type AttachmentKind = 'image' | 'video' | 'audio' | 'document';
 type AttachmentStatus = 'uploading' | 'ready' | 'error';
 
 interface AttachmentDraft {
@@ -626,24 +630,47 @@ function getLocalFilePath(file: File | undefined, explicitPath?: string): string
   return undefined;
 }
 
+function isVideoFile(file: File): boolean {
+  if (file.type.startsWith('video/')) return true;
+  return VIDEO_EXTENSIONS.has(getFileExtension(file.name || ''));
+}
+
+function isAudioFile(file: File): boolean {
+  if (file.type.startsWith('audio/')) return true;
+  return AUDIO_EXTENSIONS.has(getFileExtension(file.name || ''));
+}
+
 /** Classify a picked file for routing to media.persist vs document.persist. */
-function resolveAttachmentKind(file: File): AttachmentKind | null {
+function resolveAttachmentKind(file: File, designMode: boolean): AttachmentKind | null {
   if (isImageFile(file)) return 'image';
+  if (designMode && isVideoFile(file)) return 'video';
+  if (designMode && isAudioFile(file)) return 'audio';
   if (isForbiddenDocumentFile(file)) return null;
   return 'document';
+}
+
+function getMediaValidationError(file: File, t: TFunction, maxBytes: number): string | null {
+  if (file.size > maxBytes) {
+    return t('chat.inputAttachment.fileSizeExceeded', {
+      name: file.name || t('chat.inputAttachment.unnamedFile'),
+      limit: formatAttachmentSize(maxBytes),
+    });
+  }
+  return null;
 }
 
 function getImageValidationError(file: File, t: TFunction): string | null {
   if (!isImageFile(file)) {
     return t('chat.inputAttachment.unsupportedFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') });
   }
-  if (file.size > MAX_IMAGE_BYTES) {
-    return t('chat.inputAttachment.fileSizeExceeded', {
-      name: file.name || t('chat.inputAttachment.unnamedFile'),
-      limit: formatAttachmentSize(MAX_IMAGE_BYTES),
-    });
+  return getMediaValidationError(file, t, MAX_IMAGE_BYTES);
+}
+
+function getAvValidationError(file: File, t: TFunction): string | null {
+  if (!isVideoFile(file) && !isAudioFile(file)) {
+    return t('chat.inputAttachment.unsupportedFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') });
   }
-  return null;
+  return getMediaValidationError(file, t, MAX_FILE_BYTES);
 }
 
 function clearAttachmentAlertTimers(timers: Map<string, number>): void {
@@ -877,7 +904,24 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const runs = s.runtimes[activeSessionId ?? '']?.workflowRuns ?? [];
     return runs.some((run) => run.phases?.some((phase) => phase.agents?.some((agent) => agent.status === 'running')));
   });
-  const composerDisabled = agentGroupUnavailable || isCompactRunning || (hasPendingQuestion && !hasRunningAgent);
+  const workMode = useWorkspaceStore((state) => state.workMode);
+  // Design mode reuses this composer for the old DesignerLanding page. The first
+  // prompt is a one-shot compose: no abort, and no second prompt while it runs.
+  const isDesignLanding = workMode === 'design' && activeSessionId === NEW_CONVERSATION_ID;
+  const designLandingSubmitting = isDesignLanding && isProcessing;
+  const composerDisabled =
+    agentGroupUnavailable ||
+    isCompactRunning ||
+    (hasPendingQuestion && !hasRunningAgent) ||
+    designLandingSubmitting;
+
+  useEffect(() => {
+    if (!designLandingSubmitting) return;
+    setAttachMenuOpen(false);
+    setAgentPickerOpen(false);
+    setExtensionPanelOpen(false);
+    setSkillPanelOpen(false);
+  }, [designLandingSubmitting]);
   const selectedAgentId = useSessionStore((s) => {
     const runtime = s.runtimes[activeSessionId ?? ''];
     if (runtime?.mode !== 'agent') return null;
@@ -1025,7 +1069,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     return s.sessions.find((session) => session.session_id === activeSessionId) ?? null;
   });
   const canPersistAttachments = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
-  const { workMode, projects, selectedProject, setSelectedProject, createProject } = useWorkspaceStore();
+  const { projects, selectedProject, setSelectedProject, createProject } = useWorkspaceStore();
   const loadedMsgLen = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages?.length ?? 0);
   const hasHistory = (currentSession?.message_count ?? 0) > 0 || loadedMsgLen > 0;
   const externalAgentSwitchBlocked = Boolean(
@@ -1472,13 +1516,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   });
   const taskAsrEnabled = useTaskAsrEnabled();
 
-  const imageInputDisabled = isImageInputDisabled({
-    isListening: isListening || isTranscribing,
-    isCompactRunning,
-    isInterruptible,
-    isTeamMode,
-    isAgentMode,
-  });
+  const imageInputDisabled =
+    designLandingSubmitting ||
+    isImageInputDisabled({
+      isListening: isListening || isTranscribing,
+      isCompactRunning,
+      isInterruptible,
+      isTeamMode,
+      isAgentMode,
+    });
   const isDesktopBridgeReady = useDesktopLocalFilePickerReady();
   const uploadLimitsTooltip = [
     t('chat.inputAttachment.imageLimitTooltip', { limit: MAX_IMAGE_BYTES / (1024 * 1024) }),
@@ -1706,6 +1752,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               filename: attachment.filename,
               localPath: attachment.localPath,
             })
+          : attachment.kind === 'video' || attachment.kind === 'audio'
+            ? (attachment.file ? getAvValidationError(attachment.file, t) : null)
           : attachment.file
             ? getImageValidationError(attachment.file, t)
             : attachment.base64Data
@@ -1783,6 +1831,51 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             });
           }
         })();
+        return;
+      }
+
+      if (attachment.kind === 'video' || attachment.kind === 'audio') {
+        const localPath = getLocalFilePath(attachment.file, attachment.localPath);
+        if (localPath) {
+          updateAttachment(attachment.id, {
+            persistedMediaItem: {
+              type: attachment.kind,
+              filename: attachment.filename,
+              mime_type: attachment.mimeType,
+              path: localPath,
+              size_bytes: attachment.size,
+            },
+            status: 'ready',
+            error: undefined,
+          });
+          return;
+        }
+        if (!attachment.file) {
+          const error = t('chat.inputAttachment.uploadFailed');
+          pushAttachmentAlert(error);
+          updateAttachment(attachment.id, { status: 'error', error });
+          return;
+        }
+        if (attachment.file.size > DESIGNER_REF_MAX_INLINE_BYTES) {
+          const error = t('designer.chat.tooLarge');
+          pushAttachmentAlert(error);
+          updateAttachment(attachment.id, { status: 'error', error });
+          return;
+        }
+        void readBinaryFileAsBase64(attachment.file).then((payload) => {
+          if (!payload?.base64Data) {
+            updateAttachment(attachment.id, {
+              status: 'error',
+              error: t('chat.inputAttachment.uploadFailed'),
+            });
+            return;
+          }
+          updateAttachment(attachment.id, {
+            base64Data: payload.base64Data,
+            status: 'ready',
+            error: undefined,
+          });
+        });
         return;
       }
 
@@ -1908,7 +2001,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       }
 
       const drafts = filesToAdd.reduce<AttachmentDraft[]>((items, file) => {
-        const kind = resolveAttachmentKind(file);
+        const kind = resolveAttachmentKind(file, workMode === 'design');
         if (!kind) {
           const message = isForbiddenDocumentFile(file)
             ? t('chat.inputAttachment.forbiddenFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') })
@@ -1934,7 +2027,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         const validationError =
           kind === 'document'
             ? getDocumentValidationError(file, t, { filename: base.filename, localPath })
-            : getImageValidationError(file, t);
+            : kind === 'video' || kind === 'audio'
+              ? getAvValidationError(file, t)
+              : getImageValidationError(file, t);
         if (validationError) {
           pushAttachmentAlert(validationError);
           items.push({
@@ -1959,7 +2054,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         uploadAttachment(draft);
       });
     },
-    [attachments, pushAttachmentAlert, uploadAttachment, t],
+    [attachments, pushAttachmentAlert, uploadAttachment, t, workMode],
   );
 
   const appendLocalFilePicks = useCallback(
@@ -2164,7 +2259,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       if (!attachMenuRef.current) return;
       const rect = attachMenuRef.current.getBoundingClientRect();
       setAttachMenuAnchor(rect);
-      setAttachMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
+      setAttachMenuDirection(resolveMenuDirection(rect.bottom, ATTACH_MENU_ESTIMATED_HEIGHT));
     }
     window.addEventListener('resize', updateAttachMenuPosition);
     window.addEventListener('scroll', updateAttachMenuPosition, true);
@@ -2553,7 +2648,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   // preparing a follow-up. A pending approval keeps Stop available and blocks Send.
   const hasDraft = hasTextDraft || attachments.length > 0 || isListening || isTranscribing;
   const isImageInterruptBlocked = isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
-  const showStop = isProcessing && !isPaused && (!hasDraft || hasPendingQuestion);
+  const showStop =
+    !designLandingSubmitting && isProcessing && !isPaused && (!hasDraft || hasPendingQuestion);
   const hasReadyMedia = readyMediaItems.length > 0;
   const canSubmit =
     showStop ||
@@ -2565,13 +2661,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       !hasAttachmentErrors);
 
   const handleSendButtonClick = useCallback(() => {
+    if (designLandingSubmitting) return;
     if (showStop) {
       onCancel();
       return;
     }
 
     handleSubmit();
-  }, [handleSubmit, showStop, onCancel]);
+  }, [designLandingSubmitting, handleSubmit, showStop, onCancel]);
 
   const fullDuplexActionEligible =
     !showStop &&
@@ -3820,10 +3917,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     ? t('chat.placeholderAwaitingApproval')
                     : isListening
                       ? t('chat.placeholderVoice')
-                      : isTeamMode
-                        ? isInterruptible && !isPaused
-                          ? t('chat.placeholderTeamModeProcessing')
-                          : t('chat.placeholderTeamMode')
+                      : designLandingSubmitting
+                        ? t('chat.placeholder')
+                        : isTeamMode
+                          ? isInterruptible && !isPaused
+                            ? t('chat.placeholderTeamModeProcessing')
+                            : t('chat.placeholderTeamMode')
                         : isAutoHarnessMode
                           ? t('autoHarness.inputPlaceholder')
                           : isAgentMode && isInterruptible
@@ -3863,7 +3962,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       if (!attachMenuOpen && attachMenuRef.current) {
                         const rect = attachMenuRef.current.getBoundingClientRect();
                         setAttachMenuAnchor(rect);
-                        setAttachMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
+                        setAttachMenuDirection(resolveMenuDirection(rect.bottom, ATTACH_MENU_ESTIMATED_HEIGHT));
                       }
                       setAttachMenuOpen((open) => !open);
                       setExtensionPanelOpen(false);
@@ -3878,7 +3977,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     aria-label={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFile')}
                     aria-haspopup="menu"
                     aria-expanded={attachMenuOpen}
-                    data-tooltip={attachTriggerDisabled ? t('chat.addFileDisabled') : t('chat.addFileTooltip')}
+                    data-tooltip={
+                      attachTriggerDisabled
+                        ? t('chat.addFileDisabled')
+                        : isDesignLanding
+                          ? t('chat.addFile')
+                          : t('chat.addFileTooltip')
+                    }
                     {...attachTooltipHandlers}
                   >
                     <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
@@ -3928,6 +4033,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                           </span>
                         </button>
+                        {!isDesignLanding && (
+                        <>
                         <div className="chat-attach-menu-item-anchor">
                           <button
                             type="button"
@@ -4528,10 +4635,29 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             />
                           </div>
                         )}
+                        </>
+                        )}
                       </div>,
                       document.body,
                     )}
                 </div>
+                {workMode === 'design' && showWorkContextRow && (
+                  <div className="chat-mode-select" data-testid="chat-panel-video-generation">
+                    <div
+                      className="chat-mode-select__trigger chat-mode-select__trigger--feature-on chat-mode-select__trigger--current"
+                      data-testid="chat-panel-video-generation-trigger"
+                    >
+                      <span className="chat-mode-select__value">
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <SquarePlay className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('chat.videoGeneration')}</span>
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {workMode !== 'design' && (
+                <>
                 <div
                   ref={modeMenuRef}
                   className={clsx('chat-mode-select', isModeMenuOpen && 'chat-mode-select--open')}
@@ -4670,6 +4796,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     permissionProfile={permissionProfile}
                     onSavePermission={onSavePermission}
                   />
+                )}
+                </>
                 )}
 
                 {selectedAgentId && (
@@ -4946,12 +5074,18 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                           showStop && 'chat-input-btn--stop',
                           canSubmit ? 'chat-input-btn--send-active' : 'chat-input-btn--disabled',
                         )}
-                        data-tooltip={showStop ? t('chat.stop') : t('chat.send')}
+                        data-tooltip={designLandingSubmitting ? undefined : showStop ? t('chat.stop') : t('chat.send')}
                         {...sendTooltipHandlers}
                         data-testid="chat-panel-input-send"
-                        data-variant={showStop ? 'stop' : 'send'}
+                        data-variant={designLandingSubmitting ? 'submitting' : showStop ? 'stop' : 'send'}
                       >
-                        {showStop ? (
+                        {designLandingSubmitting ? (
+                          <Loader2
+                            className="chat-input-btn-icon chat-input-btn-icon--spin"
+                            strokeWidth={1.8}
+                            aria-hidden="true"
+                          />
+                        ) : showStop ? (
                           <Square
                             className="chat-input-btn-icon"
                             fill="currentColor"

@@ -45,6 +45,7 @@ from jiuwenswarm.agents.harness.common.tools.session_messaging_toolkit import (
     with_session_messaging_route,
 )
 from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
+from jiuwenswarm.common.mode_matrix import NEW_TEAM_DESIGN
 from jiuwenswarm.common.utils import get_agent_skills_dir, mask_sensitive
 from jiuwenswarm.common.config import get_config, get_skill_evolution_enabled
 from jiuwenswarm.common.cron_team_completion import (
@@ -2776,7 +2777,94 @@ async def process_team_message_stream(
     inputs: dict[str, Any],
     deep_agent: DeepAgent,
 ) -> AsyncIterator[AgentResponseChunk]:
-    """Hold the session startup lock until registration, never while streaming."""
+    """Hold the session startup lock until registration, never while streaming.
+
+    ``team.design`` sessions bind their execution context here (graph,
+    StoreNodeSpawner, worker base spec — see ``DesignTeamBridge.bind_round``)
+    so the leader's design tools mount; everything else about the round is
+    the standard team pipeline.
+    """
+    design_bindings = await _bind_design_round_if_needed(request)
+    try:
+        async with aclosing(_process_team_message_stream_locked(
+            request, inputs, deep_agent
+        )) as stream:
+            async for chunk in stream:
+                if design_bindings is not None:
+                    _push_design_tool_activity(request, chunk)
+                yield chunk
+    finally:
+        if design_bindings is not None:
+            design_bindings.cleanup()
+            design_bindings.push_stage("stage", "done")
+
+
+async def _bind_design_round_if_needed(request: Any) -> Any:
+    """Bind the design execution context when this is a team.design turn."""
+    if str(request.params.get("mode") or "").strip() != NEW_TEAM_DESIGN:
+        return None
+    from jiuwenswarm.runtime.session.model import TEAM_ATTACH_ONLY_PARAM
+
+    # An attach-only observer submits no input: binding would hold the
+    # node_run round guard for the whole subscription lifetime.
+    if request.params.get(TEAM_ATTACH_ONLY_PARAM) is True:
+        return None
+    from jiuwenswarm.server.runtime.design.team_bridge import DesignTeamBridge
+
+    try:
+        bindings = await DesignTeamBridge().bind_round(
+            request=request, session_id=str(request.session_id or "")
+        )
+    except Exception:  # best-effort: binding must not kill the chat round
+        logger.exception(
+            "[TeamHelpers] design round bind failed: session_id=%s",
+            request.session_id,
+        )
+        return None
+    if bindings is not None:
+        bindings.push_stage("thinking", "设计主编 · 处理请求（LLM）")
+    return bindings
+
+
+def _push_design_tool_activity(request: Any, chunk: Any) -> None:
+    """Map the round's tool events onto the canvas leader-activity peek."""
+    payload = chunk.payload
+    if payload is None:
+        return
+    payload_event = str(payload.get("event_type") or "")
+    if payload_event not in ("chat.tool_call", "chat.tool_result"):
+        return
+    import asyncio as _asyncio
+
+    from jiuwenswarm.server.runtime.design.team_bridge import (
+        activity_text,
+        push_leader_activity,
+    )
+
+    channel_id = str(request.channel_id or "web")
+    session_id = str(request.session_id or "")
+    kind = "tool_call" if payload_event == "chat.tool_call" else "tool_result"
+    try:
+        loop = _asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(
+        push_leader_activity(
+            channel_id,
+            session_id,
+            kind,
+            activity_text(payload),
+            str(payload.get("tool_name") or ""),
+        )
+    )
+
+
+async def _process_team_message_stream_locked(
+    request: Any,
+    inputs: dict[str, Any],
+    deep_agent: DeepAgent,
+) -> AsyncIterator[AgentResponseChunk]:
+    """The original process_team_message_stream body (startup lock owner)."""
     team_manager = get_team_manager(request.channel_id)
     session_id = request.session_id or "default"
     request_id = str(request.request_id or "")

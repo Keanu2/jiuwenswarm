@@ -47,6 +47,8 @@ interface MessageListProps {
   teamLeaderIdentityOverride?: TeamLeaderIdentity | null;
   teamGroupIdentityOverride?: AgentGroupIdentity | null;
   onForkFromMessage?: (message: Message) => Promise<void>;
+  /** The designer dock is narrow; render in normal flow so expanding content reflows. */
+  virtualized?: boolean;
 }
 
 interface ChatTimelineListProps {
@@ -932,6 +934,7 @@ export function MessageList({
   teamLeaderIdentityOverride,
   teamGroupIdentityOverride,
   onForkFromMessage,
+  virtualized,
 }: MessageListProps) {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const conversationId = useOrganizationConversationKey(activeSessionId);
@@ -955,6 +958,7 @@ export function MessageList({
       teamLeaderIdentityOverride={teamLeaderIdentityOverride}
       teamGroupIdentityOverride={teamGroupIdentityOverride}
       onForkFromMessage={onForkFromMessage}
+      virtualized={virtualized}
     />
   );
 }

@@ -542,7 +542,7 @@ async def _wait_for_web_channel_listening(
             )
             return
         await asyncio.sleep(0.01)
-    raise TimeoutError("WebChannel did not bind its listening socket within 5s")
+    raise TimeoutError(f"WebChannel did not bind its listening socket within {timeout:.0f}s")
 
 
 def _running_under_supervisor() -> bool:

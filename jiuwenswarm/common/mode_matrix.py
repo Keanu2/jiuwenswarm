@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from jiuwenswarm.common.work_mode import SUPPORTED_WORK_MODES
+from jiuwenswarm.common.work_mode import EXECUTION_WORK_MODES
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,8 @@ NEW_TEAM_WORK_NORMAL = "team.work.normal"
 NEW_TEAM_WORK_PLAN = "team.work.plan"
 NEW_TEAM_CODE_NORMAL = "team.code.normal"
 NEW_TEAM_CODE_PLAN = "team.code.plan"
+# Designer 团队模式：design 画布会话专属，environment 段=design 直通 team manager。
+NEW_TEAM_DESIGN = "team.design"
 
 # Web 组合模式覆盖单 agent 和 Team 的 work/code profile。其余取值一律按历史完整
 # 模式处理。Team 不支持独立的 Web Plan，但 ``team + code`` 必须进入与 TUI
@@ -84,6 +86,7 @@ NEW_CANONICAL_MODES: frozenset[str] = frozenset(
         NEW_TEAM_WORK_PLAN,
         NEW_TEAM_CODE_NORMAL,
         NEW_TEAM_CODE_PLAN,
+        NEW_TEAM_DESIGN,
     }
 )
 
@@ -112,6 +115,7 @@ TEAM_CANONICAL_MODES: frozenset[str] = frozenset(
         NEW_TEAM_WORK_PLAN,
         NEW_TEAM_CODE_NORMAL,
         NEW_TEAM_CODE_PLAN,
+        NEW_TEAM_DESIGN,
     }
 )
 
@@ -184,6 +188,7 @@ NEW_CANONICAL_MODE_RESOLUTION: dict[str, tuple[str, str, str]] = {
     NEW_TEAM_WORK_PLAN: ("team", "work", "plan"),
     NEW_TEAM_CODE_NORMAL: ("team", "code", "normal"),
     NEW_TEAM_CODE_PLAN: ("team", "code", "plan"),
+    NEW_TEAM_DESIGN: ("team", "design", "normal"),
 }
 
 
@@ -234,7 +239,7 @@ def normalize_work_mode(raw: Any) -> str | None:
     if not isinstance(raw, str):
         return None
     value = raw.strip().lower()
-    return value if value in SUPPORTED_WORK_MODES else None
+    return value if value in EXECUTION_WORK_MODES else None
 
 
 def read_request_work_mode(params: Mapping[str, Any] | None) -> str | None:

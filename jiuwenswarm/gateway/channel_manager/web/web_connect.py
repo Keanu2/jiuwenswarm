@@ -837,6 +837,10 @@ class WebChannel(BaseWsChannel):
             or event_name.startswith("harness.")
             or event_name.startswith("personal_context.context.")
             or event_name.startswith("org.")
+            # designer.* canvas frames carry the whole run/graph snapshot the
+            # design page binds to; the {session_id, content} reduction here
+            # would blank the canvas (empty canvas / no node progress).
+            or event_name.startswith("designer.")
         )
 
     @staticmethod
@@ -1154,7 +1158,13 @@ class WebChannel(BaseWsChannel):
         ws_set: set[Any] = set()
         metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
         request_ws_id = str(metadata.get("ws_id") or "").strip()
-        if request_ws_id:
+        # Designer canvas frames are session-scoped idempotent snapshots:
+        # pinning them to the originating request's ws loses the whole run
+        # when that socket is a half-open proxy connection (page reloaded
+        # behind the vite dev proxy) — the canvas never restarts its poll
+        # and misses every intermediate event. Route them to every live ws
+        # subscribed to the session instead.
+        if request_ws_id and not _et.startswith("designer."):
             ws = self._ws_by_id.get(request_ws_id)
             if ws is not None and not getattr(ws, "closed", False):
                 ws_set.add(ws)
