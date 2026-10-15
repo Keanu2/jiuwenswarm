@@ -48,7 +48,7 @@ import {
   type WorkflowRun,
 } from '../components/teamArea/workflowTypes';
 import { requestAgentDetail, requestPhaseAgents } from '../services/webClient';
-import type { TeamDispatchMode } from '../features/teamDispatch/featureConfig';
+import type { TeamBootstrapMode, TeamDispatchMode } from '../features/teamDispatch/featureConfig';
 import {
   normalizeTeamLeaderIdentity,
   type TeamLeaderIdentity,
@@ -655,6 +655,11 @@ export interface SessionRuntime {
    * undefined = 用户未拨过：开关默认关闭（自主模式）。团队建好后不可再改。
    */
   teamDispatchMode?: TeamDispatchMode;
+  /**
+   * 本会话团队的建队方式（调度模式的子开关，会话级，随 chat.send 下发并持久化到会话 metadata）。
+   * undefined = 用户未拨过：子开关默认关闭（Leader 自己 build_team）。团队建好后不可再改。
+   */
+  teamBootstrapMode?: TeamBootstrapMode;
   /** SwarmFlow 工作流运行列表（树视图渲染） */
   workflowRuns: WorkflowRun[];
 }
@@ -826,6 +831,8 @@ interface SessionState {
   setSwarmflowWorktree: (sessionId: string, enabled: boolean) => void;
   /** 设置本会话团队的任务调度模式（显式值，随 chat.send 下发并持久化到会话 metadata） */
   setTeamDispatchMode: (sessionId: string, mode: TeamDispatchMode) => void;
+  /** 设置本会话团队的建队方式（调度模式子开关；显式值，随 chat.send 下发并持久化到会话 metadata） */
+  setTeamBootstrapMode: (sessionId: string, mode: TeamBootstrapMode) => void;
   /** 懒加载 phase 完整 agents（command.workflows get_phase） */
   loadPhaseAgents: (
     sessionId: string,
@@ -2137,6 +2144,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...rt, teamDispatchMode: mode },
+        },
+      };
+    });
+  },
+
+  setTeamBootstrapMode: (sessionId, mode) => {
+    set((state) => {
+      const rt = state.runtimes[sessionId];
+      if (!rt) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...rt, teamBootstrapMode: mode },
         },
       };
     });

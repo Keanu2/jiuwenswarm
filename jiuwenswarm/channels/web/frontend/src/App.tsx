@@ -194,7 +194,9 @@ import {
 import './App.css';
 import { setTeamOrganizationUiEnabled } from './features/teamOrganization/featureConfig';
 import {
+  normalizeTeamBootstrapMode,
   normalizeTeamDispatchMode,
+  resolveNewSessionBootstrapMode,
   resolveNewSessionDispatchMode,
   setTeamScheduledDispatchEnabled,
 } from './features/teamDispatch/featureConfig';
@@ -1829,6 +1831,12 @@ function AppContent({
         if (restoredDispatchMode) {
           useSessionStore.getState().setTeamDispatchMode(targetSessionId, restoredDispatchMode);
         }
+        const restoredBootstrapMode = normalizeTeamBootstrapMode(
+          (session as unknown as Record<string, unknown> | null)?.session_team_bootstrap_mode,
+        );
+        if (restoredBootstrapMode) {
+          useSessionStore.getState().setTeamBootstrapMode(targetSessionId, restoredBootstrapMode);
+        }
       }
       return session;
     } catch (error) {
@@ -3039,6 +3047,13 @@ function AppContent({
       if (pendingDispatchMode) {
         sessionStore.setTeamDispatchMode(newSid, pendingDispatchMode);
       }
+      const pendingBootstrapMode = resolveNewSessionBootstrapMode(
+        pendingDispatchMode,
+        pendingRuntime?.teamBootstrapMode,
+      );
+      if (pendingBootstrapMode) {
+        sessionStore.setTeamBootstrapMode(newSid, pendingBootstrapMode);
+      }
       if (usePlanStore.getState().isActive(NEW_CONVERSATION_ID)) {
         usePlanStore.getState().setActive(newSid, true, {
           explicitEntry: usePlanStore.getState().hasPendingExplicitEntry(NEW_CONVERSATION_ID),
@@ -3282,6 +3297,13 @@ function AppContent({
         const newConvDispatchMode = resolveNewSessionDispatchMode(newConvSwarmflow?.teamDispatchMode);
         if (newConvDispatchMode) {
           useSessionStore.getState().setTeamDispatchMode(newSid, newConvDispatchMode);
+        }
+        const newConvBootstrapMode = resolveNewSessionBootstrapMode(
+          newConvDispatchMode,
+          newConvSwarmflow?.teamBootstrapMode,
+        );
+        if (newConvBootstrapMode) {
+          useSessionStore.getState().setTeamBootstrapMode(newSid, newConvBootstrapMode);
         }
         pendingNewConversationRef.current = false;
         useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);

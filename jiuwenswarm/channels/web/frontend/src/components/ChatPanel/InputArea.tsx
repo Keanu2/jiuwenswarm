@@ -20,7 +20,7 @@
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AtSign, ChevronRight, CircleX, ListChecks, Loader2, Lock, Mic, Pencil, Plus, Settings, Square, SquarePlay, Workflow, X } from 'lucide-react';
+import { AtSign, ChevronRight, CircleX, ListChecks, Loader2, Lock, Mic, Pencil, Plus, Rocket, Settings, Square, SquarePlay, Workflow, X } from 'lucide-react';
 
 // import { stopAllTts } from '../../utils';
 import {
@@ -150,7 +150,11 @@ import { TeamSelector } from './TeamSelector';
 import { resolveOrganizationTeamIdentity } from '../../features/teamOrganization/teamIdentity';
 import { useTeamSelectorStore } from '../../stores/teamSelectorStore';
 import { useTeamOrganizationUiEnabled } from '../../features/teamOrganization/featureConfig';
-import { resolveTeamDispatchMode, useTeamScheduledDispatchEnabled } from '../../features/teamDispatch/featureConfig';
+import {
+  resolveTeamBootstrapMode,
+  resolveTeamDispatchMode,
+  useTeamScheduledDispatchEnabled,
+} from '../../features/teamDispatch/featureConfig';
 
 const MENU_GAP = 10;
 /** 智能体选择列表单行高度（与 ChatPanel.css 的 .chat-agent-picker__item min-height 一致） */
@@ -1167,6 +1171,20 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const sessionTeamDispatchMode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamDispatchMode);
   const teamDispatchScheduled = resolveTeamDispatchMode(sessionTeamDispatchMode) === 'scheduled';
   const teamDispatchToggleDisabled = swarmflowToggleDisabled;
+  // 调度模式的子开关「启动即建队」（F_122）：只在调度模式打开时展示，同一把锁。
+  const sessionTeamBootstrapMode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamBootstrapMode);
+  const teamBootstrapFramework = resolveTeamBootstrapMode(sessionTeamBootstrapMode) === 'framework';
+  const setTeamDispatchScheduled = (next: boolean) => {
+    if (!activeSessionId || teamDispatchToggleDisabled) return;
+    const store = useSessionStore.getState();
+    store.setTeamDispatchMode(activeSessionId, next ? 'scheduled' : 'autonomous');
+    // 关掉调度模式时子开关一并复位：framework 只在 scheduled 下合法。
+    if (!next) store.setTeamBootstrapMode(activeSessionId, 'leader');
+  };
+  const setTeamBootstrapFramework = (next: boolean) => {
+    if (!activeSessionId || teamDispatchToggleDisabled) return;
+    useSessionStore.getState().setTeamBootstrapMode(activeSessionId, next ? 'framework' : 'leader');
+  };
   const canUsePlanMenu = supportsPlanMode(mode);
   const planTagVisible = canUsePlanMenu && planActive;
 
@@ -4476,12 +4494,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             role="menuitem"
                             data-testid="chat-panel-input-attach-menu-team-dispatch"
                             title={t(teamDispatchToggleDisabled ? 'teamDispatch.readonlyHint' : 'teamDispatch.toggleHint')}
-                            onClick={() => {
-                              if (!activeSessionId || teamDispatchToggleDisabled) return;
-                              useSessionStore
-                                .getState()
-                                .setTeamDispatchMode(activeSessionId, teamDispatchScheduled ? 'autonomous' : 'scheduled');
-                            }}
+                            onClick={() => setTeamDispatchScheduled(!teamDispatchScheduled)}
                           >
                             <span className="chat-mode-select__option-main">
                               <span className="chat-mode-select__icon" aria-hidden="true">
@@ -4492,12 +4505,32 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             <Switch
                               checked={teamDispatchScheduled}
                               disabled={teamDispatchToggleDisabled}
-                              onChange={(next) => {
-                                if (!activeSessionId || teamDispatchToggleDisabled) return;
-                                useSessionStore
-                                  .getState()
-                                  .setTeamDispatchMode(activeSessionId, next ? 'scheduled' : 'autonomous');
-                              }}
+                              onChange={setTeamDispatchScheduled}
+                            />
+                          </div>
+                        )}
+                        {isTeamMode && teamScheduledDispatchEnabled && teamDispatchScheduled && (
+                          <div
+                            className={cx(
+                              'chat-mode-select__option',
+                              'chat-mode-select__option--sub',
+                              teamDispatchToggleDisabled && 'chat-mode-select__option--disabled',
+                            )}
+                            role="menuitem"
+                            data-testid="chat-panel-input-attach-menu-team-bootstrap"
+                            title={t(teamDispatchToggleDisabled ? 'teamBootstrap.readonlyHint' : 'teamBootstrap.toggleHint')}
+                            onClick={() => setTeamBootstrapFramework(!teamBootstrapFramework)}
+                          >
+                            <span className="chat-mode-select__option-main">
+                              <span className="chat-mode-select__icon" aria-hidden="true">
+                                <Rocket className="w-4 h-4" />
+                              </span>
+                              <span className="chat-mode-select__label">{t('teamBootstrap.toggleLabel')}</span>
+                            </span>
+                            <Switch
+                              checked={teamBootstrapFramework}
+                              disabled={teamDispatchToggleDisabled}
+                              onChange={setTeamBootstrapFramework}
                             />
                           </div>
                         )}

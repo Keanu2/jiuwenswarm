@@ -4895,6 +4895,11 @@
     "toggleHint": "When on, the leader assigns every task to a named member; when off, members claim tasks on their own",
     "readonlyHint": "The team has started; dispatch mode can no longer be changed"
   },
+  "teamBootstrap": {
+    "toggleLabel": "Pre-built Team",
+    "toggleHint": "When on, the system builds a general-purpose team as the session starts; the leader creates members per task without a build_team step",
+    "readonlyHint": "The team has started; the bootstrap mode can no longer be changed"
+  },
   "swarmflow": {
     "statusPlanned": "Planned",
     "statusPending": "Pending",
