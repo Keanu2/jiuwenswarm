@@ -20,7 +20,7 @@ from jiuwenswarm.server.runtime.designer.media_settings import (
 )
 from jiuwenswarm.server.runtime.gateway_adapter import designer_adapter as adapter
 
-from tests.unit_tests.designer.graph_fixtures import make_pipeline_graph
+from tests.unit_tests.design.graph_fixtures import make_pipeline_graph
 
 _MODEL_ID = "jiuwenswarm.server.runtime.designer.pipeline.model_capacity.configured_video_model_id"
 

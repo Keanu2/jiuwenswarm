@@ -25,7 +25,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     repair_overlapping_pipeline_layout,
 )
 from jiuwenswarm.server.runtime.designer.graph_store import DesignerGraphStore
-from tests.unit_tests.designer.graph_fixtures import make_pipeline_graph
+from tests.unit_tests.design.graph_fixtures import make_pipeline_graph
 
 
 def _assert_nodes_do_not_overlap(nodes: list) -> None:
