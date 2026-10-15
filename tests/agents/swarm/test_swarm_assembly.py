@@ -177,6 +177,21 @@ def test_team_heartbeat_rail_skipped_for_cron_execution_session(ctx_kwargs: dict
     assert member_rails._build_heartbeat_rail({}, context) is None
 
 
+def test_team_heartbeat_rail_skipped_for_xiaoyi_channel() -> None:
+    """小艺渠道的成员不挂心跳工具（渠道没有可用的主动投递路径）。"""
+    context = SwarmBuildContext(
+        session_id="xiaoyi_1a13511901d_32eb921d481b",
+        channel_id="xiaoyi",
+        user_id="user-1",
+        request_metadata={"mode": "team.work.normal"},
+        mode="team.work.normal",
+        member_card_id="leader-card",
+        heartbeat_job_service=object(),
+    )
+
+    assert member_rails._build_heartbeat_rail({}, context) is None
+
+
 @pytest.mark.parametrize(
     "mode",
     [
@@ -214,6 +229,7 @@ def test_canonical_code_team_modes_use_code_profile(mode: str) -> None:
 # Sourced from the registry symbols so the test tracks renames automatically.
 _TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
     {
+        registry.USER_HOOKS,
         registry.RUNTIME_PROMPT,
         registry.TEAM_SKILL_STORAGE_POLICY,
         registry.TEAM_SKILL_LIBRARY_RELOAD,
@@ -618,12 +634,14 @@ def test_build_member_capability_specs_rail_names(
     rail_names = {spec.type for spec in rails_specs}
 
     expected = _TEAM_SHARED_RAIL_NAMES | extra_rails
+    if role == "leader":
+        expected = expected | {registry.SESSION_MESSAGING_ROUTE}
     if role == "teammate":
         expected = expected | {registry.TASK_PLANNING}
 
     assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    assert len(_TEAM_SHARED_RAIL_NAMES) == 19
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 20
     assert rail_names == expected
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -632,7 +650,7 @@ def test_build_member_capability_specs_rail_names(
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
 def test_build_member_capability_specs_tool_names(role: str) -> None:
-    """Only the leader declares A4P on top of the common tool set."""
+    """Only the leader adds A4P and durable cross-Session messaging tools."""
     config = {"agents": {"leader": {"skills": []}, "teammate": {"skills": []}}}
 
     _, tool_specs = build_member_capability_specs(config, "team", role)
@@ -641,6 +659,7 @@ def test_build_member_capability_specs_tool_names(role: str) -> None:
     expected = set(_COMMON_TOOL_NAMES)
     if role == "leader":
         expected.add(registry.A4P_INTENT_AUTHORIZATION)
+        expected.add(registry.SESSION_MESSAGING_TOOLS)
     assert tool_names == expected
     assert all(isinstance(spec, BuiltinToolSpec) for spec in tool_specs)
 
@@ -1074,6 +1093,57 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
 
 
 @pytest.mark.parametrize(
+    ("mode", "kept_rail", "dropped_rails"),
+    [
+        ("team", registry.RUNTIME_PROMPT, (registry.TASK_PLANNING, registry.CODE_LSP)),
+        ("code.team", registry.CODE_LSP, (registry.CODE_TASK_PLANNING, registry.CODE_AGENT_MODE)),
+    ],
+)
+def test_enrich_team_spec_for_swarm_builds_a_narrow_reviewer_spec(
+    mode: str,
+    kept_rail: str,
+    dropped_rails: tuple[str, ...],
+) -> None:
+    """Temp reviewers get a read-only, inspection-only slice of the teammate spec."""
+    spec = _make_team_spec()
+    spec.enable_permissions = True
+
+    enrich_team_spec_for_swarm(spec, session_id="s", mode=mode, channel_id="web")
+
+    teammate = spec.agents["teammate"]
+    reviewer = spec.reviewer_agent
+    assert reviewer is not None
+    rail_types = [rail.type for rail in reviewer.rails or []]
+    assert kept_rail in rail_types
+    assert TEAM_SKILL_USE in rail_types
+    sys_rails = [rail for rail in reviewer.rails if rail.type == registry.SYS_OPERATION]
+    assert len(sys_rails) == 1 and sys_rails[0].params["read_only"] is True
+    for dropped in (
+        *dropped_rails,
+        registry.HEARTBEAT,
+        registry.MEMBER_SKILL_TOOLKIT,
+        registry.MEMBER_SKILL_EVOLUTION,
+        registry.TEAM_PERMISSION,
+        registry.PLUGIN_RAILS,
+    ):
+        assert dropped not in rail_types
+    # The teammate keeps what the reviewer drops.
+    teammate_rail_types = {rail.type for rail in teammate.rails or []}
+    assert registry.TEAM_PERMISSION in teammate_rail_types
+    assert registry.HEARTBEAT in teammate_rail_types
+
+    tool_types = {tool.type for tool in reviewer.tools or [] if isinstance(tool, BuiltinToolSpec)}
+    assert registry.WEB_FETCH in tool_types
+    assert registry.VISION in tool_types
+    assert not tool_types & {registry.CRON_TOOLS, registry.SEND_FILE, registry.USER_TODOS, registry.IMAGE_GEN}
+
+    assert reviewer.subagents is None
+    assert reviewer.enable_task_planning is False
+    assert reviewer.mcps == teammate.mcps
+    assert reviewer.cwd == teammate.cwd
+
+
+@pytest.mark.parametrize(
     ("channel_id", "port_env", "port", "expected_url"),
     [
         ("web", "WEB_PORT", "29000", "ws://127.0.0.1:29000/ws"),
@@ -1476,6 +1546,7 @@ def _write_agent_group_assembly_fixture(root: Path) -> Path:
                 "name": "sample-expert-group",
                 "package_type": "agent_group",
                 "instruction": "Leader 负责理解用户目标",
+                "tags": [{"id": "analysis", "zh": "分析", "en": "Analysis"}],
                 "agents": list(manifests),
                 "skills": ["skill_name_1"],
             }
@@ -1514,8 +1585,9 @@ def _write_agent_group_assembly_fixture(root: Path) -> Path:
     return package_dir
 
 
+@pytest.mark.parametrize("organization_enabled", [False, True])
 def test_enrich_applies_agent_group_as_hybrid_member_snapshots(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, organization_enabled: bool
 ) -> None:
     """AgentGroup prompts stay Team-owned while capabilities use snapshots."""
     from jiuwenswarm.server.runtime import extension_package_manager as package_manager
@@ -1537,6 +1609,7 @@ def test_enrich_applies_agent_group_as_hybrid_member_snapshots(
     )
     spec = _make_team_spec()
     spec.leader.prompt = "existing leader agreement"
+    spec.enable_organization = organization_enabled
 
     enrich_team_spec_for_swarm(
         spec,
@@ -1547,6 +1620,9 @@ def test_enrich_applies_agent_group_as_hybrid_member_snapshots(
     )
 
     assert spec.team_mode == "hybrid"
+    assert spec.metadata["agent_group_name"] == "sample-expert-group"
+    assert spec.metadata["capabilities"] == ["analysis"]
+    assert spec.enable_organization is organization_enabled
     assert [member.member_name for member in spec.predefined_members] == [
         "member1",
         "member2",
@@ -2385,6 +2461,7 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     if mode == "team.plan.code":
         expected_rails = expected_rails - {registry.CODE_CONFIRM_INTERRUPT}
     assert expected_rails <= rail_names
+    assert registry.SESSION_MESSAGING_ROUTE in rail_names
     assert registry.CODE_TASK_PLANNING not in rail_names
     assert registry.TEAM_SKILL_EVOLUTION in rail_names
     assert registry.STRUCTURED_ASK_USER in rail_names
@@ -2419,6 +2496,7 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
         registry.CODE_EXTRA_TOOLS,
         registry.CRON_TOOLS,
         registry.SEND_FILE,
+        registry.SESSION_MESSAGING_TOOLS,
     }
 
 

@@ -46,17 +46,17 @@ test('fromReactFlowGraph preserves domain semantics while updating layout', () =
   assert.equal(brief.layout?.x, 100);
   assert.equal(brief.layout?.y, 200);
   assert.equal(brief.type, 'text');
-  assert.equal(
-    merged.edges.find((edge) => edge.id === 'e_frame_n_clip_1')?.source,
-    'n_clip_1a',
+  assert.deepEqual(
+    merged.edges.map((edge) => edge.id),
+    fixture.edges.map((edge) => edge.id),
   );
   assert.equal(
-    merged.edges.find((edge) => edge.id === 'e_clip_1_final')?.target,
-    'n_final',
+    merged.edges.find((edge) => edge.id === 'e_scene_n_clip_1')?.source,
+    'n_scene',
   );
   assert.equal(
-    merged.edges.find((edge) => edge.id === 'e_character_storyboard'),
-    undefined,
+    merged.edges.find((edge) => edge.id === 'e_n_clip_1_compose')?.target,
+    'n_compose',
   );
 });
 

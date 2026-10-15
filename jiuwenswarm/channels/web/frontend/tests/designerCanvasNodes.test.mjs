@@ -4,7 +4,9 @@ import test from 'node:test';
 import {
   canvasEditGlance,
   DESIGNER_ADD_TEMPLATES,
+  DESIGNER_DOC_FIT_MIN_BODY,
   DESIGNER_LAYOUT_ORIGIN_X,
+  DESIGNER_NODE_HEADER_HEIGHT,
   DESIGNER_LAYOUT_ORIGIN_Y,
   DESIGNER_SUCCESSOR_GAP_X,
   DESIGNER_SUCCESSOR_GAP_Y,
@@ -331,12 +333,12 @@ test('resolvedNodeCanvasSize uses the canvas ratio on default landscape cards', 
 test('sizeNodeForDocumentContent hugs short text and keeps tables near square', () => {
   const short = sizeNodeForDocumentContent({ width: 72, height: 16 }, 'text');
   assert.ok(short.width >= 180);
-  assert.ok(short.height >= 36 + 64);
+  assert.ok(short.height >= DESIGNER_NODE_HEADER_HEIGHT + DESIGNER_DOC_FIT_MIN_BODY);
   assert.ok(short.height < 160);
 
   const compact = sizeNodeForDocumentContent({ width: 320, height: 120 }, 'table');
   assert.equal(compact.width, 180);
-  assert.equal(compact.height, 120 + 36);
+  assert.equal(compact.height, 120 + DESIGNER_NODE_HEADER_HEIGHT);
 
   const square = sizeNodeForDocumentContent({ width: 240, height: 200 }, 'table');
   assert.equal(square.width, square.height);

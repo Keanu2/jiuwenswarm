@@ -116,9 +116,11 @@ after(() => {
 
 const { InputArea } =
   await import('../node_modules/.cache/input-area-permission-merge/components/ChatPanel/InputArea.js');
-const { useChatStore, useSessionStore, useWorkspaceStore, usePlanStore } =
+const { useChatStore, useSessionStore, useWorkspaceStore, usePlanStore, useTeamSelectorStore } =
   await import('../node_modules/.cache/input-area-permission-merge/stores/index.js');
 const { default: i18n } = await import('../node_modules/.cache/input-area-permission-merge/i18n/index.js');
+const { setTeamOrganizationUiEnabled } = await import('../node_modules/.cache/input-area-permission-merge/features/teamOrganization/featureConfig.js');
+const { webClient } = await import('../node_modules/.cache/input-area-permission-merge/services/webClient.js');
 
 function byId(id, variant) {
   const selector = `[data-testid="${id}"]${variant === undefined ? '' : `[data-variant="${variant}"]`}`;
@@ -531,9 +533,9 @@ for (const language of ['zh', 'en']) {
 }
 
 for (const mode of ['agent', 'auto_harness']) {
-  test(`${mode}: persisted default profile is displayed without saving during render`, async () => {
-    await mount({ mode, profile: 'default' }, async ({ saved, sessionId }) => {
-      const effective = 'default';
+  test(`${mode}: persisted automatic profile is projected without saving during render`, async () => {
+    await mount({ mode, profile: 'automatic' }, async ({ saved, sessionId }) => {
+      const effective = mode === 'agent' ? 'automatic' : 'default';
       const trigger = byId('chat-panel-permission-selector-trigger');
       assert.equal(trigger.dataset.variant, effective);
       assert.match(trigger.textContent, new RegExp(i18n.t(`chat.config.permission.${effective}`)));
@@ -541,25 +543,102 @@ for (const mode of ['agent', 'auto_harness']) {
       const options = [...document.querySelectorAll('[data-testid="chat-panel-permission-selector-option"]')];
       assert.deepEqual(
         options.map((option) => option.dataset.variant),
-        ['default', 'full_access'],
+        mode === 'agent' ? ['default', 'automatic', 'full_access'] : ['default', 'full_access'],
       );
       assert.equal(byId('chat-panel-permission-selector-option', effective).getAttribute('aria-checked'), 'true');
       await click(byId('chat-panel-permission-selector-option', effective));
       assert.deepEqual(saved, []);
       await act(async () => useSessionStore.getState().setMode(sessionId, 'agent'));
-      assert.equal(byId('chat-panel-permission-selector-trigger').dataset.variant, 'default');
-      assert.deepEqual(saved, [], 'switching modes must not overwrite the persisted profile');
+      assert.equal(byId('chat-panel-permission-selector-trigger').dataset.variant, 'automatic');
+      assert.deepEqual(saved, [], 'a mode projection must not overwrite the persisted automatic profile');
     });
   });
 }
 
 test('team hides the permission selector without overwriting the persisted profile', async () => {
-  await mount({ mode: 'team', profile: 'default' }, async ({ saved, sessionId }) => {
+  await mount({ mode: 'team', profile: 'automatic' }, async ({ saved, sessionId }) => {
     assert.equal(document.querySelector('[data-testid="chat-panel-permission-selector-trigger"]'), null);
     await act(async () => useSessionStore.getState().setMode(sessionId, 'agent'));
-    assert.equal(byId('chat-panel-permission-selector-trigger').dataset.variant, 'default');
+    assert.equal(byId('chat-panel-permission-selector-trigger').dataset.variant, 'automatic');
     assert.deepEqual(saved, []);
   });
+});
+
+test('actual composer follows organization Team identity; dissolution and disabling restore Owner view and ordinary sending', async () => {
+  const groups = [
+    { id: 'business-planning', displayName: '商业策划专家团', avatar: 'http://localhost/business.png' },
+    { id: 'technology-insight', displayName: '技术洞察专家团', avatar: 'http://localhost/technology.png' },
+    { id: 'software-architecture-design', displayName: '代码架构设计专家团', avatar: 'http://localhost/architecture.png' },
+  ].map((group) => ({ ...group, name: group.id, installed: true, source: 'local', capabilities: { canUse: true } }));
+  const teams = groups.map((group, index) => ({
+    team_id: index === 0 ? 'owner' : `expert-${index}`, team_name: index === 0 ? 'owner' : `expert-${index}`,
+    agent_group_name: group.id, organization_id: 'org', is_owner: index === 0, state: 'paused',
+  }));
+  let listedTeams = teams;
+  const requests = [];
+  const originalRequest = webClient.request;
+  webClient.request = async (method, params) => {
+    requests.push(method);
+    if (method === 'agent_groups.list') return { agentGroups: groups };
+    if (method === 'team.list') return { teams: listedTeams, default_team_id: 'owner' };
+    if (method === 'team.snapshot') return { team_id: params.team_id, members: [], tasks: [] };
+    if (method === 'commands.list') return { commands: [] };
+    if (method === 'skills.list') return { skills: [], plugins: [] };
+    if (method === 'session.assets.list') return { assets: [] };
+    assert.fail(`Unexpected composer request: ${method}`);
+  };
+  let testedSession;
+  try {
+    await mount({ mode: 'team', language: 'zh' }, async ({ sessionId, props, render }) => {
+      testedSession = sessionId;
+      let identity;
+      props.onAgentGroupIdentityChange = (value) => { identity = value; };
+      await act(async () => useSessionStore.getState().setAgentGroupBinding(sessionId, 'business-planning'));
+      await render();
+      assert.equal(byId('chat-panel-agent-group-tag-label').textContent, '商业策划专家团');
+      const ordinaryTag = byId('chat-panel-agent-group-tag').outerHTML;
+      await act(async () => {
+        useTeamSelectorStore.setState({ runtimes: {
+          [sessionId]: { teams, selectedTeamId: 'owner', defaultTeamId: 'owner', loaded: true, loading: false },
+        } });
+        setTeamOrganizationUiEnabled(true);
+      });
+      for (const [index, team] of teams.entries()) {
+        await click(byId('chat-panel-team-select-trigger'));
+        await click(document.querySelector(`[data-team-id="${team.team_id}"]`));
+        assert.equal(byId('chat-panel-agent-group-tag-label').textContent, groups[index].displayName);
+        assert.equal(byId('chat-panel-agent-group-tag').querySelector('img').getAttribute('src'), groups[index].avatar);
+        assert.equal(identity.displayName, groups[index].displayName);
+        assert.equal(identity.avatarUrl, groups[index].avatar);
+        assert.equal(useSessionStore.getState().runtimes[sessionId].agentGroupBinding, 'business-planning');
+      }
+      listedTeams = [{ ...teams[0], organization_id: null }];
+      await act(async () => useTeamSelectorStore.getState().fetchTeams(sessionId));
+      assert.equal(useTeamSelectorStore.getState().runtimes[sessionId].selectedTeamId, 'owner');
+      assert.equal(byId('chat-panel-agent-group-tag').outerHTML, ordinaryTag);
+      await click(byId('chat-panel-team-select-trigger'));
+      assert.equal(document.querySelectorAll('[data-testid="chat-panel-team-select-option"]').length, 1);
+      assert.equal(document.querySelector('[data-team-id="expert-1"]'), null);
+      assert.equal(document.querySelector('[data-team-id="expert-2"]'), null);
+      await click(document.querySelector('[data-team-id="owner"]'));
+      await act(async () => setTeamOrganizationUiEnabled(false));
+      assert.equal(document.querySelector('[data-testid="chat-panel-team-select"]'), null);
+      assert.equal(byId('chat-panel-agent-group-tag').outerHTML, ordinaryTag);
+      assert.equal(identity.displayName, '商业策划专家团');
+      const orgRequestCount = requests.filter((method) => method.startsWith('team.')).length;
+      const sent = [];
+      props.onSubmit = (text) => sent.push(text);
+      await render();
+      await typeInput('普通团队消息');
+      await click(byId('chat-panel-input-send'));
+      assert.deepEqual(sent, ['普通团队消息']);
+      assert.equal(requests.filter((method) => method.startsWith('team.')).length, orgRequestCount);
+    });
+  } finally {
+    setTeamOrganizationUiEnabled(false);
+    if (testedSession) useTeamSelectorStore.getState().removeRuntime(testedSession);
+    webClient.request = originalRequest;
+  }
 });
 
 test('team skills and Expert Teams are mutually exclusive', async () => {
@@ -588,15 +667,15 @@ test('team skills and Expert Teams are mutually exclusive', async () => {
   });
 });
 
-test('default selection sends the profile contract and reflects the persisted prop', async () => {
-  await mount({ profile: 'full_access' }, async ({ saved, props, render }) => {
+test('automatic selection sends the profile contract and reflects the persisted prop', async () => {
+  await mount({}, async ({ saved, props, render }) => {
     await click(byId('chat-panel-permission-selector-trigger'));
-    await click(byId('chat-panel-permission-selector-option', 'default'));
-    assert.deepEqual(saved, [{ permissions_profile: 'default' }]);
+    await click(byId('chat-panel-permission-selector-option', 'automatic'));
+    assert.deepEqual(saved, [{ permissions_profile: 'automatic' }]);
     assert.equal(document.querySelector('[data-testid="chat-panel-perm-warning-modal"]'), null);
-    props.permissionProfile = 'default';
+    props.permissionProfile = 'automatic';
     await render();
-    assert.equal(byId('chat-panel-permission-selector-trigger').dataset.variant, 'default');
+    assert.equal(byId('chat-panel-permission-selector-trigger').dataset.variant, 'automatic');
   });
 });
 

@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, ClassVar, NamedTuple, Optional
 from weakref import WeakValueDictionary
 
-from gateway_protocol.hooks import AgentServerChatHookContext, AgentServerHookEvents
 from openjiuwen.core.common.logging import server_logger
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
@@ -62,15 +61,17 @@ from jiuwenswarm.common.e2a.wire_codec import (
 )
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenswarm.common.version import __version__
+from jiuwenswarm.common.version import get_runtime_version
 from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_exception,
     describe_ws_peer,
     format_ws_diagnostics,
 )
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
+from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
+from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenswarm.runtime import AgentRuntime
 from jiuwenswarm.runtime.session_provisioner import (
@@ -552,6 +553,7 @@ class _TurnOutcomeTracker:
 
     saw_chat_final: bool = False
     saw_runtime_accepted: bool = False
+    saw_team_input_accepted: bool = False
     waiting_user: bool = False
     saw_error: bool = False
     error: str = ""
@@ -562,6 +564,11 @@ class _TurnOutcomeTracker:
             self.saw_chat_final = True
         elif event_type == "runtime.accepted":
             self.saw_runtime_accepted = True
+        elif event_type in {
+            "team.input.accepted",
+            "chat.processing_status_deferred",
+        }:
+            self.saw_team_input_accepted = True
         elif event_type == "chat.ask_user_question":
             self.waiting_user = True
         if not event.ok or event_type in TERMINAL_ERROR_EVENT_TYPES:
@@ -1147,6 +1154,7 @@ class AgentWebSocketServer:
         self._runtime_push_handler = None
         self._previous_runtime_push_handler = None
         self._runtime_services_started = False
+        self._group_service = None
         # RSI 服务域分发句柄（懒加载，见 _get_rsi_handlers）
         self._rsi_handlers = None
         # Optional production Provider injection point.  The concrete class is
@@ -1392,16 +1400,23 @@ class AgentWebSocketServer:
                 exc,
             )
 
-    def attach_gateway_connection(self, ws: Any, send_lock: asyncio.Lock) -> None:
+    async def attach_gateway_connection(
+        self,
+        ws: Any,
+        send_lock: asyncio.Lock,
+    ) -> None:
         """Publish the Front-owned Gateway socket for send_push / ACP caps."""
         self._current_ws = ws
         self._current_send_lock = send_lock
+        await self._session_message_service.set_available(True)
 
     async def on_gateway_disconnect(self, ws: Any, remote: Any) -> None:
         """Runtime-side cleanup when Front drops the Gateway connection."""
-        if self._current_ws is ws:
+        owns_current_connection = self._current_ws is ws
+        if owns_current_connection:
             self._current_ws = None
             self._current_send_lock = None
+            await self._session_message_service.set_available(False)
         self._clear_ws_acp_client_capabilities(ws)
         try:
             await self._execution_runtime().cancel_all_inflight_work(
@@ -1416,15 +1431,6 @@ class AgentWebSocketServer:
             await self._stop_scheduler()
         except Exception:
             logger.exception("[AgentWebSocketServer] scheduler stop failed")
-        try:
-            await self._execution_runtime().cancel_all_team_stream_tasks(
-                reason=f"[gateway ws closed {remote}] ",
-                exclude_session_ids=(
-                    self._heartbeat_runtime.execution.active_session_ids()
-                ),
-            )
-        except Exception:
-            logger.exception("[AgentWebSocketServer] team stream cancel failed")
         self._session_stream_tasks.clear()
 
     async def start(self, *, bind_transport: bool = False) -> None:
@@ -2183,9 +2189,9 @@ class AgentWebSocketServer:
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
         finally:
-            if session_message_service is not None:
-                await session_message_service.set_available(False)
             owns_current_connection = self._release_current_connection(ws)
+            if owns_current_connection and session_message_service is not None:
+                await session_message_service.set_available(False)
             self._clear_ws_acp_client_capabilities(ws)
             connection_tasks = list(tasks)
             for task in connection_tasks:
@@ -2210,15 +2216,6 @@ class AgentWebSocketServer:
                     await self._stop_scheduler()
                 except Exception:
                     logger.exception("[AgentWebSocketServer] scheduler stop failed")
-                try:
-                    await self._execution_runtime().cancel_all_team_stream_tasks(
-                        reason=f"[gateway ws closed {remote}] ",
-                        exclude_session_ids=(
-                            self._heartbeat_runtime.execution.active_session_ids()
-                        ),
-                    )
-                except Exception:
-                    logger.exception("[AgentWebSocketServer] team stream cancel failed")
             if connection_tasks:
                 await asyncio.gather(*connection_tasks, return_exceptions=True)
             if owns_current_connection:
@@ -2270,8 +2267,12 @@ class AgentWebSocketServer:
                 try:
                     params = request.params if isinstance(request.params, dict) else {}
                     session_id = str(params.get("session_id") or "")
-                    response.payload["queued_session_messages"] = (
-                        await service.queued_for_target(session_id, request.user_id)
+                    queue_state = await service.queue_state_for_target(
+                        session_id, request.user_id,
+                    )
+                    response.payload["queued_session_messages"] = queue_state["messages"]
+                    response.payload["can_continue_queued_session_messages"] = bool(
+                        queue_state.get("can_continue_queued")
                     )
                 except Exception:
                     logger.warning(
@@ -2413,6 +2414,10 @@ class AgentWebSocketServer:
 
         pending_chat_request: tuple[AgentRuntime, str, str] | None = None
         try:
+            from jiuwenswarm.server.runtime.group_requests import dispatch_group_request
+
+            if await dispatch_group_request(self, ws, request, send_lock):
+                return
             if request.req_method is not None and request.req_method.value.startswith("assets.publish."):
                 await self._handle_asset_publish(ws, request, send_lock)
                 return
@@ -3784,10 +3789,10 @@ class AgentWebSocketServer:
         )
         mode = deprecate_mode(metadata.get("mode")) if metadata else ""
         channel_id = str(metadata.get("channel_id") or "").strip().lower()
-        # metadata 缺失 / 非单 Agent 模式 / 渠道不支持 / cron 会话，均视为目标不可用
+        # Missing metadata, unsupported mode/channel, and Cron targets are unavailable.
         target_unsupported = (
             not metadata
-            or not is_single_agent_mode(mode)
+            or not (is_single_agent_mode(mode) or is_team_mode(mode))
             or channel_id not in {"web", "tui"}
             or bool(str(metadata.get("cron_id") or "").strip())
         )
@@ -3933,6 +3938,27 @@ class AgentWebSocketServer:
                     elif payload.get("input_boundary") == "stream":
                         delivered = True
                         continue
+                elif supplemental_delivery and event.ok and event_type == "team.input.accepted":
+                    # Team targets acknowledge with ``team.input.accepted``
+                    # instead of ``runtime.accepted``: the input has entered
+                    # the Team and its output arrives via the team broadcast,
+                    # so this stream stays receipt-only. Publish the
+                    # processing frame (cross-session marked) so the frontend
+                    # renders the input turn; without it the bubble only
+                    # appears after a history reload.
+                    await start_processing()
+                    delivered = True
+                    continue
+                elif supplemental_delivery and event.ok and event_type == "chat.processing_status_deferred":
+                    # A team follow-up delivered into an already-running Team
+                    # stream ends with the deferred marker instead of the
+                    # accepted receipt. The input was injected by interact(),
+                    # so publish the same processing frame for its turn.
+                    # (First-request submit-only streams hit the accepted
+                    # branch above first and skip this marker via continue.)
+                    await start_processing()
+                    delivered = True
+                    continue
                 elif record.input_mode == "steer" and event.ok and event_type == "runtime.accepted":
                     service = getattr(self, "_session_message_service", None)
                     if service is not None:
@@ -4006,7 +4032,15 @@ class AgentWebSocketServer:
                 await runtime_stream.aclose()
             finally:
                 try:
-                    if not supplemental_delivery and not processing_finished:
+                    team_processing_handed_off = (
+                        is_team_mode(mode)
+                        and outcome_tracker.saw_team_input_accepted
+                    )
+                    if (
+                        not supplemental_delivery
+                        and not processing_finished
+                        and not team_processing_handed_off
+                    ):
                         await self.send_push(
                             build_server_push_message(
                                 session_id=record.target_session_id,
@@ -4034,6 +4068,9 @@ class AgentWebSocketServer:
                             await release(
                                 record.target_session_id, request_id=request.request_id
                             )
+
+        if is_team_mode(mode) and outcome_tracker.saw_team_input_accepted:
+            return SessionMessageExecutionResult(status="delivered")
 
         if supplemental_delivery:
             if outcome_tracker.outcome() == "failed":
@@ -4087,7 +4124,9 @@ class AgentWebSocketServer:
             )
         if outcome == "waiting_user":
             return SessionMessageExecutionResult(status="waiting_user")
-        return SessionMessageExecutionResult(status="succeeded")
+        return SessionMessageExecutionResult(
+            status="delivered" if is_team_mode(mode) else "succeeded"
+        )
 
     async def _handle_stream_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -10833,7 +10872,7 @@ class AgentWebSocketServer:
                     channel_id=request.channel_id,
                     ok=True,
                     payload={
-                        "version": __version__,
+                        "version": get_runtime_version(),
                         "session_id": session_id,
                         "cwd": str(params.get("cwd", "") or os.getcwd()),
                         "model": model_name,
@@ -11696,6 +11735,15 @@ class AgentWebSocketServer:
     def get_agent_manager(self) -> AgentManager:
         """获取 AgentManager 实例."""
         return self._agent_manager
+
+    def get_group_service(self):
+        """Return the lazily initialized group management service."""
+        from jiuwenswarm.server.runtime.group_service import GroupService
+
+        service = self._group_service
+        if service is None:
+            service = self._group_service = GroupService(self._execution_runtime())
+        return service
 
     def get_runtime(self) -> AgentRuntime:
         """Return the transport-independent Runtime owned by AgentServer."""

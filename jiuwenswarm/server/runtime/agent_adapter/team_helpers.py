@@ -10,9 +10,10 @@ import logging
 import os
 import re
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, aclosing
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -38,6 +39,11 @@ from jiuwenswarm.server.runtime.session.history_io import (
 
 from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
 from jiuwenswarm.agents.harness.team.team_manager import TEAM_EVENT_QUEUE_MAXSIZE
+from jiuwenswarm.agents.harness.common.tools.session_messaging_toolkit import (
+    SessionMessagingRoute,
+    session_messaging_route_context,
+    with_session_messaging_route,
+)
 from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
 from jiuwenswarm.common.mode_matrix import NEW_TEAM_DESIGN
 from jiuwenswarm.common.utils import get_agent_skills_dir, mask_sensitive
@@ -62,6 +68,7 @@ from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMo
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
+from jiuwenswarm.runtime.session_input import SessionInputMode, resolve_session_input_mode
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EvolutionProgressStatus,
     EvolutionPushContext,
@@ -109,6 +116,8 @@ logger = logging.getLogger(__name__)
 _WORKFLOW_RUNS_STATE_KEY = "workflow_runs"
 _SESSION_BUDGET_STATE_KEY = "session_budget"
 _SESSION_SWARMFLOW_CONFIG_KEY = "session_swarmflow_config"
+_SESSION_TEAM_DISPATCH_MODE_KEY = "session_team_dispatch_mode"
+_TEAM_DISPATCH_MODES = frozenset({"autonomous", "scheduled"})
 
 _TEAM_CREATE_KINDS = {
     RunActionKind.CREATE.value,
@@ -528,6 +537,153 @@ class _FollowupInteractBoundaryResult:
     first_request_ready: bool
 
 
+def _team_input_run_context(request: Any) -> dict[str, Any]:
+    """Build the invocation-scoped context consumed by Team leader rails."""
+    inherited = session_messaging_route_context(request) or {}
+    try:
+        hop_count = max(0, int(inherited.get("hop_count") or 0))
+    except (TypeError, ValueError):
+        hop_count = 0
+    route = SessionMessagingRoute(
+        session_id=str(getattr(request, "session_id", "") or "").strip(),
+        request_id=str(getattr(request, "request_id", "") or "").strip(),
+        user_id=str(getattr(request, "user_id", "") or "").strip(),
+        chain_id=str(inherited.get("chain_id") or "").strip(),
+        parent_message_id=str(inherited.get("message_id") or "").strip(),
+        hop_count=hop_count,
+    )
+    routed_inputs = with_session_messaging_route({}, route)
+    run = routed_inputs.get("run")
+    if not isinstance(run, dict):
+        return {}
+    context = run.get("context")
+    return dict(context) if isinstance(context, dict) else {}
+
+
+async def _interact_with_team_context(
+    team_manager: Any,
+    session_id: str,
+    query: Any,
+    *,
+    run_context: object | None,
+) -> tuple[bool, str | None]:
+    """Interact while preserving compatibility with context-free callers."""
+    if run_context is None:
+        return await team_manager.interact(session_id, query)
+    return await team_manager.interact(
+        session_id,
+        query,
+        run_context=run_context,
+    )
+
+
+def _add_team_waiter(
+    team_manager: Any,
+    session_id: str,
+    request_id: str,
+    request_queue: asyncio.Queue,
+    *,
+    exclusive: bool = False,
+    generation: int | None,
+    attach_only: bool = False,
+) -> None:
+    """Register a waiter with generation data when Runtime supplied it."""
+    team_manager.add_waiter(
+        session_id,
+        request_id,
+        request_queue,
+        exclusive=exclusive,
+        generation=generation,
+        attach_only=attach_only,
+    )
+
+
+def _remove_team_waiter(
+    team_manager: Any,
+    session_id: str,
+    request_id: str,
+    *,
+    generation: int | None,
+) -> None:
+    """Remove a waiter without widening the legacy manager contract."""
+    team_manager.remove_waiter(
+        session_id,
+        request_id,
+        generation=generation,
+    )
+
+
+def _has_team_stream_task(
+    team_manager: Any,
+    session_id: str,
+    *,
+    generation: int | None,
+) -> bool:
+    """Check stream ownership using generation data when available."""
+    return bool(team_manager.has_stream_task(session_id, generation=generation))
+
+
+async def _release_team_round(
+    team_manager: Any,
+    session_id: str,
+    request_id: str,
+    *,
+    generation: int | None,
+) -> None:
+    """Release one round with optional generation fencing."""
+    await team_manager.release_round(
+        session_id,
+        request_id,
+        generation=generation,
+    )
+
+
+def _begin_team_manager_round(
+    team_manager: Any,
+    session_id: str,
+    request_id: str,
+    *,
+    release_admission: Callable[[], Awaitable[None]] | None,
+    defer_terminal_release: bool = False,
+    terminal_armed: bool,
+    generation: int | None,
+) -> None:
+    """Begin round ownership with optional generation fencing."""
+    team_manager.begin_round(
+        session_id,
+        request_id,
+        release_admission=release_admission,
+        defer_terminal_release=defer_terminal_release,
+        terminal_armed=terminal_armed,
+        generation=generation,
+    )
+
+
+def _register_team_stream_task(
+    team_manager: Any,
+    session_id: str,
+    stream_task: asyncio.Task,
+    *,
+    generation: int | None,
+) -> None:
+    """Register producer ownership with optional generation fencing."""
+    team_manager.register_stream_task(
+        session_id,
+        stream_task,
+        generation=generation,
+    )
+
+
+def _pop_team_stream_task(
+    team_manager: Any,
+    session_id: str,
+    *,
+    generation: int | None,
+) -> None:
+    """Pop producer ownership with optional generation fencing."""
+    team_manager.pop_stream_task(session_id, generation=generation)
+
+
 async def _deliver_followup_interact_across_boundary(
     team_manager: Any,
     session_id: str,
@@ -536,6 +692,7 @@ async def _deliver_followup_interact_across_boundary(
     initial_reason: str | None = None,
     timeout_sec: float = _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC,
     poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
+    run_context: object | None = None,
 ) -> _FollowupInteractBoundaryResult:
     """Deliver a follow-up until interact succeeds or the session becomes first-run ready."""
     deadline = time.monotonic() + max(0.0, timeout_sec)
@@ -547,7 +704,12 @@ async def _deliver_followup_interact_across_boundary(
         await asyncio.sleep(sleep_sec)
         if not await _team_session_has_runtime(team_manager, session_id):
             return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
-        success, reason = await team_manager.interact(session_id, query)
+        success, reason = await _interact_with_team_context(
+            team_manager,
+            session_id,
+            query,
+            run_context=run_context,
+        )
         if success:
             return _FollowupInteractBoundaryResult(success=True, reason=None, first_request_ready=False)
         last_reason = reason
@@ -989,6 +1151,51 @@ def _resolve_session_swarmflow_config(
         session_id, result,
     )
     return result
+
+
+def _coerce_team_dispatch_mode(value: Any) -> str | None:
+    """Return ``value`` as a known dispatch mode, else None."""
+    mode = str(value or "").strip().lower()
+    return mode if mode in _TEAM_DISPATCH_MODES else None
+
+
+def persist_session_team_dispatch_mode(session_id: str, dispatch_mode: str) -> None:
+    """Persist the session-level team dispatch mode to session metadata.
+
+    Mirrors persist_session_swarmflow_config (read-modify-write, no-op on read
+    failure) so a refreshed page restores the mode the team was built with.
+    """
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
+    metadata = _read_metadata(session_id, cache_bust=True)
+    if not metadata.get("session_id"):
+        logger.warning(
+            "[TeamHelpers] skipping session_team_dispatch_mode persist: "
+            "failed to read session metadata (session_id=%s)",
+            session_id,
+        )
+        return
+    metadata[_SESSION_TEAM_DISPATCH_MODE_KEY] = dispatch_mode
+    _enqueue_write(session_id, metadata)
+
+
+def _resolve_session_team_dispatch_mode(
+    params: dict | None,
+    *,
+    session_id: str,
+) -> str | None:
+    """Resolve the session-level team dispatch mode: params > persisted > unset.
+
+    ``None`` means "not specified" and the team config's ``dispatch_mode``
+    stands, so clients that never send the key (TUI, cron) keep the global
+    behavior.
+    """
+    if params is not None:
+        requested = _coerce_team_dispatch_mode(params.get("team_dispatch_mode"))
+        if requested is not None:
+            return requested
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+    metadata = _read_metadata(session_id, cache_bust=True)
+    return _coerce_team_dispatch_mode(metadata.get(_SESSION_TEAM_DISPATCH_MODE_KEY))
 
 
 def _resolve_channel_id(channel_id: str | None) -> str:
@@ -2353,6 +2560,68 @@ def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
         )
 
 
+async def _consume_attach_only_stream(
+    *,
+    request: Any,
+    team_manager: TeamManager,
+    startup: AsyncExitStack,
+    generation: int | None,
+) -> AsyncIterator[AgentResponseChunk]:
+    """Observe a running Team stream without submitting any input.
+
+    Mirrors the persistent waiter contract: the subscription stays attached
+    across Team rounds (including idle gaps and cold-started follow-ups)
+    until the response stream is closed by the caller — e.g. the gateway
+    tearing the stream down on disconnect. It never creates a producer or a
+    Runner stream; the waiter is registered under the caller's startup lock
+    so it cannot race a stream task being registered or torn down, and the
+    lock is released right after registration, never held while streaming.
+    """
+    session_id = request.session_id or "default"
+    rid = str(request.request_id or "")
+    channel_id = request.channel_id
+    request_queue = _new_team_event_queue()
+    _add_team_waiter(
+        team_manager,
+        session_id,
+        rid,
+        request_queue,
+        generation=generation,
+        attach_only=True,
+    )
+    if not _has_team_stream_task(team_manager, session_id, generation=generation):
+        # The Team stream is already idle (e.g. attaching after a finished
+        # round): no round transition will ever park this execution, so align
+        # it to WAITING_FOR_INPUT now — otherwise the RUNNING execution keeps
+        # the Session busy (undeletable) until the connection drops.
+        team_manager.report_round_state(session_id, generation, running=False)
+    try:
+        await startup.aclose()
+        while True:
+            try:
+                event = await asyncio.wait_for(request_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            _agent_ref, _metadata = _build_team_event_chunk_meta(event)
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload=event,
+                agent_ref=_agent_ref,
+                metadata=_metadata,
+                is_complete=False,
+            )
+            if isinstance(event, dict) and event.get("event_type") == "team.error":
+                break
+    finally:
+        _remove_team_waiter(
+            team_manager,
+            session_id,
+            rid,
+            generation=generation,
+        )
+
+
 async def _start_team_stream_round(
     *,
     channel_id: str | None,
@@ -2368,7 +2637,10 @@ async def _start_team_stream_round(
     exclusive_waiter: bool = False,
     request_queue: asyncio.Queue | None = None,
     team_leader_identity: dict[str, Any] | None = None,
-) -> asyncio.Queue:
+    generation: int | None = None,
+    attach_waiter: bool = True,
+    run_context: object | None = None,
+) -> asyncio.Queue | None:
     """Start a team stream round and register its waiter queue."""
     # Sync team observability with current config before streaming.
     # Runner.run_agent_team_streaming auto-attaches handlers when
@@ -2378,17 +2650,24 @@ async def _start_team_stream_round(
 
     sync_team_observability()
     await team_manager.prepare_runtime_activation(session_id, team_name)
-    if request_queue is None:
-        request_queue = _new_team_event_queue()
-        if exclusive_waiter:
-            team_manager.add_waiter(
+    if request_queue is None and attach_waiter:
+        # Re-check right before attaching. The waiter-kind decision was made
+        # before spec assembly, and a concurrent first request may have
+        # registered its interactive waiter inside that window; attaching a
+        # second one would duplicate every event to the frontend and double
+        # the admission ownership. Exclusive (Heartbeat) waiters keep their
+        # takeover semantics and are not blocked by an existing waiter.
+        already_attached = team_manager.has_interactive_waiter(session_id)
+        if exclusive_waiter or not already_attached:
+            request_queue = _new_team_event_queue()
+            _add_team_waiter(
+                team_manager,
                 session_id,
                 request_id,
                 request_queue,
-                exclusive=True,
+                exclusive=exclusive_waiter,
+                generation=generation,
             )
-        else:
-            team_manager.add_waiter(session_id, request_id, request_queue)
     logger.info(
         "[TeamHelpers] %s team request: channel_id=%s session_id=%s",
         source,
@@ -2408,16 +2687,22 @@ async def _start_team_stream_round(
     }
     if team_leader_identity is not None:
         stream_kwargs["team_leader_identity"] = team_leader_identity
-    stream_task = asyncio.create_task(
-        _consume_stream_with_query(
-            channel_id,
-            session_id,
-            team_spec,
-            query,
-            **stream_kwargs,
-        )
+    stream = _consume_stream_with_query(
+        channel_id,
+        session_id,
+        team_spec,
+        query,
+        generation=generation,
+        run_context=run_context,
+        **stream_kwargs,
     )
-    team_manager.register_stream_task(session_id, stream_task)
+    stream_task = asyncio.create_task(stream)
+    _register_team_stream_task(
+        team_manager,
+        session_id,
+        stream_task,
+        generation=generation,
+    )
     return request_queue
 
 
@@ -2451,6 +2736,12 @@ async def process_team_message_stream(
 async def _bind_design_round_if_needed(request: Any) -> Any:
     """Bind the design execution context when this is a team.design turn."""
     if str(request.params.get("mode") or "").strip() != NEW_TEAM_DESIGN:
+        return None
+    from jiuwenswarm.runtime.session.model import TEAM_ATTACH_ONLY_PARAM
+
+    # An attach-only observer submits no input: binding would hold the
+    # node_run round guard for the whole subscription lifetime.
+    if request.params.get(TEAM_ATTACH_ONLY_PARAM) is True:
         return None
     from jiuwenswarm.server.runtime.design.team_bridge import DesignTeamBridge
 
@@ -2511,18 +2802,38 @@ async def _process_team_message_stream_locked(
     team_manager = get_team_manager(request.channel_id)
     session_id = request.session_id or "default"
     request_id = str(request.request_id or "")
+    from jiuwenswarm.runtime.session.model import (
+        TEAM_EXECUTION_CONTEXT_METADATA_KEY,
+        TeamExecutionContext,
+    )
+
+    request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    execution_context = request_metadata.get(TEAM_EXECUTION_CONTEXT_METADATA_KEY)
+    generation = (
+        execution_context.session.generation
+        if isinstance(execution_context, TeamExecutionContext)
+        else None
+    )
+    sanitized_metadata = dict(request_metadata)
+    sanitized_metadata.pop(TEAM_EXECUTION_CONTEXT_METADATA_KEY, None)
+    request = replace(request, metadata=sanitized_metadata)
     # 归档闸门：Team 回合从进入适配器起即算「运行中」，直到本轮 round 终止
     # （round 之前的 spec 组装 / 运行时激活等准备阶段也要覆盖）。
     begin_request = getattr(team_manager, "begin_request", None)
     end_request = getattr(team_manager, "end_request", None)
     if callable(begin_request):
-        begin_request(session_id, request_id)
+        begin_request(session_id, request_id, generation=generation)
     try:
         startup_lock = team_manager.get_startup_lock(session_id)
         async with AsyncExitStack() as startup:
             await startup.enter_async_context(startup_lock)
             async with aclosing(_process_team_message_stream(
-                request, inputs, deep_agent, team_manager=team_manager, startup=startup,
+                request,
+                inputs,
+                deep_agent,
+                team_manager=team_manager,
+                startup=startup,
+                execution_context=execution_context,
             )) as stream:
                 async for chunk in stream:
                     # Early replies (validation errors, slash commands) also end
@@ -2532,7 +2843,7 @@ async def _process_team_message_stream_locked(
     finally:
         # 兜底：提前返回（校验失败/斜杠命令）也要解除运行中标记。
         if callable(end_request):
-            end_request(session_id, request_id)
+            end_request(session_id, request_id, generation=generation)
 
 
 async def _process_team_message_stream(
@@ -2542,12 +2853,50 @@ async def _process_team_message_stream(
     *,
     team_manager: TeamManager,
     startup: AsyncExitStack,
+    execution_context: object,
 ) -> AsyncIterator[AgentResponseChunk]:
     """Process a team-mode streaming request."""
     heartbeat_service = _TEAM_HEARTBEAT_SERVICE.get()
     session_id = request.session_id or "default"
     rid = request.request_id
     channel_id = request.channel_id
+    from jiuwenswarm.runtime.session.model import (
+        TEAM_ATTACH_ONLY_PARAM,
+        TeamExecutionContext,
+        TeamWaiterKind,
+    )
+
+    generation = (
+        execution_context.session.generation
+        if isinstance(execution_context, TeamExecutionContext)
+        else None
+    )
+    waiter_kind = (
+        execution_context.details.waiter_kind
+        if isinstance(execution_context, TeamExecutionContext)
+        else TeamWaiterKind.NONE
+    )
+    has_execution_context = isinstance(execution_context, TeamExecutionContext)
+    run_context = _team_input_run_context(request) if has_execution_context else None
+
+    # Attach-only subscription: entering a running Team Session observes the
+    # live stream without submitting input. It must short-circuit before the
+    # spec assembly and admission work below — none of that applies to a pure
+    # observer, and skipping it keeps mailbox-driven rounds observable the
+    # moment the user switches into the Session.
+    request_params = getattr(request, "params", None)
+    if (
+        isinstance(request_params, dict)
+        and request_params.get(TEAM_ATTACH_ONLY_PARAM) is True
+    ):
+        async for chunk in _consume_attach_only_stream(
+            request=request,
+            team_manager=team_manager,
+            startup=startup,
+            generation=generation,
+        ):
+            yield chunk
+        return
 
     language = _resolve_request_language(request)
     # ``query`` stays the user's own words for the whole function — directive
@@ -2581,7 +2930,11 @@ async def _process_team_message_stream(
         )
     # The startup lock covers this check through waiter + stream registration,
     # including the awaits in spec assembly and MCP preflight below.
-    has_active_waiters = team_manager.has_waiters(session_id)
+    # Attach-only subscriptions receive broadcasts but never imply the Team
+    # stream is alive: a waiter from them must not flip a fresh input into a
+    # follow-up, which would deliver into a stopped runtime and stall on
+    # ``gate_closed``.
+    has_active_waiters = team_manager.has_input_waiters(session_id)
     is_first_request = (
         not await _team_session_has_runtime(team_manager, session_id)
         and not has_active_waiters
@@ -2591,10 +2944,37 @@ async def _process_team_message_stream(
         # Live follow-ups must remain concurrent; they only submit an input.
         await startup.aclose()
     request_queue: asyncio.Queue | None = None
-    is_heartbeat_request = _is_heartbeat_request(request)
-    is_cron_request = _is_cron_request_id(rid)
+    is_heartbeat_request = (
+        waiter_kind is TeamWaiterKind.EXCLUSIVE
+        if has_execution_context
+        else _is_heartbeat_request(request)
+    )
+    is_cron_request = (
+        waiter_kind is TeamWaiterKind.REQUEST
+        if has_execution_context
+        else _is_cron_request_id(rid)
+    )
     is_bounded_round = is_heartbeat_request or is_cron_request
     admission = getattr(heartbeat_service, "admission", None)
+    # A cross-Session turn is executed by the mailbox worker, which already
+    # holds this turn's ``session_message_run_id`` admission. Taking the
+    # interactive team slot on top of it would wait for that marker to clear —
+    # i.e. wait for this very turn to finish (it is released only after the
+    # stream ends), a self-deadlock. ``_begin_team_round`` routes such turns
+    # through the mailbox-scoped admission instead.
+    from jiuwenswarm.common.session_message import SESSION_MESSAGE_INTERNAL_KEY
+
+    request_params = getattr(request, "params", None)
+    cross_session_marker = (
+        request_params.get(SESSION_MESSAGE_INTERNAL_KEY)
+        if isinstance(request_params, dict)
+        else None
+    )
+    is_session_message_turn = isinstance(cross_session_marker, dict)
+    is_session_message_steer = (
+        is_session_message_turn
+        and resolve_session_input_mode(request_params) is SessionInputMode.STEER
+    )
     user_admitted = False
     cron_user_admitted = False
     round_submitted = False
@@ -2621,11 +3001,13 @@ async def _process_team_message_stream(
     def _ensure_interactive_round(*, terminal_armed: bool) -> None:
         if team_manager.is_round_active(session_id):
             return
-        team_manager.begin_round(
+        _begin_team_manager_round(
+            team_manager,
             session_id,
             rid,
             release_admission=_release_interactive_activity,
             terminal_armed=terminal_armed,
+            generation=generation,
         )
 
     async def _begin_team_round() -> None:
@@ -2633,7 +3015,16 @@ async def _process_team_message_stream(
         if group_input is not None and not group_input["mentions"]:
             return
         if not is_bounded_round:
-            if admission is not None:
+            if is_session_message_turn and not is_session_message_steer:
+                # A task-lane mailbox worker holds this turn's session-message
+                # admission. Claiming the interactive team slot on top of it
+                # would wait for this very turn to end, so the mailbox-scoped
+                # admission performs only the accepting check. Steering uses
+                # the interactive lane because it deliberately has no task
+                # marker and must reach an already active Team round.
+                if admission is not None:
+                    await admission.begin_team_session_message(session_id)
+            elif admission is not None:
                 begin_team_user = getattr(
                     admission,
                     "begin_team_user",
@@ -2653,7 +3044,8 @@ async def _process_team_message_stream(
             await admission.begin_bounded_team_user(session_id)
             cron_user_admitted = True
         try:
-            team_manager.begin_round(
+            _begin_team_manager_round(
+                team_manager,
                 session_id,
                 rid,
                 release_admission=(
@@ -2668,6 +3060,7 @@ async def _process_team_message_stream(
                 # first new runtime event so duplicate terminal frames from
                 # the previous generation cannot release this round.
                 terminal_armed=is_first_request,
+                generation=generation,
             )
         except BaseException:
             await _complete_user_submission(accepted=False)
@@ -2679,17 +3072,32 @@ async def _process_team_message_stream(
         round_submitted = accepted
         if is_heartbeat_request:
             if not accepted:
-                await team_manager.release_round(session_id, rid)
+                await _release_team_round(
+                    team_manager,
+                    session_id,
+                    rid,
+                    generation=generation,
+                )
             return
         if is_cron_request:
             if not accepted:
-                await team_manager.release_round(session_id, rid)
+                await _release_team_round(
+                    team_manager,
+                    session_id,
+                    rid,
+                    generation=generation,
+                )
             return
         if admission is None:
             return
         if not accepted:
             await _complete_user_submission(accepted=False)
-            await team_manager.release_round(session_id, rid)
+            await _release_team_round(
+                team_manager,
+                session_id,
+                rid,
+                generation=generation,
+            )
             return
         # Concurrent steers share the active round. If it already ended during
         # delivery, a late acknowledgement must not restore its busy marker.
@@ -2722,6 +3130,15 @@ async def _process_team_message_stream(
 
     try:
         request_metadata = dict(request.metadata or {})
+        if group_input is not None:
+            from jiuwenswarm.agents.swarm.group_chat import resolve_group_members
+
+            roster = resolve_group_members(
+                session_id, (getattr(request, "params", None) or {}).get("group_members"),
+                is_first_request=is_first_request,
+            )
+            if roster is not None:
+                request_metadata["group_members"] = roster
         # V2: 若请求携带 member_name（由 Gateway resolve_member_by_user 反查注入），
         # 在前拼接 $sender，让 OpenJiuwen 识别发言人身份。
         # 规则：
@@ -2854,6 +3271,10 @@ async def _process_team_message_stream(
             get_config(),
             session_id=session_id,
         )
+        team_dispatch_mode = _resolve_session_team_dispatch_mode(
+            params_obj if isinstance(params_obj, dict) else None,
+            session_id=session_id,
+        )
         team_spec = await team_manager.get_swarm_enriched_team_spec(
             session_id=session_id,
             mode=resolved_mode,
@@ -2869,8 +3290,13 @@ async def _process_team_message_stream(
             login_model_entry=login_model_entry,
             agent_group_name=agent_group_name,
             swarmflow_config=swarmflow_config,
+            dispatch_mode=team_dispatch_mode,
             model_selection=runtime_model_selection,
         )
+        if group_input is not None and request_metadata.get("group_members") is not None:
+            update_session_metadata(session_id=session_id,
+                group_members=request_metadata["group_members"],
+                touch_last_message_at=False, sync_write=True)
         if isinstance(model_selection, dict) and model_selection.get("type") and model_selection.get("id"):
             from jiuwenswarm.common.model_selection import ModelSelection as SwarmModelSelection
             from jiuwenswarm.server.runtime.session.model_selection_store import (
@@ -2909,6 +3335,11 @@ async def _process_team_message_stream(
             )
         ):
             persist_session_swarmflow_config(session_id, swarmflow_config)
+        if (
+            isinstance(params_obj, dict)
+            and _coerce_team_dispatch_mode(params_obj.get("team_dispatch_mode")) is not None
+        ):
+            persist_session_team_dispatch_mode(session_id, team_spec.dispatch_mode)
         if team_skill_names is not None:
             await _apply_team_skill_selection(
                 team_manager=team_manager,
@@ -3091,21 +3522,24 @@ async def _process_team_message_stream(
                 None,
             )
             needs_interactive_waiter = (
-                not is_bounded_round
-                and callable(has_interactive_waiter)
-                and not has_interactive_waiter(session_id)
+                waiter_kind is TeamWaiterKind.PERSISTENT
+                if has_execution_context
+                else (
+                    not is_bounded_round
+                    and callable(has_interactive_waiter)
+                    and not has_interactive_waiter(session_id)
+                )
             )
             if is_bounded_round or needs_interactive_waiter:
                 request_queue = _new_team_event_queue()
-                if is_heartbeat_request:
-                    team_manager.add_waiter(
-                        session_id,
-                        rid,
-                        request_queue,
-                        exclusive=True,
-                    )
-                else:
-                    team_manager.add_waiter(session_id, rid, request_queue)
+                _add_team_waiter(
+                    team_manager,
+                    session_id,
+                    rid,
+                    request_queue,
+                    exclusive=is_heartbeat_request,
+                    generation=generation,
+                )
             if query:
                 # Follow-up rounds carry their own attachments and context, so
                 # they are rendered exactly like the first one.
@@ -3121,9 +3555,11 @@ async def _process_team_message_stream(
                     query = turn.text if isinstance(turn.text, str) else query
                 followup_payload = _deliverable(turn, query)
                 await _begin_team_round()
-                success, reason = await team_manager.interact(
+                success, reason = await _interact_with_team_context(
+                    team_manager,
                     session_id,
                     followup_payload,
+                    run_context=run_context,
                 )
                 if not success:
                     logger.warning(
@@ -3135,12 +3571,21 @@ async def _process_team_message_stream(
                     )
                     first_request_ready = False
                     if _is_followup_delivery_boundary_reason(reason):
-                        boundary_result = await _deliver_followup_interact_across_boundary(
-                            team_manager,
-                            session_id,
-                            followup_payload,
-                            initial_reason=reason,
-                        )
+                        if run_context is None:
+                            boundary_result = await _deliver_followup_interact_across_boundary(
+                                team_manager,
+                                session_id,
+                                followup_payload,
+                                initial_reason=reason,
+                            )
+                        else:
+                            boundary_result = await _deliver_followup_interact_across_boundary(
+                                team_manager,
+                                session_id,
+                                followup_payload,
+                                initial_reason=reason,
+                                run_context=run_context,
+                            )
                         success = boundary_result.success
                         reason = boundary_result.reason
                         first_request_ready = boundary_result.first_request_ready
@@ -3153,12 +3598,21 @@ async def _process_team_message_stream(
                         if not await _team_session_has_runtime(team_manager, session_id):
                             break
                         await startup.aclose()
-                        boundary_result = await _deliver_followup_interact_across_boundary(
-                            team_manager,
-                            session_id,
-                            followup_payload,
-                            initial_reason=reason,
-                        )
+                        if run_context is None:
+                            boundary_result = await _deliver_followup_interact_across_boundary(
+                                team_manager,
+                                session_id,
+                                followup_payload,
+                                initial_reason=reason,
+                            )
+                        else:
+                            boundary_result = await _deliver_followup_interact_across_boundary(
+                                team_manager,
+                                session_id,
+                                followup_payload,
+                                initial_reason=reason,
+                                run_context=run_context,
+                            )
                         success = boundary_result.success
                         reason = boundary_result.reason
                         first_request_ready = boundary_result.first_request_ready
@@ -3243,7 +3697,12 @@ async def _process_team_message_stream(
                         is_complete=False,
                     )
                     if not group_input["mentions"]:
-                        await team_manager.release_round(session_id, rid)
+                        await _release_team_round(
+                            team_manager,
+                            session_id,
+                            rid,
+                            generation=generation,
+                        )
                         yield _team_processing_done_chunk(rid, channel_id, session_id)
                         yield AgentResponseChunk(
                             request_id=rid, channel_id=channel_id, payload=None, is_complete=True,
@@ -3276,7 +3735,12 @@ async def _process_team_message_stream(
                                 is_complete=False,
                             )
                     finally:
-                        team_manager.remove_waiter(session_id, rid)
+                        _remove_team_waiter(
+                            team_manager,
+                            session_id,
+                            rid,
+                            generation=generation,
+                        )
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=channel_id,
@@ -3359,14 +3823,58 @@ async def _process_team_message_stream(
                     exclusive_waiter=is_heartbeat_request,
                     request_queue=request_queue,
                     team_leader_identity=team_leader_identity,
+                    generation=generation,
+                    attach_waiter=(
+                        waiter_kind is not TeamWaiterKind.NONE
+                        if has_execution_context
+                        else True
+                    ),
+                    run_context=run_context,
                 )
             except BaseException:
-                team_manager.remove_waiter(session_id, rid)
+                _remove_team_waiter(
+                    team_manager,
+                    session_id,
+                    rid,
+                    generation=generation,
+                )
                 team_manager.clear_pending_runtime(session_id)
                 await _finish_round_submission(accepted=False)
                 raise
             await startup.aclose()
             await _finish_round_submission(accepted=True)
+
+            if request_queue is None:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": "team.input.accepted",
+                        "session_id": session_id,
+                    },
+                    is_complete=False,
+                )
+                # The round is owned by the background team stream (e.g. an
+                # attach waiter consumes its output). The deferred marker tells
+                # the Gateway not to auto-emit is_processing=False when this
+                # submit-only stream ends — that emit would flash the frontend
+                # as paused until the next round event arrives.
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": "chat.processing_status_deferred",
+                        "session_id": session_id,
+                    },
+                    is_complete=False,
+                )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload=None,
+                    is_complete=True,
+                )
+                return
 
         try:
             if is_bounded_round and request_queue is not None:
@@ -3390,7 +3898,11 @@ async def _process_team_message_stream(
             else:
                 # while 循环：仅 first-request 使用，依赖 stream_task 生命周期。
                 # follow-up 已在上方 return，不再进入此循环。
-                while team_manager.has_stream_task(session_id):
+                while _has_team_stream_task(
+                    team_manager,
+                    session_id,
+                    generation=generation,
+                ):
                     if request_queue is None:
                         break
                     try:
@@ -3419,7 +3931,11 @@ async def _process_team_message_stream(
                         if isinstance(event, dict) and event.get("event_type") == "team.error":
                             break
                     except asyncio.TimeoutError:
-                        if not team_manager.has_stream_task(session_id):
+                        if not _has_team_stream_task(
+                            team_manager,
+                            session_id,
+                            generation=generation,
+                        ):
                             break
                         continue
                 # Drain any events that were enqueued by
@@ -3500,7 +4016,12 @@ async def _process_team_message_stream(
         raise
     finally:
         if request_queue is not None:
-            team_manager.remove_waiter(session_id, rid)
+            _remove_team_waiter(
+                team_manager,
+                session_id,
+                rid,
+                generation=generation,
+            )
             if _is_cron_request_id(rid):
                 team_manager.pop_cron_completion(session_id)
             if not team_manager.has_waiters(session_id):
@@ -3526,7 +4047,12 @@ async def _process_team_message_stream(
             )
             await asyncio.shield(abort_task)
         elif is_bounded_round or not round_submitted:
-            await team_manager.release_round(session_id, rid)
+            await _release_team_round(
+                team_manager,
+                session_id,
+                rid,
+                generation=generation,
+            )
         if (
             user_admitted
             and not round_submitted
@@ -3602,6 +4128,8 @@ async def _consume_stream_with_query(
     round_id: int,
     envs: dict[str, Any] | None = None,
     team_leader_identity: dict[str, Any] | None = None,
+    generation: int | None = None,
+    run_context: object | None = None,
 ) -> None:
     """Consume the team stream in the background and broadcast parsed events."""
     _envs = envs or {}
@@ -3662,14 +4190,26 @@ async def _consume_stream_with_query(
             session_id=session_id,
             kv_cache_runtime=get_kv_cache_runtime(),
         )
-        async for chunk in Runner.run_agent_team_streaming(
-            agent_team=team_spec,
-            inputs={"query": initial_query},
-            session=team_session,
-            envs=envs,
-            stream_logger=lg,
-            background_task_controller=get_background_task_controller(session_id),
-        ):
+        if run_context is None:
+            runner_stream = Runner.run_agent_team_streaming(
+                agent_team=team_spec,
+                inputs={"query": initial_query},
+                session=team_session,
+                envs=envs,
+                stream_logger=lg,
+                background_task_controller=get_background_task_controller(session_id),
+            )
+        else:
+            runner_stream = Runner.run_agent_team_streaming(
+                agent_team=team_spec,
+                inputs={"query": initial_query},
+                session=team_session,
+                envs=envs,
+                stream_logger=lg,
+                background_task_controller=get_background_task_controller(session_id),
+                run_context=run_context,
+            )
+        async for chunk in runner_stream:
             received_chunks += 1
             # First event of any kind from the runner — usually a framework
             # control event (team.runtime_ready and friends), not model output.
@@ -3763,6 +4303,15 @@ async def _consume_stream_with_query(
                     )
                     tm = get_team_manager(channel_id)
                     tm.commit_runtime_ready(session_id, ready_team_name)
+                    from jiuwenswarm.server.runtime.group_service import (
+                        read_group, resolve_group_backend, sync_group_roster,
+                    )
+
+                    group = read_group(session_id)
+                    if group is not None:
+                        backend = await resolve_group_backend(group)
+                        if backend is not None:
+                            await sync_group_roster(group, backend)
                     await tm.attach_distributed_hooks_for_runner_runtime(
                         team_name=ready_team_name,
                         session_id=session_id,
@@ -4074,7 +4623,11 @@ async def _consume_stream_with_query(
             clear_active_runtime = getattr(team_manager, "clear_active_runtime", None)
             if callable(clear_active_runtime):
                 clear_active_runtime(session_id)
-            team_manager.pop_stream_task(session_id)
+            _pop_team_stream_task(
+                team_manager,
+                session_id,
+                generation=generation,
+            )
 
 
 async def _consume_monitor_events(

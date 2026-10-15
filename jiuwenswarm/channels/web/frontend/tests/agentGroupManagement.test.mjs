@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import {
   buildAgentGroupCreatePayload,
@@ -75,6 +76,8 @@ test('builds a group create payload without unsupported Agent fields', () => {
   assert.deepEqual(payload.skills, ['review']);
   assert.deepEqual(payload.quickInputs, ['评审方案']);
   assert.equal(payload.tags[0].zh, '产品研发');
+  assert.equal(payload.tags[0].id, 'product-development');
+  assert.equal(payload.tags[1].id, '交付');
   for (const forbidden of ['model', 'mcps', 'pluginNames', 'apiKey', 'apiBase', 'path']) {
     assert.equal(Object.hasOwn(payload, forbidden), false, forbidden);
   }
@@ -239,4 +242,24 @@ test('catalog filtering keeps description matches while mine excludes them', () 
   const options = { category: '', query: 'description-only', page: 1, pageSize: 12 };
   assert.equal(buildGroupCatalogViewModel([item], { ...options, scope: 'catalog' }).totalItems, 1);
   assert.equal(buildGroupCatalogViewModel([item], { ...options, scope: 'mine' }).totalItems, 0);
+});
+
+test('chat group picker submits runtime package names and keeps selection checked', () => {
+  const source = readFileSync(new URL('../src/components/ChatPanel/InputArea.tsx', import.meta.url), 'utf8');
+  const picker = source.slice(source.indexOf('filteredGroupOptions.map((item) => {'));
+  const handler = picker.match(/onClick=\{\(\) => \{([\s\S]*?)\}\}/)[1];
+  const selectedExpression = picker.match(/const isSelected = ([^;]+);/)[1];
+  for (const item of [
+    { id: 'hub-asset-uuid', name: 'presentation-generation' },
+    { id: 'local-team', name: 'local-team' },
+  ]) {
+    let intent;
+    new Function('item', 'agentGroupSelectionDisabled', 'activeSessionId', 'useSessionStore',
+      'setAgentGroupSelectionIntent', 'setAgentSelectionIntent', 'clearSelectedSkills', 'setAttachMenuOpen', handler)(
+      item, false, 'new', { getState: () => ({ setMode() {} }) },
+      (_session, value) => { intent = value; }, () => {}, () => {}, () => {},
+    );
+    assert.deepEqual(buildAgentGroupSelectionPayloadForMode('team', intent), { agent_group_name: item.name });
+    assert.equal(new Function('item', 'selectedGroupId', `return ${selectedExpression}`)(item, item.name), true);
+  }
 });
