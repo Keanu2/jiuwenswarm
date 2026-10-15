@@ -126,6 +126,20 @@ def list_video_styles() -> list[dict[str, Any]]:
     return out
 
 
+_ANIMATE_CUES = (
+    "10秒",
+    "15秒",
+    "10-15",
+    "10–15",
+    "short video",
+    "短视频",
+    "动起来",
+    "animate",
+    "bring to life",
+    "活过来",
+)
+
+
 def detect_video_style(
     prompt: str,
     *,
@@ -142,21 +156,7 @@ def detect_video_style(
         if cue.lower() in blob:
             return VIDEO_STYLE_FINAL_FRAME_REVERSE
     # Uploaded image + short-form language often means "animate into this pose".
-    if has_reference_images and any(
-        k in blob
-        for k in (
-            "10秒",
-            "15秒",
-            "10-15",
-            "10–15",
-            "short video",
-            "短视频",
-            "动起来",
-            "animate",
-            "bring to life",
-            "活过来",
-        )
-    ):
+    if has_reference_images and any(k in blob for k in _ANIMATE_CUES):
         return VIDEO_STYLE_FINAL_FRAME_REVERSE
     return VIDEO_STYLE_DEFAULT_CINEMATIC
 

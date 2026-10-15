@@ -58,13 +58,8 @@ def _style_is_covered(text: str, look: str) -> bool:
         return True
     if style in body:
         return True
-    cues = {
-        token
-        for token in re.findall(r"[\w-]+", style)
-        if len(token) > 4
-        and token
-        not in {"across", "every", "feature", "coherent", "forms", "shapes", "rendering"}
-    }
+    filler = {"across", "every", "feature", "coherent", "forms", "shapes", "rendering"}
+    cues = {token for token in re.findall(r"[\w-]+", style) if len(token) > 4 and token not in filler}
     return bool(cues and any(token in body for token in cues))
 
 
@@ -102,12 +97,7 @@ def visual_prop_list(raw: Any) -> list[str]:
     out: list[str] = []
     for item in parts:
         text = str(item or "").strip()
-        if (
-            not text
-            or _BAD.search(text)
-            or _PLACEHOLDER_PROP.search(text)
-            or _INSTRUCTION_PLACE.search(text)
-        ):
+        if not text or any(p.search(text) for p in (_BAD, _PLACEHOLDER_PROP, _INSTRUCTION_PLACE)):
             continue
         if text not in out:
             out.append(text[:160])

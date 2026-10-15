@@ -33,6 +33,8 @@ from jiuwenswarm.server.runtime.designer.pipeline.model_capacity import (
 
 VIDEO_SETTINGS_KEY = "video_settings"
 IMAGE_SETTINGS_KEY = "image_settings"
+
+
 class MediaSettingsError(ValueError):
     """A settings patch names a field or value the active models do not accept."""
 

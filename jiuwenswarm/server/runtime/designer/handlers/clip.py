@@ -300,9 +300,10 @@ def collect_clip_reference_images(
 ) -> list[Path]:
     """Wan reference_images: on-screen character specs, then user images, then the scene spec.
 
-    Design clips always attach these as R2V refs — never as a single first-frame image. Order matches Wan R2V labeling: character specs are character1…, uploads and
-    user-wired image nodes follow, and the scene spec stays last as the
-    environment.
+    Design clips always attach these as R2V refs — never as a single
+    first-frame image. Order matches Wan R2V labeling: character specs are
+    character1…, uploads and user-wired image nodes follow, and the scene spec
+    stays last as the environment.
     """
     from jiuwenswarm.server.runtime.designer.handlers.common import (
         node_ids_output_image_paths,
@@ -770,7 +771,8 @@ def build_clip_prompt(
             f"Storyboard shot for shot {clip_index} only "
             f"(action={action or 'see clip spec'}; camera={camera or 'match clip spec'})."
         )
-    override = str((cfg.get("generate") or {}).get("prompt") or "").strip() if isinstance(cfg.get("generate"), dict) else ""
+    generate_cfg = cfg.get("generate")
+    override = str(generate_cfg.get("prompt") or "").strip() if isinstance(generate_cfg, dict) else ""
     # When live storyboard already provided the shot, skip stale generate.prompt narratives.
     if override and not sb_action:
         extracted = _extract_action_from_generate_prompt(override)
@@ -978,8 +980,8 @@ class ClipNodeHandler:
         refs = collect_clip_reference_images(
             ctx, clip_index, node=node
         )
-        _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
-        ref_files = [p for p in refs if p.is_file() and p.suffix.lower() in _IMG]
+        image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+        ref_files = [p for p in refs if p.is_file() and p.suffix.lower() in image_suffixes]
         scene_chain = resolve_gated_last_frame_chain(cfg, graph=graph, ctx=ctx)
         if scene_chain:
             cfg = stamp_scene_last_frame_chain(cfg, scene_chain)

@@ -128,8 +128,9 @@ def architecture_clause_from_bible(bible: dict[str, Any] | None) -> str:
     if not isinstance(bible, dict) or not bible:
         return ""
     objects = ", ".join(str(x) for x in (bible.get("objects") or [])[:6] if str(x).strip())
+    scene = bible.get("scene_name") or bible.get("place")
     parts = [
-        f"scene={bible.get('scene_name') or bible.get('place')}" if (bible.get("scene_name") or bible.get("place")) else "",
+        f"scene={scene}" if scene else "",
         f"lighting={bible.get('lighting')}" if bible.get("lighting") else "",
         f"objects={objects}" if objects else "",
         f"crowd={bible.get('crowd')}" if bible.get("crowd") else "",
@@ -221,7 +222,8 @@ def strip_prior_prompt_pastes(prompt: str) -> str:
         return ""
     patterns = (
         r"\n*PRIOR CLIP PROMPT \(do not redo the same beat; advance time\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
-        r"\n*PRIOR SHOT CONSISTENCY \(do NOT redo these beats; continue the film forward\):\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
+        r"\n*PRIOR SHOT CONSISTENCY \(do NOT redo these beats; continue the film forward\):\n"
+        r"[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
         r"\n*MASTER SCENE PROMPT:\n[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
         r"\n*CHARACTER CONSISTENCY \(Director\):[\s\S]*?(?=\n[A-Z][A-Z _/]{2,}:|\Z)",
     )

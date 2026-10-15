@@ -364,7 +364,8 @@ def path_from_output_ref(ref: dict[str, Any] | None) -> str | None:
 
         parsed = urlparse(uri)
         path = unquote(parsed.path)
-        if os.name == "nt" and path.startswith("/") and len(path) > 2 and path[2] == ":":
+        has_drive_letter = len(path) > 2 and path[2] == ":"
+        if os.name == "nt" and path.startswith("/") and has_drive_letter:
             path = path[1:]
         return path
     if os.path.isfile(uri):

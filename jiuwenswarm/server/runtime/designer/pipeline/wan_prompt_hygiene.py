@@ -87,8 +87,11 @@ def positive_continuity_clause(
             on_screen_ids,
         )
     except Exception:  # noqa: BLE001
-        character_name_map = lambda _chars: {}  # type: ignore[assignment]
-        on_screen_ids = lambda _cfg: []  # type: ignore[assignment]
+        def character_name_map(_chars: Any) -> dict[str, str]:  # type: ignore[misc]
+            return {}
+
+        def on_screen_ids(_cfg: Any) -> list[str]:  # type: ignore[misc]
+            return []
 
     names = character_name_map(characters)
     on = on_screen_ids(cfg)

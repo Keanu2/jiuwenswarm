@@ -31,7 +31,7 @@ def _clean_bit(*parts: str) -> str:
 
 
 def _window_before(blob: str, end: int, *, span: int = 48) -> str:
-    return blob[max(0, end - span) : end]
+    return blob[max(0, end - span):end]
 
 
 def _color_in(window: str) -> str:
@@ -80,6 +80,11 @@ _BOTTOM_STYLES = (
     "relaxed",
 )
 _DRESS_STYLES = ("midi", "maxi", "mini", "cocktail", "evening", "casual")
+_SLOT_KEYS = ("top=", "bottom=", "outfit=")
+
+
+def _has_clothing_slots(text: str) -> bool:
+    return any(key in text for key in _SLOT_KEYS)
 
 
 def extract_clothing_parts(text: str) -> dict[str, str]:
@@ -198,7 +203,7 @@ def detailed_costume_lock_for_character(ch: dict[str, Any] | None) -> str:
     if not parts and str(ch.get("costume_lock") or "").strip():
         # Already structured (top=...; bottom=...).
         raw = str(ch.get("costume_lock") or "")
-        if "=" in raw and ("top=" in raw or "bottom=" in raw or "outfit=" in raw):
+        if "=" in raw and _has_clothing_slots(raw):
             return raw if raw.lower().startswith(name.lower()) else f"{name}: {raw}"[:480]
     slots = format_clothing_slots(parts, fallback=str(ch.get("description") or ch.get("costume_lock") or name))
     if not slots:
@@ -299,9 +304,10 @@ def ensure_cfg_clothing_lock(
         return detailed[:720]
     if existing:
         # Still attach hold-friendly structured copy when missing slots but text is rich.
-        if characters and cids and "top=" not in existing and "bottom=" not in existing:
+        has_top_or_bottom = "top=" in existing or "bottom=" in existing
+        if characters and cids and not has_top_or_bottom:
             upgraded = costume_lock_for_ids(characters, cids)
-            if upgraded and ("top=" in upgraded or "bottom=" in upgraded or "outfit=" in upgraded):
+            if upgraded and _has_clothing_slots(upgraded):
                 cfg["costume_lock"] = upgraded[:720]
                 return upgraded[:720]
         return existing[:720]

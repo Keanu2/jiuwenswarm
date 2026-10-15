@@ -111,7 +111,7 @@ def hollywood_leaf_instructions(role: str) -> str:
     if r == "clip":
         return (
             shared
-            +             "ROLE=clip. Write ONE concise positive story-form video prompt "
+            + "ROLE=clip. Write ONE concise positive story-form video prompt "
             "(Wan / Seedance / MiniMax-H3).\n"
             "FORM (locks folded into narrative — faithful, general, no examples):\n"
             "The scene is as in Image N: <place>. Scene description: <lighting/props from bible>.\n"

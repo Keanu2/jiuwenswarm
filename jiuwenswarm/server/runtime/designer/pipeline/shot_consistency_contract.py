@@ -264,6 +264,13 @@ def merge_storyboard_consistency(
     return out, notes
 
 
+def _is_opening_hold(hold: str, action_done: str) -> bool:
+    low = hold.lower()
+    if "already past:" in low or "after this shot" in low:
+        return False
+    return not action_done or action_done.lower() not in low
+
+
 def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
     """Leaf-facing continuity — structured fields only (no prior Wan dump)."""
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -273,7 +280,8 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
     action_done = str(
         end.get("action_done") or cfg.get("previous_clip_action") or ""
     ).strip()
-    if action_done or end or cfg.get("already_done") or cfg.get("pose_holds"):
+    has_holds = cfg.get("already_done") or cfg.get("pose_holds")
+    if action_done or end or has_holds:
         lines.append(
             f"CONTINUITY STATE (prior shot {idx} finished — structured only; "
             "write a NEW prompt for THIS storyboard row; never paste prior Wan text):"
@@ -291,13 +299,7 @@ def agent_structured_continuity_block(cfg: dict[str, Any] | None) -> str:
     if done:
         lines.append("- Already done: " + "; ".join(done[:8]))
     holds = [str(x).strip() for x in (cfg.get("pose_holds") or end.get("pose_holds") or []) if str(x).strip()]
-    holds = [
-        hold
-        for hold in holds
-        if "already past:" not in hold.lower()
-        and "after this shot" not in hold.lower()
-        and (not action_done or action_done.lower() not in hold.lower())
-    ]
+    holds = [hold for hold in holds if _is_opening_hold(hold, action_done)]
     if holds:
         lines.append("- Opening holds: " + "; ".join(holds[:6]))
     seats = cfg.get("seat_anchors") if isinstance(cfg.get("seat_anchors"), dict) else {}
@@ -402,13 +404,8 @@ def prompt_violates_consistency(
 
         prior_act = str(cfg.get("previous_clip_action") or "").strip()
         this_act = str(cfg.get("clip_action") or "").strip()
-        if (
-            prior_act
-            and this_act
-            and overlap_ratio(prior_act, this_act) < 0.4
-            and overlap_ratio(body, prior_act) >= 0.45
-            and overlap_ratio(body, this_act) < 0.35
-        ):
+        rows_differ = bool(prior_act and this_act) and overlap_ratio(prior_act, this_act) < 0.4
+        if rows_differ and overlap_ratio(body, prior_act) >= 0.45 and overlap_ratio(body, this_act) < 0.35:
             reasons.append("films_prior_action_not_this_row")
             prior_bias = True
     except Exception:  # noqa: BLE001

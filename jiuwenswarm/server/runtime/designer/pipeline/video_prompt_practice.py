@@ -182,20 +182,13 @@ def exited_ids(cfg: dict[str, Any] | None) -> list[str]:
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     occ = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
-    return list(
-        dict.fromkeys(
-            [
-                str(x).strip()
-                for x in (
-                    list(cfg.get("exited_ids") or [])
-                    + list(cfg.get("exiting_character_ids") or [])
-                    + list(cfg.get("exiting") or [])
-                    + list(occ.get("exited") or [])
-                )
-                if str(x).strip()
-            ]
-        )
+    raw = (
+        list(cfg.get("exited_ids") or [])
+        + list(cfg.get("exiting_character_ids") or [])
+        + list(cfg.get("exiting") or [])
+        + list(occ.get("exited") or [])
     )
+    return list(dict.fromkeys([str(x).strip() for x in raw if str(x).strip()]))
 
 
 def exited_names(cfg: dict[str, Any], graph: dict[str, Any] | None) -> list[str]:
@@ -208,6 +201,11 @@ def exited_names(cfg: dict[str, Any], graph: dict[str, Any] | None) -> list[str]
         # Storyboard return: listed on_screen wins; otherwise treat as gone.
         out.append(label)
     return out
+
+
+def _speaker_names(cfg: dict[str, Any], graph: dict[str, Any] | None) -> set[str]:
+    by_character = cfg.get("speech_by_character") if isinstance(cfg.get("speech_by_character"), dict) else {}
+    return {_name_for_id(str(key), graph).casefold() for key in by_character if str(key).strip()}
 
 
 def offscreen_names(cfg: dict[str, Any], graph: dict[str, Any] | None) -> list[str]:
@@ -226,13 +224,10 @@ def offscreen_names(cfg: dict[str, Any], graph: dict[str, Any] | None) -> list[s
         if token.casefold() in gone or token in exited_ids(cfg):
             continue
         label = _name_for_id(token, graph)
-        if (
-            not label
-            or label.casefold() in on
-            or label.casefold() in gone
-            or label.casefold() in gone_names
-            or label.casefold() in {x.casefold() for x in out}
-        ):
+        if not label:
+            continue
+        folded = label.casefold()
+        if any(folded in names for names in (on, gone, gone_names, {x.casefold() for x in out})):
             continue
         out.append(label)
     return out
@@ -520,15 +515,7 @@ def _cast_presence_lines(cfg: dict[str, Any], graph: dict[str, Any] | None, name
         else:
             lines.append(f"On screen: {', '.join(names[:-1])} and {names[-1]}.")
     away = offscreen_names(cfg, graph)
-    speakers = {
-        _name_for_id(str(key), graph).casefold()
-        for key in (
-            (cfg.get("speech_by_character") or {})
-            if isinstance(cfg.get("speech_by_character"), dict)
-            else {}
-        )
-        if str(key).strip()
-    }
+    speakers = _speaker_names(cfg, graph)
     heard = [name for name in away if name.casefold() in speakers]
     silent = [name for name in away if name.casefold() not in speakers]
     if heard:
@@ -931,15 +918,7 @@ def compose_practice_prompt(
         )
 
     # Still-in-setting offscreen: only if they speak this shot (heard). Never name exited.
-    speakers = {
-        _name_for_id(str(key), graph).casefold()
-        for key in (
-            (cfg.get("speech_by_character") or {})
-            if isinstance(cfg.get("speech_by_character"), dict)
-            else {}
-        )
-        if str(key).strip()
-    }
+    speakers = _speaker_names(cfg, graph)
     for who in offscreen_names(cfg, graph):
         if who.casefold() in gone_names or who.casefold() in {n.casefold() for n in names}:
             continue
@@ -1061,6 +1040,9 @@ _LOCK_BANNER_LINE = re.compile(
     r"(?i)^\s*(?:style\s*lock|costume\s*lock|clothing\s*lock|wardrobe\s*lock|"
     r"positioning\s*lock|scene\s*specs|forbid|forbidden|already-?done|on\s*screen)\b"
 )
+# Keep enough Film-shot narrative for prop/color edits (e.g. blue car) to
+# survive rewrite into Image-N practice form.
+_SEED_CAP = 1200
 
 
 def narrative_seed_from_user_prompt(prompt: str) -> str:
@@ -1068,9 +1050,6 @@ def narrative_seed_from_user_prompt(prompt: str) -> str:
     text = str(prompt or "").strip()
     if not text:
         return ""
-    # Keep enough Film-shot narrative for prop/color edits (e.g. blue car) to
-    # survive rewrite into Image-N practice form.
-    _SEED_CAP = 1200
     if not _BAD_DIRECTIVE.search(text) and not _LOCK_BANNER_LINE.search(text):
         return text[:_SEED_CAP]
     chunks: list[str] = []
@@ -1213,6 +1192,9 @@ def prompt_respects_practice(
     return reasons
 
 
+_ACTION_LABELS = ("primary action", "character action", "storyboard shot", "storyboard beat", "action")
+
+
 def _pull_labeled(prompt: str, prefixes: tuple[str, ...]) -> str:
     """First matching label wins. Prefix order is priority, not line order."""
     lines = [raw.strip().lstrip("-").strip() for raw in str(prompt or "").splitlines()]
@@ -1305,7 +1287,7 @@ def director_prepare_video_prompt(
         mined_action = (
             action
             or str(cfg.get("clip_action") or "")
-            or _pull_labeled(prompt, ("primary action", "character action", "storyboard shot", "storyboard beat", "action"))
+            or _pull_labeled(prompt, _ACTION_LABELS)
         )
         move = _pull_labeled(prompt, ("camera move",))
         angle = (
@@ -1368,7 +1350,7 @@ def director_approve_video_prompt(
         beat = (
             action
             or str(cfg.get("clip_action") or "")
-            or _pull_labeled(prompt, ("primary action", "character action", "storyboard shot", "storyboard beat", "action"))
+            or _pull_labeled(prompt, _ACTION_LABELS)
         )
         cam = (
             camera

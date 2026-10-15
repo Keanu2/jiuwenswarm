@@ -16,6 +16,10 @@ from __future__ import annotations
 from typing import Any
 
 
+def _is_prop_character(character: dict[str, Any]) -> bool:
+    return bool(character.get("is_prop")) or str(character.get("cast_kind") or "") in {"brand_mascot", "prop"}
+
+
 def compute_setting_ensembles(
     shots: list[dict[str, Any]],
     characters: list[dict[str, Any]] | None = None,
@@ -24,12 +28,7 @@ def compute_setting_ensembles(
     prop_chars = {
         str(c.get("id"))
         for c in (characters or [])
-        if isinstance(c, dict)
-        and c.get("id")
-        and (
-            c.get("is_prop")
-            or str(c.get("cast_kind") or "") in {"brand_mascot", "prop"}
-        )
+        if isinstance(c, dict) and c.get("id") and _is_prop_character(c)
     }
     by_set: dict[str, list[str]] = {}
     for shot in shots:
@@ -84,6 +83,27 @@ def identity_ref_priority(
     return out
 
 
+_CROWD_WORDS = (
+    "crowd",
+    "audience",
+    "extras",
+    "spectators",
+    "onlookers",
+    "background people",
+    "bystanders",
+    "group of people",
+)
+_CROWD_EXIT_WORDS = (
+    "crowd leaves",
+    "crowd exits",
+    "audience leaves",
+    "extras leave",
+    "people file out",
+    "crowd disperses",
+    "empty the room",
+)
+
+
 def _crowd_lock_for_setting(
     shot: dict[str, Any],
     *,
@@ -96,34 +116,11 @@ def _crowd_lock_for_setting(
         str(shot.get(k) or "")
         for k in ("action", "clip_prompt", "scene_objects", "comment", "title")
     ).lower()
-    mentions_crowd = any(
-        k in blob
-        for k in (
-            "crowd",
-            "audience",
-            "extras",
-            "spectators",
-            "onlookers",
-            "background people",
-            "bystanders",
-            "group of people",
-        )
-    )
+    mentions_crowd = any(k in blob for k in _CROWD_WORDS)
     present = bool(prev.get("present")) or (is_first_of_set and mentions_crowd)
     if not present and prev.get("present"):
         present = True
-    exiting_crowd = any(
-        k in blob
-        for k in (
-            "crowd leaves",
-            "crowd exits",
-            "audience leaves",
-            "extras leave",
-            "people file out",
-            "crowd disperses",
-            "empty the room",
-        )
-    )
+    exiting_crowd = any(k in blob for k in _CROWD_EXIT_WORDS)
     if exiting_crowd:
         present = False
     count_hint = str(prev.get("density") or "").strip()
@@ -246,15 +243,7 @@ def apply_compose_character_specs_setting_policy(analysis: dict[str, Any]) -> di
     shots = [s for s in (out.get("clips") or []) if isinstance(s, dict)]
     characters = [c for c in (out.get("characters") or []) if isinstance(c, dict)]
     by_id = {str(c.get("id")): c for c in characters if c.get("id")}
-    prop_ids = {
-        str(c.get("id"))
-        for c in characters
-        if c.get("id")
-        and (
-            c.get("is_prop")
-            or str(c.get("cast_kind") or "") in {"brand_mascot", "prop"}
-        )
-    }
+    prop_ids = {str(c.get("id")) for c in characters if c.get("id") and _is_prop_character(c)}
     all_human_ids = [
         str(c.get("id"))
         for c in characters

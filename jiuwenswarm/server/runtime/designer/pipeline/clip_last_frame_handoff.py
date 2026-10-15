@@ -47,36 +47,31 @@ def _setting_id(cfg: dict[str, Any] | None) -> str:
     return str(cfg.get("setting_id") or "").strip() or "set_1"
 
 
+_HARD_CUT_TOKENS = (
+    "hard cut",
+    "smash cut",
+    "cut to",
+    "new location",
+    "elsewhere",
+    "meanwhile",
+    "jump cut to another",
+)
+
+
 def _looks_like_hard_cut(this_cfg: dict[str, Any] | None, prev_cfg: dict[str, Any] | None) -> bool:
     this_cfg = this_cfg if isinstance(this_cfg, dict) else {}
     prev_cfg = prev_cfg if isinstance(prev_cfg, dict) else {}
-    blob = " ".join(
-        str(x)
-        for x in (
-            this_cfg.get("clip_action"),
-            this_cfg.get("scene_change"),
-            this_cfg.get("scene_distinctness"),
-            (this_cfg.get("continuity_lock") or {}).get("forbid")
-            if isinstance(this_cfg.get("continuity_lock"), dict)
-            else "",
-            (this_cfg.get("generate") or {}).get("prompt")
-            if isinstance(this_cfg.get("generate"), dict)
-            else "",
-        )
-        if x
-    ).lower()
-    if any(
-        tok in blob
-        for tok in (
-            "hard cut",
-            "smash cut",
-            "cut to",
-            "new location",
-            "elsewhere",
-            "meanwhile",
-            "jump cut to another",
-        )
-    ):
+    lock = this_cfg.get("continuity_lock") if isinstance(this_cfg.get("continuity_lock"), dict) else {}
+    generate = this_cfg.get("generate") if isinstance(this_cfg.get("generate"), dict) else {}
+    parts = (
+        this_cfg.get("clip_action"),
+        this_cfg.get("scene_change"),
+        this_cfg.get("scene_distinctness"),
+        lock.get("forbid"),
+        generate.get("prompt"),
+    )
+    blob = " ".join(str(x) for x in parts if x).lower()
+    if any(tok in blob for tok in _HARD_CUT_TOKENS):
         return True
     # Different setting always hard for last-frame purposes.
     if _setting_id(this_cfg) != _setting_id(prev_cfg):
@@ -461,7 +456,7 @@ def collect_same_scene_last_frame_chain(
     # Cap: keep the oldest scene opener + the most recent endings.
     cap = max(1, int(max_frames or MAX_SCENE_LAST_FRAME_REFS))
     if len(chain) > cap:
-        chain = [chain[0], *chain[-(cap - 1) :]] if cap > 1 else chain[-1:]
+        chain = [chain[0], *chain[-(cap - 1):]] if cap > 1 else chain[-1:]
     return chain
 
 

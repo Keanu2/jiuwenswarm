@@ -265,7 +265,7 @@ def assign_shot_settings(
         # Presence type ignores planning nouns; arrival requires explicit presence cues.
         st = detect_setting_type(blob)
         arrived = bool(_SETTING_ARRIVAL_RE.search(blob))
-        if arrived and st and st != prev_type and st != "generic":
+        if arrived and st and st not in (prev_type, "generic"):
             set_i += 1
             prev_id = f"set_{set_i}"
             prev_type = st

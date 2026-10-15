@@ -35,6 +35,7 @@ from jiuwenswarm.server.runtime.designer.user_references import (
     user_reference_node_file,
 )
 
+
 def _upstream_images(ctx: NodeExecutionContext, node: DesignerGraphNode) -> list[Path]:
     """Old stills on this node, then images from incoming data edges, in edge order."""
     seen: set[str] = set()

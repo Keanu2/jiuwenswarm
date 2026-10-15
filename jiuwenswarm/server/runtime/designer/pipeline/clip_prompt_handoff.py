@@ -104,7 +104,7 @@ def collect_prior_clip_prompts(
                 "camera": str(cfg.get("camera") or ""),
             }
         )
-    return out[-max(1, int(max_clips)) :]
+    return out[-max(1, int(max_clips)):]
 
 
 def stamp_wan_prompt_handoff(
@@ -233,17 +233,17 @@ def _content_stems(text: str) -> set[str]:
             content_tokens,
         )
     except Exception:  # noqa: BLE001
-        return { _stem_token(x) for x in re.findall(r"[A-Za-z]{2,}", str(text or "").lower()) }
-    return { _stem_token(t) for t in content_tokens(text) }
+        return {_stem_token(x) for x in re.findall(r"[A-Za-z]{2,}", str(text or "").lower())}
+    return {_stem_token(t) for t in content_tokens(text)}
 
 
 def _families_in(text: str) -> set[int]:
     tokens = set(re.findall(r"[A-Za-z]{2,}", str(text or "").lower()))
-    stems = { _stem_token(t) for t in tokens }
+    stems = {_stem_token(t) for t in tokens}
     bag = tokens | stems
     hit: set[int] = set()
     for i, fam in enumerate(_EVENT_FAMILIES):
-        fam_stems = { _stem_token(x) for x in fam } | set(fam)
+        fam_stems = {_stem_token(x) for x in fam} | set(fam)
         if bag & fam_stems:
             hit.add(i)
     return hit

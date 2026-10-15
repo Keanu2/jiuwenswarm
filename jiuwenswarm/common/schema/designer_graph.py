@@ -206,6 +206,7 @@ def infer_pipeline_from_id(node_id: str) -> str:
 
 # ── Node config (role-discriminated; modality stays on node.type) ─────────────
 
+
 CONFIG_KEY_ROLE = "role"
 CONFIG_KEY_PIPELINE = "pipeline"
 CONFIG_KEY_PROMPT = "prompt"
@@ -750,7 +751,11 @@ def normalize_execution_graph(raw: Any) -> DesignerExecutionGraph:
     if not isinstance(raw_edges, list):
         raise DesignerGraphValidationError("edges must be an array")
     nodes = [normalize_node(item) for item in raw_nodes]
-    edges = [edge for item in raw_edges if (edge := normalize_edge(item)) is not None]
+    edges = []
+    for item in raw_edges:
+        edge = normalize_edge(item)
+        if edge is not None:
+            edges.append(edge)
     node_ids = {node["id"] for node in nodes}
     if len(node_ids) != len(nodes):
         raise DesignerGraphValidationError("node ids must be unique")
@@ -850,7 +855,7 @@ def _restack_column(nodes: list[dict[str, Any]]) -> None:
     if not any(
         _boxes_overlap(left, right)
         for index, left in enumerate(visible)
-        for right in visible[index + 1 :]
+        for right in visible[index + 1:]
     ):
         return
     ordered = sorted(visible, key=lambda node: _layout_box(node.get("layout"))[1])
@@ -865,6 +870,10 @@ def _restack_column(nodes: list[dict[str, Any]]) -> None:
         }
 
 
+def _is_clip_node(node: dict[str, Any]) -> bool:
+    return node_pipeline(node) == PIPELINE_CLIP or str(node.get("id") or "").startswith("n_clip")
+
+
 def repair_overlapping_pipeline_layout(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
     """Push 成片 to the right of clips and unstack overlapping bootstrap columns."""
     nodes = [node for node in (graph.get("nodes") or []) if isinstance(node, dict)]
@@ -873,12 +882,7 @@ def repair_overlapping_pipeline_layout(graph: DesignerExecutionGraph) -> Designe
         [by_id[key] for key in ("n_character", "n_scene", "n_storyboard") if key in by_id]
     )
     clips = sorted(
-        [
-            node
-            for node in nodes
-            if node_pipeline(node) == PIPELINE_CLIP
-            or str(node.get("id") or "").startswith("n_clip")
-        ],
+        [node for node in nodes if _is_clip_node(node)],
         key=node_clip_index,
     )
     _restack_column(clips)
@@ -934,6 +938,18 @@ def _is_clip_pipeline_id(node_id: str) -> bool:
         node_id in {"n_clip", COMPOSE_NODE_ID}
         or node_id.startswith("n_clip_")
     )
+
+
+def _is_clip_pipeline_node(node: dict[str, Any]) -> bool:
+    if node_pipeline(node) in {PIPELINE_CLIP, PIPELINE_COMPOSE}:
+        return True
+    return _is_clip_pipeline_id(str(node.get("id") or ""))
+
+
+def _is_clip_pipeline_edge(edge: dict[str, Any]) -> bool:
+    if _is_clip_pipeline_id(str(edge.get("source") or "")):
+        return True
+    return _is_clip_pipeline_id(str(edge.get("target") or ""))
 
 
 _BOOTSTRAP_CLIP_IDS = frozenset({"n_clip", "n_clip_1"})
@@ -1025,23 +1041,15 @@ def preserve_expanded_shot_nodes(
         return incoming
     existing_count = shot_pipeline_count(existing)
     incoming_count = shot_pipeline_count(incoming)
-    if (
-        not is_one_shot_bootstrap_skeleton(incoming)
-        or incoming_count > 1
-        or existing_count <= incoming_count
-        or existing_count <= 1
-    ):
+    is_bootstrap_skeleton = is_one_shot_bootstrap_skeleton(incoming) and incoming_count <= 1
+    if not is_bootstrap_skeleton or existing_count <= max(incoming_count, 1):
         return incoming
     incoming_ids = {str(node.get("id") or "") for node in incoming.get("nodes") or []}
     grafted = dict(incoming)
     extra_nodes = [
         dict(node)
         for node in existing.get("nodes") or []
-        if str(node.get("id") or "") not in incoming_ids
-        and (
-            node_pipeline(node) in {PIPELINE_CLIP, PIPELINE_COMPOSE}
-            or _is_clip_pipeline_id(str(node.get("id") or ""))
-        )
+        if str(node.get("id") or "") not in incoming_ids and _is_clip_pipeline_node(node)
     ]
     grafted["nodes"] = [dict(node) for node in incoming.get("nodes") or []] + extra_nodes
     return expand_shot_nodes(grafted, existing_count)
@@ -1103,18 +1111,8 @@ def expand_shot_nodes(
     clip_template = existing_by_id.get("n_clip_1") or existing_by_id.get("n_clip") or {}
     clip_base = dict(clip_template.get("layout") or {})
 
-    kept_nodes = [
-        dict(node)
-        for node in raw.get("nodes") or []
-        if node_pipeline(node) not in {PIPELINE_CLIP, PIPELINE_COMPOSE}
-        and not _is_clip_pipeline_id(str(node.get("id") or ""))
-    ]
-    kept_edges = [
-        dict(edge)
-        for edge in raw.get("edges") or []
-        if not _is_clip_pipeline_id(str(edge.get("source") or ""))
-        and not _is_clip_pipeline_id(str(edge.get("target") or ""))
-    ]
+    kept_nodes = [dict(node) for node in raw.get("nodes") or [] if not _is_clip_pipeline_node(node)]
+    kept_edges = [dict(edge) for edge in raw.get("edges") or [] if not _is_clip_pipeline_edge(edge)]
     kept_ids = {str(node.get("id") or "") for node in kept_nodes}
 
     def _role_node_ids(role: str) -> list[str]:
@@ -1292,7 +1290,8 @@ def apply_node_activity(
             "at": at if isinstance(at, int) else utc_now_ms(),
         }
     )
-    assert activity is not None
+    if activity is None:
+        raise DesignerGraphValidationError("node activity must not be empty")
     line = format_activity_line(
         str(activity.get("kind") or ""),
         str(activity.get("text") or ""),
@@ -1419,6 +1418,7 @@ def normalize_node_state(raw: Any) -> DesignerNodeState:
             entries.append(normalized_entry)
         state["history"] = entries[-NODE_HISTORY_LIMIT:]
     return state
+
 
 def normalize_execution_run(raw: Any) -> DesignerExecutionRun:
     if not isinstance(raw, dict):
@@ -1629,6 +1629,7 @@ def is_concat_video_source(node: DesignerGraphNode | dict[str, Any] | None) -> b
         return True
     return ntype == NODE_TYPE_VIDEO
 
+
 def video_concat_source_ids(graph: DesignerExecutionGraph, target_id: str) -> list[str]:
     """Direct video predecessors of ``target_id`` in input / edge order."""
     target = str(target_id or "").strip()
@@ -1782,6 +1783,7 @@ def compose_required_predecessor_ids(graph: DesignerExecutionGraph) -> list[str]
             seen.add(nid)
             out.append(nid)
     # Stable: clips by clip_index, then audio ids.
+
     def _sort_key(nid: str) -> tuple[int, int, str]:
         by_id = {
             str(n.get("id") or ""): n

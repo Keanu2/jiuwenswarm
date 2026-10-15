@@ -262,11 +262,11 @@ def require_media_models(*, image: bool = False, video: bool = False) -> None:
     """
     from jiuwenswarm.server.runtime.designer.media_generation import generation_problem
 
-    problems = [
-        problem
-        for kind, wanted in (("image", image), ("video", video))
-        if wanted and (problem := generation_problem(kind))
-    ]
+    problems: list[str] = []
+    for kind, wanted in (("image", image), ("video", video)):
+        problem = generation_problem(kind) if wanted else None
+        if problem:
+            problems.append(problem)
     if not problems:
         return
     raise DesignerLlmError(

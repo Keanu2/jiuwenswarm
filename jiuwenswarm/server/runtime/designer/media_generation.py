@@ -241,9 +241,11 @@ async def generate_video(request: DesignerVideoRequest, *, save_dir: str | None 
         _VLLM_OMNI_VIDEO_TIMEOUT_SECONDS if target.backend == gen_toolkits.VLLM_OMNI else _VIDEO_TIMEOUT_SECONDS
     )
     deadline = time.monotonic() + timeout
-    while (pending := _PENDING_JOB.match(result)) and time.monotonic() < deadline:
+    pending = _PENDING_JOB.match(result)
+    while pending and time.monotonic() < deadline:
         await asyncio.sleep(_VIDEO_POLL_SECONDS)
         result = await gen_toolkits.check_video(target, pending.group(1), save_dir)
+        pending = _PENDING_JOB.match(result)
     if pending:
         return {"error": f"[ERROR]: video job {pending.group(1)} did not finish within {int(timeout)}s."}
     path = None if result.startswith("[ERROR]") else _saved_path(result)

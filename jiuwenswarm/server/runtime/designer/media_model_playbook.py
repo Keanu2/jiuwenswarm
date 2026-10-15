@@ -171,6 +171,40 @@ def playbook_for_role(role: str) -> str:
     return "\n\n".join(chunks)
 
 
+_CARTOON_STYLE_WORDS = (
+    "cartoon",
+    "cartoonish",
+    "pixar",
+    "anime",
+    "cel-shaded",
+    "cel shaded",
+    "stylized",
+    "2d animated",
+    "3d animated",
+    "toon",
+    "卡通",
+    "动画",
+    "动漫",
+    "二次元",
+    "赛璐璐",
+    "扁平",
+    "圆润造型",
+    "柔和渲染",
+)
+_PHOTOREAL_STYLE_WORDS = (
+    "photoreal",
+    "photorealistic",
+    "live-action",
+    "live action",
+    "documentary",
+    "写实",
+    "逼真",
+    "真人",
+    "实拍",
+    "纪录片",
+)
+
+
 def default_style_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]:
     """Infer the brief's film-wide style; unspecified briefs default to cartoonish."""
     lock = dict(STYLE_LOCK_DEFAULT)
@@ -222,29 +256,7 @@ def default_style_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]
             return {k: str(v)[:280] for k, v in lock.items()}
 
     # Stylization must win over incidental camera language such as "cinematic".
-    if any(
-        k in blob
-        for k in (
-            "cartoon",
-            "cartoonish",
-            "pixar",
-            "anime",
-            "cel-shaded",
-            "cel shaded",
-            "stylized",
-            "2d animated",
-            "3d animated",
-            "toon",
-            "卡通",
-            "动画",
-            "动漫",
-            "二次元",
-            "赛璐璐",
-            "扁平",
-            "圆润造型",
-            "柔和渲染",
-        )
-    ):
+    if any(k in blob for k in _CARTOON_STYLE_WORDS):
         lock["look"] = (
             "cartoonish animated feature look (卡通画风), flat shapes, soft rendering, "
             "rounded forms, coherent across every spec sheet and clip"
@@ -257,21 +269,7 @@ def default_style_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]
             "no subtitles/watermarks, no labeled infographic character specs, "
             "no medium switch (cartoon<->photoreal or 3D<->2D) mid-film"
         )
-    elif any(
-        k in blob
-        for k in (
-            "photoreal",
-            "photorealistic",
-            "live-action",
-            "live action",
-            "documentary",
-            "写实",
-            "逼真",
-            "真人",
-            "实拍",
-            "纪录片",
-        )
-    ):
+    elif any(k in blob for k in _PHOTOREAL_STYLE_WORDS):
         lock["look"] = "photoreal cinematic — continuous color grade; never cartoon restyle"
         lock["lens"] = "35mm cinematic, soft background when close; no comic/grid UI"
         lock["palette"] = "match scene color temperature and wardrobe dyes across shots"

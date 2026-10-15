@@ -29,25 +29,25 @@ _CROSS_RE = re.compile(
     r"\b(?:cross(?:es|ing)?|walks?\s+to\s+the\s+other|swaps?\s+sides|moves?\s+left|moves?\s+right)\b",
     re.I,
 )
+_NIGHT_WORDS = (
+    "midnight",
+    "late night",
+    "at night",
+    "nighttime",
+    "night time",
+    "nocturnal",
+    "moonlit",
+    "星夜",
+    "夜晚",
+    "夜里",
+    "深夜",
+)
+
+
 def infer_time_of_day_lock(prompt: str = "", scene_desc: str = "") -> dict[str, str]:
     """Film-wide / per-setting time-of-day + lighting cue (domain-agnostic)."""
     blob = f"{prompt or ''} {scene_desc or ''}".lower()
-    if any(
-        w in blob
-        for w in (
-            "midnight",
-            "late night",
-            "at night",
-            "nighttime",
-            "night time",
-            "nocturnal",
-            "moonlit",
-            "星夜",
-            "夜晚",
-            "夜里",
-            "深夜",
-        )
-    ):
+    if any(w in blob for w in _NIGHT_WORDS):
         tod = "night"
         light = "night lighting — cool/dark key with practicals; keep night across same-setting shots"
     elif any(w in blob for w in ("dusk", "sunset", "twilight", "golden hour", "傍晚", "黄昏", "日落")):

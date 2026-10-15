@@ -46,6 +46,7 @@ def _action_has_exit(action: str) -> bool:
     text = _FALSE_EXIT_RE.sub(" ", action or "")
     return bool(_EXIT_RE.search(text))
 
+
 _STAY_SPEAK_RE = re.compile(
     r"\b(?:still\s+(?:speak|preach|read|talk)|continues?\s+(?:speak|preach|read|talk)|"
     r"remains?\s+(?:at|behind)|keeps?\s+(?:speak|read))\b",
@@ -841,7 +842,7 @@ async def enrich_analysis_with_llm(
                 "Chat model did not return a usable director contract JSON.",
                 code=LLM_API_ERROR,
             )
-        raw = text[start : end + 1]
+        raw = text[start:end + 1]
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:

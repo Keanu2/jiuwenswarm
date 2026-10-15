@@ -112,16 +112,8 @@ def build_action_lock(
     occ = shot.get("occupancy") if isinstance(shot.get("occupancy"), dict) else {}
     if not cast_actions and isinstance(occ.get("cast_actions"), dict):
         cast_actions = occ["cast_actions"]
-    on_screen = [
-        str(x)
-        for x in (
-            shot.get("on_screen")
-            or shot.get("character_ids")
-            or occ.get("must_appear")
-            or []
-        )
-        if str(x)
-    ]
+    on_screen_raw = shot.get("on_screen") or shot.get("character_ids") or occ.get("must_appear") or []
+    on_screen = [str(x) for x in on_screen_raw if str(x)]
     for cid in on_screen or list(cast_actions.keys()):
         doing = str(cast_actions.get(cid) or "").strip()
         if doing:
@@ -190,7 +182,8 @@ def build_relationship_lock(
     looks = shot.get("looks_at") or shot.get("gaze") or shot.get("looking_at")
     if isinstance(looks, dict):
         for src, tgt in looks.items():
-            bits.append(f"{_who(str(src), names)} looks_at={_who(str(tgt), names) if str(tgt) in names else str(tgt)[:80]}")
+            target = _who(str(tgt), names) if str(tgt) in names else str(tgt)[:80]
+            bits.append(f"{_who(str(src), names)} looks_at={target}")
     elif isinstance(looks, list):
         for item in looks:
             if isinstance(item, dict):
@@ -293,7 +286,11 @@ def staging_lock_clause(
     for_clip: bool = False,
 ) -> str:
     """Prompt block for clip specs and clips."""
-    where = "this clip (match storyboard contact poses — character specs are identity only)" if for_clip else "this clip spec"
+    where = (
+        "this clip (match storyboard contact poses — character specs are identity only)"
+        if for_clip
+        else "this clip spec"
+    )
     scope = f"shot {clip_index}" if clip_index else "this shot"
     if setting_id:
         scope += f" / setting `{setting_id}`"

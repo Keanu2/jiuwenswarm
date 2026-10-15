@@ -433,12 +433,13 @@ def _design_sessions(project_id: str) -> list[dict[str, Any]]:
         collect_all_sessions_metadata,
     )
 
-    return [
-        item
-        for item in collect_all_sessions_metadata()
-        if str(item.get("project_id") or "") == project_id
-        and str(item.get("work_mode") or "") == DESIGN_WORK_MODE
-    ]
+    sessions: list[dict[str, Any]] = []
+    for item in collect_all_sessions_metadata():
+        if str(item.get("project_id") or "") != project_id:
+            continue
+        if str(item.get("work_mode") or "") == DESIGN_WORK_MODE:
+            sessions.append(item)
+    return sessions
 
 
 def _pair_design_canvases(
@@ -1121,6 +1122,18 @@ def _persist_uploaded_outputs(graph: dict[str, Any]) -> None:
     _store.save_run(run)
 
 
+_GRAPH_PATCH_KEYS = (
+    "title",
+    "description",
+    "upsert_nodes",
+    "upsert_edges",
+    "remove_node_ids",
+    "remove_edge_ids",
+    "video_settings",
+    "image_settings",
+)
+
+
 def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
     graph_id = str(params.get("graph_id") or "").strip()
     if not graph_id:
@@ -1130,20 +1143,7 @@ def _patch_graph(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | N
         return None, "graph not found", "NOT_FOUND"
     raw_patch = params.get("patch")
     if raw_patch is None:
-        raw_patch = {
-            key: params[key]
-            for key in (
-                "title",
-                "description",
-                "upsert_nodes",
-                "upsert_edges",
-                "remove_node_ids",
-                "remove_edge_ids",
-                "video_settings",
-                "image_settings",
-            )
-            if key in params
-        }
+        raw_patch = {key: params[key] for key in _GRAPH_PATCH_KEYS if key in params}
     video_patch = None
     image_patch = None
     if isinstance(raw_patch, dict):

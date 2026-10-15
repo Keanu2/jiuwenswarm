@@ -189,16 +189,8 @@ def normalize_speech_by_character(
     ).strip()
     if not line:
         return {}
-    cast = [
-        str(x)
-        for x in (
-            shot.get("on_screen")
-            or shot.get("featured_cast_ids")
-            or shot.get("character_ids")
-            or []
-        )
-        if str(x).strip()
-    ]
+    cast_raw = shot.get("on_screen") or shot.get("featured_cast_ids") or shot.get("character_ids") or []
+    cast = [str(x) for x in cast_raw if str(x).strip()]
     if not cast and characters:
         for c in characters:
             if isinstance(c, dict) and c.get("id"):
@@ -423,12 +415,13 @@ def audio_lock_prompt_block(
         )
     else:
         lines.append("BGM LOCK: no underscore this film; clip stays dialogue-only or silent.")
-    if clip_embedded and (include_speech or by_char or speech_line):
+    has_speech = include_speech or by_char or speech_line
+    if clip_embedded and has_speech:
         lines.append(
             "AUDIO ROUTE: this clip may synthesize NATIVE DIALOGUE only "
             "(video-model audio=true). No BGM in the clip — score is one track after concat."
         )
-    elif include_speech or by_char or speech_line:
+    elif has_speech:
         lines.append(
             "AUDIO ROUTE: clip audio = spoken lines only. Film BGM is a separate "
             "Music node mixed after concat."
@@ -670,12 +663,8 @@ def stamp_audio_fields_on_clip_config(
     gen = dict(cfg.get("generate") or {})
     prompt = str(gen.get("prompt") or "")
     image_binding = "image 1 is" in prompt.lower() or "@image 1 is" in prompt.lower()
-    if (
-        block
-        and not image_binding
-        and "LANGUAGE LOCK" not in prompt
-        and "SPEECH LOCK" not in prompt
-    ):
+    already_locked = "LANGUAGE LOCK" in prompt or "SPEECH LOCK" in prompt
+    if block and not image_binding and not already_locked:
         gen["prompt"] = (prompt + "\n" + block).strip()
         cfg["generate"] = gen
     try:

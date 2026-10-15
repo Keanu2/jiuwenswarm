@@ -91,11 +91,11 @@ async def _require_image(
     """Generate an image; fail closed when the image model returns nothing."""
     refs = [str(p) for p in (reference_images or []) if str(p).strip()]
     # Only pass real image files — markdown/extra stubs break DashScope uploads.
-    _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
     clean_refs: list[str] = []
     for raw in refs:
         path = Path(raw)
-        if path.is_file() and path.suffix.lower() in _IMG:
+        if path.is_file() and path.suffix.lower() in image_suffixes:
             clean_refs.append(str(path.resolve()))
     clean_refs = clean_refs[:3]
     emit = getattr(ctx, "emit_activity", None) if ctx is not None else None
@@ -135,14 +135,10 @@ async def _require_image(
     err = str((generated or {}).get("error") or "")
     # DashScope often rejects ref uploads ("Cannot determine file type") — retry T2I-only.
     # Reference-led stills fail closed instead of dropping the file.
-    if (
-        not keep_references
-        and (not generated or not generated.get("image_path"))
-        and clean_refs
-        and (
-            "file type" in err.lower() or "InvalidParameter" in err or "181001" in err
-        )
-    ):
+    refs_rejected = not (generated or {}).get("image_path") and (
+        "file type" in err.lower() or "InvalidParameter" in err or "181001" in err
+    )
+    if not keep_references and clean_refs and refs_rejected:
         generated = await handler_io.generate_designer_image(
             prompt + " Match the described architecture and cast from text alone.",
             size=size,
@@ -275,17 +271,9 @@ class SceneNodeHandler:
                         source = f"{source}\n{arch}"
         else:
             refs = [str(path) for path in wired_user_reference_images(ctx, node)]
-            char_nids = [
-                str(x)
-                for x in (
-                    cfg.get("character_node_ids")
-                    or ((cfg.get("identity_refs") or {}) if isinstance(cfg.get("identity_refs"), dict) else {}).get(
-                        "character_node_ids"
-                    )
-                    or []
-                )
-                if str(x).strip()
-            ]
+            identity_refs = cfg.get("identity_refs") if isinstance(cfg.get("identity_refs"), dict) else {}
+            char_nids_raw = cfg.get("character_node_ids") or identity_refs.get("character_node_ids") or []
+            char_nids = [str(x) for x in char_nids_raw if str(x).strip()]
             if char_nids and bool(cfg.get("composed_scene")):
                 from jiuwenswarm.server.runtime.designer.handlers.common import (
                     node_ids_output_image_paths,

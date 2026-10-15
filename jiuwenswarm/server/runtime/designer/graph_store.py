@@ -117,7 +117,8 @@ def reload_graph_inplace(graph: dict[str, Any] | None) -> bool:
 class DesignerGraphStore:
     """File-backed store for Designer graphs and execution runs."""
 
-    def save_graph(self, graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
+    @staticmethod
+    def save_graph(graph: DesignerExecutionGraph) -> DesignerExecutionGraph:
         normalized = normalize_execution_graph(graph)
         path = _record_path(_graphs_dir(), normalized["graph_id"])
         if path is None:
@@ -140,7 +141,8 @@ class DesignerGraphStore:
             _atomic_write_json(path, dict(normalized))
         return normalized
 
-    def get_graph(self, graph_id: str) -> DesignerExecutionGraph | None:
+    @staticmethod
+    def get_graph(graph_id: str) -> DesignerExecutionGraph | None:
         path = _record_path(_graphs_dir(), str(graph_id or ""))
         if path is None or not path.is_file():
             return None
@@ -156,7 +158,8 @@ class DesignerGraphStore:
             logger.warning("Invalid designer graph %s: %s", graph_id, exc)
             return None
 
-    def list_graphs(self, project_id: str | None = None) -> list[DesignerExecutionGraph]:
+    @staticmethod
+    def list_graphs(project_id: str | None = None) -> list[DesignerExecutionGraph]:
         wanted = str(project_id or "").strip()
         graphs: list[DesignerExecutionGraph] = []
         with _STORE_LOCK:
@@ -195,7 +198,8 @@ class DesignerGraphStore:
                 return graph
         return None
 
-    def delete_graph(self, graph_id: str) -> bool:
+    @staticmethod
+    def delete_graph(graph_id: str) -> bool:
         """Delete a graph created by an uncommitted workspace transaction."""
         path = _record_path(_graphs_dir(), str(graph_id or ""))
         if path is None:
@@ -207,7 +211,8 @@ class DesignerGraphStore:
                 return False
         return True
 
-    def save_run(self, run: DesignerExecutionRun) -> DesignerExecutionRun:
+    @staticmethod
+    def save_run(run: DesignerExecutionRun) -> DesignerExecutionRun:
         normalized = normalize_execution_run(run)
         normalized["updated_at"] = utc_now_ms()
         path = _record_path(_runs_dir(), normalized["run_id"])
@@ -217,7 +222,8 @@ class DesignerGraphStore:
             _atomic_write_json(path, dict(normalized))
         return normalized
 
-    def get_run(self, run_id: str) -> DesignerExecutionRun | None:
+    @staticmethod
+    def get_run(run_id: str) -> DesignerExecutionRun | None:
         path = _record_path(_runs_dir(), str(run_id or ""))
         if path is None or not path.is_file():
             return None
@@ -233,7 +239,8 @@ class DesignerGraphStore:
             logger.warning("Invalid designer run %s: %s", run_id, exc)
             return None
 
-    def get_latest_run_for_graph(self, graph_id: str) -> DesignerExecutionRun | None:
+    @staticmethod
+    def get_latest_run_for_graph(graph_id: str) -> DesignerExecutionRun | None:
         graph_id = str(graph_id or "").strip()
         if not graph_id:
             return None
@@ -254,7 +261,8 @@ class DesignerGraphStore:
                     latest_ts = ts
         return latest
 
-    def latest_runs_by_graph(self) -> dict[str, DesignerExecutionRun]:
+    @staticmethod
+    def latest_runs_by_graph() -> dict[str, DesignerExecutionRun]:
         """Latest run per graph in one scan over the run files.
 
         List views need the latest run of every graph at once; calling

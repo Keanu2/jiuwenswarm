@@ -100,10 +100,11 @@ def prompt_slot_roster(refs: list[dict[str, Any]] | None) -> str:
         kind = str(item.get("kind") or "").strip().lower()
         if kind not in SUPPORTED_KINDS:
             continue
-        counts[kind] += 1
-        filename = str(item.get("filename") or f"{kind}-{counts[kind]}").strip()
+        slot = counts.get(kind, 0) + 1
+        counts[kind] = slot
+        filename = str(item.get("filename") or f"{kind}-{slot}").strip()
         lines.append(
-            f"{kind} {counts[kind]} = {filename}, generic reference "
+            f"{kind} {slot} = {filename}, generic reference "
             "(visual/audio authority; take compatible visible traits)"
         )
     return "\n".join(lines)
@@ -827,7 +828,7 @@ def normalize_user_references(
                 f"reference {index} must be an image, video, or audio file"
             )
         limit = MAX_REFS_BY_KIND[kind]
-        if counts[kind] >= limit:
+        if counts.get(kind, 0) >= limit:
             raise UserReferenceError(
                 f"at most {limit} {kind} reference(s) can be attached"
             )
@@ -1015,9 +1016,10 @@ def _materialize_reference(
     dest = unique_upload_path(dest_dir / safe_name)
     if payload is not None:
         dest.write_bytes(payload)
-    else:
-        assert source is not None
+    elif source is not None:
         dest.write_bytes(source.read_bytes())
+    else:
+        raise UserReferenceError("reference has neither inline data nor a source file")
     resolved = dest.resolve()
     return {
         "id": f"ref_{index:02d}",

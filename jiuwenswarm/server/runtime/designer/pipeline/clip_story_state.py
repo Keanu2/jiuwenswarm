@@ -227,6 +227,7 @@ def narrative_from_wan_prompt(text: str, *, limit: int = 2500) -> str:
         cleaned = re.sub(r"\s+", " ", raw)[:limit]
     return cleaned[:limit]
 
+
 def seat_anchors_from_cfg(cfg: dict[str, Any] | None) -> dict[str, dict[str, str]]:
     """Per-character zone / landmark / screen from this shot's blocking."""
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -428,7 +429,11 @@ def apply_story_state_to_next_cfg(
         prior_action=action,
     )
 
-    exited = [str(e.get("character_id") or "").strip() for e in events if e.get("type") == "exit" and e.get("character_id")]
+    exited = [
+        str(e.get("character_id") or "").strip()
+        for e in events
+        if e.get("type") == "exit" and e.get("character_id")
+    ]
     # Carry prior exited_ids within the same setting.
     prior_exited = _norm_ids(src.get("exited_ids")) + _norm_ids(
         (src.get("occupancy") or {}).get("exited") if isinstance(src.get("occupancy"), dict) else []
@@ -660,7 +665,6 @@ def stamp_continuity_story_fields(
         events=events,
     )
     return cfg
-
 
 
 def cap_r2v_reference_paths(paths: list[Path], *, max_refs: int = 5) -> list[Path]:

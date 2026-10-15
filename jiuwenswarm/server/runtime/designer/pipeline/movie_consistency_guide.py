@@ -53,7 +53,8 @@ def build_movie_consistency_guide(
         "9) REFERENCE BINDING: when images are attached, prompt MUST name Image 1, Image 2, … "
         "matching attach order (character specs → environment).\n"
         "10) CLIP RULE: R2V animates from attached refs — motion/camera change, not redesign.\n"
-        "11) LOCATION CHANGE: only when storyboard setting_id changes; then new compose from character specs+scene specs, "
+        "11) LOCATION CHANGE: only when storyboard setting_id changes; "
+        "then new compose from character specs+scene specs, "
         "not a morph of the previous room.\n"
         "=== END GUIDE ==="
     )

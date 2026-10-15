@@ -336,12 +336,8 @@ def repair_shot_cast(
         if not _beat_has_leave(beat):
             shot_ids = list(dict.fromkeys(carried))
         else:
-            leavers = [
-                c
-                for c in humans
-                if c
-                in (shot.get("exiting_character_ids") or shot.get("exiting") or [])
-            ]
+            exiting = shot.get("exiting_character_ids") or shot.get("exiting") or []
+            leavers = [c for c in humans if c in exiting]
             for lid in leavers:
                 exited.add(lid)
             shot_ids = [c for c in carried if c not in exited]

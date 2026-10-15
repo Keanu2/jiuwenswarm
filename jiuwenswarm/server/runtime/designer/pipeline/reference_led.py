@@ -1156,7 +1156,7 @@ def _partition_companions_for_cap(
     if room <= 1:
         return [], list(companions)
     individual = list(companions[: room - 1])
-    combined = list(companions[room - 1 :])
+    combined = list(companions[room - 1:])
     return individual, combined
 
 
@@ -1291,12 +1291,8 @@ def _job_plan(
     covered_chars = _covered_character_ids(slots, analysis)
     # True animate-image: a single analysis character with no character specs
     # is the animate subject — do not mint a redundant character specs for them.
-    if (
-        video_binding == VIDEO_ANIMATE_IMAGE
-        and motion
-        and not character
-        and len(cast) == 1
-    ):
+    animates_image = video_binding == VIDEO_ANIMATE_IMAGE and motion
+    if animates_image and not character and len(cast) == 1:
         _cover_character_keys(covered_chars, str(cast[0].get("id") or ""), cast)
         _cover_character_keys(covered_chars, str(cast[0].get("name") or ""), cast)
     companions = _companion_characters(analysis, covered_chars)
@@ -1415,14 +1411,11 @@ def _job_plan(
     # Default multi-ref story: R2V. Motion role alone never forces I2V.
     # If an image already has character/scene/product identity, do not also park
     # it as a motion plan lead (avoids duplicate n_ref entries).
+    identity_roles = (ROLE_CHARACTER, ROLE_SCENE, ROLE_PRODUCT)
     story_motion = [
         slot
         for slot in motion
-        if not (
-            ROLE_CHARACTER in (slot.get("roles") or [])
-            or ROLE_SCENE in (slot.get("roles") or [])
-            or ROLE_PRODUCT in (slot.get("roles") or [])
-        )
+        if not any(role in (slot.get("roles") or []) for role in identity_roles)
     ]
     contract = (
         "product"
@@ -1534,13 +1527,7 @@ def _cap_plan(plan: list[dict[str, str]], cap: int = WAN_REF_CAP) -> list[dict[s
 
     products = [i for i, item in enumerate(plan) if item.get("role") == ROLE_PRODUCT]
     motion = [i for i, item in enumerate(plan) if item.get("role") == ROLE_MOTION]
-    uploads = [
-        i
-        for i, item in enumerate(plan)
-        if i not in products
-        and i not in motion
-        and is_upload(item)
-    ]
+    uploads = [i for i, item in enumerate(plan) if i not in products and i not in motion and is_upload(item)]
     generated = [
         i
         for i in range(len(plan))

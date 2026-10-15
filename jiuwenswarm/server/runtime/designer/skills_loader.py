@@ -244,10 +244,7 @@ def _tool_skills_for_role(role: str) -> str:
 def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> dict[str, Any]:
     """Attach task-specific agent skills to nodes; overall skills only on orchestration meta."""
     # Fresh disk index after skill file edits (dev restarts).
-    try:
-        _skill_index.cache_clear()
-    except Exception:
-        pass
+    _skill_index.cache_clear()
     meta = dict(graph.get("metadata") or {})
     scenario = str(meta.get("scenario") or "video")
     text = prompt or str(graph.get("description") or "")
@@ -308,8 +305,8 @@ def attach_skills_metadata(graph: dict[str, Any], prompt: str | None = None) -> 
                 cfg["skill_excerpt"] = (
                     str(cfg.get("skill_excerpt") or "") + "\n\n" + pb
                 ).strip()[:2800]
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001
+            logger.debug("media playbook not attached for role %s", role, exc_info=True)
         node["config"] = cfg
     bundle = skill_bundle_for_graph(
         scenario=scenario,

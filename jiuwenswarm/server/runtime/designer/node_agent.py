@@ -252,6 +252,7 @@ def _required_media_family(node: DesignerGraphNode) -> str | None:
         return ntype
     return None
 
+
 def _path_from_file_uri(uri: str) -> Path | None:
     raw = str(uri or "").strip()
     if not raw:
@@ -370,11 +371,14 @@ def _prefer_media_primary(
 
 
 class DesignerNodeSpawner(Protocol):
-    async def spawn_node_agent(self, run_id: str, node_id: str) -> str: ...
+    async def spawn_node_agent(self, run_id: str, node_id: str) -> str:
+        ...
 
-    def apply_agent_graph_patch(self, graph_id: str, patch: dict[str, Any]) -> DesignerExecutionGraph: ...
+    def apply_agent_graph_patch(self, graph_id: str, patch: dict[str, Any]) -> DesignerExecutionGraph:
+        ...
 
-    def load_graph_snapshot(self, graph_id: str, run_id: str) -> dict[str, Any]: ...
+    def load_graph_snapshot(self, graph_id: str, run_id: str) -> dict[str, Any]:
+        ...
 
 
 def designer_agent_group_dir() -> Path:
@@ -1089,8 +1093,8 @@ class DesignerGraphToolkit:
         refs = collect_clip_reference_images(
             self.ctx, clip_index, node=node
         )
-        _IMG = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
-        ref_paths = [p for p in refs if p.is_file() and p.suffix.lower() in _IMG]
+        image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+        ref_paths = [p for p in refs if p.is_file() and p.suffix.lower() in image_suffixes]
         scene_chain = resolve_gated_last_frame_chain(cfg, graph=graph, ctx=self.ctx)
         if scene_chain:
             cfg = stamp_scene_last_frame_chain(cfg, scene_chain)
@@ -1257,16 +1261,15 @@ class DesignerGraphToolkit:
                 user_reference_video_path,
             )
 
-            reference_file = (
-                wired_video
-                if wired_video
-                else (
+            if wired_video:
+                reference_file = wired_video
+            else:
+                user_video = user_reference_video_path(graph)
+                reference_file = (
                     str(user_video.resolve())
-                    if (user_video := user_reference_video_path(graph)) is not None
-                    and user_video.is_file()
+                    if user_video is not None and user_video.is_file()
                     else None
                 )
-            )
             from jiuwenswarm.server.runtime.designer.media_settings import video_settings
 
             video = video_settings(graph)
@@ -1821,7 +1824,9 @@ def build_designer_tools(toolkit: DesignerGraphToolkit) -> list[Any]:
                         },
                         "first_frame": {
                             "type": "string",
-                            "description": "Optional legacy image. Clip-as-shot uses reference images, not a first frame.",
+                            "description": (
+                                "Optional legacy image. Clip-as-shot uses reference images, not a first frame."
+                            ),
                         },
                     },
                     "required": ["prompt"],
@@ -1930,7 +1935,8 @@ class NodeAgentHost:
         self._agents: dict[str, Any] = {}
         self._agent_system_prompts: dict[str, str] = {}
 
-    def agent_key(self, run_id: str, node_id: str) -> str:
+    @staticmethod
+    def agent_key(run_id: str, node_id: str) -> str:
         return f"designer:{run_id}:{node_id}"
 
     async def execute(

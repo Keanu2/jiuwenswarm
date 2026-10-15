@@ -157,6 +157,13 @@ def find_non_contributing_node_ids(graph: DesignerExecutionGraph) -> list[str]:
     return sorted(ids - contributing)
 
 
+def _is_user_added(node: dict[str, Any]) -> bool:
+    cfg = node.get("config") or {}
+    if not isinstance(cfg, dict):
+        return False
+    return bool(cfg.get("user_added")) or bool(str(cfg.get("user_reference_id") or "").strip())
+
+
 def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
     """Remove nodes/edges that cannot reach the final compose (or any sink).
 
@@ -195,15 +202,7 @@ def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
         for p in preds.get(cur) or []:
             if p not in contributing:
                 stack.append(p)
-    user_added = {
-        str(n.get("id"))
-        for n in nodes
-        if isinstance((n.get("config") or {}), dict)
-        and (
-            bool((n.get("config") or {}).get("user_added"))
-            or bool(str((n.get("config") or {}).get("user_reference_id") or "").strip())
-        )
-    }
+    user_added = {str(n.get("id")) for n in nodes if _is_user_added(n)}
     orphan = ids - contributing
     preserved = sorted(orphan & user_added)
     pruned = sorted(orphan - user_added)
@@ -227,10 +226,7 @@ def prune_non_contributing_nodes(graph: DesignerExecutionGraph) -> list[str]:
     if pruned:
         graph["nodes"] = [n for n in nodes if str(n.get("id")) in keep]
         graph["edges"] = [
-            e
-            for e in edges
-            if str(e.get("source") or "") in keep
-            and str(e.get("target") or "") in keep
+            e for e in edges if str(e.get("source") or "") in keep and str(e.get("target") or "") in keep
         ]
     notes = list(meta.get("prune_notes") or [])
     notes.extend([f"pruned:{nid}" for nid in pruned])
@@ -277,19 +273,18 @@ def _ensure_characters_referenced(
     Never dump onto shot 1 by lexical score — that puts later-meet cast into the
     establishing beat (e.g. woman into alone-in-office).
     """
-    covered = {
-        str(cid)
-        for s in shots
-        if isinstance(s, dict)
-        for cid in (
+    covered: set[str] = set()
+    for s in shots:
+        if not isinstance(s, dict):
+            continue
+        cast = (
             list(s.get("on_screen") or [])
             + list(s.get("visible_cast_ids") or [])
             + list(s.get("character_ids") or [])
             + list(s.get("offscreen") or [])
             + list(s.get("off_screen_cast_ids") or [])
         )
-        if str(cid)
-    }
+        covered.update(str(cid) for cid in cast if str(cid))
     for ch in characters:
         cid = str(ch.get("id") or "")
         if not cid or cid in covered or not shots:
@@ -299,16 +294,13 @@ def _ensure_characters_referenced(
         for shot in shots:
             if not isinstance(shot, dict):
                 continue
-            listed = {
-                str(x)
-                for x in (
-                    list(shot.get("on_screen") or [])
-                    + list(shot.get("visible_cast_ids") or [])
-                    + list(shot.get("offscreen") or [])
-                    + list(shot.get("off_screen_cast_ids") or [])
-                )
-                if str(x)
-            }
+            listed_raw = (
+                list(shot.get("on_screen") or [])
+                + list(shot.get("visible_cast_ids") or [])
+                + list(shot.get("offscreen") or [])
+                + list(shot.get("off_screen_cast_ids") or [])
+            )
+            listed = {str(x) for x in listed_raw if str(x)}
             if cid not in listed:
                 continue
             shot["character_ids"] = list(
@@ -451,35 +443,21 @@ def ensure_combined_cast_reach_compose(graph: DesignerExecutionGraph) -> list[st
             continue
         edge_keys.add((s, t))
         trole = node_pipeline(by_id[t])
-        if (
-            trole in sink_roles
-            or t in {"n_compose", "n_storyboard", "n_scene"}
-            or t.startswith("n_scene_")
-            or t.startswith("n_clip_")
-        ):
+        targets_sink = t in {"n_compose", "n_storyboard", "n_scene"} or t.startswith(("n_scene_", "n_clip_"))
+        if trole in sink_roles or targets_sink:
             wired_sources.add(s)
 
-    combined_ids = [
-        str(sheet_id)
-        for sheet_id, node in by_id.items()
-        if bool((node.get("config") or {}).get("combined_cast"))
-        or sheet_id.startswith("n_cast_")
-    ]
+    combined_ids: list[str] = []
+    for sheet_id, node in by_id.items():
+        if bool((node.get("config") or {}).get("combined_cast")) or sheet_id.startswith("n_cast_"):
+            combined_ids.append(str(sheet_id))
     has_compose = "n_compose" in ids or any(
         node_pipeline(by_id[i]) == NODE_ROLE_COMPOSE
         for i in ids
     )
+    preferred_targets = ("n_clip_1", "n_scene_1", "n_scene", "n_compose")
     fallback = next(
-        (
-            cand
-            for cand in (
-                "n_clip_1",
-                "n_scene_1",
-                "n_scene",
-                "n_compose",
-            )
-            if cand in ids
-        ),
+        (cand for cand in preferred_targets if cand in ids),
         next(
             (
                 i
@@ -530,7 +508,7 @@ def _cameras_compatible(a: str, b: str) -> bool:
     # Treat generic medium/eye-level variants as compatible.
     mediumish = ("medium", "eye-level", "eye level")
     if any(m in la for m in mediumish) and any(m in lb for m in mediumish):
-        if "close" in la or "close" in lb or "wide" in la or "wide" in lb:
+        if any(word in la or word in lb for word in ("close", "wide")):
             return False
         return True
     return False
@@ -691,15 +669,8 @@ def build_smart_video_graph(
     scenes = [item for item in (analysis.get("scenes") or []) if isinstance(item, dict)]
     shots = [item for item in (analysis.get("clips") or []) if isinstance(item, dict)]
     audio = dict(analysis.get("audio") or {})
-    missing = [
-        name
-        for name, values in (
-            ("characters", characters),
-            ("scenes", scenes),
-            ("clips", shots),
-        )
-        if not values
-    ]
+    sections = (("characters", characters), ("scenes", scenes), ("clips", shots))
+    missing = [name for name, values in sections if not values]
     if missing:
         from jiuwenswarm.server.runtime.designer.model_tools import (
             DesignerLlmError,

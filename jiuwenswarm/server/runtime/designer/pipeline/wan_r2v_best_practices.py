@@ -23,9 +23,15 @@ _POSE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:kneel(?:s|ing)?|knelt)\b", re.I), "kneeling_on_surface"),
     (re.compile(r"\b(?:lie|lies|lying|lay|reclining)\b", re.I), "reclining_on_surface"),
     (re.compile(r"\b(?:lean(?:s|ing)?|leant|leaned)\b", re.I), "leaning_on_support"),
-    (re.compile(r"\b(?:stand(?:s|ing)?|stood)\s+(?:at|by|beside|near|behind|in front of)\b", re.I), "standing_beside_support"),
+    (
+        re.compile(r"\b(?:stand(?:s|ing)?|stood)\s+(?:at|by|beside|near|behind|in front of)\b", re.I),
+        "standing_beside_support",
+    ),
     (re.compile(r"\b(?:hold(?:s|ing)?|held|grasp(?:s|ing)?|clutch(?:es|ing)?)\b", re.I), "holding_prop"),
-    (re.compile(r"\b(?:walk(?:s|ing)?|exit(?:s|ing)?|enter(?:s|ing)?|leave|leaves|leaving)\b", re.I), "standing_and_moving"),
+    (
+        re.compile(r"\b(?:walk(?:s|ing)?|exit(?:s|ing)?|enter(?:s|ing)?|leave|leaves|leaving)\b", re.I),
+        "standing_and_moving",
+    ),
     (re.compile(r"\b(?:crouch(?:es|ing)?|squat(?:s|ting)?)\b", re.I), "crouching_on_surface"),
 ]
 

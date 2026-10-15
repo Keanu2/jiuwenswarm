@@ -79,6 +79,39 @@ def _tools_for_node(node: DesignerGraphNode) -> list[str]:
     return ["call_model", "read_upstream"]
 
 
+def _edges_avoiding(edges: list[Any], drop: set[str]) -> list[Any]:
+    kept = []
+    for e in edges:
+        if str(e.get("source") or "") in drop or str(e.get("target") or "") in drop:
+            continue
+        kept.append(e)
+    return kept
+
+
+def _str_ids(raw: Any) -> list[str]:
+    return [str(x) for x in raw if str(x)]
+
+
+def _is_prop_cast(character: dict[str, Any]) -> bool:
+    return bool(character.get("is_prop")) or str(character.get("cast_kind") or "") in {"brand_mascot", "prop"}
+
+
+def _is_prune_protected(node: dict[str, Any]) -> bool:
+    nid = str(node.get("id") or "")
+    if nid.startswith(("n_clip", "n_frame")) or nid in {"n_scene", "n_compose", "n_speech", "n_music"}:
+        return True
+    return _role_key(node) in {"clip", "compose", "speech", "music"}
+
+
+def _shot_time_of_day(clips: Any, clip_index: int) -> dict[str, Any] | None:
+    for shot in clips or []:
+        if not isinstance(shot, dict) or int(shot.get("clip_index") or 0) != clip_index:
+            continue
+        if isinstance(shot.get("time_of_day_lock"), dict):
+            return shot["time_of_day_lock"]
+    return None
+
+
 def _spatial_continuity_patch(graph: DesignerExecutionGraph) -> list[str]:
     """Director gate: stamp consistency locks so clip/shot prompts share blocking."""
     notes: list[str] = []
@@ -220,12 +253,8 @@ def _spatial_geography_lock_patch(graph: DesignerExecutionGraph) -> list[str]:
         if role not in {"scene", "clip", "brief", "storyboard"}:
             continue
         cfg["spatial_lock"] = lock
-        if (
-            role == "scene"
-            and nid != "n_scene"
-            and "n_scene" in ids
-            and not cfg.get("master_scene_node_id")
-        ):
+        is_sub_scene = role == "scene" and nid != "n_scene"
+        if is_sub_scene and "n_scene" in ids and not cfg.get("master_scene_node_id"):
             cfg["master_scene_node_id"] = "n_scene"
             cfg.setdefault("scene_strategy", "edit_master_view")
             notes.append(f"{nid}: master_scene_node_id=n_scene")
@@ -267,12 +296,7 @@ def _director_prune_and_cohere(graph: DesignerExecutionGraph) -> list[str]:
     if drop:
         drop_set = set(drop)
         graph["nodes"] = [n for n in nodes if str(n.get("id")) not in drop_set]
-        graph["edges"] = [
-            e
-            for e in edges
-            if str(e.get("source") or "") not in drop_set
-            and str(e.get("target") or "") not in drop_set
-        ]
+        graph["edges"] = _edges_avoiding(edges, drop_set)
         notes.extend([f"drop_unused_combined:{x}" for x in drop])
 
     # Coherence: master plate → shot views; frames/shots include master + shot scene.
@@ -419,16 +443,9 @@ def _director_reedit_artifacts_after_prune(
                 )
                 carried.add(cid)
             # Storyboard return clears exit for anyone listed on_screen again.
-            visible = [
-                str(x)
-                for x in (
-                    shot.get("on_screen")
-                    or shot.get("visible_cast_ids")
-                    or shot.get("character_ids")
-                    or []
-                )
-                if str(x)
-            ]
+            visible = _str_ids(
+                shot.get("on_screen") or shot.get("visible_cast_ids") or shot.get("character_ids") or []
+            )
             returned = {c for c in visible if c in carried}
             carried -= returned
             exited_by_setting[sid] = set(carried)
@@ -442,16 +459,7 @@ def _director_reedit_artifacts_after_prune(
             visible = [c for c in visible if c not in carried]
             shot["on_screen"] = list(visible)
             shot["character_ids"] = list(visible)
-            ensemble = [
-                str(x)
-                for x in (
-                    shot.get("ensemble_cast_ids")
-                    or shot.get("compose_cast_ids")
-                    or visible
-                    or []
-                )
-                if str(x)
-            ]
+            ensemble = _str_ids(shot.get("ensemble_cast_ids") or shot.get("compose_cast_ids") or visible or [])
             occ = dict(shot.get("occupancy") or {}) if isinstance(shot.get("occupancy"), dict) else {}
             occ["must_appear"] = list(visible)
             occ["offscreen"] = list(offscreen)
@@ -561,31 +569,20 @@ def assign_audio_node_agents(graph: DesignerExecutionGraph) -> dict[str, Any]:
     clip_embedded = bool(routing.get("clip_embedded")) or (not can_speech and not can_music)
     if clip_embedded:
         # Only dialogue folds into the shots; the BGM node stays either way.
-        drop = (
-            {
-                str(n.get("id") or "")
-                for n in (graph.get("nodes") or [])
-                if isinstance(n, dict)
-                and (
-                    str(n.get("id") or "") == "n_speech"
-                    or _role_key(n).lower() in {"speech", "tts"}
-                )
-            }
-            if not can_speech
-            else set()
-        )
+        drop: set[str] = set()
+        if not can_speech:
+            for n in graph.get("nodes") or []:
+                if not isinstance(n, dict):
+                    continue
+                if str(n.get("id") or "") == "n_speech" or _role_key(n).lower() in {"speech", "tts"}:
+                    drop.add(str(n.get("id") or ""))
         if drop:
             graph["nodes"] = [
                 n
                 for n in (graph.get("nodes") or [])
                 if str(n.get("id") or "") not in drop
             ]
-            graph["edges"] = [
-                e
-                for e in (graph.get("edges") or [])
-                if str(e.get("source") or "") not in drop
-                and str(e.get("target") or "") not in drop
-            ]
+            graph["edges"] = _edges_avoiding(graph.get("edges") or [], drop)
             for n in graph.get("nodes") or []:
                 if not isinstance(n, dict):
                     continue
@@ -825,16 +822,9 @@ def validate_plan_occupancy(analysis: dict[str, Any]) -> dict[str, Any]:
         sid = str(shot.get("setting_id") or shot.get("scene_id") or "").strip()
         if not sid:
             errors.append(f"shot{idx}_missing_setting_id")
-        on_screen = [
-            str(x)
-            for x in (
-                shot.get("on_screen")
-                or shot.get("visible_cast_ids")
-                or shot.get("featured_cast_ids")
-                or []
-            )
-            if str(x)
-        ]
+        on_screen = _str_ids(
+            shot.get("on_screen") or shot.get("visible_cast_ids") or shot.get("featured_cast_ids") or []
+        )
         if not on_screen:
             errors.append(f"shot{idx}_empty_on_screen")
         for cid in on_screen:
@@ -1022,17 +1012,11 @@ class Director:
                 [f"mgr:{x}" for x in (gate.get("notes") or []) if isinstance(x, str)][:4]
             )
 
-        orphans = [
-            nid
-            for nid in find_non_contributing_node_ids(graph)
-            if any(
-                str(n.get("id") or "") == nid
-                and isinstance(n.get("config"), dict)
-                and n["config"].get("user_added")
-                for n in (graph.get("nodes") or [])
-                if isinstance(n, dict)
-            )
-        ]
+        user_added_ids: set[str] = set()
+        for n in graph.get("nodes") or []:
+            if isinstance(n, dict) and isinstance(n.get("config"), dict) and n["config"].get("user_added"):
+                user_added_ids.add(str(n.get("id") or ""))
+        orphans = [nid for nid in find_non_contributing_node_ids(graph) if nid in user_added_ids]
         meta = dict(graph.get("metadata") or {})
         if orphans:
             meta["non_contributing_user_nodes"] = orphans
@@ -1927,14 +1911,7 @@ class Director:
             for n in (graph.get("nodes") or [])
             if str(n.get("id") or "").startswith("n_character")
         )
-        new_humans = [
-            c
-            for c in characters
-            if isinstance(c, dict)
-            and c.get("id")
-            and not c.get("is_prop")
-            and str(c.get("cast_kind") or "") not in {"brand_mascot", "prop"}
-        ]
+        new_humans = [c for c in characters if isinstance(c, dict) and c.get("id") and not _is_prop_cast(c)]
         if old_char_specs > 1 and len(new_humans) < old_char_specs:
             logger.info(
                 "design_execution_graph rejected cast shrink %s → %s; keeping current graph",
@@ -2000,7 +1977,8 @@ class Director:
         graph.update(rebuilt)
         return dict(rmeta["director_graph_ack"])
 
-    def decide_capabilities(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
+    @staticmethod
+    def decide_capabilities(graph: DesignerExecutionGraph) -> dict[str, Any]:
         """Inspect chat/vision backends and assign per-agent tools + rating modality."""
         from jiuwenswarm.server.runtime.designer.capabilities import decide_modality_plan
 
@@ -2016,8 +1994,8 @@ class Director:
         graph["metadata"] = meta
         return plan
 
+    @staticmethod
     def review_leaf_media_prompt(
-        self,
         graph: DesignerExecutionGraph,
         node: DesignerGraphNode,
     ) -> dict[str, Any]:
@@ -2055,15 +2033,7 @@ class Director:
         if not spatial:
             meta = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
             spatial = meta.get("spatial_lock") if isinstance(meta.get("spatial_lock"), dict) else {}
-        character_spec_ids = [
-            str(x)
-            for x in (
-                identity.get("character_node_ids")
-                or cfg.get("character_node_ids")
-                or []
-            )
-            if str(x)
-        ]
+        character_spec_ids = _str_ids(identity.get("character_node_ids") or cfg.get("character_node_ids") or [])
         prior_clip_id = str(
             cfg.get("prior_clip_node_id") or identity.get("prior_clip_node_id") or ""
         ).strip()
@@ -2140,11 +2110,9 @@ class Director:
                     notes.append("pull_prior_clip_action")
                     changed = True
                 break
-        if (
-            (prior_clip_action or prior_prompt)
-            and "PREVIOUS CLIP HAD" not in prompt
-            and "PRIOR CLIP PROMPT" not in prompt
-        ):
+        has_prior = prior_clip_action or prior_prompt
+        prior_noted = "PREVIOUS CLIP HAD" in prompt or "PRIOR CLIP PROMPT" in prompt
+        if has_prior and not prior_noted:
             from jiuwenswarm.server.runtime.designer.pipeline.clip_prompt_handoff import (
                 clip_continuity_note,
             )
@@ -2175,16 +2143,9 @@ class Director:
         occupancy = cfg.get("occupancy") if isinstance(cfg.get("occupancy"), dict) else {}
         if not occupancy and isinstance(identity.get("occupancy"), dict):
             occupancy = dict(identity["occupancy"])
-        config_on_screen = [
-            str(x)
-            for x in (
-                cfg.get("on_screen")
-                or occupancy.get("must_appear")
-                or cfg.get("character_ids")
-                or []
-            )
-            if str(x)
-        ]
+        config_on_screen = _str_ids(
+            cfg.get("on_screen") or occupancy.get("must_appear") or cfg.get("character_ids") or []
+        )
         if occupancy and "OCCUPANCY:" not in prompt:
             prompt = (
                 prompt
@@ -2226,12 +2187,7 @@ class Director:
                 changed = True
             # Keep character_spec_ids aligned to on_screen only.
             spec_by_cid = {
-                str(c): sid
-                for c, sid in zip(
-                    cfg.get("character_ids") or [],
-                    character_spec_ids,
-                )
-                if str(c)
+                str(c): sid for c, sid in zip(cfg.get("character_ids") or [], character_spec_ids) if str(c)
             }
             # Prefer resolving from graph character spec nodes when available.
             for other in graph.get("nodes") or []:
@@ -2323,15 +2279,9 @@ class Director:
                 ((graph.get("metadata") or {}).get("script_analysis") or {}).get("characters")
                 or []
             )
+            analysis_clips = ((graph.get("metadata") or {}).get("script_analysis") or {}).get("clips") or []
             shot_row = next(
-                (
-                    s
-                    for s in (
-                        ((graph.get("metadata") or {}).get("script_analysis") or {}).get("clips")
-                        or []
-                    )
-                    if isinstance(s, dict) and int(s.get("clip_index") or 0) == clip_index
-                ),
+                (s for s in analysis_clips if isinstance(s, dict) and int(s.get("clip_index") or 0) == clip_index),
                 None,
             )
             staging_clause = ensure_cfg_staging_locks(
@@ -2532,14 +2482,12 @@ class Director:
                     pass
             # Character consistency on every shot call (Director enforce).
             cast_who = ", ".join(
-                str(x)
-                for x in (
+                _str_ids(
                     cfg.get("on_screen")
                     or (cfg.get("occupancy") or {}).get("must_appear")
                     or cfg.get("character_ids")
                     or []
                 )
-                if str(x)
             )
             if "CHARACTER CONSISTENCY" not in prompt:
                 from jiuwenswarm.server.runtime.designer.pipeline.wan_reference_binding import (
@@ -2656,7 +2604,8 @@ class Director:
                 include_music=bool(flags.get("include_music")),
                 clip_embedded=bool(flags.get("clip_embedded")),
             )
-            if block and ("LANGUAGE LOCK" not in prompt or "SPEECH LOCK" not in prompt or "BGM LOCK" not in prompt):
+            missing_lock = any(lock not in prompt for lock in ("LANGUAGE LOCK", "SPEECH LOCK", "BGM LOCK"))
+            if block and missing_lock:
                 # Replace soft fragments with full lock block once.
                 if "LANGUAGE LOCK" not in prompt:
                     prompt = prompt + "\n" + block
@@ -2703,24 +2652,17 @@ class Director:
                         infer_time_of_day_lock,
                     )
 
+                    scene_specs = cfg.get("scene_specs") or {}
                     tod = infer_time_of_day_lock(
                         str(graph.get("description") or meta_tod.get("user_prompt") or ""),
                         str(
-                            (cfg.get("scene_specs") or {}).get("scene_name") or (cfg.get("scene_specs") or {}).get("place")
+                            scene_specs.get("scene_name")
+                            or scene_specs.get("place")
                             or cfg.get("clip_action")
                             or ""
                         ),
                     )
-                    shot_tod = next(
-                        (
-                            s.get("time_of_day_lock")
-                            for s in (analysis_tod.get("clips") or [])
-                            if isinstance(s, dict)
-                            and int(s.get("clip_index") or 0) == clip_index
-                            and isinstance(s.get("time_of_day_lock"), dict)
-                        ),
-                        None,
-                    )
+                    shot_tod = _shot_time_of_day(analysis_tod.get("clips"), clip_index)
                     if isinstance(shot_tod, dict):
                         tod = {**tod, **{k: v for k, v in shot_tod.items() if str(v).strip()}}
                     elif isinstance(analysis_tod.get("time_of_day_lock"), dict):
@@ -2786,16 +2728,7 @@ class Director:
             )
             tod = cfg.get("time_of_day_lock") if isinstance(cfg.get("time_of_day_lock"), dict) else {}
             if not tod:
-                shot_tod = next(
-                    (
-                        s.get("time_of_day_lock")
-                        for s in (analysis_l.get("clips") or [])
-                        if isinstance(s, dict)
-                        and int(s.get("clip_index") or 0) == clip_index
-                        and isinstance(s.get("time_of_day_lock"), dict)
-                    ),
-                    None,
-                )
+                shot_tod = _shot_time_of_day(analysis_l.get("clips"), clip_index)
                 tod = shot_tod if isinstance(shot_tod, dict) else (
                     analysis_l.get("time_of_day_lock")
                     if isinstance(analysis_l.get("time_of_day_lock"), dict)
@@ -2807,9 +2740,15 @@ class Director:
                         infer_time_of_day_lock,
                     )
 
+                    scene_specs = cfg.get("scene_specs") or {}
                     tod = infer_time_of_day_lock(
                         str(graph.get("description") or meta_l.get("user_prompt") or ""),
-                        str((cfg.get("scene_specs") or {}).get("scene_name") or (cfg.get("scene_specs") or {}).get("place") or cfg.get("clip_action") or ""),
+                        str(
+                            scene_specs.get("scene_name")
+                            or scene_specs.get("place")
+                            or cfg.get("clip_action")
+                            or ""
+                        ),
                     )
                 except Exception:  # noqa: BLE001
                     tod = {}
@@ -2996,7 +2935,8 @@ class Director:
         graph["metadata"] = meta
         return ack
 
-    def ensure_agents_and_prune(self, graph: DesignerExecutionGraph) -> dict[str, Any]:
+    @staticmethod
+    def ensure_agents_and_prune(graph: DesignerExecutionGraph) -> dict[str, Any]:
         """Stamp creative nodes as agents; force_handler uploads stay handlers.
 
         Chat credentials are gated at Enter/chat/Play. This only stamps topology —
@@ -3127,7 +3067,8 @@ class Director:
         graph["metadata"] = meta
         return dict(meta["director_contribution_audit"])
 
-    def _enforce_leaf_agents(self, graph: DesignerExecutionGraph) -> list[str]:
+    @staticmethod
+    def _enforce_leaf_agents(graph: DesignerExecutionGraph) -> list[str]:
         """Every leaf is an LLM agent with tools (uploads stay force_handler)."""
         notes: list[str] = []
         for node in graph.get("nodes") or []:
@@ -3753,16 +3694,7 @@ class Director:
         # Explicit prune_ids from director LLM (then structural prune).
         # Never drop shot shots or required audio — every shot must reach the final film with sound.
         protected = {
-            str(n.get("id"))
-            for n in (graph.get("nodes") or [])
-            if isinstance(n, dict)
-            and (
-                str(n.get("id") or "").startswith("n_clip")
-                or str(n.get("id") or "").startswith("n_frame")
-                or str(n.get("id") or "") in {"n_scene", "n_compose", "n_speech", "n_music"}
-                or _role_key(n)
-                in {"clip", "compose", "speech", "music"}
-            )
+            str(n.get("id")) for n in (graph.get("nodes") or []) if isinstance(n, dict) and _is_prune_protected(n)
         }
         from jiuwenswarm.server.runtime.designer.user_references import (
             is_user_reference_node,
@@ -3773,14 +3705,8 @@ class Director:
             for n in (graph.get("nodes") or [])
             if isinstance(n, dict) and is_user_reference_node(n)
         }
-        prune_ids = [
-            str(x)
-            for x in (parsed.get("prune_ids") or [])
-            if str(x).strip()
-            and str(x) not in protected
-            and str(x) not in reference_ids
-            and str(x) != "n_compose"
-        ]
+        unprunable = protected | reference_ids | {"n_compose"}
+        prune_ids = [str(x) for x in (parsed.get("prune_ids") or []) if str(x).strip() and str(x) not in unprunable]
         if prune_ids:
             drop = set(prune_ids)
             graph["nodes"] = [
@@ -3788,12 +3714,7 @@ class Director:
                 for n in (graph.get("nodes") or [])
                 if not isinstance(n, dict) or str(n.get("id")) not in drop
             ]
-            graph["edges"] = [
-                e
-                for e in (graph.get("edges") or [])
-                if str(e.get("source") or "") not in drop
-                and str(e.get("target") or "") not in drop
-            ]
+            graph["edges"] = _edges_avoiding(graph.get("edges") or [], drop)
             applied.extend([f"director_prune:{x}" for x in prune_ids])
 
         consistency_notes = _spatial_continuity_patch(graph)
@@ -4208,28 +4129,24 @@ def _cast_focus_alignment_patch(graph: DesignerExecutionGraph) -> list[str]:
                         char_nodes.append(str(other.get("id")))
                 if char_nodes:
                     cfg["character_node_ids"] = list(dict.fromkeys(char_nodes))
-            costume_parts = [
-                f"{id_to_name.get(cid, cid)}: "
-                + next(
-                    (
-                        str((o.get("config") or {}).get("costume_lock") or "")
-                        for o in (graph.get("nodes") or [])
-                        if str(o.get("id")) in (cfg.get("character_node_ids") or [])
-                        and str(((o.get("config") or {}).get("character_id") or "")) == cid
-                    ),
-                    str(
-                        next(
-                            (
-                                c.get("description") or ""
-                                for c in characters
-                                if str(c.get("id")) == cid
-                            ),
-                            "",
-                        )
-                    ),
-                )
-                for cid in focus
+            spec_node_ids = cfg.get("character_node_ids") or []
+            spec_configs = [
+                spec_node.get("config") or {}
+                for spec_node in (graph.get("nodes") or [])
+                if str(spec_node.get("id")) in spec_node_ids
             ]
+            costume_parts = []
+            for cid in focus:
+                description = next((c.get("description") or "" for c in characters if str(c.get("id")) == cid), "")
+                costume = next(
+                    (
+                        str(spec.get("costume_lock") or "")
+                        for spec in spec_configs
+                        if str(spec.get("character_id") or "") == cid
+                    ),
+                    str(description),
+                )
+                costume_parts.append(f"{id_to_name.get(cid, cid)}: {costume}")
             costume_lock = "; ".join(p for p in costume_parts if p).strip("; ")
             identity_refs = {
                 "character_ids": list(focus),
@@ -4263,8 +4180,7 @@ def _ensure_all_character_specs_precede_clips(graph: DesignerExecutionGraph) -> 
     character_spec_node_ids = [
         nid
         for nid, node in by_id.items()
-        if _role_key(node) == "character"
-        and not bool((node.get("config") or {}).get("combined_cast"))
+        if _role_key(node) == "character" and not bool((node.get("config") or {}).get("combined_cast"))
     ]
     if not character_spec_node_ids:
         return notes
@@ -4404,14 +4320,8 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
                 enrich_character_clothing(ch)
         costume_lock = str(cfg.get("costume_lock") or "").strip()
         detailed = costume_lock_for_ids(analysis_chars, cids) if cids else ""
-        if detailed and (
-            not costume_lock
-            or (
-                "top=" not in costume_lock
-                and "bottom=" not in costume_lock
-                and "outfit=" not in costume_lock
-            )
-        ):
+        has_slots = any(key in costume_lock for key in ("top=", "bottom=", "outfit="))
+        if detailed and (not costume_lock or not has_slots):
             costume_lock = detailed
             cfg["costume_lock"] = costume_lock
             notes.append(f"{node.get('id')}: clothing costume_lock stamped")
@@ -4564,7 +4474,8 @@ def _identity_consistency_patch(graph: DesignerExecutionGraph) -> list[str]:
             lock_bits.append(f"STRATEGY=compose_from_character_specs setting={setting_id}.")
         if specs and "SCENE SPECS" not in prompt:
             lock_bits.append(
-                f"SCENE SPECS: scene={specs.get('scene_name') or specs.get('place')}; lighting={specs.get('lighting')}; "
+                f"SCENE SPECS: scene={specs.get('scene_name') or specs.get('place')}; "
+                f"lighting={specs.get('lighting')}; "
                 f"objects={', '.join(str(x) for x in (specs.get('objects') or [])[:5])}; "
                 f"views={list((specs.get('views') or {}).keys())}."
             )

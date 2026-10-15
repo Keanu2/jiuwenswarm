@@ -297,7 +297,7 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
         flags=re.I,
     ):
         role = match.group(1)
-        ahead = text[max(0, match.start() - 8) : match.start()].lower()
+        ahead = text[max(0, match.start() - 8):match.start()].lower()
         if ahead.rstrip().endswith("what"):
             continue
         start_i = match.start()
@@ -306,7 +306,7 @@ def _heuristic_characters(prompt: str) -> list[dict[str, str]]:
         nxt = re.search(
             rf"\b(?:a|an|the|another|a second|the other|his|her|their)\s+"
             rf"(?:[A-Za-z-]+\s+){{0,2}}(?:{_ROLE_NOUNS})\b",
-            clause[len(match.group(0)) :],
+            clause[len(match.group(0)):],
             flags=re.I,
         )
         if nxt:
@@ -454,7 +454,7 @@ def _split_prompt_beats(prompt: str) -> list[str]:
     parts: list[str] = []
     last = 0
     for m in split_re.finditer(text):
-        left = text[last : m.start()].strip(" ,.")
+        left = text[last:m.start()].strip(" ,.")
         if left and len(left) > 8:
             parts.append(left)
         cue = m.group(0).strip().lower()
@@ -980,7 +980,7 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                chunk = raw[start : i + 1]
+                chunk = raw[start:i + 1]
                 try:
                     return _as_dict(json.loads(chunk))
                 except json.JSONDecodeError:
@@ -1141,15 +1141,12 @@ def _normalize_llm_analysis(
                 valid_ids=valid_ids,
                 by_name=by_name,
             )
-        offscreen = [
-            cid
-            for cid in resolve_cast_token_list(
-                sh.get("offscreen") or sh.get("off_screen_cast_ids") or [],
-                valid_ids=valid_ids,
-                by_name=by_name,
-            )
-            if cid not in on_screen
-        ]
+        offscreen_ids = resolve_cast_token_list(
+            sh.get("offscreen") or sh.get("off_screen_cast_ids") or [],
+            valid_ids=valid_ids,
+            by_name=by_name,
+        )
+        offscreen = [cid for cid in offscreen_ids if cid not in on_screen]
         cast_actions: dict[str, str] = {}
         raw_actions = sh.get("cast_actions") or sh.get("doing")
         if isinstance(raw_actions, dict):

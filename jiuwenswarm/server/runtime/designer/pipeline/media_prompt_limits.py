@@ -70,11 +70,29 @@ class PromptLimit:
 _REGISTRY: tuple[tuple[str, str, int, str, str], ...] = (
     # —— Image ——
     ("image", r"(?i)\bimage-01\b|minimax.*image|image.*minimax", 1500, "chars", "MiniMax image-01 docs"),
-    ("image", r"(?i)qwen-image-3\.0|qwen-image-max|qwen-image-plus|qwen-image-edit", 18000, "≈4500 tokens×4", "Qwen-Image 3.x / DashScope (~4500 tokens)"),
+    (
+        "image",
+        r"(?i)qwen-image-3\.0|qwen-image-max|qwen-image-plus|qwen-image-edit",
+        18000,
+        "≈4500 tokens×4",
+        "Qwen-Image 3.x / DashScope (~4500 tokens)",
+    ),
     ("image", r"(?i)qwen-image-2\.0|qwen-image-2\b", 5200, "≈1300 tokens×4", "Qwen-Image 2.x (~1300 tokens)"),
-    ("image", r"(?i)qwen-image\b|qwen.*image|dashscope.*image", 3200, "≈800 tokens×4", "Qwen-Image legacy / DashScope (~800 tokens|chars)"),
+    (
+        "image",
+        r"(?i)qwen-image\b|qwen.*image|dashscope.*image",
+        3200,
+        "≈800 tokens×4",
+        "Qwen-Image legacy / DashScope (~800 tokens|chars)",
+    ),
     ("image", r"(?i)\bdall-?e-3\b|gpt-image|openai.*image", 4000, "chars", "OpenAI image API common cap"),
-    ("image", r"(?i)\bflux\b|blackforest|bfl\.|schnell|dev\b.*flux", 1200, "≈300 tokens×4", "FLUX.1 ~300-token encoder"),
+    (
+        "image",
+        r"(?i)\bflux\b|blackforest|bfl\.|schnell|dev\b.*flux",
+        1200,
+        "≈300 tokens×4",
+        "FLUX.1 ~300-token encoder",
+    ),
     ("image", r"(?i)stable-?diffusion|sdxl|sd3|stability", 800, "chars", "SD/SDXL common prompt practice"),
     ("image", r"(?i)ideogram", 2000, "chars", "Ideogram common API practice"),
     ("image", r"(?i)recraft|imagen|gemini.*image|nano-?banana|seedream", 4000, "chars", "common hosted image APIs"),
@@ -83,8 +101,20 @@ _REGISTRY: tuple[tuple[str, str, int, str, str], ...] = (
     # Wan before MiniMax i2v-01: model ids like wan2.2-i2v must not hit the MiniMax row
     # when VIDEO_GEN_API_BASE from another test still mentions i2v-01 / hailuo.
     ("video", r"(?i)wan2\.|wan3\.|wan-?video|wanx|tongyi.*wan", 20000, "chars", "Wan / DashScope video common max"),
-    ("video", r"(?i)minimax-h3|hailuo-?h3|h3-max|video.?generation.?v2", 7000, "chars", "MiniMax H3 / video-generation v2"),
-    ("video", r"(?i)minimax|hailuo|\bt2v-01\b|\bi2v-01\b|\bvideo-01\b", 2000, "chars", "MiniMax Hailuo T2V/I2V (pre-H3)"),
+    (
+        "video",
+        r"(?i)minimax-h3|hailuo-?h3|h3-max|video.?generation.?v2",
+        7000,
+        "chars",
+        "MiniMax H3 / video-generation v2",
+    ),
+    (
+        "video",
+        r"(?i)minimax|hailuo|\bt2v-01\b|\bi2v-01\b|\bvideo-01\b",
+        2000,
+        "chars",
+        "MiniMax Hailuo T2V/I2V (pre-H3)",
+    ),
     ("video", r"(?i)seedance.?2\.5|seedance@2\.5", 10000, "chars", "Seedance 2.5 API max"),
     ("video", r"(?i)seedance|doubao.*video|bytedance.*video", 5000, "chars", "Seedance / ByteDance video common"),
     ("video", r"(?i)\bkling\b|kwai.*video", 2500, "chars", "Kling API common practice"),

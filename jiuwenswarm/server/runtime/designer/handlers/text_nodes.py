@@ -191,7 +191,7 @@ def render_storyboard_table(
             "speech": speech,
         }
         lines.append(
-            "| " + " | ".join(_table_cell(row[field]) for field, _ in STORYBOARD_COLUMNS) + " |"
+            "| " + " | ".join(_table_cell(row.get(field)) for field, _ in STORYBOARD_COLUMNS) + " |"
         )
     return "\n".join(lines) + "\n"
 

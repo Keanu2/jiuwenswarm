@@ -636,15 +636,8 @@ def collect_compose_reference_images(ctx: NodeExecutionContext, node: dict) -> l
         or []
     )
     on_screen = [str(x) for x in on_screen_raw if str(x).strip()]
-    preferred = [
-        str(x)
-        for x in (
-            identity.get("character_node_ids")
-            or cfg.get("character_node_ids")
-            or []
-        )
-        if str(x).strip()
-    ]
+    preferred_raw = identity.get("character_node_ids") or cfg.get("character_node_ids") or []
+    preferred = [str(x) for x in preferred_raw if str(x).strip()]
     # Prefer preferred list when it already matches on_screen; otherwise resolve character specs by cid.
     paths = node_ids_output_image_paths(ctx, preferred) if preferred else []
     if on_screen:
@@ -862,27 +855,22 @@ def _image_gen_semaphore():
     return _IMAGE_GEN_SEM
 
 
+_RATE_LIMIT_TOKENS = ("ratequota", "rate limit", "throttling", "too many requests", "429")
+
+
 def _is_rate_limit_error(text: str) -> bool:
     low = (text or "").lower()
-    return any(
-        token in low
-        for token in (
-            "ratequota",
-            "rate limit",
-            "throttling",
-            "too many requests",
-            "429",
-        )
-    )
+    return any(token in low for token in _RATE_LIMIT_TOKENS)
+
+
+_IMAGE_GEN_TIMEOUT_SECONDS = 1200
 
 
 async def generate_designer_image(
     prompt: str,
     size: str = "1K",
-    reference_image: str | None = None,
     reference_images: list[str] | None = None,
     max_tries: int = 2,
-    timeout_sec: float = 1200.0,
     save_dir: str | None = None,
 ) -> dict[str, str] | None:
     """Call the Settings > Agent image model when enabled. Tests monkeypatch this function.
@@ -904,9 +892,6 @@ async def generate_designer_image(
         logger.info("Designer image generation skipped: VISUAL_GEN_ENABLED is off")
         return None
     refs = [str(item).strip() for item in (reference_images or []) if str(item).strip()]
-    single = (reference_image or "").strip()
-    if single and single not in refs:
-        refs.insert(0, single)
     if refs:
         logger.info(
             "Designer image generation using reference_images=%s",
@@ -941,18 +926,19 @@ async def generate_designer_image(
                             reference_images=refs or None,
                             save_dir=save_dir,
                         ),
-                        timeout=max(60.0, float(timeout_sec or 1200.0)),
+                        timeout=_IMAGE_GEN_TIMEOUT_SECONDS,
                     )
             except asyncio.TimeoutError:
-                last_error = f"image generation timed out after {int(timeout_sec or 1200)}s"
+                last_error = f"image generation timed out after {_IMAGE_GEN_TIMEOUT_SECONDS}s"
                 logger.info("Designer image generation timed out (attempt %s/%s)", attempt, attempts)
                 result = {"error": last_error}
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
                 result = {"error": last_error}
 
-        if isinstance(result, dict) and result.get("image_path"):
-            return {"image_path": str(result["image_path"])}
+        image_path = result.get("image_path") if isinstance(result, dict) else None
+        if image_path:
+            return {"image_path": str(image_path)}
         err = str((result or {}).get("error") or last_error or "image generation failed")
         last_error = err
         if attempt < attempts and _is_rate_limit_error(err):

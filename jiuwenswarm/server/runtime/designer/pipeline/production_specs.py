@@ -147,6 +147,20 @@ def build_production_specs(
     return text
 
 
+_SPATIAL_LOCK_KEYS = {
+    "setting",
+    "architecture",
+    "static_rule",
+    "crowd_rule",
+    "light",
+    "lighting_lock",
+    "landmarks",
+    "landmark_placements",
+    "landmark_rule",
+    "forbid_bleed",
+}
+
+
 def leaf_lock_packet(
     *,
     role: str,
@@ -182,22 +196,7 @@ def leaf_lock_packet(
         "role": str(role or ""),
         "clip_index": int(clip_index or 0) or None,
         "style_lock": style,
-        "spatial_lock": {
-            k: v
-            for k, v in (spatial or {}).items()
-            if k in {
-                "setting",
-                "architecture",
-                "static_rule",
-                "crowd_rule",
-                "light",
-                "lighting_lock",
-                "landmarks",
-                "landmark_placements",
-                "landmark_rule",
-                "forbid_bleed",
-            }
-        },
+        "spatial_lock": {k: v for k, v in (spatial or {}).items() if k in _SPATIAL_LOCK_KEYS},
         "speech_line": str(shot.get("speech_line") or ""),
         "motion_detail": str(shot.get("motion_detail") or ""),
         "wardrobe_lock": str(shot.get("wardrobe_lock") or ""),
