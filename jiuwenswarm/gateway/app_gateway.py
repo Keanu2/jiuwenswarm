@@ -518,7 +518,7 @@ async def _wait_for_web_channel_listening(
     channel: Any,
     task: asyncio.Task[None],
     *,
-    timeout: float = 60.0,
+    timeout: float = 5.0,
 ) -> None:
     """Wait until WebChannel has actually bound its listening socket.
 
@@ -526,12 +526,6 @@ async def _wait_for_web_channel_listening(
     startup, so merely scheduling the task is not sufficient to make 19000
     available.  Desktop and the static proxy both rely on that port during
     cold start; bind it before the potentially expensive channel config pass.
-
-    The timeout must tolerate a cold-start build of the channel app: that work
-    runs synchronously inside the web-channel task, blocking the event loop
-    while this poller is asleep, so the deadline can pass without the poller
-    ever getting to observe a bound socket.  A too-tight budget (5s) made the
-    whole gateway crash-loop on cold starts.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
