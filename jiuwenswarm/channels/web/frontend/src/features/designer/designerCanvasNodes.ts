@@ -699,7 +699,7 @@ const CANVAS_EDIT_OPS = new Set<UserCanvasEdit['op']>([
   'replace',
 ]);
 
-/** Latest canvas edit op. The visible sentence lives in designer.canvasEdit i18n. */
+/** Latest canvas edit op, or an empty string when none is present. */
 export function canvasEditGlance(edits: unknown): string {
   const list = Array.isArray(edits) ? edits : [];
   for (let index = list.length - 1; index >= 0; index -= 1) {
