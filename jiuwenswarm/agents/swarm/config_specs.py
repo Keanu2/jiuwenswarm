@@ -32,6 +32,7 @@ from typing import (
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     BuiltinToolSpec,
     DeepAgentSpec,
+    ProgressiveToolSpec,
     RailSpec,
     SubAgentSpec,
 )
@@ -54,6 +55,7 @@ from jiuwenswarm.agents.harness.common.cua_defaults import (
 from jiuwenswarm.common.config import (
     get_default_model_provider,
     get_evolution_auto_save_enabled,
+    get_progressive_tool_enabled,
     get_skill_evolution_enabled,
     get_symphony_evolution_enabled,
 )
@@ -1076,6 +1078,15 @@ def build_member_deep_agent_spec(
         "mcps": merged_mcps,
         "kv_cache_affinity_config": _kv_cache_affinity_config(config),
     }
+    if get_progressive_tool_enabled(config):
+        # Same top-level ``progressive_tool_enabled`` switch the single-agent
+        # adapters read: the member mounts the harness ProgressiveToolRail
+        # (``tool_search`` + deferred tools) exactly like a single agent does.
+        # Team coordination tools stay DIRECT — ``TeamToolRail`` declares
+        # their exposure — so only the long tail is discovered on demand.
+        # Written only when enabled so a disabled switch keeps the base spec
+        # byte-identical (a YAML base spec may carry its own value).
+        update["progressive_tool"] = ProgressiveToolSpec(enabled=True)
     if role == "leader":
         # Leaders use the team task board (create_task / view_task / update_task).
         # Force off agent-core's enable_task_planning auto-inject path so a YAML

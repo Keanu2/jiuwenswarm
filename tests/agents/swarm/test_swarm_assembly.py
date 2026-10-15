@@ -43,6 +43,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     BuiltinToolSpec,
     DeepAgentSpec,
+    ProgressiveToolSpec,
     RailSpec,
     TeamModelConfig,
     WorkspaceSpec,
@@ -955,6 +956,45 @@ def test_team_member_deep_agent_spec_keeps_core_skill_discovery_when_retrieval_d
     spec = build_member_deep_agent_spec(_agentic_retrieval_config(False), "team", role, base)
 
     assert spec.enable_skill_discovery is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "role"),
+    [
+        ("team", "leader"),
+        ("team", "teammate"),
+        ("team.plan", "leader"),
+        ("team.plan", "teammate"),
+    ],
+)
+def test_team_member_deep_agent_spec_follows_progressive_tool_switch(mode: str, role: str) -> None:
+    """The top-level single-agent switch mounts tool_search on every team member."""
+    spec = build_member_deep_agent_spec(
+        {"progressive_tool_enabled": True}, mode, role, DeepAgentSpec()
+    )
+
+    assert spec.progressive_tool is not None
+    assert spec.progressive_tool.enabled is True
+    logger.info("%s/%s progressive_tool: %s", mode, role, spec.progressive_tool)
+
+
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+def test_team_member_deep_agent_spec_keeps_base_progressive_tool_when_switch_off(role: str) -> None:
+    """A disabled switch leaves the base spec's progressive_tool byte-identical."""
+    config = {"progressive_tool_enabled": False}
+
+    plain = build_member_deep_agent_spec(config, "team", role, DeepAgentSpec())
+    declared = build_member_deep_agent_spec(
+        config,
+        "team",
+        role,
+        DeepAgentSpec(progressive_tool=ProgressiveToolSpec(enabled=True, search_limit=7)),
+    )
+
+    assert plain.progressive_tool is None
+    assert declared.progressive_tool is not None
+    assert declared.progressive_tool.enabled is True
+    assert declared.progressive_tool.search_limit == 7
 
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan.code"])
