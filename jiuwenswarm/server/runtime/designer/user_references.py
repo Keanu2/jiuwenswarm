@@ -10,7 +10,6 @@ media with a text summary.
 from __future__ import annotations
 
 import base64
-import binascii
 import json
 import logging
 import os
@@ -907,7 +906,6 @@ def _preview_reference(item: dict[str, Any], *, kind: str, index: int) -> dict[s
     path = Path(path_raw) if path_raw else Path()
     if not path_raw and uri.startswith("file:"):
         try:
-            from urllib.parse import unquote, urlparse
             from urllib.request import url2pathname
 
             parsed = urlparse(uri)
@@ -1075,7 +1073,7 @@ def _decode_inline_bytes(item: dict[str, Any]) -> bytes | None:
         text = match.group(2)
     try:
         payload = base64.b64decode(text, validate=False)
-    except (binascii.Error, ValueError) as exc:
+    except ValueError as exc:
         raise UserReferenceError("reference payload is not valid base64") from exc
     if len(payload) > MAX_INLINE_BYTES:
         raise UserReferenceError(

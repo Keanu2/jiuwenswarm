@@ -16,6 +16,7 @@ from pathlib import Path
 from jiuwenswarm.common.schema.designer_graph import (
     NODE_ROLE_BRIEF,
     NODE_ROLE_CLIP,
+    NODE_STATUS_COMPLETED,
     NODE_TYPE_AUDIO,
     NODE_TYPE_VIDEO,
     AssetRef,
@@ -341,11 +342,6 @@ def compose_predecessor_media_ready(
     member_id: str,
 ) -> bool:
     """True when a compose-required clip/audio node has a real on-disk media file."""
-    from jiuwenswarm.common.schema.designer_graph import (
-        NODE_STATUS_COMPLETED,
-        node_pipeline,
-    )
-
     nid = str(member_id or "").strip()
     if not nid:
         return False

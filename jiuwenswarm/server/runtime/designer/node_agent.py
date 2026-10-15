@@ -21,6 +21,7 @@ from jiuwenswarm.common.schema.designer_graph import (
     DesignerExecutionGraph,
     DesignerGraphNode,
     data_predecessors,
+    is_compose_sink_node,
     node_agent_template,
     node_pipeline,
     node_role,
@@ -1362,11 +1363,6 @@ class DesignerGraphToolkit:
 
     async def ffmpeg_compose(self, *, prompt: str = "") -> str:
         """Run the compose handler for this node (ffmpeg assemble)."""
-        from jiuwenswarm.common.schema.designer_graph import (
-            NODE_ROLE_CLIP,
-            is_compose_sink_node,
-            node_pipeline,
-        )
         from jiuwenswarm.server.runtime.designer.handlers import get_node_handler
 
         node = _node_from_ctx(self.ctx)

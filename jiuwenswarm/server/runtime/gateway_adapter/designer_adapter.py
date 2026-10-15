@@ -105,7 +105,7 @@ def _read_workspace_receipt(
         return None
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     if not isinstance(receipt, dict):
         return None

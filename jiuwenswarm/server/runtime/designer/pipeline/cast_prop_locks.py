@@ -203,6 +203,29 @@ def _co_present_ids(
     return mentioned
 
 
+def _resolve_focus(
+    base: list[str],
+    *,
+    mentioned: list[str],
+    had_prop_in_cast: bool,
+    exited: set[str],
+    fallback_lead: str,
+) -> list[str]:
+    """Prefer storyboard humans; if cast listed a prop, trust beat mentions more."""
+    if had_prop_in_cast:
+        # Prop-as-hero is untrusted — rebuild from who the shot actually names.
+        pick = [c for c in mentioned if c not in exited] or [
+            c for c in base if c not in exited
+        ]
+    else:
+        pick = [c for c in base if c not in exited] or [
+            c for c in mentioned if c not in exited
+        ]
+    if not pick and fallback_lead and fallback_lead not in exited:
+        pick = [fallback_lead]
+    return list(dict.fromkeys(pick))
+
+
 def repair_shot_cast(
     analysis: dict[str, Any],
     *,
@@ -237,14 +260,14 @@ def repair_shot_cast(
         had_prop_in_cast = any(c in props for c in old)
 
         # Score humans against This shot (action first, then brief as weak tiebreak).
-        ranked = sorted(
-            humans,
-            key=lambda cid: (
+        scores = {
+            cid: (
                 _score_human(by_id.get(cid) or {}, beat),
                 _score_human(by_id.get(cid) or {}, user_prompt),
-            ),
-            reverse=True,
-        )
+            )
+            for cid in humans
+        }
+        ranked = sorted(humans, key=scores.get, reverse=True)
         mentioned = _co_present_ids(
             beat,
             humans=ranked,
@@ -257,25 +280,16 @@ def repair_shot_cast(
                 [fallback_lead] if fallback_lead else []
             )
 
-        def _resolve_focus(base: list[str]) -> list[str]:
-            """Prefer storyboard humans; if cast listed a prop, trust beat mentions more."""
-            if had_prop_in_cast:
-                # Prop-as-hero is untrusted — rebuild from who the shot actually names.
-                pick = [c for c in mentioned if c not in exited] or [
-                    c for c in base if c not in exited
-                ]
-            else:
-                pick = [c for c in base if c not in exited] or [
-                    c for c in mentioned if c not in exited
-                ]
-            if not pick and fallback_lead and fallback_lead not in exited:
-                pick = [fallback_lead]
-            return list(dict.fromkeys(pick))
-
         setting_changed = bool(prev_set) and sid != prev_set
         if not prev_set or setting_changed:
             exited = set()
-            focus = _resolve_focus(listed)
+            focus = _resolve_focus(
+                listed,
+                mentioned=mentioned,
+                had_prop_in_cast=had_prop_in_cast,
+                exited=exited,
+                fallback_lead=fallback_lead,
+            )
             if not listed and not mentioned and fallback_lead:
                 notes.append(
                     f"shot{idx}: empty human cast after prop strip → fallback {fallback_lead}"
@@ -301,13 +315,23 @@ def repair_shot_cast(
         incoming = (
             [c for c in mentioned if c not in exited]
             if had_prop_in_cast
-            else _resolve_focus(listed)
+            else _resolve_focus(
+                listed,
+                mentioned=mentioned,
+                had_prop_in_cast=had_prop_in_cast,
+                exited=exited,
+                fallback_lead=fallback_lead,
+            )
         )
         for c in incoming:
             if c not in carried and c not in exited:
                 carried.append(c)
         featured = _resolve_focus(
-            [c for c in (mentioned or listed) if c in carried] or carried
+            [c for c in (mentioned or listed) if c in carried] or carried,
+            mentioned=mentioned,
+            had_prop_in_cast=had_prop_in_cast,
+            exited=exited,
+            fallback_lead=fallback_lead,
         )
         if not _beat_has_leave(beat):
             shot_ids = list(dict.fromkeys(carried))

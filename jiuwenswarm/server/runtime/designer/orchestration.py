@@ -38,7 +38,6 @@ _SHOT_TEXT_LANGUAGE_RULE = (
 _ROLE_TOOLS: dict[str, list[str]] = {
     "brief": ["call_model", "read_upstream"],
     "character": ["call_model", "read_upstream", "call_image_model"],
-    "character": ["call_model", "read_upstream", "call_image_model"],
     "scene": ["call_model", "read_upstream", "call_image_model"],
     "storyboard": ["call_model", "read_upstream"],
     "clip": ["call_model", "read_upstream", "call_video_model"],

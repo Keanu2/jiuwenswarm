@@ -134,7 +134,7 @@ class DesignerGraphStore:
                     )
 
                     normalized = reapply_user_reference_routes(normalized, existing) or normalized
-                except (DesignerGraphValidationError, ValueError, json.JSONDecodeError, OSError):
+                except (ValueError, OSError):
                     pass
             normalized["updated_at"] = utc_now_ms()
             _atomic_write_json(path, dict(normalized))
@@ -147,7 +147,7 @@ class DesignerGraphStore:
         with _STORE_LOCK:
             try:
                 raw = _read_json(path)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning("Failed to read designer graph %s: %s", graph_id, exc)
                 return None
         try:
@@ -164,7 +164,7 @@ class DesignerGraphStore:
                 try:
                     raw = _read_json(path)
                     graph = normalize_execution_graph(raw)
-                except (DesignerGraphValidationError, ValueError, json.JSONDecodeError):
+                except ValueError:
                     continue
                 if wanted and graph.get("project_id") != wanted:
                     continue
@@ -224,7 +224,7 @@ class DesignerGraphStore:
         with _STORE_LOCK:
             try:
                 raw = _read_json(path)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning("Failed to read designer run %s: %s", run_id, exc)
                 return None
         try:
@@ -244,7 +244,7 @@ class DesignerGraphStore:
                 try:
                     raw = _read_json(path)
                     run = normalize_execution_run(raw)
-                except (DesignerGraphValidationError, ValueError, json.JSONDecodeError):
+                except ValueError:
                     continue
                 if run.get("graph_id") != graph_id:
                     continue
@@ -266,7 +266,7 @@ class DesignerGraphStore:
             for path in _runs_dir().glob("*.json"):
                 try:
                     run = normalize_execution_run(_read_json(path))
-                except (DesignerGraphValidationError, ValueError, json.JSONDecodeError):
+                except ValueError:
                     continue
                 graph_id = str(run.get("graph_id") or "")
                 if not graph_id:
