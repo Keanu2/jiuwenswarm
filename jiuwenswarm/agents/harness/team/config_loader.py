@@ -615,8 +615,10 @@ def load_team_spec_dict(
         (config_base.get("experimental") or {}).get("team_organization_ui_enabled", False)
     )
     _apply_swarmflow_budget(spec_dict, team_raw.get("swarmflow_budget"))
-    # Team-level key, independent of the single-agent progressive_tool_enabled
-    # switch; the spec field is named progressive_tool on the engine side.
+    # Team-level key forcing swarmflow workers into progressive exposure; the
+    # spec field is named progressive_tool on the engine side. Leader /
+    # teammate members (and, through the teammate base spec, workers) follow
+    # the top-level progressive_tool_enabled switch in config_specs instead.
     spec_dict["progressive_tool"] = bool(spec_dict.pop("swarmflow_progressive_tool", False))
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents

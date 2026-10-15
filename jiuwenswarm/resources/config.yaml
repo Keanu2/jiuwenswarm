@@ -5,10 +5,11 @@ config_version: ""
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
-# Agent 模式是否启用渐进式工具暴露（tool_search + deferred 工具）
-# true：只向模型暴露 direct 工具和 tool_search，其他工具按需搜索；
+# Agent 模式与集群模式（Leader / Teammate）是否启用渐进式工具暴露（tool_search + deferred 工具）
+# true：只向模型暴露 direct 工具和 tool_search，其他工具按需搜索；集群成员的
+#       团队协作工具（send_message / create_task / spawn_* 等）始终 direct；
 # false：不挂载 ProgressiveToolRail，未显式声明 exposure 的工具按 direct 暴露。
-# ToolCard 自己显式声明的 exposure 优先级更高。
+# ToolCard 自己显式声明的 exposure 优先级更高。集群模式改后新建团队生效。
 progressive_tool_enabled: true
 
 # Web 首次模型配置引导；用户确认完成后会自动关闭，可通过侧栏问号再次打开
