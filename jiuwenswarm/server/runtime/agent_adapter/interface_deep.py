@@ -129,6 +129,10 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
     STATUSLINE_SETUP_AGENT_TYPE,
     build_statusline_setup_agent_config,
 )
+from jiuwenswarm.server.runtime.agent_adapter.todo_close_text_hold import (
+    TodoCloseTextHold,
+    is_todo_close_control,
+)
 
 from jiuwenswarm.agents.harness.common.tools.deepresearch import (
     get_deepresearch_tools,
@@ -21255,6 +21259,35 @@ class JiuWenSwarmDeepAdapter:
             # has either handed the message over or attached to a running round.
             runner_stream_started_at = time.monotonic()
             first_chunk_seen = False
+            todo_close_hold = TodoCloseTextHold()
+
+            def _take_todo_close_chunks() -> list[AgentResponseChunk]:
+                """下发挂起的外层正文。drop 过的块不在这里。"""
+                nonlocal emitted_terminal_chat_final, has_streamed_content
+                payloads = todo_close_hold.take()
+                if not payloads:
+                    return []
+                chunks: list[AgentResponseChunk] = []
+                boundary = self._begin_visible_chat_content(
+                    stream_is_user_originated
+                )
+                if boundary is not None:
+                    chunks.append(AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=note_chat_payload(boundary),
+                        is_complete=False,
+                    ))
+                    emitted_terminal_chat_final = False
+                for payload in payloads:
+                    chunks.append(AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=note_chat_payload(payload),
+                        is_complete=False,
+                    ))
+                has_streamed_content = True
+                return chunks
             # A plain user-chat consumer stream (not a command.goal / attach-goal
             # stream). Only these may be hijacked by a goal round before the user
             # round produces its first visible token; used to allow a bubble
@@ -21369,6 +21402,16 @@ class JiuWenSwarmDeepAdapter:
                     continue
 
                 chunk_type = chunk.type
+                control = todo_close_hold.on_control(chunk_type)
+                if control == "arm" or control == "drop":
+                    continue
+                if control == "release" or todo_close_hold.should_flush_for(chunk_type):
+                    if control != "release":
+                        todo_close_hold.disarm()
+                    for held_chunk in _take_todo_close_chunks():
+                        yield held_chunk
+                    if control == "release":
+                        continue
                 if chunk_type == "llm_usage":
                     logger.info(f"[JiuWenSwarmDeepAdapter] llm_usage chunk: {chunk}")
                     usage_meta = (
@@ -21439,7 +21482,6 @@ class JiuWenSwarmDeepAdapter:
                     if delta_payload is None:
                         continue
                     _propagate_stream_source_id(chunk.payload, delta_payload)
-                    has_streamed_content = True
                     if accumulated_reasoning:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -21451,6 +21493,12 @@ class JiuWenSwarmDeepAdapter:
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
+                    if todo_close_hold.should_buffer(
+                        _is_foreign_stream_source(chunk.payload)
+                    ):
+                        todo_close_hold.push(delta_payload)
+                        continue
+                    has_streamed_content = True
                     boundary = self._begin_visible_chat_content(stream_is_user_originated)
                     if boundary is not None:
                         yield AgentResponseChunk(
@@ -21666,6 +21714,9 @@ class JiuWenSwarmDeepAdapter:
             # ask_user 暂停中为 True 跳过；in-place 续跑后为 False 放行（此时
             # 轮次已正常完成/取消，flush 与合成 final 必须发出，否则前端悬挂）。
             # hitl_pending_stream 只反映"本轮出过 ask_user 卡片"，不随续跑复位。
+            if not suppress_stream_after_hitl:
+                for held_chunk in _take_todo_close_chunks():
+                    yield held_chunk
             if accumulated_text and not suppress_stream_after_hitl:
                 # Same rule as _adapt_goal_intermediate_final: demote host
                 # flush only when the flushed text belonged to a goal round.
@@ -22541,6 +22592,9 @@ class JiuWenSwarmDeepAdapter:
             if hasattr(chunk, "type") and hasattr(chunk, "payload"):
                 chunk_type = chunk.type
                 payload = chunk.payload
+
+                if is_todo_close_control(chunk_type):
+                    return None
 
                 if chunk_type == "steering_consumed":
                     # Only the root/leader receipt may divide the user's main

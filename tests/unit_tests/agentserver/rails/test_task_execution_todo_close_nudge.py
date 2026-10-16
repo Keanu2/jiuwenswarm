@@ -22,11 +22,14 @@ from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
 
 
 class _FakeSession:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
     def get_session_id(self) -> str:
         return "sess-1"
 
     async def write_stream(self, schema: object) -> None:
-        return None
+        self.events.append(str(getattr(schema, "type", "")))
 
 
 def _rail_with_open_task() -> TaskExecutionRail:
@@ -62,6 +65,7 @@ async def test_text_only_ending_attaches_one_todo_close_nudge() -> None:
     rail = _rail_with_open_task()
     ctx = _text_ctx("流程在此暂停，请上传源文件。")
 
+    await rail.before_model_call(ctx)
     await rail.after_model_call(ctx)
     calls = ctx.inputs.response.tool_calls
     assert len(calls) == 1
@@ -69,6 +73,8 @@ async def test_text_only_ending_attaches_one_todo_close_nudge() -> None:
     assert str(calls[0].id).startswith(TODO_CLOSE_NUDGE_ID_PREFIX)
     assert ctx.inputs.response.content == ""
     assert rail._todo_close_nudge_used is True
+    assert ctx.session.events == ["todo_close_hold", "todo_close_drop"]
+    assert rail._todo_close_hold_pending is False
 
     await rail.after_model_call(ctx)
     assert len(ctx.inputs.response.tool_calls) == 1
@@ -80,11 +86,13 @@ async def test_truncated_text_does_not_attach_nudge() -> None:
     ctx = _text_ctx("正文被截断")
     ctx.inputs.response.finish_reason = "length"
 
+    await rail.before_model_call(ctx)
     await rail.after_model_call(ctx)
 
     assert ctx.inputs.response.tool_calls == []
     assert ctx.inputs.response.content == "正文被截断"
     assert rail._todo_close_nudge_used is False
+    assert ctx.session.events == ["todo_close_hold", "todo_close_release"]
 
 
 @pytest.mark.asyncio
@@ -112,10 +120,12 @@ async def test_text_only_ending_keeps_real_tool_calls() -> None:
     )
     ctx = _text_ctx("同时改状态", tool_calls=[existing])
 
+    await rail.before_model_call(ctx)
     await rail.after_model_call(ctx)
 
     assert ctx.inputs.response.tool_calls == [existing]
     assert rail._todo_close_nudge_used is False
+    assert ctx.session.events == ["todo_close_hold", "todo_close_release"]
 
 
 @pytest.mark.asyncio
@@ -238,13 +248,14 @@ async def test_stream_rail_does_not_emit_todo_close_nudge(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_text_only_resume_nudges_disk_in_progress_without_memory() -> None:
+async def test_text_only_resume_nudges_stamped_disk_in_progress() -> None:
     rail = TaskExecutionRail()
     rail._todo_map = {
         "env": {
             "id": "env",
             "content": "环境预检",
             "status": "in_progress",
+            "generation_token": "gen-1",
         },
     }
     ctx = _text_ctx("问答之后直接说明卡点。")
@@ -257,11 +268,38 @@ async def test_text_only_resume_nudges_disk_in_progress_without_memory() -> None
 
 
 @pytest.mark.asyncio
+async def test_unstamped_legacy_in_progress_does_not_nudge() -> None:
+    rail = TaskExecutionRail()
+    rail._todo_map = {
+        "legacy": {
+            "id": "legacy",
+            "content": "上一问留下的步骤",
+            "status": "in_progress",
+        },
+        "current": {
+            "id": "current",
+            "content": "这一问的步骤",
+            "status": "pending",
+            "generation_token": "gen-1",
+        },
+    }
+    ctx = _text_ctx("新问题直接回答。")
+
+    await rail.before_model_call(ctx)
+    await rail.after_model_call(ctx)
+
+    assert ctx.inputs.response.tool_calls == []
+    assert ctx.session.events == []
+
+
+@pytest.mark.asyncio
 async def test_before_invoke_resets_nudge_budget() -> None:
     rail = _rail_with_open_task()
     rail._todo_close_nudge_used = True
+    rail._todo_close_hold_pending = True
     ctx = SimpleNamespace(session=None, inputs=object(), extra={})
 
     await rail.before_invoke(ctx)
 
     assert rail._todo_close_nudge_used is False
+    assert rail._todo_close_hold_pending is False
