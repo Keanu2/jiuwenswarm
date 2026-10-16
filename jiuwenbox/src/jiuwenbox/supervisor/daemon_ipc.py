@@ -7,6 +7,10 @@ JSON objects describe the request/response semantics, while raw bytes
 (stdin contents, captured stdout/stderr) ride alongside as additional
 length-prefixed frames so we can carry binary payloads safely.
 
+Each Linux connection must first send a length-prefixed control-token
+frame, before its JSON request header. The per-sandbox token is delivered
+to the daemon through its bootstrap stdin pipe, never argv or environment.
+
 Stays standard-library only so the daemon (loaded with ``python3 -S``
 inside the sandbox) does not have to drag in the rest of jiuwenbox to
 participate in IPC.
@@ -44,6 +48,7 @@ SANDBOX_LAUNCHER_PATH = f"{SANDBOX_RESERVED_DIR}/landlock-launcher.py"
 # children with ``close_fds=True`` so the inherited fd is not exposed
 # either).
 LISTENER_FD_ENV = "JIUWENBOX_CONTROL_LISTENER_FD"
+CONTROL_TOKEN_BYTES = 32
 
 # Daemon argv vector. ``-S`` shaves the ``import site`` cost so the daemon
 # starts faster; the daemon is stdlib-only so ``site`` is unnecessary.

@@ -232,6 +232,39 @@ Deployment acceptance: a non-loopback listener without a Token must fail startup
 missing or wrong credentials must receive `401`; a correct Token must allow `/health`, followed by sandbox API checks.
 Source-level and local tests do not replace verification of the deployed service.
 
+### Linux sandbox control IPC authentication
+
+This internal channel is separate from serving the management HTTP API over UDS. Each Linux
+daemon adopts a listener FD created by box-server on the host. The control directory is `0700`,
+the socket is `0600`, its path is not mounted into the sandbox, and user commands do not inherit the listener FD.
+
+Each sandbox also has an independent random 256-bit control token. Box-server delivers it through
+an anonymous stdin pipe during bootstrap. The daemon consumes and closes the pipe before accepting work.
+The token is not stored in argv, environment variables, or persistent files and is separate from `JIUWENBOX_API_TOKEN`.
+Every connection must send a token frame before its request header and data. Missing, wrong, or another
+sandbox's token is rejected before dispatching exec, background jobs, file operations, or shutdown.
+Bootstrap delivery failures terminate the daemon; there is no unauthenticated legacy fallback.
+Sandbox cleanup removes the host's in-memory credential.
+
+This closes the control-channel authentication gap. Direct IPC calls can bypass gateway checks, but
+commands still inherit the daemon's namespaces, seccomp, Landlock, and mount restrictions; missing
+IPC authentication alone does not prove a host escape. Tokens do not replace separate host accounts
+for different trust domains: same-UID processes that can ptrace or read controller memory are not isolated tenants.
+
+After upgrading, restart box-server and recreate existing Linux sandboxes to replace resident old
+daemons. Updating source files alone does not authenticate an already running process.
+Run native UDS regression checks on Linux from `jiuwenbox`:
+
+```bash
+PYTHONPATH=src python -m pytest tests/unit/test_linux_ipc_auth.py tests/integration/test_linux_ipc_auth_e2e.py -q
+```
+
+These checks cover rejection of a separate same-UID process, denied writes with a wrong token,
+and authorized exec / file operations. They do not run bubblewrap and do not replace deployment
+acceptance of namespaces, Landlock, and the complete inherited-FD chain. Recreate real sandboxes and
+verify normal exec, upload/download, directory listing, background jobs, and shutdown, together with
+absence of side effects from unauthorized IPC requests. Native Linux cases are skipped on Windows.
+
 ### Persisting the audit log (`--save-logs DIR`)
 
 **By default jiuwenbox writes no log files at all.** Audit events

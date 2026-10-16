@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import errno
 import json
 import logging
 import os
+import secrets
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -64,6 +67,7 @@ from jiuwenbox.supervisor import cgroup as cgroup_module
 from jiuwenbox.supervisor import network as network_module
 from jiuwenbox.supervisor.bwrap import BwrapConfig
 from jiuwenbox.supervisor.daemon_ipc import (
+    CONTROL_TOKEN_BYTES,
     LISTENER_FD_ENV,
     LOG_FIELD_LEVEL,
     LOG_FIELD_MESSAGE,
@@ -628,6 +632,7 @@ class ProcessRuntime(RuntimeAdapter):
         self._file_roots: dict[str, Path] = {}
         self._launcher_dirs: dict[str, Path] = {}
         self._control_dirs: dict[str, Path] = {}
+        self._daemon_control_tokens: dict[Path, bytes] = {}
         self._daemon_socket_ready: dict[str, bool] = {}
         self._seccomp_bpf: dict[str, bytes] = {}
         self._landlock_payloads: dict[str, str] = {}
@@ -896,7 +901,27 @@ class ProcessRuntime(RuntimeAdapter):
         # other policy-managed paths) is consistent with what created the
         # socket; we do not actually need ``policy`` further here.
         _ = policy
+        self._daemon_control_tokens[socket_path] = secrets.token_bytes(CONTROL_TOKEN_BYTES)
         return listener
+
+    @staticmethod
+    def _bootstrap_daemon_token(proc: subprocess.Popen, token: bytes) -> None:
+        """Send the private credential through stdin; terminate on any failure."""
+        try:
+            if proc.stdin is None or len(token) != CONTROL_TOKEN_BYTES:
+                raise RuntimeError("Daemon control-token bootstrap pipe is missing or invalid")
+            with proc.stdin as pipe:
+                data = struct.pack(">I", len(token)) + token
+                if pipe.write(data) != len(data):
+                    raise RuntimeError("Incomplete daemon control-token bootstrap write")
+                pipe.flush()
+        except Exception as exc:
+            # bwrap --die-with-parent propagates this termination to its child.
+            with contextlib.suppress(OSError):
+                proc.kill()
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+            raise RuntimeError("Failed to deliver daemon control token") from exc
 
     def _ensure_seccomp_bpf(self, sandbox_id: str, policy: SecurityPolicy) -> bytes:
         bpf = self._seccomp_bpf.get(sandbox_id)
@@ -1946,6 +1971,9 @@ class ProcessRuntime(RuntimeAdapter):
                 f"{sandbox_id}: {exc}",
             ) from exc
         listener_fd = listener.fileno()
+        control_token = self._daemon_control_tokens[
+            self._control_dirs[sandbox_id] / SANDBOX_CONTROL_SOCKET_NAME
+        ]
 
         seccomp_fd: int | None = None
         try:
@@ -2057,6 +2085,7 @@ class ProcessRuntime(RuntimeAdapter):
         try:
             proc = subprocess.Popen(
                 daemon_cmd,
+                stdin=subprocess.PIPE,
                 stdout=startup_log_file,
                 stderr=subprocess.STDOUT,
                 env=process_env,
@@ -2064,6 +2093,7 @@ class ProcessRuntime(RuntimeAdapter):
                 start_new_session=True,
                 preexec_fn=preexec,
             )
+            self._bootstrap_daemon_token(proc, control_token)
         except Exception:
             startup_log_file.close()
             if seccomp_fd is not None:
@@ -2213,6 +2243,7 @@ class ProcessRuntime(RuntimeAdapter):
             shutil.rmtree(launcher_dir, ignore_errors=True)
         control_dir = self._control_dirs.pop(sandbox_id, None)
         if control_dir is not None:
+            self._daemon_control_tokens.pop(control_dir / SANDBOX_CONTROL_SOCKET_NAME, None)
             shutil.rmtree(control_dir, ignore_errors=True)
         self._daemon_socket_ready.pop(sandbox_id, None)
         uplink_handle = self._uplink_handles.pop(sandbox_id, None)
@@ -2349,12 +2380,18 @@ class ProcessRuntime(RuntimeAdapter):
         except OSError:
             return False
 
-    @staticmethod
-    def _connect_daemon_socket(socket_path: Path) -> socket.socket:
+    def _authenticate_daemon_socket(self, sock: socket.socket, socket_path: Path) -> None:
+        token = self._daemon_control_tokens.get(socket_path)
+        if token is None:
+            raise PermissionError("No control credential for daemon socket")
+        send_frame(sock, token)
+
+    def _connect_daemon_socket(self, socket_path: Path) -> socket.socket:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(DAEMON_CONNECT_TIMEOUT_SECONDS)
         try:
             sock.connect(str(socket_path))
+            self._authenticate_daemon_socket(sock, socket_path)
         except OSError:
             sock.close()
             raise
@@ -2413,6 +2450,7 @@ class ProcessRuntime(RuntimeAdapter):
             if call.exec_socket is not None:
                 sock.settimeout(DAEMON_CONNECT_TIMEOUT_SECONDS)
                 sock.connect(str(call.socket_path))
+                self._authenticate_daemon_socket(sock, call.socket_path)
             # The daemon waits for the user command to finish before
             # responding, so the receive timeout has to outlive the request
             # timeout. When no exec timeout is configured, use a bounded
@@ -2928,10 +2966,9 @@ class ProcessRuntime(RuntimeAdapter):
             return
 
         def _ask_shutdown(path: Path) -> None:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock = self._connect_daemon_socket(path)
             sock.settimeout(DAEMON_SHUTDOWN_TIMEOUT_SECONDS)
             try:
-                sock.connect(str(path))
                 send_frame(
                     sock,
                     encode_request(request_type=REQUEST_TYPE_SHUTDOWN),

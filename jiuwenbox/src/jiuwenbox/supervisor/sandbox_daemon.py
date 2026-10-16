@@ -38,6 +38,11 @@ cannot reach (or delete) the listener.
 
 Important security notes:
 
+* Every IPC connection must authenticate using a fresh per-sandbox control
+  token before sending a request. Box-server sends it through an anonymous
+  stdin pipe during bootstrap; the daemon consumes and closes that pipe
+  before accepting work. It is never placed in argv or environment.
+
 * Sandboxed payloads share the daemon's UID (typically ``nobody``).  The
   kernel's PID-1 signal protections are not sufficient on every platform,
   so seccomp additionally blocks ``kill``/``tkill``/``tgkill`` targeting
@@ -65,6 +70,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import errno
+import hmac
 import json
 import logging
 import os
@@ -89,6 +95,7 @@ SANDBOX_DAEMON_SANDBOX_PATH = f"{SANDBOX_RESERVED_DIR}/sandbox-daemon.py"
 SANDBOX_LAUNCHER_PATH = f"{SANDBOX_RESERVED_DIR}/landlock-launcher.py"
 SANDBOX_DAEMON_COMMAND = ["python3", "-S", SANDBOX_DAEMON_SANDBOX_PATH]
 LISTENER_FD_ENV = "JIUWENBOX_CONTROL_LISTENER_FD"
+CONTROL_TOKEN_BYTES = 32
 
 REQUEST_TYPE_EXEC = "exec"
 REQUEST_TYPE_SHUTDOWN = "shutdown"
@@ -183,7 +190,10 @@ def _normalize_env(env: Any) -> dict[str, str] | None:
 class DaemonState:
     """Shared mutable state guarded by ``lock``."""
 
-    def __init__(self) -> None:
+    def __init__(self, control_token: bytes) -> None:
+        if not isinstance(control_token, bytes) or len(control_token) != CONTROL_TOKEN_BYTES:
+            raise ValueError("A valid daemon control token is required")
+        self.control_token = control_token
         self.shutdown_event = threading.Event()
         self.in_flight = 0
         self.lock = threading.Lock()
@@ -1039,6 +1049,21 @@ def _handle_bg_kill(conn: socket.socket, header: dict[str, Any]) -> None:
 def _handle_connection(conn: socket.socket, state: DaemonState) -> None:
     state.begin_request()
     try:
+        # Authenticate before reading a command, file body, or shutdown request.
+        # A bounded timeout also prevents an idle unauthenticated connection
+        # from holding a worker indefinitely.
+        conn.settimeout(5.0)
+        try:
+            provided = _recv_frame(conn, CONTROL_TOKEN_BYTES)
+        except (OSError, ValueError):
+            provided = b""
+        if not hmac.compare_digest(provided, state.control_token):
+            with contextlib.suppress(OSError):
+                _send_response(conn, {
+                    "v": PROTOCOL_VERSION, "ok": False, "error": "unauthorized",
+                    "stderr": "invalid or missing control token",
+                })
+            return
         try:
             header_bytes = _recv_frame(conn, MAX_HEADER_BYTES)
         except OSError:
@@ -1058,6 +1083,10 @@ def _handle_connection(conn: socket.socket, state: DaemonState) -> None:
             )
             return
 
+        if not isinstance(header, dict):
+            _send_response(conn, {"v": PROTOCOL_VERSION, "ok": False, "error": "bad_request"})
+            return
+        conn.settimeout(None)
         request_type = header.get("type")
         if request_type == REQUEST_TYPE_EXEC:
             _handle_exec(conn, header, state)
@@ -1167,14 +1196,40 @@ def _accept_loop(listener: socket.socket, state: DaemonState) -> None:
         thread.start()
 
 
+def _read_control_token(stream: Any = None) -> bytes:
+    """Consume and close the anonymous bootstrap pipe before accepting work."""
+    if stream is None:
+        stream = getattr(sys.stdin, "buffer", None)
+    if stream is None:
+        raise RuntimeError("Daemon control-token bootstrap pipe is required")
+
+    def read_exact(size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            chunk = stream.read(size - len(data))
+            if not chunk:
+                raise RuntimeError("Incomplete daemon control-token bootstrap")
+            data.extend(chunk)
+        return bytes(data)
+
+    try:
+        with stream:
+            length = struct.unpack(">I", read_exact(4))[0]
+            if length != CONTROL_TOKEN_BYTES:
+                raise RuntimeError("Invalid daemon control-token bootstrap length")
+            return read_exact(length)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Failed to read daemon control-token bootstrap") from exc
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
-    state = DaemonState()
     try:
+        state = DaemonState(_read_control_token())
         with _adopted_listener() as listener:
             logger.info(
                 "sandbox daemon adopted listener fd; entering accept loop",

@@ -227,6 +227,37 @@ UDS 无 Token 时依赖文件权限；多用户环境应设置 `JIUWENBOX_UDS_MO
 部署验收：无 Token 的非回环启动应失败；配置 Token 后，匿名和错误 Token 请求应返回 `401`，
 正确 Token 的 `/health` 请求应成功，再验证沙箱 API。源码回归或本机测试不能替代已部署服务器的验收。
 
+### Linux 沙箱内部 IPC 认证
+
+此控制通道与管理 HTTP API 使用 UDS 是两件事。Linux 的每个沙箱 daemon 接收
+box-server 在宿主机预先创建的监听 FD；控制目录为 `0700`，socket 为 `0600`，
+控制路径不挂载到沙箱内，用户命令也不会继承监听 FD。
+
+除文件权限外，每个沙箱现在有独立的随机 256 位控制令牌。box-server 在启动时通过
+匿名 stdin 管道传递令牌，daemon 读取并关闭管道后才开始接受请求；令牌不进入命令行、
+环境变量或持久化文件，也不复用 `JIUWENBOX_API_TOKEN`。
+每条 IPC 连接必须先发送令牌帧，再发送请求头及数据。缺失、错误或其他沙箱的令牌会被拒绝，
+不会分派 exec、后台任务、文件操作或 shutdown。启动令牌传递失败时终止 daemon，
+不保留兼容旧客户端的无认证回退；沙箱清理时同时删除宿主侧的内存凭证。
+
+该修复补上“能连接 socket 就能控制沙箱”的认证缺口。直接 IPC 调用可能绕过网关层检查，
+但命令仍继承 daemon 的 namespace、seccomp、Landlock 和文件系统挂载限制，不能仅凭
+缺少 IPC 认证就断言已实现宿主机逃逸。令牌也不能替代宿主机不同信任域的用户隔离；
+能 ptrace 或读取控制进程内存的同 UID 进程仍不应被视为安全隔离的租户。
+
+升级后需重启 box-server 并重新创建已有 Linux 沙箱，以替换驻留的旧 daemon；
+只更新磁盘上的源码不会给正在运行的旧进程补上认证。
+Linux 主机上的原生 UDS 回归命令（在 `jiuwenbox` 目录执行）：
+
+```bash
+PYTHONPATH=src python -m pytest tests/unit/test_linux_ipc_auth.py tests/integration/test_linux_ipc_auth_e2e.py -q
+```
+
+原生测试覆盖同 UID 独立进程被拒绝、错误令牌不能写文件，以及合法 exec / 文件操作。
+它不启动 bubblewrap，不能替代部署环境中 namespace、Landlock 和完整 FD 传递链路的验收。
+部署验收还需重新创建真实沙箱，验证正常执行、上传/下载、目录列表、后台任务和停止操作，
+并确认未授权 IPC 请求不能产生文件或进程副作用。Windows 上原生 Linux 用例会跳过。
+
 ### 持久化审计日志（`--save-logs DIR`）
 
 **默认情况下 jiuwenbox 不会写任何日志文件**：审计事件只在 Python 标
