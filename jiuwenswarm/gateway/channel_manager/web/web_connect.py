@@ -26,6 +26,10 @@ from urllib.parse import parse_qs, urlparse
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.security.web_identity import (
+    PRINCIPAL_ATTR, WebAccessDenied, WebIdentityPolicy, WebPrincipal,
+    authorize_rpc, can_access, claim_resource, identity_scope, principal_for,
+)
 from jiuwenswarm.common.security.attachment_download import (
     AttachmentDownloadPolicy,
     AttachmentError,
@@ -181,6 +185,8 @@ class WebChannel(BaseWsChannel):
     def __init__(self, config: WebChannelConfig, router: RobotMessageRouter):
         super().__init__(config, router)
         self.config: WebChannelConfig = config
+        self._identity_policy = WebIdentityPolicy()
+        self._pending_creates: set[tuple[int, str]] = set()
         self._attachment_policy = AttachmentDownloadPolicy.from_env()
         self._attachment_download_slots = asyncio.Semaphore(4)
         self._server: Any = None
@@ -419,18 +425,17 @@ class WebChannel(BaseWsChannel):
 
     @classmethod
     def _resolve_connection_user_id(cls, flat_query: dict[str, str], ws: Any) -> str | None:
-        connection_user_id = cls._extract_query_user_id(flat_query) or cls._extract_ws_header_user_id(ws)
+        del flat_query  # Query/header user IDs are untrusted routing hints.
+        principal = principal_for(ws)
+        connection_user_id = principal.user_id if principal else None
         setattr(ws, _WEB_CONNECTION_USER_ID_ATTR, connection_user_id)
         return connection_user_id
 
     @staticmethod
     def _connection_user_id(ws: Any) -> str | None:
-        """返回 Web 连接建立时缓存的 user_id（query 或 X-User-Id Header）。"""
-        uid = getattr(ws, _WEB_CONNECTION_USER_ID_ATTR, None)
-        if uid is None:
-            return None
-        text = str(uid).strip()
-        return text or None
+        """返回服务端认证后绑定的 user_id。"""
+        principal = principal_for(ws)
+        return principal.user_id if principal else None
 
     @staticmethod
     def _routing_key_user_id(connection_user_id: str | None, remote: Any) -> str:
@@ -633,6 +638,7 @@ class WebChannel(BaseWsChannel):
 
         from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
 
+        self._identity_policy.validate_listener(self.config.host)
         self._server = await ws_serve(
             self._connection_handler,
             self.config.host,
@@ -1061,6 +1067,12 @@ class WebChannel(BaseWsChannel):
         remote = getattr(ws, "remote_address", None)
         _flat_query = {k: (v[0] if v else "") for k, v in query.items()}
 
+        try:
+            await self._identity_policy.authenticate(ws)
+        except WebAccessDenied:
+            await ws.close(code=4401, reason="Web authentication required")
+            return
+
         # ── Path 分发(设计文档 §5.3.7) ──
         # /ws/git → GitDiffWebSocketHandler
         # /ws     → 现有主 RPC
@@ -1126,15 +1138,18 @@ class WebChannel(BaseWsChannel):
         出站：统一经 per-ws writer（``_enqueue_send``），WS 发文本帧、管道发长度
         前缀帧，由各自的 ws 皮（websockets 连接 / ``_PipeClientAdapter``）承担。
         """
+        if principal_for(ws) is None:
+            await ws.close(code=4401, reason="Web authentication required")
+            return
         _flat_query = {k: (v[0] if v else "") for k, v in query.items()}
         connection_user_id, _user_id = self._resolve_ws_identity(
             ws, _flat_query, remote, route_type="ws",
         )
         uid_marker = "" if connection_user_id else " uid_empty=yes"
         logger.info(
-            "WebChannel 新连接: remote=%s query=%s user_id=%r%s",
+            "WebChannel 新连接: remote=%s query_keys=%s user_id=%r%s",
             remote,
-            query,
+            sorted(query),
             connection_user_id,
             uid_marker,
         )
@@ -1145,6 +1160,9 @@ class WebChannel(BaseWsChannel):
         _mode = _flat_query.get("mode", "agent")
         _agent_id = _flat_query.get("agent_id", "default")
         _initial_sid = _flat_query.get("session_id", self._make_session_id())
+        if _flat_query.get("session_id") and not can_access(principal_for(ws), "sessions", _initial_sid):
+            await ws.close(code=4403, reason="Session unavailable")
+            return
         _initial_rk = RoutingKey(
             user_id=_user_id,
             channel_id=self.channel_id,
@@ -1180,6 +1198,7 @@ class WebChannel(BaseWsChannel):
                 await self._handle_message_dict(ws, data, query)
         finally:
             await self.unregister_ws(ws)
+            self._pending_creates = {key for key in self._pending_creates if key[0] != id(ws)}
 
             logger.info(
                 "WebChannel 连接清理完成: %s",
@@ -1373,6 +1392,8 @@ class WebChannel(BaseWsChannel):
                 logger.warning("[WebChannel] 管道连接 auth 校验失败，断开")
                 return
             ws = _PipeClientAdapter(stream)
+            # The pipe token and peer-image checks authenticate the desktop workspace.
+            setattr(ws, PRINCIPAL_ATTR, WebPrincipal("local", workspace_owner=True))
             await self._run_client_session(
                 ws, {}, _PIPE_REMOTE_LABEL, self._pipe_frames(stream), path_label="np:cron",
             )
@@ -1403,7 +1424,87 @@ class WebChannel(BaseWsChannel):
             return
         await self._handle_message_dict(ws, data, query)
 
-    async def _handle_message_dict(
+    async def _handle_message_dict(self, ws, data, query) -> None:
+        principal = principal_for(ws)
+        if principal is None:
+            await ws.close(code=4401, reason="Web authentication required")
+            return
+        if not isinstance(data, dict):
+            await self.send_response(ws, "", ok=False, code="BAD_REQUEST", error="Invalid request")
+            return
+        if data.get("type") == "auth" and principal.workspace_owner and not self._identity_policy.configured:
+            return  # A cached browser token does not change the local workspace identity.
+        method = data.get("method")
+        params = dict(data.get("params")) if isinstance(data.get("params"), dict) else {}
+        request_id = data.get("id")
+        if not isinstance(method, str) or not isinstance(request_id, str):
+            await self.send_response(ws, "", ok=False, code="BAD_REQUEST", error="Invalid request")
+            return
+        try:
+            if method == "session.create" and not principal.workspace_owner:
+                import hashlib
+                params.pop("session_id", None)
+                supplied = str(params.get("create_token") or uuid.uuid4().hex)
+                params["create_token"] = hashlib.sha256(
+                    f"web-v1:{principal.user_id}:{supplied}".encode()).hexdigest()
+            authorize_rpc(principal, method, params)
+            if method == "session.create" and not principal.workspace_owner:
+                key = (id(ws), request_id)
+                if key in self._pending_creates or sum(k[0] == id(ws) for k in self._pending_creates) >= 128:
+                    raise WebAccessDenied("Session creation already pending or limit reached")
+                self._pending_creates.add(key)
+            # Never forward a client-selected identity to handlers or the AgentServer.
+            if method == "session.create" or ("user_id" in params and not principal.workspace_owner):
+                params["user_id"] = principal.user_id
+            safe_query = {**query, "user_id": [principal.user_id]}
+            with identity_scope(principal):
+                await self._dispatch_authenticated_message(ws, {**data, "params": params}, safe_query)
+        except WebAccessDenied:
+            await self.send_response(ws, request_id, ok=False,
+                                     code="FORBIDDEN", error="Resource unavailable or operation forbidden")
+
+    def _enqueue_send(self, ws, frame) -> None:
+        """Last delivery boundary: filter global pushes and validate response ownership."""
+        principal = principal_for(ws)
+        if principal and not principal.workspace_owner and isinstance(frame, (str, bytes)):
+            try:
+                frame = json.loads(frame)
+            except (ValueError, TypeError):
+                return
+        if principal and not principal.workspace_owner and isinstance(frame, dict):
+            payload = frame.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            if frame.get("type") == "res":
+                key = (id(ws), frame.get("id"))
+                if key in self._pending_creates:
+                    self._pending_creates.discard(key)
+                    sid = payload.get("session_id") or payload.get("sessionId")
+                    if frame.get("ok") and isinstance(sid, str):
+                        try:
+                            claim_resource("sessions", sid, principal)
+                        except WebAccessDenied:
+                            frame = {"type": "res", "id": frame.get("id"), "ok": False,
+                                     "code": "FORBIDDEN", "error": "Session unavailable", "payload": {}}
+                            payload = {}
+                sid = payload.get("session_id") or payload.get("sessionId")
+                if sid and not can_access(principal, "sessions", sid):
+                    return
+            else:
+                event = frame.get("event", "")
+                if event not in {"connection.ack", "connection.heartbeat"}:
+                    sid = payload.get("session_id")
+                    pid = payload.get("project_id")
+                    if sid:
+                        if not can_access(principal, "sessions", sid):
+                            return
+                    elif pid:
+                        if not can_access(principal, "projects", pid):
+                            return
+                    else:
+                        return  # Unscoped cron, config, heartbeat and proactive pushes are private.
+        super()._enqueue_send(ws, frame)
+
+    async def _dispatch_authenticated_message(
         self, ws: Any, data: Any, query: dict[str, list[str]],
     ) -> None:
         """消息处理公共内核（收 dict / 发 dict）：WS 与命名管道传输皮共用。"""

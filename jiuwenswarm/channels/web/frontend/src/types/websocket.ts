@@ -44,6 +44,8 @@ export interface WebRequestOptions {
 }
 
 export interface WebConnectOptions {
+  /** Gateway access credential; separate from the model provider API key. */
+  authToken?: string;
   provider?: string;
   apiKey?: string;
   apiBase?: string;

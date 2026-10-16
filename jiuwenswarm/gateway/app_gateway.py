@@ -46,6 +46,7 @@ configure_agent_core_log_dir()
 from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge
 from jiuwenswarm.gateway.routing.agent_request_timeout import coerce_client_timeout_ms
 from jiuwenswarm.common.security.ws_origin import get_header_value
+from jiuwenswarm.common.security.web_identity import WebAccessDenied, WebIdentityPolicy  # noqa: E402
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
@@ -864,6 +865,7 @@ class GatewayServer:
 
         ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
 
+        WebIdentityPolicy().validate_listener(self.config.host)
         self._server = await ws_serve(
             self._connection_handler,
             self.config.host,
@@ -1066,9 +1068,17 @@ class GatewayServer:
             await ws.close(code=1008, reason=f"unsupported path: {request_path}")
             return
 
+        try:
+            principal = await WebIdentityPolicy().authenticate(ws)
+            if not principal.workspace_owner:
+                raise WebAccessDenied("Workspace administrator required")
+        except WebAccessDenied:
+            await ws.close(code=4401, reason="Workspace authentication required")
+            return
+
         self._clients.add(ws)
 
-        ws_user_id = self._extract_ws_user_id(ws)
+        ws_user_id = principal.user_id
         setattr(ws, "_gateway_user_id", ws_user_id)
         setattr(ws, "_gateway_agent_type", "jiuwenswarm")
         uid_marker = "" if ws_user_id else " uid_empty=yes"

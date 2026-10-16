@@ -4,6 +4,7 @@ import json
 import pytest
 
 from jiuwenswarm.common.schema.message import EventType, Message
+from jiuwenswarm.common.security.web_identity import PRINCIPAL_ATTR, WebPrincipal
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
 from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannel,
@@ -18,6 +19,7 @@ class _FakeClient:
         self.frames = []
         self.closed = False
         self.remote_address = ("127.0.0.1", 12345)
+        setattr(self, PRINCIPAL_ATTR, WebPrincipal("local", workspace_owner=True))
 
     async def send(self, data):
         self.frames.append(json.loads(data))

@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from jiuwenswarm.common.security.web_identity import PRINCIPAL_ATTR, WebPrincipal
+
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     WebHandlersBindParams,
@@ -37,6 +39,8 @@ class FakeWebSocket:
         self.sent_frames: list[dict[str, Any]] = []
         self.closed = False
         self.remote_address = remote_address
+        # This protocol fixture emulates a server-verified principal.
+        setattr(self, PRINCIPAL_ATTR, WebPrincipal(query_user_id or user_id or "local", True))
         if query_user_id is not None:
             WebChannel._resolve_connection_user_id({"user_id": query_user_id}, self)
         elif user_id is not None:
@@ -133,15 +137,15 @@ def test_extract_ws_header_user_id_case_insensitive():
     assert WebChannel._extract_ws_header_user_id(ws_empty) is None
 
 
-def test_resolve_connection_user_id_query_over_header():
+def test_resolve_connection_user_id_does_not_trust_query_or_header():
     ws = type(
         "Ws",
         (),
         {"request": type("Request", (), {"headers": _FakeRequestHeaders({"X-User-Id": "header_user"})})()},
     )()
     uid = WebChannel._resolve_connection_user_id({"user_id": "query_user"}, ws)
-    assert uid == "query_user"
-    assert WebChannel._connection_user_id(ws) == "query_user"
+    assert uid is None
+    assert WebChannel._connection_user_id(ws) is None
 
 
 def test_resolve_connection_user_id_header_only():
@@ -151,7 +155,7 @@ def test_resolve_connection_user_id_header_only():
         {"request": type("Request", (), {"headers": _FakeRequestHeaders({"X-User-Id": "header_only"})})()},
     )()
     uid = WebChannel._resolve_connection_user_id({}, ws)
-    assert uid == "header_only"
+    assert uid is None
 
 
 def test_resolve_connection_user_id_empty():
@@ -255,8 +259,8 @@ async def test_web_channel_handle_raw_message_without_user_id():
     )
 
     assert len(seen) == 1
-    assert seen[0].user_id is None
-    assert seen[0].metadata.get("user_id") is None
+    assert seen[0].user_id == "local"
+    assert seen[0].metadata.get("user_id") == "local"
 
 
 @pytest.mark.asyncio

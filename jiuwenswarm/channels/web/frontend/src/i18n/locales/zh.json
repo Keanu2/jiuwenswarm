@@ -2229,6 +2229,10 @@
     }
   },
   "network": {
+    "authenticationRequired": "需要验证网关访问身份",
+    "authenticationFailed": "验证失败，请检查访问令牌和浏览器会话存储权限",
+    "accessToken": "访问令牌",
+    "authenticate": "连接",
     "wsError": "WebSocket 连接异常",
     "connectionClosedWithCode": "连接已关闭 ({{code}})",
     "connectionClosed": "连接已关闭",

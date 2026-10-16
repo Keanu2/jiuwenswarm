@@ -16,6 +16,7 @@ import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
+import { WebAuthentication } from './components/WebAuthentication';
 import { UpdatePanel } from './components/UpdatePanel';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
 import {
@@ -2663,6 +2664,7 @@ function AppContent() {
 function App() {
   return (
     <ErrorBoundary>
+      <WebAuthentication />
       <AppContent />
     </ErrorBoundary>
   );

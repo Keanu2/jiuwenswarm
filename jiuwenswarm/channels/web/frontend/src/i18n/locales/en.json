@@ -2228,6 +2228,10 @@
     }
   },
   "network": {
+    "authenticationRequired": "Gateway authentication required",
+    "authenticationFailed": "Authentication failed. Check the access token and browser session storage permissions.",
+    "accessToken": "Access token",
+    "authenticate": "Connect",
     "wsError": "WebSocket connection error",
     "connectionClosedWithCode": "Connection closed ({{code}})",
     "connectionClosed": "Connection closed",

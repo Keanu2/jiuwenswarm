@@ -33,6 +33,10 @@ from jiuwenswarm.dotenv_early import parse_dotenv_early
 parse_dotenv_early("jiuwenswarm-web")
 
 # --- Now safe to import jiuwenswarm modules ---
+from jiuwenswarm.common.security.web_identity import (  # noqa: E402 -- load after --dotenv
+    AUTH_COOKIE, WebAccessDenied, WebIdentityPolicy, can_access, is_loopback,
+)
+
 from jiuwenswarm.agents.harness.common.tools.ssl_config import (
     get_insecure_ssl_context,
     get_ssl_verify,
@@ -466,6 +470,63 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._format_ws_part(payload.get("payload")),
             )
 
+    def _authorize_http(self, *, session_id=None) -> bool:
+        try:
+            principal = WebIdentityPolicy().authenticate_http(
+                self.headers, self.client_address, self.connection.getsockname())
+            origin = self.headers.get("Origin")
+            if origin:
+                parsed = urlparse(origin)
+                if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != self.headers.get("Host", "").lower():
+                    raise WebAccessDenied("Untrusted browser origin")
+            if not principal.workspace_owner and not (
+                    session_id and can_access(principal, "sessions", session_id)):
+                raise WebAccessDenied("Workspace administrator required")
+            return True
+        except (WebAccessDenied, ValueError):
+            self._write_json(403, {"error": "access_denied"})
+            return False
+
+    def _set_auth_session(self) -> None:
+        # An explicit same-origin Bearer exchange preserves normal browser file
+        # requests without putting a credential in URLs or JavaScript-readable cookies.
+        if not self.headers.get("Authorization") or not self._authorize_auth_exchange_origin():
+            self._write_json(403, {"error": "authentication_required"})
+            return
+        try:
+            policy = WebIdentityPolicy()
+            if not policy.configured:
+                raise WebAccessDenied("Authentication is not configured")
+            policy.authenticate_http(self.headers, self.client_address, self.connection.getsockname())
+            token = self.headers["Authorization"].partition(" ")[2]
+        except (WebAccessDenied, ValueError):
+            self._write_json(403, {"error": "authentication_required"})
+            return
+        # Tokens are printable, whitespace-free config values; quote cookie values.
+        from http.cookies import SimpleCookie
+        cookie = SimpleCookie()
+        cookie[AUTH_COOKIE] = token
+        cookie[AUTH_COOKIE]["path"] = "/"
+        cookie[AUTH_COOKIE]["httponly"] = True
+        cookie[AUTH_COOKIE]["samesite"] = "Strict"
+        if isinstance(self.connection, ssl.SSLSocket):
+            cookie[AUTH_COOKIE]["secure"] = True
+        body = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Set-Cookie", cookie[AUTH_COOKIE].OutputString())
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _authorize_auth_exchange_origin(self):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        parsed = urlparse(origin)
+        return parsed.scheme in ("http", "https") and parsed.netloc.lower() == self.headers.get("Host", "").lower()
+
     def _is_api_route(self) -> bool:
         return urlparse(self.path).path.startswith("/api")
 
@@ -484,6 +545,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         return "websocket" in upgrade.lower() and "upgrade" in connection.lower()
 
     def _proxy_http(self) -> None:
+        if not self._authorize_http():
+            return
         parsed = urlparse(self.api_target)
         if parsed.scheme == "https":
             ssl_ctx = None if get_ssl_verify() else get_insecure_ssl_context()
@@ -534,6 +597,11 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             conn.close()
 
     def _proxy_websocket_tunnel(self) -> None:
+        policy = WebIdentityPolicy()
+        remote = not is_loopback(self.client_address[0])
+        if remote and not policy.configured:
+            self._write_json(403, {"error": "authentication_required"})
+            return
         parsed = urlparse(self.ws_target)
         if parsed.scheme not in ("ws", "wss", "http", "https"):
             self.send_error(500, "ws proxy target must be ws/wss/http/https")
@@ -576,6 +644,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         try:
             request_lines = [f"{self.command} {self.path} HTTP/1.1"]
             for key, value in self.headers.items():
+                if key.lower() in {"x-jiuwen-remote-proxy", "cookie"}:
+                    continue
                 # Optional debug mode: disable websocket compression so frames stay
                 # plain text and can be parsed for req/res/event logging.
                 if (
@@ -589,6 +659,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     request_lines.append(f"{key}: {value}")
             if not any(line.lower().startswith("host:") for line in request_lines[1:]):
                 request_lines.append(f"Host: {upstream_host}:{upstream_port}")
+            if remote:
+                request_lines.append("X-Jiuwen-Remote-Proxy: 1")
             raw_req = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8")
             upstream.sendall(raw_req)
 
@@ -892,6 +964,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         return snapshot, filename
 
     def _handle_share_api_get(self, parsed) -> None:
+        sid = self._parse_query(parsed.query).get("session_id", "")
+        if not self._authorize_http(session_id=sid):
+            return
         if parsed.path != "/share-api/snapshot":
             self._write_json(404, {"error": "not_found"})
             return
@@ -913,6 +988,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self._write_json(200, {"filename": filename, "snapshot": snapshot})
 
     def _handle_file_api_get(self, parsed) -> None:
+        # Download URLs already require an unforgeable, expiring file capability.
+        if parsed.path != "/file-api/download" and not self._authorize_http():
+            return
         path = parsed.path
         query = self._parse_query(parsed.query)
 
@@ -1273,6 +1351,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 download_file.close()
 
     def _handle_file_api_post(self, parsed) -> None:
+        if not self._authorize_http():
+            return
         if parsed.path == "/file-api/rebuild-agent-data":
             try:
                 _generate_agent_data(self.project_root)
@@ -1393,6 +1473,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/web-auth/session":
+            self._set_auth_session()
+            return
         if self._is_file_api_route():
             self._handle_file_api_post(parsed)
             return
@@ -1624,6 +1707,7 @@ def main() -> None:
     _ConfiguredHandler.logs_root = logs_root
     _ConfiguredHandler.logger = logger
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
+    WebIdentityPolicy().validate_listener(args.host)
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
     logger.info("[jiuwenswarm-web] serving %s", dist_dir)

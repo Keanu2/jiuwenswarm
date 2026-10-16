@@ -13,6 +13,11 @@ project_id 格式: ``proj_`` + 8 位 hex(由 ``secrets.token_hex`` 生成)。
 """
 from __future__ import annotations
 
+from jiuwenswarm.common.security.web_identity import (
+    WebAccessDenied, claim_resource, restricted_principal, visible_resource,
+)
+
+
 import json
 import logging
 import os
@@ -287,6 +292,8 @@ def get_project_by_id(
 ) -> Project | None:
     """按 project_id 查找项目(默认项目不入库,不会命中)。"""
     for p in _load_cache(cache_bust):
+        if not visible_resource("projects", str(p.get("project_id") or "")):
+            continue
         if p.get("project_id") == project_id:
             return Project.from_dict(p)
     return None
@@ -306,6 +313,8 @@ def get_project_by_dir(
         查询时显式传入 ``work_mode``。本函数仅保留给 legacy/诊断路径。
     """
     for p in _load_cache(cache_bust):
+        if not visible_resource("projects", str(p.get("project_id") or "")):
+            continue
         if p.get("project_dir") == project_dir:
             return Project.from_dict(p)
     return None
@@ -361,6 +370,8 @@ def get_project_by_dir_and_mode(
         return None
     norm = _normalize_path_for_match(project_dir)
     for p in _load_cache(cache_bust):
+        if not visible_resource("projects", str(p.get("project_id") or "")):
+            continue
         pdir = p.get("project_dir") or ""
         if not pdir:
             continue
@@ -393,6 +404,8 @@ def get_project_by_name_and_mode(
     """
     mode = _normalize_work_mode_value(work_mode)
     for p in _load_cache(cache_bust):
+        if not visible_resource("projects", str(p.get("project_id") or "")):
+            continue
         if p.get("name") == name and _wm(p) == mode:
             return Project.from_dict(p)
     return None
@@ -467,7 +480,8 @@ def list_projects(
     for p in _load_cache(cache_bust):
         if not include_hidden and p.get("hidden"):
             continue
-        result.append(Project.from_dict(p))
+        if visible_resource("projects", str(p.get("project_id") or "")):
+            result.append(Project.from_dict(p))
     return result
 
 
@@ -802,6 +816,9 @@ def create_project(
             updated_at=now,
             work_mode=mode,
         )
+        principal = restricted_principal()
+        if principal:
+            claim_resource("projects", proj.project_id, principal)
         projects.append(proj.to_dict())
         return proj
 
@@ -866,10 +883,12 @@ def create_or_restore_project(
                 continue
             if _wm(p) != mode:
                 continue
-            if p.get("name") == name:
+            if p.get("name") == name and visible_resource("projects", str(p.get("project_id") or "")):
                 raise ProjectNameConflict(name)
 
         if path_match is not None:
+            if not visible_resource("projects", str(path_match.get("project_id") or "")):
+                raise WebAccessDenied("Project unavailable")
             if path_match.get("hidden"):
                 # 命中同 work_mode 的隐藏项目 → 自动恢复
                 path_match["hidden"] = False
@@ -888,6 +907,9 @@ def create_or_restore_project(
             updated_at=now,
             work_mode=mode,
         )
+        principal = restricted_principal()
+        if principal:
+            claim_resource("projects", proj.project_id, principal)
         projects.append(proj.to_dict())
         return proj, False
 
@@ -940,7 +962,7 @@ def rename_project(project_id: str, name: str) -> Project | None:
                 continue
             if _wm(p) != target_mode:
                 continue
-            if p.get("name") == name:
+            if p.get("name") == name and visible_resource("projects", str(p.get("project_id") or "")):
                 raise ProjectNameConflict(name)
         target["name"] = name
         target["updated_at"] = _now()
@@ -1019,13 +1041,14 @@ def reindex_project_pin_orders() -> None:
     保证反复置顶/取消后 ``pin_order`` 不会无限增长。
     """
     def _do(projects: list[dict[str, Any]]) -> None:
-        pinned = [p for p in projects if p.get("pinned")]
+        pinned = [p for p in projects if p.get("pinned")
+                  and visible_resource("projects", str(p.get("project_id") or ""))]
         pinned.sort(key=lambda p: p.get("pin_order", 0))
         for idx, p in enumerate(pinned, start=1):
             p["pin_order"] = idx
             p["updated_at"] = _now()
         for p in projects:
-            if not p.get("pinned"):
+            if not p.get("pinned") and visible_resource("projects", str(p.get("project_id") or "")):
                 p["pin_order"] = 0
 
     _mutate(_do)

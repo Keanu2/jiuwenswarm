@@ -24,6 +24,9 @@ import asyncio
 import json
 import logging
 import time
+from jiuwenswarm.common.security.web_identity import (
+    WebAccessDenied, authorize_rpc, identity_scope, principal_for,
+)
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -55,7 +58,12 @@ class GitDiffWebSocketHandler:
         """
         try:
             async for raw in ws:
-                await self._handle_message(ws, raw)
+                principal = principal_for(ws)
+                if principal is None:
+                    await ws.close(code=4401, reason="Web authentication required")
+                    return
+                with identity_scope(principal):
+                    await self._handle_message(ws, raw)
         except Exception as exc:  # noqa: BLE001
             logger.debug("[GitWS] connection loop ended: %s", exc)
 
@@ -90,6 +98,17 @@ class GitDiffWebSocketHandler:
             return
         if not isinstance(params, dict):
             params = {}
+
+        principal = principal_for(ws)
+        if principal is None:
+            await ws.close(code=4401, reason="Web authentication required")
+            return
+        try:
+            authorize_rpc(principal, method, params)
+        except WebAccessDenied:
+            await self._channel.send_response(ws, req_id, ok=False,
+                                             code="FORBIDDEN", error="Resource unavailable")
+            return
 
         if method == "project.git.diff_watch":
             await self._handle_diff_watch(ws, req_id, params)

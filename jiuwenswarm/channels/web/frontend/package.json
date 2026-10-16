@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test:web-auth": "tsc src/services/webAuth.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/web-auth --skipLibCheck --noEmitOnError && node --test tests/webAuth.test.mjs",
+    "test:dev-workspace-security": "tsc devWorkspaceSecurity.ts --target ES2020 --module ES2020 --moduleResolution Bundler --outDir node_modules/.cache/dev-workspace --skipLibCheck --noEmitOnError && node --test tests/devWorkspaceSecurity.test.mjs",
     "test:shell-rule-pattern": "tsc src/components/ConfigPanel/shellRulePattern.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/shell-rule-pattern --skipLibCheck --noEmitOnError && node --test tests/shellRulePattern.test.mjs",
     "predev": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
     "prebuild": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",

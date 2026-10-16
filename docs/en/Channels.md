@@ -263,3 +263,35 @@ ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password -p 2222 alic
 ```
 
 With `enabled: false`, verify that the SSH service no longer listens on its configured port. Local regression coverage in `tests/unit_tests/channel/test_ssh_auth.py` exercises real SSH handshakes and verifies that unauthorized clients never reach the relay. Validate the deployed environment separately using the steps above.
+
+### WebSocket identity and session ownership
+
+The Web `/ws` and `/ws/git` endpoints derive identity from server-verified credentials;
+query `user_id`, `X-User-Id`, and request parameters cannot select another identity.
+Desktop named pipes retain their token and peer-process checks. Without Web credentials,
+only actual loopback connections with local browser origins use the fixed `local` workspace identity.
+Non-loopback Web/Gateway and production HTTP listeners require authentication configuration.
+
+Use `JIUWENSWARM_WEB_TOKEN` (at least 32 bytes) for a trusted single-user workspace,
+or `JIUWENSWARM_WEB_USERS` containing a JSON user-to-distinct-token map for per-user access.
+The options are mutually exclusive. `JIUWENSWARM_WEB_ADMINS` explicitly names trusted
+workspace administrators from that map. Native clients use `Authorization: Bearer ...`;
+browsers send an authentication frame before RPCs. The built-in UI supports a token prompt
+and reconnects both main and Git sockets. Tokens never belong in connection URLs.
+Python CLI and native ACP/control clients support `JIUWENSWARM_WEB_CLIENT_TOKEN`;
+only a deployment's configured local ports may inherit its single-user server token.
+They never automatically select a credential from the multi-user map.
+
+Per-user ownership survives restarts, filters lists before pagination, and is checked before
+RPC dispatch and outbound queueing, including streaming and broadcast fallback. Legacy
+resources remain accessible to workspace administrators; unowned records are never
+automatically assigned to the first user. Global configuration, raw workspace file access,
+and adjacent ACP/TUI entrances require administrator privileges. HTTP session exports
+also enforce ownership. Existing signed file-download capabilities remain supported.
+
+Vite is local-development-only. Serve the built frontend with authenticated production
+HTTP service for remote access, with the same credentials configured in Gateway and HTTP
+processes. Restart both processes to revoke credentials and close old connections.
+This protects shared-runtime control-plane resources; run mutually untrusted agents in
+separate workspaces/processes and OS access boundaries. See the detailed
+[configuration and migration guide](../zh/WebSocket身份与会话安全.md).

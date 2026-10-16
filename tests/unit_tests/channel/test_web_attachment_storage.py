@@ -11,6 +11,10 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from types import SimpleNamespace
+from jiuwenswarm.common.security.web_identity import PRINCIPAL_ATTR, WebPrincipal
+
+
 import pytest
 
 from jiuwenswarm.common.security.attachment_download import AttachmentError
@@ -24,6 +28,10 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannel,
     WebChannelConfig,
 )
+
+
+def authenticated_socket():
+    return SimpleNamespace(**{PRINCIPAL_ATTR: WebPrincipal("local", True)})
 
 
 @pytest.fixture(autouse=True)
@@ -379,7 +387,7 @@ async def test_unrelated_methods_cannot_trigger_url_downloads(channel, method):
     callback = AsyncMock()
     channel.on_message(callback)
     await channel._handle_raw_message(
-        object(), request(method, [{"url": "https://files.example/a"}]), {}
+        authenticated_socket(), request(method, [{"url": "https://files.example/a"}]), {}
     )
     channel._download_file.assert_not_awaited()
     callback.assert_not_awaited()
@@ -419,7 +427,7 @@ async def test_normal_upload_and_persist_requests_still_reach_callback(
     raw = json.dumps(
         {"type": "req", "id": "req-persist", "method": method, "params": params}
     )
-    await channel._handle_raw_message(object(), raw, {})
+    await channel._handle_raw_message(authenticated_socket(), raw, {})
     callback.assert_awaited_once()
     assert callback.call_args.args[0].params == params
     channel._download_file.assert_not_awaited()
@@ -448,7 +456,7 @@ async def test_invalid_attachment_rejected_before_network_callback_or_agent(
     )
     callback = AsyncMock()
     channel.on_message(callback)
-    await channel._handle_raw_message(object(), request(files=[file_info]), {})
+    await channel._handle_raw_message(authenticated_socket(), request(files=[file_info]), {})
     assert channel.send_response.call_args.kwargs["code"] == code
     channel._download_file.assert_not_awaited()
     callback.assert_not_awaited()
@@ -470,7 +478,7 @@ async def test_failed_download_cleans_earlier_files_and_does_not_forward_raw_url
         {"url": f"https://files.example/{i}?secret=do-not-log", "name": f"{i}.txt"}
         for i in range(2)
     ]
-    await channel._handle_raw_message(object(), request(files=files), {})
+    await channel._handle_raw_message(authenticated_socket(), request(files=files), {})
     assert (
         channel.send_response.call_args.kwargs["code"] == "ATTACHMENT_DOWNLOAD_FAILED"
     )
@@ -497,7 +505,7 @@ async def test_successful_chat_url_attachment_reaches_agent_with_local_path(chan
     callback = AsyncMock(return_value=True)
     channel.on_message(callback)
     await channel._handle_raw_message(
-        object(),
+        authenticated_socket(),
         request(
             files=[
                 {
@@ -528,7 +536,7 @@ async def test_storage_error_returns_explicit_failure_without_agent_call(
     callback = AsyncMock()
     channel.on_message(callback)
     await channel._handle_raw_message(
-        object(), request(files=[{"url": "https://files.example/a"}]), {}
+        authenticated_socket(), request(files=[{"url": "https://files.example/a"}]), {}
     )
     assert channel.send_response.call_args.kwargs["code"] == "ATTACHMENT_SAVE_FAILED"
     callback.assert_not_awaited()

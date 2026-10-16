@@ -8,6 +8,26 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { ServerResponse } from 'http'
 import path from 'path'
 import fs from 'fs'
+import { isLocalDevelopmentRequest } from './devWorkspaceSecurity'
+
+function localWorkspaceBoundary(): Plugin {
+  return {
+    name: 'local-workspace-boundary',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (!isLocalDevelopmentRequest(req.socket.remoteAddress, req.headers.origin)) {
+          res.statusCode = 403
+          res.end('Development workspace access is local only')
+          return
+        }
+        next()
+      })
+      server.httpServer?.prependListener('upgrade', (req, socket) => {
+        if (!isLocalDevelopmentRequest(req.socket.remoteAddress, req.headers.origin)) socket.destroy()
+      })
+    },
+  }
+}
 
 type ConfigWithLogger = { logger?: { error?: (msg: string, opts?: { error?: Error }) => void } }
 
@@ -1063,7 +1083,7 @@ const webPort = portFromEnv('WEB_PORT', 19000)
 const webTarget = `http://127.0.0.1:${webPort}`
 
 export default defineConfig({
-  plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react(), svgr()],
+  plugins: [localWorkspaceBoundary(), suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react(), svgr()],
   optimizeDeps: {
     include: ['exceljs', 'jszip', 'saxes', 'ssf'],
   },
