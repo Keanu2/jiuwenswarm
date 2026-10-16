@@ -1,8 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""HTTP 路由。每条路径直接调用一个处理函数，不查 WebSocket 的分发表。
+"""HTTP 路由。每条路径直接调用一个处理函数，不查 WebSocket 的消息流水线。
 
-第一期只开放列 Agent 和聊天。别的命令还走 WebSocket。
+和 dev-stable 一样：路径表里的动作各有自己的网址，例如新建对话是
+``POST /sessions``。没有专用网址的方法不在这里接收。
+原先的列 Agent 和 ``/chat`` 仍保留。
 """
 
 from __future__ import annotations
@@ -93,6 +95,10 @@ def build_http_app(app_services: AppServices) -> FastAPI:
     # 后加的包在最外层，先拦超大请求体，再记日志。
     app.add_middleware(RequestBodyLimitMiddleware)
 
+    @app.get(f"{API_PREFIX}/health")
+    async def health() -> JSONResponse:
+        return JSONResponse({"ok": True})
+
     @app.post(f"{API_PREFIX}/agents/list")
     async def agents_list(request: Request) -> JSONResponse:
         ctx = await _context_from_body(
@@ -139,7 +145,129 @@ def build_http_app(app_services: AppServices) -> FastAPI:
         await invoke_unary(ctx, http_chat.handle_http_chat)
         return JSONResponse(ctx.sink.body or {}, status_code=ctx.sink.status_code)
 
+    @app.post(f"{API_PREFIX}/chat/completions")
+    async def chat_completions(request: Request):
+        return await _runtime_chat(app_services, request, ReqMethod.CHAT_SEND)
+
+    @app.post(f"{API_PREFIX}/chat/resume")
+    async def chat_resume(request: Request):
+        return await _runtime_chat(app_services, request, ReqMethod.CHAT_RESUME)
+
+    @app.get(f"{API_PREFIX}/events/stream")
+    async def events_stream(request: Request) -> StreamingResponse:
+        return StreamingResponse(
+            _event_frames(request),
+            media_type="text/event-stream",
+        )
+
+    _register_declared_routes(app, app_services)
     return app
+
+
+def _register_declared_routes(app: FastAPI, app_services: AppServices) -> None:
+    """只注册已经有处理函数的专用网址。技能、插件、频道配置这些先不挂。"""
+    from jiuwenswarm.extensions.runtime_management_extension.pod_rest_map import (
+        declared_http_routes,
+    )
+
+    for method, verb, path in declared_http_routes():
+        handler = _handler_for(method)
+        if handler is None:
+            continue
+        app.add_api_route(
+            f"{API_PREFIX}{path}",
+            _make_method_endpoint(app_services, method, handler),
+            methods=[verb],
+            name=f"{verb} {path}",
+        )
+    history = _handler_for(ReqMethod.HISTORY_GET.value)
+    if history is not None:
+        app.add_api_route(
+            f"{API_PREFIX}/sessions/{{session_id}}/history/stream",
+            _make_method_endpoint(
+                app_services, ReqMethod.HISTORY_GET.value, history, force_stream=True
+            ),
+            methods=["GET"],
+            name="GET /sessions/{session_id}/history/stream",
+        )
+
+
+def _handler_for(method_name: str):
+    """注册网址时就定下处理函数。聊天交给聊天适配，其余直接用处理函数表里的那一个。"""
+    from jiuwenswarm.server.dispatch import HANDLERS
+
+    try:
+        req_method = ReqMethod(method_name)
+    except ValueError:
+        return None
+    if http_chat.is_http_chat_method(req_method):
+        return http_chat.handle_http_chat
+    return HANDLERS.get(req_method)
+
+
+def _make_method_endpoint(
+    app_services: AppServices,
+    method_name: str,
+    handler,
+    *,
+    force_stream: bool = False,
+):
+    async def endpoint(request: Request):
+        return await _serve_method(
+            app_services,
+            request,
+            method_name,
+            handler,
+            force_stream=force_stream,
+        )
+
+    endpoint.__name__ = "http_" + method_name.replace(".", "_")
+    return endpoint
+
+
+async def _serve_method(
+    app_services: AppServices,
+    request: Request,
+    method_name: str,
+    handler,
+    *,
+    force_stream: bool,
+):
+    """专用网址直接调用注册时定下的处理函数。路径和查询里的参数并进请求体。"""
+    try:
+        req_method = ReqMethod(method_name)
+    except ValueError:
+        return JSONResponse(
+            {
+                "request_id": _header(request, "x-request-id", "http"),
+                "ok": False,
+                "error": {
+                    "code": "UNKNOWN_METHOD",
+                    "message": method_name,
+                    "details": {},
+                },
+            }
+        )
+    params: dict[str, Any] = dict(request.query_params)
+    params.update(dict(request.path_params or {}))
+    params.update(await _read_json(request))
+    is_stream = force_stream or _wants_stream(request)
+    sink = SSESink() if is_stream else UnaryHTTPSink()
+    ctx = _context_from_runtime(
+        app_services,
+        request,
+        params,
+        req_method=req_method,
+        sink=sink,
+        is_stream=is_stream,
+    )
+    if is_stream:
+        return _stream_response(ctx, handler)
+    await invoke_unary(ctx, handler)
+    return JSONResponse(
+        _client_json(ctx.sink.body or {}),
+        status_code=ctx.sink.status_code,
+    )
 
 
 async def _stop_background_chat(task: asyncio.Task[None]) -> None:
@@ -173,6 +301,163 @@ async def _stop_background_chat(task: asyncio.Task[None]) -> None:
             return
         for _ in range(parked):
             current.cancel()
+
+
+async def _runtime_chat(app_services: AppServices, request: Request, req_method: ReqMethod):
+    """runtime 客户端的聊天。请求体是业务参数，身份在请求头里。"""
+    body = await _read_json(request)
+    is_stream = _wants_stream(request)
+    sink = SSESink() if is_stream else UnaryHTTPSink()
+    ctx = _context_from_runtime(
+        app_services,
+        request,
+        body,
+        req_method=req_method,
+        sink=sink,
+        is_stream=is_stream,
+    )
+    if is_stream:
+        return _stream_response(ctx, http_chat.handle_http_chat)
+    await invoke_unary(ctx, http_chat.handle_http_chat)
+    return JSONResponse(_client_json(ctx.sink.body or {}), status_code=ctx.sink.status_code)
+
+
+def _stream_response(ctx: RequestContext, handler) -> StreamingResponse:
+    async def _frames():
+        task = asyncio.create_task(invoke_stream(ctx, handler))
+        try:
+            async for frame in ctx.sink.frames():
+                yield frame
+        finally:
+            await _stop_background_chat(task)
+
+    return StreamingResponse(_frames(), media_type="text/event-stream")
+
+
+async def _event_frames(request: Request):
+    """先告诉 Gateway 这条推送流已经接上，然后一直留着，直到对方断开。"""
+    yield _sse_frame({"event_type": "gateway.push_ready"})
+    while True:
+        await asyncio.sleep(15)
+        if await request.is_disconnected():
+            break
+        yield ": keepalive\n\n"
+
+
+def _sse_frame(payload: dict[str, Any]) -> str:
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+
+def _wants_stream(request: Request) -> bool:
+    accept = request.headers.get("accept") or ""
+    return "text/event-stream" in accept
+
+
+def _header(request: Request, name: str, default: str) -> str:
+    text = str(request.headers.get(name) or "").strip()
+    return text or default
+
+
+def _client_json(body: dict[str, Any]) -> dict[str, Any]:
+    """收成 runtime 客户端认识的 ``{ok, data, error}``。"""
+    ok = bool(body.get("ok"))
+    result: dict[str, Any] = {"request_id": body.get("request_id"), "ok": ok}
+    if body.get("metadata") is not None:
+        result["metadata"] = body.get("metadata")
+    if ok:
+        payload = body.get("payload")
+        result["data"] = payload if isinstance(payload, dict) else {"content": payload}
+        return result
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    result["error"] = {
+        "code": payload.get("code") or "ERROR",
+        "message": str(payload.get("error") or payload.get("message") or ""),
+        "details": payload,
+    }
+    return result
+
+
+def _rebuild_identity_from_headers(request: Request) -> tuple[str, dict[str, Any] | None]:
+    """从 Gateway 透传的 ``X-*`` 头重建 ``user_id`` 和 ``metadata``。
+
+    Gateway 的 REST 正文只有业务参数。身份在头里：``X-User-Id``、路由三维、
+    企业租户三字段，以及内部扩展头。没有 ``X-User-Id`` 时 ``user_id`` 为空，
+    表示这次请求按匿名处理，和 WebSocket 入口缺省身份时一样。
+    """
+    from jiuwenswarm.common.request_identity import (
+        apply_routing_metadata,
+        normalize_routing_identity,
+    )
+
+    identity = normalize_routing_identity(
+        {
+            "user_id": _header(request, "x-user-id", ""),
+            "group_id": _header(request, "x-group-id", ""),
+            "bot_id": _header(request, "x-bot-id", ""),
+            "gateway_id": _header(request, "x-gateway-id", ""),
+        }
+    )
+    metadata: dict[str, Any] = apply_routing_metadata(None, identity) if identity else {}
+    for field, header_name in (
+        ("service_id", "x-service-id"),
+        ("agent_id", "x-agent-id"),
+        ("workspace_key", "x-workspace-key"),
+    ):
+        value = _header(request, header_name, "")
+        if value:
+            metadata[field] = value
+    from jiuwenswarm.common.request_ext import (
+        INTERNAL_HEADER_NAME,
+        METADATA_KEY,
+        RequestExtCodecError,
+        decode_internal_header,
+    )
+
+    encoded_ext = request.headers.get(INTERNAL_HEADER_NAME)
+    if encoded_ext:
+        try:
+            ext = decode_internal_header(encoded_ext)
+        except RequestExtCodecError as exc:
+            logger.warning(
+                "[AgentHTTPServer] request ext header is invalid; ignored: %s",
+                exc,
+            )
+        else:
+            if ext:
+                metadata[METADATA_KEY] = ext
+    user_id = str(identity.get("user_id") or "").strip()
+    return user_id, metadata or None
+
+
+def _context_from_runtime(
+    app_services: AppServices,
+    request: Request,
+    body: dict[str, Any],
+    *,
+    req_method: ReqMethod,
+    sink: Any,
+    is_stream: bool,
+) -> RequestContext:
+    session_id = _header(request, "x-session-id", "")
+    if not session_id:
+        session_id = str(body.get("session_id") or "").strip()
+    user_id, metadata = _rebuild_identity_from_headers(request)
+    agent_request = AgentRequest(
+        request_id=_header(request, "x-request-id", "http"),
+        channel_id=_header(request, "x-channel-id", "http"),
+        session_id=session_id or None,
+        req_method=req_method,
+        params=body,
+        is_stream=is_stream,
+        metadata=metadata,
+        user_id=user_id,
+    )
+    return RequestContext(
+        request=agent_request,
+        sink=sink,
+        connection_id=HTTP_CONNECTION_ID,
+        services=AgentServerServices(app_services),
+    )
 
 
 def _chat_method(body: dict[str, Any]) -> ReqMethod:
@@ -303,6 +588,9 @@ async def _session_id_from_request(request: Request) -> str:
     header = str(request.headers.get("x-session-id") or "").strip()
     if header:
         return header
+    path_id = str((request.path_params or {}).get("session_id") or "").strip()
+    if path_id:
+        return path_id
     query = str(request.query_params.get("session_id") or "").strip()
     if query:
         return query
