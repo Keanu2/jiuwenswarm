@@ -1380,6 +1380,8 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_close_nudge_used: bool = False
         # 本轮模型调用已经通知适配器挂起外层正文。after 必须 drop 或 release。
         self._todo_close_hold_pending: bool = False
+        # 上一帧 drop/release 没写进流。下一次 before_model_call 先重试这一帧。
+        self._todo_close_undelivered: str | None = None
 
     def set_skill_turbo_request_metadata(self, metadata: dict | None) -> None:
         """注入当前请求 metadata 副本，供 before_tool_call 解析请求级工作区。"""
@@ -1467,6 +1469,7 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_start_deferred = set()
         self._todo_close_nudge_used = False
         self._todo_close_hold_pending = False
+        self._todo_close_undelivered = None
         self._tool_start_times = {}
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
@@ -1515,10 +1518,6 @@ class TaskExecutionRail(DeepAgentRail):
         dropped = False
         try:
             dropped = self._attach_todo_close_nudge(ctx)
-            if dropped and self._todo_close_hold_pending:
-                await self._write_todo_close_control(
-                    ctx.session, TODO_CLOSE_DROP_STREAM_TYPE,
-                )
         finally:
             await self._finish_todo_close_text_hold(ctx, dropped=dropped)
 
@@ -1565,7 +1564,10 @@ class TaskExecutionRail(DeepAgentRail):
         known until the call returns, so a truncated turn is still held and
         released afterwards.
         """
-        if self._todo_close_hold_pending or ctx.session is None:
+        await self._retry_undelivered_todo_close(ctx)
+        if self._todo_close_undelivered or ctx.session is None:
+            return
+        if self._todo_close_hold_pending:
             return
         if self._todo_close_nudge_used:
             return
@@ -1585,24 +1587,59 @@ class TaskExecutionRail(DeepAgentRail):
         *,
         dropped: bool,
     ) -> None:
-        """Drop already told the adapter to discard. Otherwise release.
+        """Drop the held text, or release it.
 
-        A failed release keeps the pending flag. The next model call must not
-        send another hold: that frame would drop the text still sitting in the
-        adapter. A later successful release flushes it. A failed drop still
-        clears the flag so the next hold discards the buffer; releasing on
-        that failure would put the discarded draft into the open task segment.
+        A failed write is remembered as ``drop`` or ``release``. The next
+        ``before_model_call`` retries that frame before arming again. Drop is
+        never rewritten as release: that would show the discarded draft.
         """
-        if not self._todo_close_hold_pending:
-            return
-        if dropped or ctx.session is None:
+        if ctx.session is None:
             self._todo_close_hold_pending = False
+            self._todo_close_undelivered = None
+            return
+        want_drop = dropped or self._todo_close_undelivered == "drop"
+        if want_drop:
+            if not self._todo_close_hold_pending and self._todo_close_undelivered != "drop":
+                return
+            wrote = await self._write_todo_close_control(
+                ctx.session, TODO_CLOSE_DROP_STREAM_TYPE,
+            )
+            self._mark_todo_close_delivered("drop", wrote)
+            return
+        if not self._todo_close_hold_pending and self._todo_close_undelivered != "release":
             return
         wrote = await self._write_todo_close_control(
             ctx.session, TODO_CLOSE_RELEASE_STREAM_TYPE,
         )
+        self._mark_todo_close_delivered("release", wrote)
+
+    async def _retry_undelivered_todo_close(self, ctx: AgentCallbackContext) -> None:
+        """Resend a drop or release the adapter never received."""
+        if ctx.session is None:
+            return
+        kind = self._todo_close_undelivered
+        if kind is None and self._todo_close_hold_pending:
+            kind = "release"
+        if kind not in ("drop", "release"):
+            return
+        stream_type = (
+            TODO_CLOSE_DROP_STREAM_TYPE
+            if kind == "drop"
+            else TODO_CLOSE_RELEASE_STREAM_TYPE
+        )
+        wrote = await self._write_todo_close_control(ctx.session, stream_type)
+        if wrote:
+            self._todo_close_undelivered = None
+            self._todo_close_hold_pending = False
+            return
+        self._todo_close_undelivered = kind
+
+    def _mark_todo_close_delivered(self, kind: str, wrote: bool) -> None:
         if wrote:
             self._todo_close_hold_pending = False
+            self._todo_close_undelivered = None
+            return
+        self._todo_close_undelivered = kind
 
     async def _write_todo_close_control(self, session: Any, stream_type: str) -> bool:
         try:
