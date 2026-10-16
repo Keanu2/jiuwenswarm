@@ -1,8 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """存储装配层：按 edition 注入 backend，不属于 ``gateway/storage/`` 基础设施。
 
-序 3：启用 2-C 接线导出（``setup_gateway_storage_repositories`` / ``create_*``）。
-仍不改 ``app_gateway``（3-F / 2-D 另批）。
+导出 Repository 接线（``setup_gateway_storage_repositories`` / ``create_*``）。
+企业版由 ``app_gateway`` 调用 ``start_gateway_storage``；个人版不装配。
 """
 
 from jiuwenswarm.gateway.storage_assembly.db_connection import (
@@ -27,6 +27,7 @@ from jiuwenswarm.gateway.storage_assembly.setup import (
     resolve_storage_instance_id,
     setup_gateway_storage_repositories,
     setup_session_map_repository,
+    start_gateway_storage,
     teardown_gateway_storage_repositories,
     teardown_session_map_repository,
     wire_enterprise_persistent_repositories,
@@ -53,6 +54,7 @@ __all__ = [
     "resolve_storage_instance_id",
     "setup_gateway_storage_repositories",
     "setup_session_map_repository",
+    "start_gateway_storage",
     "teardown_gateway_storage_repositories",
     "teardown_session_map_repository",
     "wire_enterprise_persistent_repositories",

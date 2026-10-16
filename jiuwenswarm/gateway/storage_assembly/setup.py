@@ -64,7 +64,7 @@ def _create_persistent() -> PersistentStore:
 
     from jiuwenswarm.gateway.storage.backends.file_persistent import FilePersistentBackend
 
-    # 序 2：暂不注册 cron StoreLayout（develop 无 resolve_gateway_cron_jobs_path_template）
+    # 暂不注册 cron StoreLayout（无 resolve_gateway_cron_jobs_path_template）
     persistent_root = get_user_workspace_dir() / "gateway" / "persistent"
     config_file = get_config_file()
     session_map_file = get_checkpoint_dir() / "session_map.json"
@@ -316,6 +316,41 @@ async def teardown_gateway_storage_repositories(ctx: StorageContext) -> None:
     await ctx.shutdown()
 
 
+async def start_gateway_storage(
+    cfg: dict[str, Any] | None = None,
+) -> StorageContext | None:
+    """企业版启动时装配存储屏蔽层，并注入各配置模块。
+
+    注入范围与 ``setup_gateway_storage_repositories`` 相同：SessionMap、
+    channel / permissions / logging / memory、企业专属表，以及进程级
+    ``PersistentStore``。装配成功后再冷加载 audit。
+
+    个人版直接返回 ``None``：不创建 backend，不注入 Repository，
+    业务侧继续走 ``common.config`` 直读。企业版装配失败向上抛出，由启动方退出。
+    """
+    if not is_enterprise():
+        return None
+    ctx = await setup_gateway_storage_repositories(cfg)
+    if ctx is None:
+        logger.warning(
+            "[StorageAssembly] enterprise storage repositories disabled by flag"
+        )
+        return None
+    try:
+        from jiuwenswarm.gateway.config.audit.access import (
+            reload_audit_log_config_from_db,
+        )
+
+        await reload_audit_log_config_from_db()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[StorageAssembly] audit_log_config cold load skipped",
+            exc_info=True,
+        )
+    logger.info("[StorageAssembly] enterprise storage repositories wired")
+    return ctx
+
+
 def ensure_enterprise_storage_context(
     cfg: dict[str, Any] | None = None,
     *,
@@ -560,6 +595,7 @@ __all__ = [
     "resolve_storage_instance_id",
     "setup_gateway_storage_repositories",
     "setup_session_map_repository",
+    "start_gateway_storage",
     "teardown_gateway_storage_repositories",
     "teardown_session_map_repository",
     "wire_enterprise_persistent_repositories",

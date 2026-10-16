@@ -175,7 +175,7 @@ def _legacy_gateway_cron_job_layout(path_template: str | None) -> StoreLayout:
 
 
 def _enterprise_record_store_names() -> tuple[str, ...]:
-    """企业专属表名；序 6 catalog 未落地时返回空（本功能不新建 config/*）。"""
+    """企业专属表名。catalog 无法导入时返回空。"""
     try:
         from jiuwenswarm.gateway.config.enterprise.catalog import (
             ENTERPRISE_RECORD_STORE_NAMES,
@@ -194,14 +194,14 @@ def _build_layouts(
 ) -> dict[str, StoreLayout]:
     """按形态工厂组装全部业务 name → StoreLayout。
 
-    序 2（develop）：暂不注册 cron StoreLayout（规避缺失
+    暂不注册 cron StoreLayout（缺少
     ``resolve_gateway_cron_jobs_path_template``）；``cron_jobs_path_template``
-    参数保留签名兼容，忽略。
+    参数保留签名兼容，调用时忽略。
     """
     _ = cron_jobs_path_template
     layouts: dict[str, StoreLayout] = {}
 
-    # 本功能不注册 cron_job（见 gateway-存储屏蔽层设计 2-B）
+    # 不注册 cron_job
     for name, (rel, shape, key_fields) in _JSON_ONLY_STORES.items():
         layout = _json_only(
             rel,
@@ -279,7 +279,7 @@ def build_gateway_store_registry(
 
     personal 传入绝对 ``persistent_root`` / ``config_file``；
     ``session_map_file`` 默认与 ``LocalSessionStorage`` 相同（``.checkpoint/session_map.json``）。
-    序 2：不注册 cron layout（``cron_jobs_path_template`` 忽略）。
+    不注册 cron layout（``cron_jobs_path_template`` 忽略）。
     enterprise 可不传（file 为空，YAML-only name 不注册，只挂 DB）。
     """
     registry = StoreRegistry()
