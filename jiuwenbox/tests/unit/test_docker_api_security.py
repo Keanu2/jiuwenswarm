@@ -26,6 +26,7 @@ def docker_script(tmp_path, monkeypatch):
         "JIUWENBOX_LISTEN", "JIUWENBOX_API_TOKEN", "JIUWENBOX_HOST_BIND",
         "JIUWENBOX_SAVE_LOGS_HOST_DIR", "JIUWENBOX_POLICY_PATH",
         "JIUWENBOX_CORS_ORIGINS",
+        "JIUWENBOX_PROXY_TOKEN", "JIUWENBOX_PROXY_HOST_BIND", "JIUWENBOX_PROXY_PORT",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TEST_DOCKER_ARGS", output.as_posix())
@@ -80,3 +81,18 @@ def test_docker_forwards_explicit_browser_origins(docker_script, monkeypatch):
     assert result.returncode == 0, result.stderr
     args = output.read_text(encoding="utf-8").splitlines()
     assert "JIUWENBOX_CORS_ORIGINS" in args
+
+
+@pytest.mark.parametrize("bind", [None, "0.0.0.0"])
+def test_proxy_publish_defaults_loopback_and_forwards_separate_token(docker_script, monkeypatch, bind):
+    run, output = docker_script
+    monkeypatch.setenv("JIUWENBOX_API_TOKEN", "management-test-token")
+    monkeypatch.setenv("JIUWENBOX_PROXY_TOKEN", "proxy-test-token")
+    if bind:
+        monkeypatch.setenv("JIUWENBOX_PROXY_HOST_BIND", bind)
+    result = run()
+    assert result.returncode == 0, result.stderr
+    args = output.read_text(encoding="utf-8").splitlines()
+    assert f"{bind or '127.0.0.1'}:8322:8322" in args
+    assert "JIUWENBOX_PROXY_TOKEN" in args
+    assert "proxy-test-token" not in output.read_text(encoding="utf-8") + result.stdout + result.stderr

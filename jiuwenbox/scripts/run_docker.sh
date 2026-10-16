@@ -193,8 +193,9 @@ else
 fi
 # 代理端口在两种模式下都映射: Inference Privacy Proxy 是独立 TCP listener,
 # 与管理 API 传输方式无关; 即便管理面走 UDS, 代理仍可能需要从宿主转出流量。
-DOCKER_PORT_ARGS+=(-p "${PROXY_PORT}:8322")
-echo "  proxy:     http://127.0.0.1:${PROXY_PORT} (inference privacy proxy)"
+PROXY_HOST_BIND="${JIUWENBOX_PROXY_HOST_BIND:-127.0.0.1}"
+DOCKER_PORT_ARGS+=(-p "${PROXY_HOST_BIND}:${PROXY_PORT}:8322")
+echo "  proxy:     http://${PROXY_HOST_BIND}:${PROXY_PORT} (inference privacy proxy)"
 
 # 把 listen / uds-mode 显式 -e 给容器, 让容器 entrypoint 拿到一致的视图。
 # 注意: 这里 -e 后面的"键名"必须仍是 JIUWENBOX_LISTEN / JIUWENBOX_UDS_MODE,
@@ -204,6 +205,9 @@ DOCKER_ENV_ARGS+=(-e "JIUWENBOX_LISTEN=${LISTEN_URI}")
 if [[ -n "${JIUWENBOX_API_TOKEN:-}" ]]; then
   # Forward by name so the token is not placed in the docker command line.
   DOCKER_ENV_ARGS+=(-e JIUWENBOX_API_TOKEN)
+fi
+if [[ -n "${JIUWENBOX_PROXY_TOKEN:-}" ]]; then
+  DOCKER_ENV_ARGS+=(-e JIUWENBOX_PROXY_TOKEN)
 fi
 if [[ -n "${JIUWENBOX_CORS_ORIGINS:-}" ]]; then
   DOCKER_ENV_ARGS+=(-e JIUWENBOX_CORS_ORIGINS)

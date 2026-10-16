@@ -20,6 +20,7 @@ from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import ProxyRouteEntry
 from jiuwenbox.proxy.inference_privacy_proxy import InferencePrivacyProxyConfig, ProxyRoute
 from jiuwenbox.proxy.inference_privacy_proxy_manager import get_proxy_manager
+from jiuwenbox.proxy.target_security import ProxyPolicyError
 
 router = APIRouter(tags=["proxies"])
 configure_logging()
@@ -96,6 +97,8 @@ async def create_proxy(route: RouteRequest):
     try:
         result = await _mgr().create_proxy(proxy_name, config)
         return result
+    except ProxyPolicyError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -123,6 +126,8 @@ async def delete_proxy(proxy_name: str):
     try:
         result = await _mgr().delete_proxy(validated_name)
         return result
+    except ProxyPolicyError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -134,6 +139,8 @@ async def start_proxy(proxy_name: str):
     try:
         result = await _mgr().start_proxy(validated_name)
         return result
+    except ProxyPolicyError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
@@ -147,6 +154,8 @@ async def stop_proxy(proxy_name: str):
     try:
         result = await _mgr().stop_proxy(validated_name)
         return result
+    except ProxyPolicyError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
@@ -187,6 +196,8 @@ async def update_proxy(proxy_name: str, route: RouteRequest):
     try:
         result = await _mgr().update_proxy(validated_name, config)
         return result
+    except ProxyPolicyError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -203,5 +214,7 @@ async def get_proxy_logs(
     try:
         result = await _mgr().get_proxy_logs(validated_name, lines)
         return PlainTextResponse(result["logs"])
+    except ProxyPolicyError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e

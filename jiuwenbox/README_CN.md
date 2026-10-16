@@ -218,7 +218,8 @@ curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/healt
 
 Docker HTTP 模式下，即使宿主机只发布回环端口，也必须显式传入 Token，因为容器内部监听非回环接口。
 `run_docker.sh` 将 Token 按环境变量名传入容器，默认发布 `127.0.0.1:<宿主端口>:8321`；
-需要远程访问时再设置 `JIUWENBOX_HOST_BIND=0.0.0.0`。推理隐私代理的独立端口不属于管理 API 认证范围。
+需要远程访问时再设置 `JIUWENBOX_HOST_BIND=0.0.0.0`。推理隐私代理的独立端口使用
+`JIUWENBOX_PROXY_TOKEN` 认证，Docker 默认发布到宿主回环地址。
 
 升级时，原来没有 Token 的非回环部署会拒绝启动，需同时更新 CLI、HTTP 和 MCP 客户端的
 `Authorization` 请求头。外部 jiuwenswarm 适配器也需确认支持传入该请求头，不能通过关闭认证解决兼容问题。
@@ -791,6 +792,14 @@ jiuwenbox-server --listen http://0.0.0.0:8321 --log-level debug
 
 ### 代理配置
 
+安全配置与迁移步骤见 [推理代理安全配置](docs/inference-proxy-security.md)。
+启动路由的 Origin 和管理员的 `allowed_origins` 固定目标权限，管理 API 无法扩展；
+企业域名解析到内网时须显式列入 `allowed_origins`。本地及内网 IP 模型继续支持。
+`ca_file` 可添加企业 CA；跳过证书验证还须管理员在 `insecure_tls_origins` 中精确授权。
+非回环监听必须配置 `JIUWENBOX_PROXY_TOKEN`。SDK 将占位 API Key 改为该 Token，
+代理认证成功后仍替换成配置的上游 Key；需要透传上游 Key 时使用 `Proxy-Authorization`。
+SSE、chunked 上传、二进制正文和客户端 keep-alive 均支持。
+
 配置文件yaml文件说明：
 
 ```yaml
@@ -803,7 +812,7 @@ inference_privacy_proxies:
    - path_prefix: str，转发规则的路径名称
       target_endpoint: URL，目标端点
       api_key: str，转发时用于替换的api key
-      skip_cert_verify: boolean，仅当target_endpoint为https且证书为自签名时跳过证书校验，调试用
+      skip_cert_verify: boolean，默认 false；还需部署级 insecure_tls_origins 精确授权
 ```
 
 ### URL 路由
@@ -834,12 +843,13 @@ inference_privacy_proxies:
     - path_prefix: "openai"
       target_endpoint: "https://api.openai.com"
       api_key: "sk_sandbox_managed_openai_key"
-   - path_prefix: "custom"
+    - path_prefix: "custom"
       target_endpoint: "http://192.168.1.100:9000"
       api_key: "sk_sandbox_managed_custom_key"
 ```
 
-边缘服务器可使用 `listen_host: "0.0.0.0"` 接收所有网络接口的连接。
+边缘服务器可使用 `listen_host: "0.0.0.0"`，并必须配置 `JIUWENBOX_PROXY_TOKEN`。
+下方假 Key 示例仅适用于未配置代理 Token 的本地回环模式；启用认证后替换为代理 Token。
 
 #### 转发示例
 

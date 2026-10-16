@@ -534,29 +534,33 @@ class ProxyRouteEntry(BaseModel):
     @field_validator("target_endpoint", mode="after")
     @classmethod
     def validate_target_endpoint(cls, value: str) -> str:
-        from urllib.parse import urlparse
-        
+        from jiuwenbox.proxy.target_security import parse_endpoint
+
         if not value or not value.strip():
             raise ValueError("target_endpoint cannot be empty")
-        
-        normalized = value.strip()
-        
-        if _contains_crlf_or_null(normalized):
+        if _contains_crlf_or_null(value):
             raise ValueError("target_endpoint contains invalid characters")
-        
-        try:
-            parsed = urlparse(normalized)
-            if not parsed.scheme or not parsed.netloc:
-                raise ValueError("target_endpoint must be a valid URL")
-            if parsed.scheme not in ("http", "https"):
-                raise ValueError("target_endpoint must use http or https scheme")
-        except Exception as e:
-            raise ValueError(f"target_endpoint must be a valid URL: {e}") from e
-        
+        normalized = value.strip()
+        if not normalized.startswith(("http://", "https://")):
+            raise ValueError("target_endpoint must use http or https scheme")
+        parse_endpoint(normalized)
         return normalized
 
 
 class InferencePrivacyProxyPolicy(BaseModel):
+    allowed_origins: list[str] = Field(default_factory=list)
+    insecure_tls_origins: list[str] = Field(default_factory=list)
+    ca_file: str | None = None
+
+    @field_validator("allowed_origins", "insecure_tls_origins")
+    @classmethod
+    def validate_origins(cls, values: list[str]) -> list[str]:
+        from jiuwenbox.proxy.target_security import origin
+
+        for value in values:
+            origin(value, exact=True)
+        return values
+
     listen_port: int = 0
     listen_host: str | None = None
     routes: list[ProxyRouteEntry] = Field(default_factory=list)

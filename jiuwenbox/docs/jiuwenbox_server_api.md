@@ -963,6 +963,14 @@ print(resp.json())
 
 代理接口用于管理 inference privacy proxy。
 
+管理接口沿用 `JIUWENBOX_API_TOKEN` 认证；代理数据端口独立使用 `JIUWENBOX_PROXY_TOKEN`。
+新建、更新路由只能选择部署 YAML 初始路由或 `allowed_origins` 中批准的精确 Origin，
+违规返回 `403`；请求不能修改部署白名单、CA 或监听配置。企业域名访问内网还需显式
+列入 `allowed_origins`。修改被拒绝时保留原路由和运行状态。
+`skip_cert_verify: true` 还需部署级 `insecure_tls_origins` 精确授权，否则返回 `403`。
+非回环数据端口缺少代理 Token 时不开启监听。API 创建路由后仍需调用 start 接口启用。
+详见 [安全配置和客户端迁移](inference-proxy-security.md)，含 SSE、SDK 认证和企业 CA 配置。
+
 ### 创建代理
 
 接口：`POST /api/v1/proxies`
@@ -974,9 +982,9 @@ print(resp.json())
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `path_prefix` | string | 是 | 路由前缀，如 `/openai` |
-| `target_endpoint` | string | 是 | 目标服务地址 |
+| `target_endpoint` | string | 是 | 已获部署策略批准的 HTTP(S) 目标，不允许 URL 用户凭据、查询参数或片段 |
 | `api_key` | string | 否 | 注入到上游的 API Key |
-| `skip_cert_verify` | boolean | 否 | 是否跳过证书校验 |
+| `skip_cert_verify` | boolean | 否 | 默认 false；true 还需部署级精确授权，优先使用 ca_file |
 
 Python 请求示例：
 

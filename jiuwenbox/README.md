@@ -835,6 +835,22 @@ See the reference config at [`src/jiuwenbox/configs/inference-policy.yaml`](src/
 
 ### Proxy Configuration
 
+Targets are restricted to origins from startup routes and the deployment-only
+`allowed_origins` list (exact scheme, host and port). Corporate hostnames resolving
+to private addresses must also appear in `allowed_origins`; local/private IP models
+remain supported. API requests cannot expand this policy. Use `ca_file` for additional
+enterprise trust; `skip_cert_verify` additionally requires an exact deployment entry
+in `insecure_tls_origins`, which is empty by default.
+
+Non-loopback listeners require `JIUWENBOX_PROXY_TOKEN`, separate from the management
+API token. Existing OpenAI/Anthropic SDKs can use this token as their placeholder API
+key; the proxy authenticates it before injecting the upstream key. To pass through
+an upstream credential, use `Proxy-Authorization: Bearer <proxy-token>` separately.
+Proxy credentials are removed before forwarding. SSE, chunked uploads, binary bodies,
+and client keep-alive are supported. Docker publishes the proxy to host loopback by
+default (`JIUWENBOX_PROXY_HOST_BIND` overrides it) and forwards `JIUWENBOX_PROXY_TOKEN`
+by name. See [deployment and migration details](docs/inference-proxy-security.md).
+
 Policy YAML configuration schema:
 
 ```yaml
@@ -847,7 +863,7 @@ inference_privacy_proxies:
    - path_prefix: str, path name for forwarding rule
       target_endpoint: URL, target endpoint
       api_key: str, api key to inject when forwarding
-      skip_cert_verify: boolean, skip cert verify for self-signed https targets, debug only
+      skip_cert_verify: boolean, false by default; also requires insecure_tls_origins approval
 ```
 
 ### API Key Injection
@@ -871,12 +887,14 @@ inference_privacy_proxies:
     - path_prefix: "openai"
       target_endpoint: "https://api.openai.com"
       api_key: "sk_sandbox_managed_openai_key"
-   - path_prefix: "custom"
+    - path_prefix: "custom"
       target_endpoint: "http://192.168.1.100:9000"
       api_key: "sk_sandbox_managed_custom_key"
 ```
 
-For edge servers, use `listen_host: "0.0.0.0"` to accept connections from all interfaces.
+For edge servers, `listen_host: "0.0.0.0"` requires `JIUWENBOX_PROXY_TOKEN`.
+The fake keys below apply only to local loopback mode without a proxy token;
+replace them with the proxy token when authentication is configured.
 
 #### Forwarding Example
 

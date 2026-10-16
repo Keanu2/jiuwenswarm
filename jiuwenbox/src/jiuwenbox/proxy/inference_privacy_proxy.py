@@ -15,13 +15,19 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ipaddress
 import logging
+import os
 import re
+import secrets
 import ssl
 from dataclasses import dataclass, field
 from typing import Callable
-from urllib.parse import urlparse
 
+import h11
+
+from jiuwenbox.proxy.target_security import ProxyPolicyError, TargetPolicy, origin, parse_endpoint
 from jiuwenbox.logging_config import configure_logging
 
 configure_logging()
@@ -35,7 +41,7 @@ PLACEHOLDER = "<placeholder>"
 class ProxyRoute:
     path_prefix: str
     target_endpoint: str
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     skip_cert_verify: bool = False
     _target_host: str = ""
     _target_port: int = 0
@@ -43,42 +49,27 @@ class ProxyRoute:
     _target_base_path: str = ""
 
     def __post_init__(self):
+        if "://" not in self.target_endpoint:
+            scheme = "http" if ":" in self.target_endpoint and not self.target_endpoint.endswith(":443") else "https"
+            self.target_endpoint = f"{scheme}://{self.target_endpoint}"
         (
             self._target_host,
             self._target_port,
             self._use_tls,
             self._target_base_path,
         ) = self._parse_endpoint(self.target_endpoint)
+        if any(ord(c) < 32 or ord(c) == 127 for c in self.api_key + self.path_prefix):
+            raise ValueError("Invalid proxy route characters")
         if not self.path_prefix.startswith("/"):
             self.path_prefix = "/" + self.path_prefix
         self.path_prefix = self.path_prefix.rstrip("/")
 
     @staticmethod
     def _parse_endpoint(endpoint: str) -> tuple[str, int, bool, str]:
-        """Parse endpoint URL to extract host, port, TLS, and base path."""
-        endpoint = endpoint.strip()
-        
-        if endpoint.startswith("http://") or endpoint.startswith("https://"):
-            parsed = urlparse(endpoint)
-            host = parsed.hostname or "localhost"
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            use_tls = parsed.scheme == "https"
-            base_path = parsed.path.rstrip("/") or ""
-            return host, port, use_tls, base_path
-        
-        if ":" in endpoint:
-            parts = endpoint.rsplit(":", 1)
-            host = parts[0]
-            try:
-                port = int(parts[1])
-                use_tls = port == 443
-            except ValueError:
-                host = endpoint
-                port = 443
-                use_tls = True
-            return host, port, use_tls, ""
-        
-        return endpoint, 443, True, ""
+        if "://" not in endpoint:
+            scheme = "http" if ":" in endpoint and not endpoint.endswith(":443") else "https"
+            endpoint = f"{scheme}://{endpoint}"
+        return parse_endpoint(endpoint)
 
     @property
     def target_host(self) -> str:
@@ -102,6 +93,16 @@ class InferencePrivacyProxyConfig:
     listen_port: int = 0
     listen_host: str = "127.0.0.1"
     routes: list[ProxyRoute] = field(default_factory=list)
+    allowed_origins: list[str] = field(default_factory=list)
+    insecure_tls_origins: list[str] = field(default_factory=list)
+    ca_file: str | None = None
+    target_policy: TargetPolicy | None = field(default=None, repr=False)
+
+    def freeze_policy(self) -> TargetPolicy:
+        """Capture deployment trust once, before management API route mutations."""
+        if self.target_policy is None:
+            self.target_policy = TargetPolicy.from_config(self)
+        return self.target_policy
 
 
 class InferencePrivacyProxy:
@@ -111,11 +112,13 @@ class InferencePrivacyProxy:
         log_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
+        self._policy = config.freeze_policy()
+        self._token = os.environ.get("JIUWENBOX_PROXY_TOKEN", "").strip().encode()
+        self._connections: set[asyncio.Task] = set()
         self._server: asyncio.Server | None = None
-        self._serve_task: asyncio.Task[None] | None = None
         self._running = False
         self._log_callback = log_callback
-        self._ssl_contexts: dict[str, ssl.SSLContext] = {}
+        self._ssl_contexts: dict[tuple, ssl.SSLContext] = {}
         self._enabled_routes: set[str] = set()
 
     @property
@@ -152,44 +155,24 @@ class InferencePrivacyProxy:
 
     def _get_ssl_context(self, route: ProxyRoute) -> ssl.SSLContext:
         """Get or create SSL context for a route."""
-        if route.path_prefix not in self._ssl_contexts:
+        self._policy.validate(route)
+        cache_key = (origin(route.target_endpoint), route.skip_cert_verify, self.config.ca_file)
+        if cache_key not in self._ssl_contexts:
             ctx = ssl.create_default_context()
+            if self.config.ca_file:
+                ctx.load_verify_locations(cafile=self.config.ca_file)
             if route.skip_cert_verify:
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
-            self._ssl_contexts[route.path_prefix] = ctx
-        return self._ssl_contexts[route.path_prefix]
+            self._ssl_contexts[cache_key] = ctx
+        return self._ssl_contexts[cache_key]
 
     def _match_route(self, path: str) -> ProxyRoute | None:
-        """Match request path to the longest matching enabled route.
-        
-        Longest-prefix matching ensures specific routes take precedence
-        over generic routes that could incorrectly match due to string
-        prefix collision (e.g., '/api' matching '/api-v2/chat').
-        
-        With single-level path_prefix requirement:
-        - '/api' matches '/api/chat' and '/api-v2/chat' (string prefix)
-        - '/api-v2' matches '/api-v2/chat' (longer, more specific)
-        - Request '/api-v2/chat' -> matches '/api-v2' (len=6) not '/api' (len=4)
-        
-        Args:
-            path: Request path to match
-            
-        Returns:
-            ProxyRoute with longest matching prefix, or None if no match
-        """
-        path = path.rstrip("/")
-        best_match = None
-        best_length = 0
-        
-        for route in self.config.routes:
-            if path.startswith(route.path_prefix) and self.is_route_enabled(route.path_prefix):
-                prefix_len = len(route.path_prefix)
-                if prefix_len > best_length:
-                    best_match = route
-                    best_length = prefix_len
-        
-        return best_match
+        """Match an enabled route at a path segment boundary."""
+        path = path.split("?", 1)[0].rstrip("/")
+        matches = [r for r in self.config.routes if self.is_route_enabled(r.path_prefix)
+                   and (path == r.path_prefix or path.startswith(r.path_prefix + "/"))]
+        return max(matches, key=lambda r: len(r.path_prefix), default=None)
 
     def match_route(self, path: str) -> ProxyRoute | None:
         """Public wrapper for route matching."""
@@ -197,16 +180,13 @@ class InferencePrivacyProxy:
 
     @staticmethod
     def _rewrite_path(path: str, route: ProxyRoute) -> str:
-        """Rewrite request path by stripping prefix and adding target base path."""
-        path = path.rstrip("/")
-        stripped = path[len(route.path_prefix):]
-        
-        if not stripped:
-            return route.target_base_path or "/"
-        
-        if route.target_base_path:
-            return route.target_base_path + stripped
-        return stripped
+        """Preserve encoded path/query while removing the local route prefix."""
+        path_part, separator, query = path.partition("?")
+        suffix = path_part[len(route.path_prefix):]
+        rewritten = route.target_base_path + suffix
+        if suffix == "/" and route.target_base_path:
+            rewritten = route.target_base_path
+        return (rewritten or "/") + separator + query
 
     def rewrite_path(self, path: str, route: ProxyRoute) -> str:
         """Public wrapper for request path rewriting."""
@@ -247,197 +227,240 @@ class InferencePrivacyProxy:
         """Public wrapper for API key header injection."""
         return self._inject_api_key(headers, route)
 
-    async def _handle_connection(
-        self,
-        client_reader: asyncio.StreamReader,
-        client_writer: asyncio.StreamWriter,
-    ) -> None:
-        conn_id = id(client_writer)
-        peer_addr = client_writer.get_extra_info('peername')
-        self._log(f"[{conn_id}] New HTTP connection from {peer_addr or 'unknown'}")
-
+    @staticmethod
+    def _loopback(address) -> bool:
         try:
-            request_data = await client_reader.read(65536)
-            if not request_data:
-                self._log(f"[{conn_id}] No data received")
-                return
+            return ipaddress.ip_address(address).is_loopback
+        except (ValueError, TypeError):
+            return False
 
-            request_text = request_data.decode(errors="replace")
-            headers_end = request_text.find("\r\n\r\n")
-            if headers_end == -1:
-                self._log(f"[{conn_id}] Invalid HTTP request: no headers end")
-                error_response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
-                client_writer.write(error_response.encode())
-                await client_writer.drain()
-                return
+    def _authenticate(self, headers, writer) -> set[bytes]:
+        credentials = {}
+        for name, value in headers:
+            if name in {b"authorization", b"x-api-key", b"proxy-authorization"}:
+                if name in credentials:
+                    raise PermissionError("Ambiguous proxy credentials")
+                credentials[name] = value
+        if not self._token:
+            peer, local = writer.get_extra_info("peername"), writer.get_extra_info("sockname")
+            if not peer or not local or not self._loopback(peer[0]) or not self._loopback(local[0]):
+                raise PermissionError("Proxy token required")
+            return set()
+        matched = set()
+        names = ([b"proxy-authorization"] if b"proxy-authorization" in credentials
+                 else [b"authorization", b"x-api-key"])
+        for name in names:
+            value = credentials.get(name, b"")
+            if name != b"x-api-key":
+                scheme, _, value = value.partition(b" ")
+                if scheme.lower() != b"bearer":
+                    continue
+            if secrets.compare_digest(value, self._token):
+                matched.add(name)
+        if not matched:
+            raise PermissionError("Invalid proxy credentials")
+        # Strip all occurrences of the proxy secret, including duplicate credential formats.
+        for name, value in credentials.items():
+            if value == self._token or (value.lower().startswith(b"bearer ") and value[7:] == self._token):
+                matched.add(name)
+        return matched
 
-            headers_raw = request_text[:headers_end]
-            body = request_text[headers_end + 4:]
-            header_lines = headers_raw.split("\r\n")
-            
-            request_line = header_lines[0]
-            parts = request_line.split(" ")
-            if len(parts) < 3:
-                self._log(f"[{conn_id}] Invalid HTTP request line")
-                error_response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
-                client_writer.write(error_response.encode())
-                await client_writer.drain()
-                return
+    @staticmethod
+    def _headers(headers):
+        hop = {b"connection", b"keep-alive", b"proxy-connection", b"proxy-authorization",
+               b"proxy-authenticate", b"te", b"trailer", b"upgrade"}
+        tokens = {v.strip().lower() for n, value in headers if n == b"connection"
+                  for v in value.split(b",")}
+        protected = {b"authorization", b"x-api-key", b"host", b"content-length", b"transfer-encoding"}
+        if tokens & protected:
+            raise ValueError("Invalid Connection header")
+        return [(n, v) for n, v in headers if n not in hop | tokens]
 
-            method = parts[0]
-            original_path = parts[1]
-            version = parts[2]
+    def _request_headers(self, request, route, consumed):
+        result = []
+        for name, value in self._headers(request.headers):
+            if name in {b"host", b"expect"}:
+                continue
+            if name == b"authorization" and value.lower().startswith(b"bearer ") and route.api_key:
+                value = b"Bearer " + route.api_key.encode()
+            elif name == b"x-api-key" and route.api_key:
+                value = route.api_key.encode()
+            elif name in consumed:
+                continue
+            result.append((name, value))
+        if (route.api_key and b"proxy-authorization" in consumed
+                and not any(n in {b"authorization", b"x-api-key"} for n, _ in result)):
+            result.append((b"authorization", b"Bearer " + route.api_key.encode()))
+        host = route.target_host
+        if ":" in host:
+            host = f"[{host}]"
+        if route.target_port != (443 if route.use_tls else 80):
+            host += f":{route.target_port}"
+        result.extend([(b"host", host.encode()), (b"connection", b"close")])
+        return result
 
-            route = self._match_route(original_path)
-            if route is None:
-                self._log(f"[{conn_id}] No route matched for path: {original_path}")
-                error_response = (
-                    "HTTP/1.1 404 Not Found\r\n"
-                    "Content-Type: text/plain\r\n"
-                    "Content-Length: 20\r\n"
-                    "\r\n"
-                    f"No route matched: {original_path}"
-                )
-                client_writer.write(error_response.encode())
-                await client_writer.drain()
-                return
+    @staticmethod
+    async def _event(connection, reader):
+        while True:
+            event = connection.next_event()
+            if event is not h11.NEED_DATA:
+                return event
+            # Model prefill / SSE pauses may be long; do not impose a response deadline.
+            connection.receive_data(await reader.read(65536))
 
-            self._log(f"[{conn_id}] Route '{route.path_prefix}' matched for {method} {original_path}")
+    @staticmethod
+    async def _send(connection, writer, event):
+        data = connection.send(event)
+        if data:
+            writer.write(data)
+            await writer.drain()
 
-            new_path = self._rewrite_path(original_path, route)
-            new_request_line = f"{method} {new_path} {version}"
-            
-            new_headers = []
-            for i, line in enumerate(header_lines):
-                if i == 0:
-                    new_headers.append(new_request_line)
-                elif line.lower().startswith("host:"):
-                    new_headers.append(f"Host: {route.target_host}")
+    async def _forward(self, front, reader, writer, request, route, consumed):
+        headers = self._request_headers(request, route, consumed)
+        upstream_reader, upstream_writer = await self._policy.connect(
+            route, self._get_ssl_context(route) if route.use_tls else None)
+        back = h11.Connection(h11.CLIENT, max_incomplete_event_size=65536)
+        upload = None
+        response_started = False
+        try:
+            await self._send(back, upstream_writer, h11.Request(
+                method=request.method, target=self._rewrite_path(request.target.decode("ascii"), route),
+                headers=headers))
+            if front.they_are_waiting_for_100_continue:
+                await self._send(front, writer, h11.InformationalResponse(status_code=100, headers=[]))
+
+            async def send_body():
+                while True:
+                    event = await self._event(front, reader)
+                    if not isinstance(event, (h11.Data, h11.EndOfMessage)):
+                        raise ValueError("Incomplete proxy request body")
+                    await self._send(back, upstream_writer, event)
+                    if isinstance(event, h11.EndOfMessage):
+                        return
+
+            upload = asyncio.create_task(send_body())
+            while True:
+                receive = asyncio.create_task(self._event(back, upstream_reader))
+                try:
+                    if not upload.done():
+                        done, _ = await asyncio.wait([upload, receive], return_when=asyncio.FIRST_COMPLETED)
+                        if upload in done:
+                            upload.result()
+                    else:
+                        upload.result()
+                    event = await receive
+                finally:
+                    if not receive.done():
+                        receive.cancel()
+                    await asyncio.gather(receive, return_exceptions=True)
+                if isinstance(event, h11.InformationalResponse):
+                    if event.status_code == 101:
+                        raise ValueError("Protocol upgrades are not supported")
+                    await self._send(front, writer, h11.InformationalResponse(
+                        status_code=event.status_code, headers=self._headers(event.headers)))
+                elif isinstance(event, h11.Response):
+                    response_started = True
+                    headers = self._headers(event.headers)
+                    if front.their_state is not h11.DONE:
+                        headers.append((b"connection", b"close"))
+                    await self._send(front, writer, h11.Response(
+                        status_code=event.status_code, headers=headers, reason=event.reason))
+                elif isinstance(event, (h11.Data, h11.EndOfMessage)):
+                    await self._send(front, writer, event)
+                    if isinstance(event, h11.EndOfMessage):
+                        return
                 else:
-                    new_headers.append(line)
-            
-            new_headers_raw = "\r\n".join(new_headers)
-            new_headers_bytes = self._inject_api_key(new_headers_raw.encode(), route)
-            
-            new_request = new_headers_bytes + "\r\n\r\n".encode() + body.encode(errors="replace")
-
-            ssl_ctx = self._get_ssl_context(route) if route.use_tls else None
-            
-            target_reader, target_writer = await asyncio.open_connection(
-                route.target_host,
-                route.target_port,
-                ssl=ssl_ctx,
-            )
-            self._log(f"[{conn_id}] Connected to {route.target_host}:{route.target_port}")
-
-            target_writer.write(new_request)
-            await target_writer.drain()
-
-            request_bytes = len(new_request)
-            response_bytes = 0
-
-            async def forward_remaining_request():
-                nonlocal request_bytes
-                try:
-                    while True:
-                        data = await client_reader.read(8192)
-                        if not data:
-                            break
-                        target_writer.write(data)
-                        await target_writer.drain()
-                        request_bytes += len(data)
-                except Exception as exc:
-                    logger.debug("[%s] Request forwarding stopped: %s", conn_id, exc)
-
-            async def forward_response():
-                nonlocal response_bytes
-                try:
-                    while True:
-                        data = await target_reader.read(8192)
-                        if not data:
-                            break
-                        client_writer.write(data)
-                        await client_writer.drain()
-                        response_bytes += len(data)
-                except Exception as exc:
-                    logger.debug("[%s] Response forwarding stopped: %s", conn_id, exc)
-
-            request_task = asyncio.create_task(forward_remaining_request())
-            response_task = asyncio.create_task(forward_response())
-
-            _, pending = await asyncio.wait(
-                [request_task, response_task],
-                return_when=asyncio.ALL_COMPLETED,
-            )
-
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    logger.debug("[%s] Cancelled pending proxy task", conn_id)
-            self._log(f"[{conn_id}] Complete: {request_bytes} bytes sent, {response_bytes} bytes received")
-
-        except Exception as e:
-            self._log(f"[{conn_id}] Error: {e}")
-            try:
-                error_response = (
-                    "HTTP/1.1 502 Bad Gateway\r\n"
-                    "Content-Type: text/plain\r\n"
-                    f"Content-Length: {len(str(e))}\r\n"
-                    "\r\n"
-                    f"{e}"
-                )
-                client_writer.write(error_response.encode())
-                await client_writer.drain()
-            except Exception as exc:
-                logger.debug("[%s] Failed to send error response: %s", conn_id, exc)
+                    raise OSError("Incomplete inference response")
+        except Exception:
+            if response_started:
+                raise ConnectionAbortedError("Inference stream interrupted") from None
+            raise
         finally:
-            self._log(f"[{conn_id}] Connection closed")
-            try:
-                client_writer.close()
-                await client_writer.wait_closed()
-            except Exception as exc:
-                logger.debug("[%s] Failed to close client writer: %s", conn_id, exc)
+            if upload:
+                upload.cancel()
+                await asyncio.gather(upload, return_exceptions=True)
+            upstream_writer.close()
+            with contextlib.suppress(Exception):
+                await upstream_writer.wait_closed()
+
+    async def _handle_connection(self, reader, writer):
+        task = asyncio.current_task()
+        self._connections.add(task)
+        front = h11.Connection(h11.SERVER, max_incomplete_event_size=65536)
+        try:
+            while self._running:
+                request = await self._event(front, reader)
+                if isinstance(request, h11.ConnectionClosed):
+                    return
+                if not isinstance(request, h11.Request):
+                    raise ValueError("Invalid proxy request")
+                consumed = self._authenticate(request.headers, writer)
+                names = {name for name, _ in request.headers}
+                if {b"content-length", b"transfer-encoding"} <= names:
+                    raise ValueError("Ambiguous HTTP request framing")
+                if (request.method == b"CONNECT" or not request.target.startswith(b"/")
+                        or request.target.startswith(b"//")
+                        or any(n == b"upgrade" for n, _ in request.headers)):
+                    raise ValueError("Unsupported proxy request target or protocol")
+                route = self._match_route(request.target.decode("ascii"))
+                if route is None:
+                    await self._error(writer, 404, "No route matched")
+                    return
+                await self._forward(front, reader, writer, request, route, consumed)
+                if front.our_state is not h11.DONE or front.their_state is not h11.DONE:
+                    return
+                front.start_next_cycle()
+        except PermissionError:
+            await self._error(writer, 401, "Proxy authentication required")
+        except ProxyPolicyError:
+            await self._error(writer, 403, "Inference target denied by policy")
+        except (ValueError, h11.RemoteProtocolError, h11.LocalProtocolError):
+            await self._error(writer, 400, "Invalid proxy request")
+        except ConnectionAbortedError:
+            pass
+        except Exception as exc:
+            self._log(f"Inference request failed ({type(exc).__name__})")
+            await self._error(writer, 502, "Inference upstream unavailable")
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            self._connections.discard(task)
+
+    @staticmethod
+    async def _error(writer, status, message):
+        reasons = {400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+                   404: "Not Found", 502: "Bad Gateway"}
+        body = message.encode()
+        response = (f"HTTP/1.1 {status} {reasons[status]}\r\nConnection: close\r\n"
+                    f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+        with contextlib.suppress(Exception):
+            writer.write(response)
+            await writer.drain()
 
     async def start(self) -> None:
         if self._running:
             return
-
-        self._running = True
-
+        if not self._loopback(self.config.listen_host) and not self._token:
+            raise ProxyPolicyError("Non-loopback inference proxy requires JIUWENBOX_PROXY_TOKEN")
+        for route in self.config.routes:
+            self._policy.validate(route)
+            if route.use_tls:
+                self._get_ssl_context(route)
         self._server = await asyncio.start_server(
-            self._handle_connection,
-            self.config.listen_host,
-            self.config.listen_port,
-        )
-
-        addr = self._server.sockets[0].getsockname()
-        routes_info = ", ".join(f"{r.path_prefix}->{r.target_endpoint}" for r in self.config.routes)
-        self._log(f"HTTP proxy listening on {addr[0]}:{addr[1]} with routes: {routes_info}")
-
-        async def serve():
-            while self._running:
-                await asyncio.sleep(1)
-
-        self._serve_task = asyncio.create_task(serve())
+            self._handle_connection, self.config.listen_host, self.config.listen_port)
+        self._running = True
+        self._log("Inference proxy started")
 
     async def stop(self) -> None:
-        if not self._running:
-            return
-
         self._running = False
-
         if self._server:
             self._server.close()
+        tasks = list(self._connections)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self._server:
             await self._server.wait_closed()
-
-        if self._serve_task:
-            self._serve_task.cancel()
-            try:
-                await self._serve_task
-            except asyncio.CancelledError:
-                logger.debug("Proxy serve task cancelled")
-            self._serve_task = None
-
-        self._log("HTTP proxy stopped")
+            self._server = None
+        self._log("Inference proxy stopped")
