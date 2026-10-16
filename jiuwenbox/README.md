@@ -88,7 +88,7 @@ After installing the wheel, start with the bundled default policy:
 ```bash
 sudo ./.venv/bin/jiuwenbox-server
 # or
-sudo ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+sudo ./.venv/bin/jiuwenbox-server --listen http://127.0.0.1:8321 --log-level debug
 ```
 
 To use a different policy or port, set `JIUWENBOX_POLICY_PATH` to an **absolute**
@@ -97,7 +97,7 @@ path (or, from a dev tree, `src/jiuwenbox/configs/<name>.yaml`):
 ```bash
 sudo env \
   JIUWENBOX_POLICY_PATH="/absolute/path/to/policy.yaml" \
-  ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 9000 --log-level debug
+  ./.venv/bin/jiuwenbox-server --listen http://127.0.0.1:9000 --log-level debug
 ```
 
 ### Docker Start
@@ -112,7 +112,8 @@ sudo ./build_docker.sh
 Run with the default policy:
 
 ```bash
-sudo ./run_docker.sh
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+sudo env JIUWENBOX_API_TOKEN="$JIUWENBOX_API_TOKEN" ./run_docker.sh
 ```
 
 ### Unix Domain Socket Deployment
@@ -126,7 +127,7 @@ conflicts.
 Listen address is controlled by a single env var:
 
 ```bash
-JIUWENBOX_LISTEN=http://0.0.0.0:8321               # default
+JIUWENBOX_LISTEN=http://127.0.0.1:8321             # local process default
 JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock  # switch to UDS (absolute path required)
 ```
 
@@ -175,12 +176,22 @@ UDS-related env vars:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `JIUWENBOX_LISTEN` | `http://0.0.0.0:8321` | Management API listen URI; accepts `http://host:port` or `unix:///abs/socket/path`. |
+| `JIUWENBOX_LISTEN` | `http://127.0.0.1:8321` | Local management API listen URI; accepts `http://host:port` or `unix:///abs/socket/path`. Docker binds `0.0.0.0` inside the container and requires a Token in HTTP mode. |
+| `JIUWENBOX_HOST_BIND` | `127.0.0.1` | Host address for the management port published by `run_docker.sh`; set `0.0.0.0` explicitly for remote access. |
 | `JIUWENBOX_UDS_MODE` | `0666` | UDS socket file permissions (octal string). The Docker default is permissive so a non-root host user can connect; for multi-tenant / hardened deployments set `0660` and pass `docker run --user $(id -u):$(id -g)`. |
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | Host directory bind-mounted by `run_docker.sh` to expose the socket. |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | Container-side mount point; must match the directory in `JIUWENBOX_LISTEN`'s socket path. |
 
-### API authentication (opt-in)
+### API authentication and network exposure
+
+Local startup defaults to `127.0.0.1:8321`. Without a Token, only loopback connections or UDS access are allowed.
+The launcher requires a non-empty `JIUWENBOX_API_TOKEN` (or `--api-token`) for `0.0.0.0`, `::`, interface IPs,
+and other non-loopback listeners. Otherwise it exits without opening the listener.
+Setting a Token does not change the bind address; remote deployments must explicitly set both.
+
+The middleware also checks ASGI connection addresses and rejects unconfigured remote requests with
+`503` / `API_TOKEN_REQUIRED`, including when the app is run directly with uvicorn.
+Spoofed `Host` or `X-Forwarded-*` headers cannot turn a non-loopback server address into a local address.
 
 When `JIUWENBOX_API_TOKEN` is set, every HTTP endpoint (including `/health`, `/api/v1/*`, and `/mcp`) requires:
 
@@ -192,7 +203,7 @@ Missing or invalid tokens return `401` with `{"error":"unauthorized"}`.
 
 ```bash
 export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
-JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN jiuwenbox-server
+jiuwenbox-server --listen http://0.0.0.0:8321
 
 export JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN
 jiuwenbox health
@@ -202,9 +213,24 @@ curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/healt
 
 | Variable / flag | Notes |
 | --- | --- |
-| `JIUWENBOX_API_TOKEN` | Shared by server and CLI; unset = auth disabled |
+| `JIUWENBOX_API_TOKEN` | Shared by server and CLI; required for non-loopback HTTP, optional for loopback / UDS; when set, checked on all HTTP endpoints |
 | `jiuwenbox-server --api-token` | Launch flag; overrides env |
 | `jiuwenbox --api-token` | CLI flag; overrides env |
+
+Docker HTTP mode requires an explicit Token even when publishing only on host loopback: the container
+listens on a non-loopback interface. `run_docker.sh` forwards the Token by environment-variable name and
+publishes `127.0.0.1:<host-port>:8321` by default. Set `JIUWENBOX_HOST_BIND=0.0.0.0` explicitly for remote access.
+The inference privacy proxy has its own listener and is outside management API authentication.
+
+On upgrade, non-loopback deployments without a Token will fail startup. Configure the Authorization header
+in CLI, HTTP, and MCP clients. External jiuwenswarm adapters must also support that header; disabling authentication
+is not a compatibility workaround. Loopback is a network boundary, not isolation from other local users.
+Use a Token behind reverse proxies, port forwarding, or on shared hosts, and HTTPS or a trusted tunnel remotely.
+Token-free UDS access relies on filesystem permissions; use `JIUWENBOX_UDS_MODE=0660` (or `0600`) with suitable UID/GID on shared hosts.
+
+Deployment acceptance: a non-loopback listener without a Token must fail startup. With a Token configured,
+missing or wrong credentials must receive `401`; a correct Token must allow `/health`, followed by sandbox API checks.
+Source-level and local tests do not replace verification of the deployed service.
 
 ### Persisting the audit log (`--save-logs DIR`)
 
@@ -650,7 +676,7 @@ returns the result.
 
 ```bash
 JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+jiuwenbox-server --listen http://127.0.0.1:8321 --log-level debug
 ```
 
 ### OpenCode configuration
@@ -661,7 +687,8 @@ python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-leve
     "jiuwenbox": {
       "url": "http://YOUR_HOST:8321/mcp",
       "type": "remote",
-      "enabled": true
+      "enabled": true,
+      "headers": {"Authorization": "Bearer <configured-token>"}
     }
   }
 }
@@ -670,12 +697,13 @@ python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-leve
 ### External IP deployment
 
 When JiuwenBox is deployed on an external IP (not `localhost` / `127.0.0.1`),
-set `JIUWENBOX_MCP_ALLOWED_HOSTS` to allow the client host:
+configure both an API Token and `JIUWENBOX_MCP_ALLOWED_HOSTS`; the Host allowlist does not replace authentication:
 
 ```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
 JIUWENBOX_MCP_ALLOWED_HOSTS=10.0.0.5,10.0.0.5:8321 \
 JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+jiuwenbox-server --listen http://0.0.0.0:8321 --log-level debug
 ```
 
 ### Notes
@@ -804,7 +832,7 @@ flag to maintain in sync:
 ```
 
 `test.sh` does **not** start the server; launch jiuwenbox first on the
-selected transport (TCP with `JIUWENBOX_LISTEN=http://0.0.0.0:8321` or a
+selected transport (local TCP with `JIUWENBOX_LISTEN=http://127.0.0.1:8321` or a
 custom port, UDS with `JIUWENBOX_LISTEN=unix:///...`).
 
 Run specific test cases:
@@ -826,6 +854,7 @@ to exit before making network requests.
 | `JIUWENBOX_TEST_SSH_HOST` | Required: dedicated test host address |
 | `JIUWENBOX_TEST_SSH_USER` | Required: authorized test account with permissions needed by the host cases |
 | `JIUWENBOX_TEST_SSH_KEY` | Optional: client private-key path; otherwise use the SSH agent / local SSH configuration |
+| `JIUWENBOX_API_TOKEN` | Bearer Token for the HTTP API; must match the server when configured |
 
 SSH uses public-key authentication only, creates no password or askpass files, and requires
 host-key verification. Verify the host fingerprint through a trusted channel and add the

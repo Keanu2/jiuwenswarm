@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 import subprocess
 import time
@@ -107,6 +108,8 @@ def _build_httpx_client(endpoint: str, *, timeout: float = 30.0) -> httpx.Client
     其它形式走 base_url 模式。两种模式对 ``SandboxTrackingClient`` 透明,
     因此 ``test_server_api_default.py`` 业务断言一行不用改。
     """
+    token = os.environ.get("JIUWENBOX_API_TOKEN", "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     if endpoint.startswith(_UDS_SCHEME):
         uds_path = endpoint[len(_UDS_SCHEME):]
         if not uds_path.startswith("/"):
@@ -117,8 +120,9 @@ def _build_httpx_client(endpoint: str, *, timeout: float = 30.0) -> httpx.Client
             transport=httpx.HTTPTransport(uds=uds_path),
             base_url=_UDS_PLACEHOLDER_BASE_URL,
             timeout=timeout,
+            headers=headers,
         )
-    return httpx.Client(base_url=_normalize_endpoint(endpoint), timeout=timeout)
+    return httpx.Client(base_url=_normalize_endpoint(endpoint), timeout=timeout, headers=headers)
 
 
 @pytest.fixture
@@ -297,7 +301,7 @@ def docker_gateway_ip(
     logger.info("[docker_gateway_ip] API server: %s", server_url_session)
     
     try:
-        with httpx.Client(base_url=server_url_session, timeout=5.0) as client:
+        with _build_httpx_client(server_url_session, timeout=5.0) as client:
             health = client.get("/health")
             if health.status_code != 200:
                 raise RuntimeError(
@@ -314,7 +318,7 @@ def docker_gateway_ip(
     llm_ok = False
     
     try:
-        with httpx.Client(base_url=server_url_session, timeout=30.0) as client:
+        with _build_httpx_client(server_url_session, timeout=30.0) as client:
             create = client.post("/api/v1/sandboxes", json={})
             if create.status_code != 201:
                 raise RuntimeError(
@@ -433,7 +437,7 @@ def docker_gateway_ip(
     except Exception as e:
         if sandbox_id:
             try:
-                with httpx.Client(base_url=server_url_session, timeout=5.0) as client:
+                with _build_httpx_client(server_url_session, timeout=5.0) as client:
                     client.delete(f"/api/v1/sandboxes/{sandbox_id}")
             except Exception as cleanup_exc:
                 logger.debug(

@@ -16,6 +16,7 @@ SETTINGS = (
     "JIUWENBOX_TEST_SSH_HOST",
     "JIUWENBOX_TEST_SSH_USER",
     "JIUWENBOX_TEST_SSH_KEY",
+    "JIUWENBOX_API_TOKEN",
 )
 
 
@@ -41,6 +42,17 @@ def java_runner(monkeypatch):
 def test_import_has_no_default_remote_target_or_account(java_runner):
     runner, _ = java_runner
     assert runner.ENDPOINT == runner.HOST == runner.SSH_USER == runner.SSH_KEY == ""
+    assert "Authorization" not in runner.S.headers
+
+
+def test_configured_api_token_is_sent_by_java_runner(java_runner, monkeypatch):
+    _, load = java_runner
+    monkeypatch.setenv("JIUWENBOX_API_TOKEN", "test-java-api-token")
+    runner = load()
+    try:
+        assert runner.S.headers["Authorization"] == "Bearer test-java-api-token"
+    finally:
+        runner.S.close()
 
 
 @pytest.mark.parametrize("missing", ["ENDPOINT", "HOST", "SSH_USER"])

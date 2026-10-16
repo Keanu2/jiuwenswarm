@@ -11,6 +11,7 @@ IMAGE_TAG="${JIUWENBOX_IMAGE_TAG:-latest}"
 IMAGE_REF="${IMAGE_NAME}:${IMAGE_TAG}"
 CONTAINER_NAME="${JIUWENBOX_CONTAINER_NAME:-jiuwenbox}"
 HOST_PORT="${JIUWENBOX_HOST_PORT:-8321}"
+HOST_BIND="${JIUWENBOX_HOST_BIND:-127.0.0.1}"
 PROXY_PORT="${JIUWENBOX_PROXY_PORT:-8322}"
 
 # 下面这一段把每个外部 env 拆成"局部短名"承接, 与上面 HOST_PORT /
@@ -58,9 +59,10 @@ Options:
                         flag wins when both are present.
 
 Examples (HTTP, default):
-  scripts/run_docker.sh
-  scripts/run_docker.sh src/jiuwenbox/configs/default-policy.yaml
+  export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+  scripts/run_docker.sh  # publishes the management API on host loopback only
   JIUWENBOX_HOST_PORT=18321 scripts/run_docker.sh
+  JIUWENBOX_HOST_BIND=0.0.0.0 scripts/run_docker.sh  # authenticated remote access
 
 Examples (Unix Domain Socket):
   mkdir -p /tmp/jiuwenbox-sock
@@ -153,12 +155,22 @@ case "$LISTEN_URI" in
     ;;
 esac
 
+if [[ "$LISTEN_MODE" = "http" ]]; then
+  # Container TCP binds an interface reachable by Docker port forwarding.
+  # Never publish an unauthenticated management API, even on host loopback.
+  API_TOKEN="${JIUWENBOX_API_TOKEN:-}"
+  if [[ -z "${API_TOKEN//[[:space:]]/}" ]]; then
+    echo "error: Docker HTTP mode requires JIUWENBOX_API_TOKEN" >&2
+    exit 2
+  fi
+fi
+
 echo "Starting jiuwenbox container:"
 echo "  image:     $IMAGE_REF"
 echo "  container: $CONTAINER_NAME"
 if [[ "$LISTEN_MODE" = "http" ]]; then
-  echo "  listen:    http -> http://127.0.0.1:${HOST_PORT}"
-  DOCKER_PORT_ARGS+=(-p "${HOST_PORT}:8321")
+  echo "  listen:    http -> http://${HOST_BIND}:${HOST_PORT}"
+  DOCKER_PORT_ARGS+=(-p "${HOST_BIND}:${HOST_PORT}:8321")
 else
   echo "  listen:    uds -> ${UDS_HOST_DIR}/$(basename "$LISTEN_SOCKET_PATH")"
   # 校验: socket 容器路径必须在容器内挂载点下面, 否则宿主看不见。
@@ -185,6 +197,10 @@ echo "  proxy:     http://127.0.0.1:${PROXY_PORT} (inference privacy proxy)"
 # 它们是 launcher / lifespan 真正读取的环境变量, 与外部用户在 README 里设的
 # 名字保持一致; 等号右边才是上面解析好的局部变量值。
 DOCKER_ENV_ARGS+=(-e "JIUWENBOX_LISTEN=${LISTEN_URI}")
+if [[ -n "${JIUWENBOX_API_TOKEN:-}" ]]; then
+  # Forward by name so the token is not placed in the docker command line.
+  DOCKER_ENV_ARGS+=(-e JIUWENBOX_API_TOKEN)
+fi
 if [[ -n "$UDS_MODE" ]]; then
   DOCKER_ENV_ARGS+=(-e "JIUWENBOX_UDS_MODE=${UDS_MODE}")
 fi

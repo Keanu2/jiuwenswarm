@@ -20,7 +20,11 @@ from jiuwenbox import __version__
 from jiuwenbox.logging_config import configure_logging, make_stream_logging_nonblocking
 from jiuwenbox.models.sandbox import InvalidJobIdError, InvalidSandboxIdError
 from jiuwenbox.server.audit_logger import AuditLogger
-from jiuwenbox.server.auth import BearerTokenAuthMiddleware, get_configured_token
+from jiuwenbox.server.auth import (
+    BearerTokenAuthMiddleware,
+    get_configured_token,
+    validate_configured_listener,
+)
 from jiuwenbox.server.limits import (
     MAX_JSON_BODY_BYTES,
     MULTIPART_OVERHEAD_BYTES,
@@ -256,6 +260,7 @@ def _chmod_uds_socket_if_any() -> None:
 async def lifespan(_application: FastAPI):
     global _sandbox_manager, _proxy_manager, _proxy_only_mode
     global _win_proxy_task, _win_proxy_stop
+    validate_configured_listener()
     # After uvicorn installed its handlers: stdout/stderr are pipes to the parent.
     make_stream_logging_nonblocking()
     # Both of these have to run after uvicorn has spun up its event loop -

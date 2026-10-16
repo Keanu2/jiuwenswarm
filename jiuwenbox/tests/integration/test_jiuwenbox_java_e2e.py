@@ -69,6 +69,9 @@ TIMEOUT = 30
 S = requests.Session()
 S.trust_env = False
 S.proxies = {"http": None, "https": None}
+_api_token = os.environ.get("JIUWENBOX_API_TOKEN", "").strip()
+if _api_token:
+    S.headers["Authorization"] = f"Bearer {_api_token}"
 
 results: List[Dict[str, Any]] = []
 

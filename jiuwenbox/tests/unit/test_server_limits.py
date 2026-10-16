@@ -71,12 +71,13 @@ def test_chunked_upload_body_is_capped():
     assert exc.value.code == "SANDBOX_UPLOAD_TOO_LARGE"
 
 
-def test_chunked_json_request_is_capped():
+def test_chunked_json_request_is_capped(monkeypatch):
     from fastapi.testclient import TestClient
 
     from jiuwenbox.server.app import create_app
     from jiuwenbox.server.limits import MAX_JSON_BODY_BYTES
 
+    monkeypatch.setenv("JIUWENBOX_API_TOKEN", "test-limits-token")
     chunk = b" " * (256 * 1024)
 
     def body():
@@ -89,7 +90,7 @@ def test_chunked_json_request_is_capped():
     response = client.post(
         "/api/v1/sandboxes/sb/exec",
         content=body(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer test-limits-token"},
     )
 
     assert response.status_code == 413
@@ -102,6 +103,7 @@ def test_chunked_upload_request_is_capped_over_http(monkeypatch):
     from jiuwenbox.server.app import create_app
 
     monkeypatch.setenv("JIUWENBOX_MAX_FILE_MB", "1")
+    monkeypatch.setenv("JIUWENBOX_API_TOKEN", "test-limits-token")
     boundary = "jiuwenboxboundary"
     chunk = b"x" * (256 * 1024)
 
@@ -119,7 +121,10 @@ def test_chunked_upload_request_is_capped_over_http(monkeypatch):
     response = client.post(
         "/api/v1/sandboxes/sb/upload?sandbox_path=/tmp/big.bin",
         content=body(),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Authorization": "Bearer test-limits-token",
+        },
     )
 
     assert response.status_code == 413

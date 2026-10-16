@@ -82,7 +82,7 @@ uv pip install ./dist/jiuwenbox*.whl
 ```bash
 sudo ./.venv/bin/jiuwenbox-server
 # 或
-sudo ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+sudo ./.venv/bin/jiuwenbox-server --listen http://127.0.0.1:8321 --log-level debug
 ```
 
 如需指定其它 policy 或端口，设置 `JIUWENBOX_POLICY_PATH` 为**绝对路径**（也可在开发树里用 `src/jiuwenbox/configs/<name>.yaml`）：
@@ -90,7 +90,7 @@ sudo ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --por
 ```bash
 sudo env \
   JIUWENBOX_POLICY_PATH="/absolute/path/to/policy.yaml" \
-  ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 9000 --log-level debug
+  ./.venv/bin/jiuwenbox-server --listen http://127.0.0.1:9000 --log-level debug
 ```
 
 ### Docker 启动
@@ -105,7 +105,8 @@ sudo ./build_docker.sh
 使用默认 policy 运行：
 
 ```bash
-sudo ./run_docker.sh
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+sudo env JIUWENBOX_API_TOKEN="$JIUWENBOX_API_TOKEN" ./run_docker.sh
 ```
 
 ### 通过 Unix Domain Socket 部署
@@ -118,7 +119,7 @@ loopback 端口冲突的场景。上层协议仍是 HTTP/1.1，路由 / 请求�
 监听地址由统一的环境变量 `JIUWENBOX_LISTEN` 控制，取以下两种形式之一：
 
 ```bash
-JIUWENBOX_LISTEN=http://0.0.0.0:8321               # 默认
+JIUWENBOX_LISTEN=http://127.0.0.1:8321             # 本地进程默认
 JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock  # 切到 UDS, 路径必须绝对
 ```
 
@@ -169,12 +170,22 @@ UDS 相关环境变量：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `JIUWENBOX_LISTEN` | `http://0.0.0.0:8321` | 管理 API 监听 URI；接受 `http://host:port` 或 `unix:///abs/socket/path`。 |
+| `JIUWENBOX_LISTEN` | `http://127.0.0.1:8321` | 本地管理 API 监听 URI；接受 `http://host:port` 或 `unix:///abs/socket/path`。Docker 容器内为 `0.0.0.0`，HTTP 模式必须配置 Token。 |
+| `JIUWENBOX_HOST_BIND` | `127.0.0.1` | `run_docker.sh` 发布管理 API 的宿主机地址；显式设置为 `0.0.0.0` 才允许远程访问。 |
 | `JIUWENBOX_UDS_MODE` | `0666` | UDS socket 文件权限 (八进制字符串)。Docker 场景下宿主与容器内 uvicorn uid 通常不同，默认放开；多租户 / 强隔离场景建议显式 `JIUWENBOX_UDS_MODE=0660` 并 `docker run --user $(id -u):$(id -g)` 收紧。 |
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | `run_docker.sh` 把宿主 socket 目录挂载到容器内的位置。 |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | 容器内挂载点，必须与 `JIUWENBOX_LISTEN` 里 socket 路径所在的目录一致。 |
 
-### API 认证（opt-in）
+### API 认证与网络暴露
+
+本地启动默认只监听 `127.0.0.1:8321`，未配置 Token 时仅允许回环连接或 UDS 访问。
+通过启动器监听 `0.0.0.0`、`::`、网卡 IP 或其他非回环地址时，必须配置非空的
+`JIUWENBOX_API_TOKEN`（或 `--api-token`），否则启动返回错误，不开放监听端口。
+设置 Token 本身不会改变监听地址；远程部署需同时显式指定地址。
+
+中间件还会根据 ASGI 连接地址检查本地传输，拒绝无 Token 的远程请求，返回
+`503` / `API_TOKEN_REQUIRED`。直接调用 uvicorn 也不能绕过这一请求检查；
+`Host` 或 `X-Forwarded-*` 请求头不能把非回环服务端地址变成本地地址。
 
 设置 `JIUWENBOX_API_TOKEN` 后，所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）均要求请求头：
 
@@ -187,7 +198,7 @@ Authorization: Bearer <token>
 ```bash
 # 生成 token 并启动服务端
 export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
-JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN jiuwenbox-server
+jiuwenbox-server --listen http://0.0.0.0:8321
 # 或: jiuwenbox-server --api-token "$JIUWENBOX_API_TOKEN"
 
 # CLI
@@ -200,9 +211,21 @@ curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/healt
 
 | 变量 / 参数 | 说明 |
 | --- | --- |
-| `JIUWENBOX_API_TOKEN` | 服务端与 CLI **共用**；未设置 = 不启用认证 |
+| `JIUWENBOX_API_TOKEN` | 服务端与 CLI **共用**；非回环 HTTP 必填，回环 / UDS 可选；设置后所有 HTTP 端点均校验 |
 | `jiuwenbox-server --api-token` | 启动参数，优先级高于 env |
 | `jiuwenbox --api-token` | CLI 参数，优先级高于 env |
+
+Docker HTTP 模式下，即使宿主机只发布回环端口，也必须显式传入 Token，因为容器内部监听非回环接口。
+`run_docker.sh` 将 Token 按环境变量名传入容器，默认发布 `127.0.0.1:<宿主端口>:8321`；
+需要远程访问时再设置 `JIUWENBOX_HOST_BIND=0.0.0.0`。推理隐私代理的独立端口不属于管理 API 认证范围。
+
+升级时，原来没有 Token 的非回环部署会拒绝启动，需同时更新 CLI、HTTP 和 MCP 客户端的
+`Authorization` 请求头。外部 jiuwenswarm 适配器也需确认支持传入该请求头，不能通过关闭认证解决兼容问题。
+回环限制不会隔离同机其他用户；反向代理、端口转发或多用户主机也应配置 Token，远程传输应通过 HTTPS 或可信隧道。
+UDS 无 Token 时依赖文件权限；多用户环境应设置 `JIUWENBOX_UDS_MODE=0660`（或 `0600`）并核对 UID/GID。
+
+部署验收：无 Token 的非回环启动应失败；配置 Token 后，匿名和错误 Token 请求应返回 `401`，
+正确 Token 的 `/health` 请求应成功，再验证沙箱 API。源码回归或本机测试不能替代已部署服务器的验收。
 
 ### 持久化审计日志（`--save-logs DIR`）
 
@@ -616,7 +639,7 @@ MCP 端点路径为 `/mcp`（Streamable HTTP 传输）。当前 MCP 工具为
 
 ```bash
 JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+jiuwenbox-server --listen http://127.0.0.1:8321 --log-level debug
 ```
 
 ### OpenCode 配置
@@ -627,7 +650,8 @@ python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-leve
     "jiuwenbox": {
       "url": "http://YOUR_HOST:8321/mcp",
       "type": "remote",
-      "enabled": true
+      "enabled": true,
+      "headers": {"Authorization": "Bearer <configured-token>"}
     }
   }
 }
@@ -636,12 +660,13 @@ python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-leve
 ### 外部 IP 部署
 
 当 JiuwenBox 部署在外部 IP（非 `localhost` / `127.0.0.1`）时，
-需设置 `JIUWENBOX_MCP_ALLOWED_HOSTS` 以允许客户端主机访问：
+需同时配置 API Token 和 `JIUWENBOX_MCP_ALLOWED_HOSTS`；Host 白名单不替代认证：
 
 ```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
 JIUWENBOX_MCP_ALLOWED_HOSTS=10.0.0.5,10.0.0.5:8321 \
 JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+jiuwenbox-server --listen http://0.0.0.0:8321 --log-level debug
 ```
 
 ### 注意事项
@@ -774,7 +799,7 @@ inference_privacy_proxies:
 ```
 
 注意 test.sh 本身**不会**起 server，请按选定通路先手工启动对应的 jiuwenbox
-(TCP 走 `JIUWENBOX_LISTEN=http://0.0.0.0:8321` 或自定义端口，UDS 走
+(本机 TCP 走 `JIUWENBOX_LISTEN=http://127.0.0.1:8321` 或自定义端口，UDS 走
 `JIUWENBOX_LISTEN=unix:///...`)。
 
 运行指定测试用例：
@@ -795,6 +820,7 @@ python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforc
 | `JIUWENBOX_TEST_SSH_HOST` | 必填，专用测试宿主机地址 |
 | `JIUWENBOX_TEST_SSH_USER` | 必填，已授权的测试账户，按宿主用例需要授予权限 |
 | `JIUWENBOX_TEST_SSH_KEY` | 可选，客户端私钥路径；未设置时使用 SSH agent / 本机 SSH 配置 |
+| `JIUWENBOX_API_TOKEN` | HTTP API 的 Bearer Token；服务端配置后必须与其一致 |
 
 SSH 仅允许公钥认证，不再使用密码或创建 askpass 文件，并强制校验服务端主机密钥。
 运行前须通过可信渠道核验宿主机指纹，将正确的主机密钥加入运行账户的 `known_hosts`。
