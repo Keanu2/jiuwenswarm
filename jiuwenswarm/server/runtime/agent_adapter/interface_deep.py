@@ -3198,17 +3198,6 @@ class JiuWenSwarmDeepAdapter:
                 continue
             if await self.cleanup_session_adapter(sid):
                 evicted += 1
-                # 逐出成功单独打一条自标识日志,与 cleanup_session_adapter 的
-                # removed 行(断连/池释放共用)区分;idle_sec 用判定时的
-                # last_used,和逐出依据一致。uncertain 旁路绕过了 TTL 判定,
-                # idle_sec 可能接近 0,reason 必须区分开,避免误导排障。
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] session adapter evicted: "
-                    "reason=%s session_id=%s idle_sec=%.0f",
-                    "rewrite_tx_uncertain" if checkpoint_uncertain else "idle_ttl",
-                    sid,
-                    now - last_used,
-                )
 
     async def cleanup_session_adapter(self, session_id: str | None) -> bool:
         """Release an idle session-scoped adapter without deleting session history."""
