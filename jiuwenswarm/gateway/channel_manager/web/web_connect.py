@@ -18,12 +18,23 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
+from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.security.attachment_download import (
+    AttachmentDownloadPolicy,
+    AttachmentError,
+    download_attachment,
+)
+from jiuwenswarm.common.security.attachment_storage import (
+    save_attachment,
+    validate_attachment_name,
+)
 from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
@@ -170,6 +181,8 @@ class WebChannel(BaseWsChannel):
     def __init__(self, config: WebChannelConfig, router: RobotMessageRouter):
         super().__init__(config, router)
         self.config: WebChannelConfig = config
+        self._attachment_policy = AttachmentDownloadPolicy.from_env()
+        self._attachment_download_slots = asyncio.Semaphore(4)
         self._server: Any = None
         # 桌面形态的命名管道 server（np_transport.PipeServer；非桌面形态恒 None）
         self._pipe_server: Any = None
@@ -527,6 +540,61 @@ class WebChannel(BaseWsChannel):
         if exclude_ws is not None:
             clients = {c for c in clients if c is not exclude_ws}
         await self._broadcast_to(frame, clients)
+
+    async def _download_file(self, url: str) -> bytes:
+        async with self._attachment_download_slots:
+            return await download_attachment(url, self._attachment_policy)
+
+    async def _process_files(self, params: dict[str, Any]) -> dict[str, Any]:
+        files = params.get("files")
+        if not files or not isinstance(files, list):
+            return params
+
+        url_files = [
+            item for item in files
+            if isinstance(item, dict) and (item.get("url") or item.get("uri"))
+        ]
+        if len(url_files) > self._attachment_policy.max_files:
+            raise AttachmentError("Too many attachments", "ATTACHMENT_TOO_MANY_FILES")
+        for item in url_files:
+            validate_attachment_name(
+                item.get("name") or item.get("filename") or "unknown_file"
+            )
+            self._attachment_policy.check_url(item.get("url") or item.get("uri"))
+        downloaded_files = []
+        # A rejected attachment must not forward its raw URL or leave earlier
+        # files from this failed request behind. Existing persisted-file dicts
+        # and path-only records retain their original behavior.
+        with ExitStack() as saved_files:
+            for file_info in files:
+                if not isinstance(file_info, dict):
+                    downloaded_files.append(file_info)
+                    continue
+                item = dict(file_info)
+                file_url = item.get("url") or item.get("uri")
+                if file_url:
+                    file_name = item.get("name") or item.get("filename") or "unknown_file"
+                    validate_attachment_name(file_name)
+                    file_content = await self._download_file(file_url)
+                    try:
+                        file_path = saved_files.enter_context(
+                            save_attachment(get_agent_workspace_dir(), file_name, file_content)
+                        )
+                    except OSError as exc:
+                        raise AttachmentError(
+                            "Attachment could not be saved", "ATTACHMENT_SAVE_FAILED"
+                        ) from exc
+                    item["path"] = str(file_path)
+                    item["filename"] = file_name
+                    item["size_bytes"] = len(file_content)
+                    # Downstream consumers receive a local file, not an
+                    # alternative URL that could trigger a second fetch.
+                    item.pop("url", None)
+                    item.pop("uri", None)
+                    for key in ("original_path", "mediaPath", "text_path"):
+                        item.pop(key, None)
+                downloaded_files.append(item)
+            return {**params, "files": downloaded_files}
 
     # ── Channel 生命周期 ──────────────────────────────────
 
@@ -1381,6 +1449,23 @@ class WebChannel(BaseWsChannel):
                 sessions = set()
                 self._ws_sessions[ws_id] = sessions
             sessions.add(session_id)
+
+        if method == ReqMethod.CHAT_SEND.value:
+            try:
+                params = await self._process_files(params)
+            except AttachmentError as exc:
+                logger.warning("WebChannel attachment rejected: code=%s", exc.code)
+                await self.send_response(ws, req_id, ok=False, error=str(exc), code=exc.code)
+                return
+        elif isinstance(params.get("files"), list) and any(
+            isinstance(item, dict) and (item.get("url") or item.get("uri"))
+            for item in params["files"]
+        ):
+            await self.send_response(
+                ws, req_id, ok=False, error="URL attachments are only supported by chat.send",
+                code="ATTACHMENT_REJECTED",
+            )
+            return
 
         # ── V2: 用实际的 session_id / mode / agent_id 更新 ws 注册 ──
         _flat_query = {k: (v[0] if v else "") for k, v in query.items()}

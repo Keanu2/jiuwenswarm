@@ -133,26 +133,24 @@ async def test_ws_sessions_ignores_empty_string_session_id():
     assert id(ws) not in channel._ws_sessions
 
 
-def test_web_channel_does_not_fetch_client_file_urls():
-    """params.files[].url used to be fetched with raw aiohttp (SSRF). Uploads
-    go through media/document persist; this path must not download URLs."""
-    from pathlib import Path
+@pytest.mark.asyncio
+async def test_web_channel_uses_guarded_attachment_download(monkeypatch):
+    """Retain public attachments through the SSRF-safe downloader."""
+    from unittest.mock import AsyncMock
+    from jiuwenswarm.gateway.channel_manager.web import web_connect
 
-    source = (
-        Path(__file__).resolve().parents[3]
-        / "jiuwenswarm"
-        / "gateway"
-        / "channel_manager"
-        / "web"
-        / "web_connect.py"
-    ).read_text(encoding="utf-8")
-    assert "aiohttp" not in source
-    assert "_download_file" not in source
-    assert "_process_files" not in source
+    download = AsyncMock(return_value=b"safe-public-attachment")
+    monkeypatch.setattr(web_connect, "download_attachment", download)
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    url = "https://attachments.example/public.txt"
+    assert await channel._download_file(url) == b"safe-public-attachment"
+    download.assert_awaited_once_with(url, channel._attachment_policy)
 
 
 @pytest.mark.asyncio
-async def test_ws_request_with_file_url_does_not_http_get(monkeypatch):
+async def test_ws_metadata_attachment_is_rejected_before_http_get(monkeypatch):
+    from unittest.mock import AsyncMock
+
     import aiohttp
 
     def _boom(*_a, **_k):
@@ -160,6 +158,8 @@ async def test_ws_request_with_file_url_does_not_http_get(monkeypatch):
 
     monkeypatch.setattr(aiohttp, "ClientSession", _boom)
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    response = AsyncMock()
+    monkeypatch.setattr(channel, "send_response", response)
     ws = _FakeWebSocket()
     received: list[Any] = []
     channel.on_message(lambda msg: received.append(msg))
@@ -177,7 +177,7 @@ async def test_ws_request_with_file_url_does_not_http_get(monkeypatch):
         ),
         {},
     )
-    assert received
-    assert received[0].params.get("files") == [
-        {"url": "http://169.254.169.254/latest/meta-data/", "name": "x"}
-    ]
+    assert not received
+    response.assert_awaited_once()
+    assert response.await_args.kwargs["ok"] is False
+    assert response.await_args.kwargs["code"] == "ATTACHMENT_REJECTED"
