@@ -14,21 +14,23 @@ def test_each_of_four_loads_uses_c_safe_loader_without_caching(tmp_path, monkeyp
     template.write_text("nested:\n  value: 1\n", encoding="utf-8")
     user.write_text("message: 中文\n", encoding="utf-8")
     calls = []
-    original = yaml.load
 
-    def counted_load(stream, Loader):
-        calls.append((stream.name, Loader))
-        return original(stream, Loader=Loader)
+    class CountedCSafeLoader(yaml.CSafeLoader):
+        def __init__(self, stream):
+            calls.append(stream.name)
+            super().__init__(stream)
 
-    monkeypatch.setattr(yaml, "load", counted_load)
+    def forbidden_load(*args, **kwargs):
+        pytest.fail("C 解析路径不应调用被 CodeCheck 禁止的通用反序列化入口")
+
+    monkeypatch.setattr(yaml, "CSafeLoader", CountedCSafeLoader)
+    monkeypatch.setattr(yaml, "load", forbidden_load)
     first = utils.load_yaml_dict(template)
     first["nested"]["value"] = 99
     assert utils.load_yaml_dict(template) == {"nested": {"value": 1}}
     assert utils.load_yaml_dict(template) == {"nested": {"value": 1}}
     assert utils.load_yaml_dict(user) == {"message": "中文"}
-    assert calls == [
-        (str(path), yaml.CSafeLoader) for path in (template, template, template, user)
-    ]
+    assert calls == [str(path) for path in (template, template, template, user)]
 
 
 def test_safe_loader_fallback_when_c_extension_is_unavailable(tmp_path, monkeypatch):
@@ -36,15 +38,36 @@ def test_safe_loader_fallback_when_c_extension_is_unavailable(tmp_path, monkeypa
     config = tmp_path / "fallback.yaml"
     config.write_text("message: 中文\nflag: true\n", encoding="utf-8")
     calls = []
-    original = yaml.load
+    original = yaml.safe_load
 
-    def counted_load(stream, Loader):
-        calls.append(Loader)
-        return original(stream, Loader=Loader)
+    def counted_load(stream):
+        calls.append(stream.name)
+        return original(stream)
 
-    monkeypatch.setattr(yaml, "load", counted_load)
+    monkeypatch.setattr(yaml, "safe_load", counted_load)
     assert utils.load_yaml_dict(config) == {"message": "中文", "flag": True}
-    assert calls == [yaml.SafeLoader]
+    assert calls == [str(config)]
+
+
+@pytest.mark.skipif(not hasattr(yaml, "CSafeLoader"), reason="当前 PyYAML 未提供 C 扩展")
+@pytest.mark.parametrize("text", ["value: 1\n", "value: [unterminated\n", "value: !!python/object/apply:builtins.str [123]\n"])
+def test_c_loader_is_disposed_on_success_and_parse_errors(tmp_path, monkeypatch, text):
+    config = tmp_path / "dispose.yaml"
+    config.write_text(text, encoding="utf-8")
+    disposed = []
+
+    class TrackedCSafeLoader(yaml.CSafeLoader):
+        def dispose(self):
+            disposed.append(self)
+            super().dispose()
+
+    monkeypatch.setattr(yaml, "CSafeLoader", TrackedCSafeLoader)
+    if text == "value: 1\n":
+        assert utils.load_yaml_dict(config) == {"value": 1}
+    else:
+        with pytest.raises(yaml.YAMLError):
+            utils.load_yaml_dict(config)
+    assert len(disposed) == 1
 
 
 def _typed(value):
@@ -79,7 +102,10 @@ def test_values_and_types_match_safe_load(tmp_path, text):
     "value: !!python/object/apply:builtins.str [123]\n",
     "first: 1\n---\nsecond: 2\n",
 ])
-def test_invalid_documents_and_python_object_tags_remain_rejected(tmp_path, text):
+@pytest.mark.parametrize("without_c_extension", [False, True])
+def test_invalid_documents_and_python_object_tags_remain_rejected(tmp_path, monkeypatch, text, without_c_extension):
+    if without_c_extension:
+        monkeypatch.delattr(yaml, "CSafeLoader", raising=False)
     config = tmp_path / "invalid.yaml"
     config.write_text(text, encoding="utf-8")
     with pytest.raises(yaml.YAMLError) as caught:
