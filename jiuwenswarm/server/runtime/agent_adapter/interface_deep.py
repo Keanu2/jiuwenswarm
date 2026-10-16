@@ -21321,8 +21321,12 @@ class JiuWenSwarmDeepAdapter:
                 if _skip:
                     continue
                 # First chunk handed back by the runner: records the time to
-                # first token for this round.
-                if not first_chunk_seen:
+                # first token for this round. Hold/drop/release are internal
+                # and are written before the model streams, so they must not
+                # count as the first token.
+                if not first_chunk_seen and not is_todo_close_control(
+                    str(getattr(chunk, "type", "") or "")
+                ):
                     first_chunk_seen = True
                     server_logger.info(
                         "[AgentServer] runner streaming first chunk: session_id=%s request_id=%s"
@@ -21402,15 +21406,18 @@ class JiuWenSwarmDeepAdapter:
                     continue
 
                 chunk_type = chunk.type
-                control = todo_close_hold.on_control(chunk_type)
-                if control == "arm" or control == "drop":
+                foreign_output = False
+                if chunk_type == "llm_output":
+                    foreign_output = _is_foreign_stream_source(chunk.payload)
+                close_action = todo_close_hold.decide(
+                    chunk_type, foreign=foreign_output,
+                )
+                if close_action == "skip":
                     continue
-                if control == "release" or todo_close_hold.should_flush_for(chunk_type):
-                    if control != "release":
-                        todo_close_hold.disarm()
+                if close_action in ("flush_skip", "flush_pass"):
                     for held_chunk in _take_todo_close_chunks():
                         yield held_chunk
-                    if control == "release":
+                    if close_action == "flush_skip":
                         continue
                 if chunk_type == "llm_usage":
                     logger.info(f"[JiuWenSwarmDeepAdapter] llm_usage chunk: {chunk}")
@@ -21493,9 +21500,7 @@ class JiuWenSwarmDeepAdapter:
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
-                    if todo_close_hold.should_buffer(
-                        _is_foreign_stream_source(chunk.payload)
-                    ):
+                    if close_action == "buffer":
                         todo_close_hold.push(delta_payload)
                         continue
                     has_streamed_content = True

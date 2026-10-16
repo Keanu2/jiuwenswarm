@@ -79,6 +79,12 @@ async def test_text_only_ending_attaches_one_todo_close_nudge() -> None:
     await rail.after_model_call(ctx)
     assert len(ctx.inputs.response.tool_calls) == 1
 
+    ctx.session.events.clear()
+    follow = _text_ctx("补刀已经用过，这段应该直接流式发出。")
+    follow.session = ctx.session
+    await rail.before_model_call(follow)
+    assert ctx.session.events == []
+
 
 @pytest.mark.asyncio
 async def test_truncated_text_does_not_attach_nudge() -> None:
@@ -106,10 +112,12 @@ async def test_last_react_iteration_does_not_attach_nudge() -> None:
     ctx = _text_ctx("最后一轮正文")
     ctx.inputs.react_iteration = 15
 
+    await rail.before_model_call(ctx)
     await rail.after_model_call(ctx)
 
     assert ctx.inputs.response.tool_calls == []
     assert rail._todo_close_nudge_used is False
+    assert ctx.session.events == []
 
 
 @pytest.mark.asyncio
@@ -126,6 +134,55 @@ async def test_text_only_ending_keeps_real_tool_calls() -> None:
     assert ctx.inputs.response.tool_calls == [existing]
     assert rail._todo_close_nudge_used is False
     assert ctx.session.events == ["todo_close_hold", "todo_close_release"]
+
+
+class _ReleaseFails(_FakeSession):
+    async def write_stream(self, schema: object) -> None:
+        if str(getattr(schema, "type", "")) == "todo_close_release":
+            raise RuntimeError("stream down")
+        await super().write_stream(schema)
+
+
+class _DropFails(_FakeSession):
+    async def write_stream(self, schema: object) -> None:
+        if str(getattr(schema, "type", "")) == "todo_close_drop":
+            raise RuntimeError("stream down")
+        await super().write_stream(schema)
+
+
+@pytest.mark.asyncio
+async def test_failed_release_keeps_hold_pending() -> None:
+    rail = _rail_with_open_task()
+    session = _ReleaseFails()
+    existing = ToolCall(
+        id="call-1", type="function", name="read_file", arguments="{}",
+    )
+    ctx = _text_ctx("进度说明", tool_calls=[existing])
+    ctx.session = session
+
+    await rail.before_model_call(ctx)
+    await rail.after_model_call(ctx)
+
+    assert rail._todo_close_hold_pending is True
+    assert session.events == ["todo_close_hold"]
+
+    await rail.before_model_call(ctx)
+    assert session.events == ["todo_close_hold"]
+
+
+@pytest.mark.asyncio
+async def test_failed_drop_does_not_release() -> None:
+    rail = _rail_with_open_task()
+    session = _DropFails()
+    ctx = _text_ctx("这段应该作废。")
+    ctx.session = session
+
+    await rail.before_model_call(ctx)
+    await rail.after_model_call(ctx)
+
+    assert rail._todo_close_nudge_used is True
+    assert rail._todo_close_hold_pending is False
+    assert session.events == ["todo_close_hold"]
 
 
 @pytest.mark.asyncio

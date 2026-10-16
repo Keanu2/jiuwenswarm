@@ -1557,8 +1557,19 @@ class TaskExecutionRail(DeepAgentRail):
         return True
 
     async def _arm_todo_close_text_hold(self, ctx: AgentCallbackContext) -> None:
-        """Ask the adapter to buffer this call's outer text until we decide."""
+        """Ask the adapter to buffer this call's outer text until we decide.
+
+        Only arm while this call can still be discarded. After the nudge has
+        been used, or on the last ReAct iteration, the text will be kept, so
+        it should stream token by token. ``finish_reason=length`` is not
+        known until the call returns, so a truncated turn is still held and
+        released afterwards.
+        """
         if self._todo_close_hold_pending or ctx.session is None:
+            return
+        if self._todo_close_nudge_used:
+            return
+        if self._is_last_react_iteration(ctx):
             return
         if not self._started_in_progress_tasks():
             return
@@ -1574,15 +1585,24 @@ class TaskExecutionRail(DeepAgentRail):
         *,
         dropped: bool,
     ) -> None:
-        """Drop already told the adapter to discard. Otherwise release."""
+        """Drop already told the adapter to discard. Otherwise release.
+
+        A failed release keeps the pending flag. The next model call must not
+        send another hold: that frame would drop the text still sitting in the
+        adapter. A later successful release flushes it. A failed drop still
+        clears the flag so the next hold discards the buffer; releasing on
+        that failure would put the discarded draft into the open task segment.
+        """
         if not self._todo_close_hold_pending:
             return
-        self._todo_close_hold_pending = False
         if dropped or ctx.session is None:
+            self._todo_close_hold_pending = False
             return
-        await self._write_todo_close_control(
+        wrote = await self._write_todo_close_control(
             ctx.session, TODO_CLOSE_RELEASE_STREAM_TYPE,
         )
+        if wrote:
+            self._todo_close_hold_pending = False
 
     async def _write_todo_close_control(self, session: Any, stream_type: str) -> bool:
         try:

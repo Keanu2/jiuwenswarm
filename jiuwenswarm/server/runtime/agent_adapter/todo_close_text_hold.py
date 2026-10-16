@@ -44,6 +44,28 @@ class TodoCloseTextHold:
         self.armed = False
         self._payloads: list[dict[str, Any]] = []
 
+    def decide(self, chunk_type: str, *, foreign: bool = False) -> str:
+        """What the adapter should do with this chunk.
+
+        ``skip``: control frame already applied, do not forward.
+        ``flush_skip``: release; emit the buffer and do not forward the frame.
+        ``flush_pass``: a commit frame arrived before release; emit the buffer,
+        then process this frame.
+        ``buffer``: outer ``llm_output`` while armed.
+        ``pass``: forward immediately, including child streams.
+        """
+        control = self.on_control(chunk_type)
+        if control in ("arm", "drop"):
+            return "skip"
+        if control == "release":
+            return "flush_skip"
+        if self.should_flush_for(chunk_type):
+            self.disarm()
+            return "flush_pass"
+        if chunk_type == "llm_output" and self.should_buffer(foreign):
+            return "buffer"
+        return "pass"
+
     def on_control(self, chunk_type: str) -> str:
         """Apply a control frame.
 
