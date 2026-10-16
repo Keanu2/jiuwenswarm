@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
-"""序 3：配置域 Repository + 2-C setup 接线。"""
+"""配置域 Repository 与存储装配接线。"""
 
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ from jiuwenswarm.gateway.storage_assembly.setup import (
     create_permissions_config_repository,
     is_storage_repositories_enabled,
     setup_gateway_storage_repositories,
+    start_gateway_storage,
     teardown_gateway_storage_repositories,
 )
 
@@ -199,6 +200,61 @@ async def test_setup_skipped_when_flags_off(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("GATEWAY_SESSION_MAP_REPOSITORY", "0")
     assert await setup_gateway_storage_repositories({}) is None
     assert get_channel_config_repository() is None
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_storage_skips_personal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    called = {"n": 0}
+
+    async def _setup(cfg=None):
+        called["n"] += 1
+        return _test_ctx()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.storage_assembly.setup.setup_gateway_storage_repositories",
+        _setup,
+    )
+    assert await start_gateway_storage({}) is None
+    assert called["n"] == 0
+    assert get_channel_config_repository() is None
+    assert get_persistent_store() is None
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_storage_wires_enterprise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    monkeypatch.delenv("GATEWAY_STORAGE_REPOSITORIES", raising=False)
+    monkeypatch.delenv("GATEWAY_SESSION_MAP_REPOSITORY", raising=False)
+    ctx = _test_ctx()
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.storage_assembly.setup.create_gateway_storage_context",
+        lambda cfg=None: ctx,
+    )
+    wired = await start_gateway_storage({})
+    try:
+        assert wired is ctx
+        assert get_channel_config_repository() is not None
+        assert get_permissions_config_repository() is not None
+        assert get_logging_config_repository() is not None
+        assert get_session_map_repository() is not None
+        assert get_persistent_store() is not None
+        from jiuwenswarm.gateway.config.enterprise.access import (
+            get_enterprise_record_repository,
+        )
+        from jiuwenswarm.gateway.config.memory.access import (
+            get_memory_config_repository,
+        )
+
+        assert get_memory_config_repository() is not None
+        assert get_enterprise_record_repository("cron_job") is not None
+    finally:
+        if wired is not None:
+            await teardown_gateway_storage_repositories(wired)
 
 
 def test_no_tables_or_audit_under_config() -> None:

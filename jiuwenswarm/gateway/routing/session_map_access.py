@@ -1,8 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """SessionMap Repository process entry (injection only).
 
-序 3-D：仅具备注入能力；不切 develop ``session_map.py`` 现网读写。
-``PersistentSessionStorage`` 适配依赖 tip ``session_storage``，归后续行为切换批次。
+仅具备注入能力，不切换 ``session_map.py`` 的现网读写。
 """
 
 from __future__ import annotations
