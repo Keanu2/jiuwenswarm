@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.sandbox import SandboxSpec
+from jiuwenbox.server.cors import get_cors_origins, parse_origin
 from jiuwenbox.server.sandbox_manager import SandboxExecRequest
 
 configure_logging()
@@ -38,9 +39,18 @@ def _build_transport_security() -> TransportSecuritySettings:
             if h and h not in allowed:
                 allowed.append(h)
     logger.info("MCP allowed hosts: %s", allowed)
+    origins = get_cors_origins()
+    # Preserve same-origin browser clients for explicitly trusted MCP hosts.
+    # The outer Origin guard still enforces the local/token boundary.
+    for host in allowed:
+        for scheme in ("http", "https"):
+            origin = f"{scheme}://{host}"
+            if parse_origin(origin) is not None and origin not in origins:
+                origins.append(origin)
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=allowed,
+        allowed_origins=origins,
     )
 
 

@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -25,6 +24,7 @@ from jiuwenbox.server.auth import (
     get_configured_token,
     validate_configured_listener,
 )
+from jiuwenbox.server.cors import BrowserOriginMiddleware, get_cors_origins
 from jiuwenbox.server.limits import (
     MAX_JSON_BODY_BYTES,
     MULTIPART_OVERHEAD_BYTES,
@@ -535,13 +535,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
     application.add_middleware(BearerTokenAuthMiddleware)
 
     @application.middleware("http")
@@ -669,6 +662,10 @@ def create_app() -> FastAPI:
                 "detail": str(exc) or exc.__class__.__name__,
             },
         )
+
+    # Added last so Origin rejection and CORS preflights run before body
+    # parsing and auth, while every actual API call remains authenticated.
+    application.add_middleware(BrowserOriginMiddleware, allow_origins=get_cors_origins())
 
     from jiuwenbox.server.routes.policy import router as policy_router
     from jiuwenbox.server.routes.proxy import router as proxy_router

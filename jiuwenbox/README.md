@@ -193,13 +193,14 @@ The middleware also checks ASGI connection addresses and rejects unconfigured re
 `503` / `API_TOKEN_REQUIRED`, including when the app is run directly with uvicorn.
 Spoofed `Host` or `X-Forwarded-*` headers cannot turn a non-loopback server address into a local address.
 
-When `JIUWENBOX_API_TOKEN` is set, every HTTP endpoint (including `/health`, `/api/v1/*`, and `/mcp`) requires:
+When `JIUWENBOX_API_TOKEN` is set, actual requests to every HTTP endpoint (including `/health`, `/api/v1/*`,
+and `/mcp`) require the following header. Allowed CORS preflights require no Token and execute no business logic:
 
 ```http
 Authorization: Bearer <token>
 ```
 
-Missing or invalid tokens return `401` with `{"error":"unauthorized"}`.
+After Origin validation, missing or invalid tokens return `401` with `{"error":"unauthorized"}`.
 
 ```bash
 export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
@@ -231,6 +232,58 @@ Token-free UDS access relies on filesystem permissions; use `JIUWENBOX_UDS_MODE=
 Deployment acceptance: a non-loopback listener without a Token must fail startup. With a Token configured,
 missing or wrong credentials must receive `401`; a correct Token must allow `/health`, followed by sandbox API checks.
 Source-level and local tests do not replace verification of the deployed service.
+
+### Browser origins and CORS
+
+Cross-origin access is disabled by default. CLI, Python HTTP, backend provider, and MCP clients without an
+`Origin` header retain their existing authentication behavior. Same-origin pages remain usable. Without a Token,
+same-origin access additionally requires a `localhost` or loopback-IP hostname and an actual loopback connection;
+arbitrary DNS aliases resolving to loopback are not implicitly trusted.
+
+For a separate browser frontend, configure exact allowed origins and an API Token before starting the server:
+
+```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+export JIUWENBOX_CORS_ORIGINS="https://console.example,http://localhost:3000"
+jiuwenbox-server
+# Docker: run_docker.sh also forwards JIUWENBOX_CORS_ORIGINS into the container.
+```
+
+An unset or empty `JIUWENBOX_CORS_ORIGINS` grants no cross-origin access. Entries are comma-separated and
+trimmed, then matched against the complete Origin (scheme, hostname, and port), without suffix matching or DNS
+resolution. Use the Origin serialized by the browser, such as `https://console.example`, without a trailing `/`.
+Wildcards, `null`, user information, paths, queries, and fragments are rejected; invalid configuration prevents
+startup. Restart after changing the configuration. Explicitly allow the public frontend Origin behind a reverse proxy.
+
+Untrusted, empty, `null`, or duplicate Origin headers return `403` / `ORIGIN_NOT_ALLOWED` before business
+handlers, including simple POSTs and multipart uploads. Merely omitting CORS response headers would not prevent
+these writes. Allowed preflights require no Token and never call sandbox handlers. Actual requests still enforce
+Token authentication / local transport checks. Ordinary OPTIONS requests do not bypass authentication.
+
+Cross-origin responses do not enable cookie credentials (`allow_credentials=False`). Browser clients must send
+Bearer credentials explicitly, for example with a securely obtained `token`:
+
+```javascript
+fetch("http://127.0.0.1:8321/api/v1/sandboxes", {
+  credentials: "omit",
+  headers: { Authorization: `Bearer ${token}` },
+});
+```
+
+Allowed cross-origin methods are GET, HEAD, POST, PUT, DELETE, and OPTIONS. In addition to CORS-safelisted
+headers, requests may use Authorization, Content-Type, Mcp-Session-Id, MCP-Protocol-Version, and Last-Event-ID.
+Mcp-Session-Id and WWW-Authenticate response headers are exposed to browser clients. Browser MCP clients share
+this Origin allowlist; MCP Host checks remain enabled. Configure `JIUWENBOX_MCP_ALLOWED_HOSTS` separately
+for a custom server Host. An allowed Origin grants no API permissions and does not replace Token authentication;
+only allow frontends whose API-calling code you trust.
+
+Acceptance: default cross-origin reads, simple POSTs, and uploads must be rejected. After configuring an allowed
+Origin, preflights must succeed, missing / incorrect Tokens on actual requests must return `401`, and a correct
+Token must succeed. CLI and same-origin requests must remain usable. Run regression tests from `jiuwenbox`:
+
+```bash
+PYTHONPATH=src python -m pytest tests/unit/test_server_cors_security.py tests/unit/test_server_auth_security.py -q
+```
 
 ### Linux sandbox control IPC authentication
 

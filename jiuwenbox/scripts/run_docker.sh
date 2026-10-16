@@ -72,6 +72,10 @@ Examples (Unix Domain Socket):
 
   curl --unix-socket /tmp/jiuwenbox-sock/jiuwenbox.sock http://localhost/health
 
+Examples (explicit browser frontend, requires API Token):
+  export JIUWENBOX_CORS_ORIGINS=https://console.example
+  scripts/run_docker.sh  # exact origins only; cross-origin access is off by default
+
 Examples (persist sandbox audit log to host):
   scripts/run_docker.sh --save-logs /tmp/jiuwenbox-logs
   scripts/run_docker.sh src/jiuwenbox/configs/default-policy.yaml --save-logs /tmp/jiuwenbox-logs
@@ -200,6 +204,9 @@ DOCKER_ENV_ARGS+=(-e "JIUWENBOX_LISTEN=${LISTEN_URI}")
 if [[ -n "${JIUWENBOX_API_TOKEN:-}" ]]; then
   # Forward by name so the token is not placed in the docker command line.
   DOCKER_ENV_ARGS+=(-e JIUWENBOX_API_TOKEN)
+fi
+if [[ -n "${JIUWENBOX_CORS_ORIGINS:-}" ]]; then
+  DOCKER_ENV_ARGS+=(-e JIUWENBOX_CORS_ORIGINS)
 fi
 if [[ -n "$UDS_MODE" ]]; then
   DOCKER_ENV_ARGS+=(-e "JIUWENBOX_UDS_MODE=${UDS_MODE}")

@@ -25,6 +25,7 @@ def docker_script(tmp_path, monkeypatch):
     for name in (
         "JIUWENBOX_LISTEN", "JIUWENBOX_API_TOKEN", "JIUWENBOX_HOST_BIND",
         "JIUWENBOX_SAVE_LOGS_HOST_DIR", "JIUWENBOX_POLICY_PATH",
+        "JIUWENBOX_CORS_ORIGINS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TEST_DOCKER_ARGS", output.as_posix())
@@ -69,3 +70,13 @@ def test_docker_publishes_api_locally_and_forwards_token_by_name(docker_script, 
     assert f"{bind or '127.0.0.1'}:8321:8321" in args
     assert "JIUWENBOX_API_TOKEN" in args
     assert token not in output.read_text(encoding="utf-8") + result.stdout + result.stderr
+
+
+def test_docker_forwards_explicit_browser_origins(docker_script, monkeypatch):
+    run, output = docker_script
+    monkeypatch.setenv("JIUWENBOX_API_TOKEN", "test-docker-api-token")
+    monkeypatch.setenv("JIUWENBOX_CORS_ORIGINS", "https://console.example")
+    result = run()
+    assert result.returncode == 0, result.stderr
+    args = output.read_text(encoding="utf-8").splitlines()
+    assert "JIUWENBOX_CORS_ORIGINS" in args

@@ -11,7 +11,7 @@
 
 ### TCP 监听（默认）
 
-uvicorn 直接 bind `0.0.0.0:8321`，外部走 IP:Port 访问：
+默认仅监听 `127.0.0.1:8321`。远程部署需显式设置监听地址并配置 API Token：
 
 ```text
 http://127.0.0.1:8321
@@ -32,21 +32,44 @@ unix:///run/jiuwenbox/jiuwenbox.sock          # 容器内 uvicorn 绑定的路�
 
 业务接口统一使用 `/api/v1` 前缀，健康检查接口为 `/health`。
 
-### API 认证（opt-in）
+### API 认证与来源检查
 
 设置环境变量 `JIUWENBOX_API_TOKEN`（或 `jiuwenbox-server --api-token`）后启用。
-所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）均需在请求头携带：
+所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）的实际请求均需在请求头携带：
 
 ```http
 Authorization: Bearer <token>
 ```
 
-未设置 `JIUWENBOX_API_TOKEN` 时行为与旧版一致（无认证）。错误 token 返回
-`401`，响应体 `{"error":"unauthorized"}`。
+未设置 Token 时仅允许回环连接或 UDS；非回环启动必须配置非空 Token，否则拒绝启动。
+请求中间件也会拒绝无 Token 的非本地连接，返回 `503` / `API_TOKEN_REQUIRED`。
+通过来源检查后，缺失或错误 Token 返回 `401`，响应体 `{"error":"unauthorized"}`。
 
 服务端与 jiuwenbox CLI 共用 `JIUWENBOX_API_TOKEN`；CLI 亦支持 `--api-token`
-（优先级高于 env）。jiuwenclaw / openjiuwen provider 当前不会自动发送该
-header，启用认证后需自行在 HTTP 客户端层携带 token。
+（优先级高于 env）。其他 HTTP / MCP 客户端也需发送该请求头；部署时应确认实际使用的
+provider 版本支持 Token 配置。
+
+默认关闭跨域。不可信的 `Origin`（含空值、`null`、重复头）在业务处理前返回
+`403` / `ORIGIN_NOT_ALLOWED`，简单 POST 和 multipart 上传也会被拦截。
+无 `Origin` 的正常客户端继续使用原有认证规则。同源网页仍可使用；无 Token 时同源识别仅信任
+`localhost` / 回环 IP 主机名及实际回环连接，不信任任意指向本机的 DNS 别名。
+
+独立浏览器前端可在启动前设置 `JIUWENBOX_CORS_ORIGINS`，例如：
+
+```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+export JIUWENBOX_CORS_ORIGINS="https://console.example,http://localhost:3000"
+jiuwenbox-server
+```
+
+多个完整 Origin 用逗号分隔，精确匹配协议、主机和端口；填写浏览器发送的格式，不带末尾 `/`。
+不接受 `*`、通配域名、`null`、用户信息、路径、查询或片段，非法配置拒绝启动。
+配置修改后重启生效；Docker 的 `run_docker.sh` 会透传此变量。
+白名单预检无需 Token，也不会调用业务接口；实际请求仍需通过 Token / 本地传输检查。
+普通 OPTIONS 请求不豁免认证。跨域浏览器请求应使用 `credentials: "omit"` 并显式携带
+`Authorization: Bearer <token>`；服务不启用跨域 Cookie 凭据。
+浏览器 MCP 使用相同 Origin 白名单，仍受独立的 `JIUWENBOX_MCP_ALLOWED_HOSTS` 检查。
+方法、请求头和验收规则见 [README_CN 的 CORS 说明](../README_CN.md#浏览器来源与-cors)。
 
 ### 通用接入示例
 

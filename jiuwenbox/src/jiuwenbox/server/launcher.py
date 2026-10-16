@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from jiuwenbox.logging_config import configure_logging, patch_uvicorn_logging
 from jiuwenbox.server.auth import require_token_for_bind
+from jiuwenbox.server.cors import get_cors_origins
 
 logger = logging.getLogger("jiuwenbox.server.launcher")
 
@@ -241,7 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     raw_uri = _resolve_listen_uri(args.listen)
     try:
         spec = parse_listen(raw_uri)
-    except ListenURIError as exc:
+        get_cors_origins()
+    except ValueError as exc:
         logger.error("jiuwenbox-server: %s", exc)
         return 2
 

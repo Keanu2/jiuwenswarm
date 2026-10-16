@@ -18,6 +18,7 @@ def isolated_settings(monkeypatch):
     for name in (
         "JIUWENBOX_API_TOKEN", "JIUWENBOX_LISTEN", "JIUWENBOX_UDS_PATH",
         "JIUWENBOX_SAVE_LOGS_DIR",
+        "JIUWENBOX_CORS_ORIGINS",
     ):
         monkeypatch.setenv(name, "")
 

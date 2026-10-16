@@ -187,13 +187,14 @@ UDS 相关环境变量：
 `503` / `API_TOKEN_REQUIRED`。直接调用 uvicorn 也不能绕过这一请求检查；
 `Host` 或 `X-Forwarded-*` 请求头不能把非回环服务端地址变成本地地址。
 
-设置 `JIUWENBOX_API_TOKEN` 后，所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）均要求请求头：
+设置 `JIUWENBOX_API_TOKEN` 后，所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）的实际请求均要求请求头
+（白名单内的 CORS 预检不执行业务，不要求 Token）：
 
 ```http
 Authorization: Bearer <token>
 ```
 
-未携带或 token 错误时返回 `401`，响应体 `{"error":"unauthorized"}`。
+通过 Origin 检查后，未携带或 token 错误时返回 `401`，响应体 `{"error":"unauthorized"}`。
 
 ```bash
 # 生成 token 并启动服务端
@@ -226,6 +227,55 @@ UDS 无 Token 时依赖文件权限；多用户环境应设置 `JIUWENBOX_UDS_MO
 
 部署验收：无 Token 的非回环启动应失败；配置 Token 后，匿名和错误 Token 请求应返回 `401`，
 正确 Token 的 `/health` 请求应成功，再验证沙箱 API。源码回归或本机测试不能替代已部署服务器的验收。
+
+### 浏览器来源与 CORS
+
+默认关闭跨域访问。无 `Origin` 的 CLI、Python HTTP 客户端、后端 provider 和 MCP 客户端保持原有认证行为。
+同源网页可正常访问；未配置 Token 时，同源放行还要求请求主机名为 `localhost` 或回环 IP，
+且实际连接为本地回环。指向回环的任意 DNS 别名不会自动获得同源信任。
+
+有独立浏览器前端时，在启动服务前配置精确来源白名单，并配置 API Token：
+
+```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+export JIUWENBOX_CORS_ORIGINS="https://console.example,http://localhost:3000"
+jiuwenbox-server
+# Docker: run_docker.sh 也会将 JIUWENBOX_CORS_ORIGINS 传入容器。
+```
+
+`JIUWENBOX_CORS_ORIGINS` 为空或未设置时无跨域白名单。多个来源用逗号分隔，逐项去除首尾空白，
+按完整 Origin 精确匹配（协议、主机、端口），不做域名后缀匹配或 DNS 解析。
+请填写浏览器实际发送的 Origin，例如 `https://console.example`，不带末尾 `/`；
+拒绝 `*`、`null`、通配域名、用户信息、路径、查询及片段等配置，配置错误时拒绝启动。
+修改后需重启服务。反向代理前端的公开 Origin 也应显式加入白名单。
+
+不可信、空、`null` 或重复的 `Origin` 请求在业务处理前返回 `403` / `ORIGIN_NOT_ALLOWED`，
+包括无需预检的简单 POST 和 multipart 上传；这不是仅删除 CORS 响应头。
+白名单预检可不带 Token，且不会进入沙箱处理函数；随后的实际请求仍须通过 Token / 本地传输检查。
+普通 OPTIONS 请求不会绕过认证。
+
+跨域响应不启用 Cookie 凭据（`allow_credentials=False`）。浏览器客户端应显式发送 Bearer Token，
+例如使用已安全获取的 `token`：
+
+```javascript
+fetch("http://127.0.0.1:8321/api/v1/sandboxes", {
+  credentials: "omit",
+  headers: { Authorization: `Bearer ${token}` },
+});
+```
+
+允许跨域的请求方法为 GET、HEAD、POST、PUT、DELETE、OPTIONS；除 CORS 安全列表请求头外，
+允许 Authorization、Content-Type、Mcp-Session-Id、MCP-Protocol-Version、Last-Event-ID，
+并向浏览器暴露 Mcp-Session-Id、WWW-Authenticate 响应头。浏览器 MCP 共享此 Origin 白名单，
+其独立 Host 检查仍保留；自定义服务端 Host 需另配 `JIUWENBOX_MCP_ALLOWED_HOSTS`。
+来源白名单不授予 API 权限，也不能替代 Token；允许某个前端即信任其调用 API 的代码。
+
+验收：默认跨域读取、简单 POST、上传均应被拒绝；配置白名单后，预检成功，实际请求无 Token / 错误
+Token 返回 `401`，正确 Token 成功；CLI 和同源请求应保持正常。运行回归测试：
+
+```bash
+PYTHONPATH=src python -m pytest tests/unit/test_server_cors_security.py tests/unit/test_server_auth_security.py -q
+```
 
 ### Linux 沙箱内部 IPC 认证
 
