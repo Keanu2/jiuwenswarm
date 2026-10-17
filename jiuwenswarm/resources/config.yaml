@@ -942,7 +942,7 @@ channels:
     # （type=agentos_router 时由 AgentOS Router 创建 YuanRong 实例并
     # 以 yr:instance:<instance_id> 中继到 frontend）。
     # 启用前请安装可选依赖: pip install "jiuwenswarm[ssh]" 或 uv sync --extra ssh
-    # 客户端: ssh -p <listen_port> user@<gateway-host>
+    # 客户端: ssh -i <private-key> -p <listen_port> user@<gateway-host>
     # 南向连接参数见 gateway.agentos.ssh；agent_type 跟随用户当前值（3rdagent.switch）。
     enabled: false
     # 绑定地址；默认仅本机回环，对外提供需显式改为网卡地址。
@@ -951,6 +951,11 @@ channels:
     advertise_host: ""
     listen_port: 2222
     host_key_path: ~/.jiuwenswarm/config/ssh_host_key
+    # 必填：SSH 用户名 -> 该用户的 OpenSSH authorized_keys 文件。
+    # 仅允许对应私钥登录；密码登录已禁用。未配置或文件无效时拒绝启动。
+    # 示例：alice: ~/.jiuwenswarm/config/ssh_authorized_keys_alice
+    # 用户名将作为 AgentOS user_id；请为每个用户独立授权，修改后重启 SSH channel。
+    authorized_keys: {}
     relay_timeout_sec: 3600
 
 # ========== 细粒度权限管控（tiered_policy）==========

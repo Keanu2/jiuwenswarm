@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -20,7 +19,12 @@ from jiuwenbox import __version__
 from jiuwenbox.logging_config import configure_logging, make_stream_logging_nonblocking
 from jiuwenbox.models.sandbox import InvalidJobIdError, InvalidSandboxIdError
 from jiuwenbox.server.audit_logger import AuditLogger
-from jiuwenbox.server.auth import BearerTokenAuthMiddleware, get_configured_token
+from jiuwenbox.server.auth import (
+    BearerTokenAuthMiddleware,
+    get_configured_token,
+    validate_configured_listener,
+)
+from jiuwenbox.server.cors import BrowserOriginMiddleware, get_cors_origins
 from jiuwenbox.server.limits import (
     MAX_JSON_BODY_BYTES,
     MULTIPART_OVERHEAD_BYTES,
@@ -256,6 +260,7 @@ def _chmod_uds_socket_if_any() -> None:
 async def lifespan(_application: FastAPI):
     global _sandbox_manager, _proxy_manager, _proxy_only_mode
     global _win_proxy_task, _win_proxy_stop
+    validate_configured_listener()
     # After uvicorn installed its handlers: stdout/stderr are pipes to the parent.
     make_stream_logging_nonblocking()
     # Both of these have to run after uvicorn has spun up its event loop -
@@ -530,13 +535,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
     application.add_middleware(BearerTokenAuthMiddleware)
 
     @application.middleware("http")
@@ -664,6 +662,10 @@ def create_app() -> FastAPI:
                 "detail": str(exc) or exc.__class__.__name__,
             },
         )
+
+    # Added last so Origin rejection and CORS preflights run before body
+    # parsing and auth, while every actual API call remains authenticated.
+    application.add_middleware(BrowserOriginMiddleware, allow_origins=get_cors_origins())
 
     from jiuwenbox.server.routes.policy import router as policy_router
     from jiuwenbox.server.routes.proxy import router as proxy_router

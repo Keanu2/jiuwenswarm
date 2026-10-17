@@ -40,32 +40,35 @@ class SSHAgentHooks:
 
 
 class ProxySSHServer(asyncssh.SSHServer if ASYNCSSH_AVAILABLE else object):  # type: ignore[misc]
-    def __init__(self, config: ProxyConfig) -> None:
-        self.config = config
+    def __init__(self, authorized_keys: dict[str, Any]) -> None:
+        self._authorized_keys = authorized_keys
+        self._conn: Any = None
         self.client_username: str | None = None
 
     def connection_made(self, conn: Any) -> None:
+        self._conn = conn
         conn.set_extra_info(proxy_auth=self)
 
     def begin_auth(self, username: str) -> bool:
         self.client_username = username
+        # Replace the trusted keys on every auth attempt, including unknown users.
+        # AsyncSSH verifies both the authorized_keys restrictions and possession
+        # of the corresponding private key before accepting the connection.
+        self._conn.set_authorized_keys(self._authorized_keys.get(username))
         return True
 
     def password_auth_supported(self) -> bool:
-        return True
+        return False
 
     def public_key_auth_supported(self) -> bool:
-        return True
+        return self.client_username in self._authorized_keys
 
     def validate_public_key(self, username: str, key: Any) -> bool:
-        del key
-        self.client_username = username
-        return True
+        # AsyncSSH calls this fallback only when its authorized_keys check fails.
+        return False
 
     def validate_password(self, username: str, password: str) -> bool:
-        del password
-        self.client_username = username
-        return True
+        return False
 
 
 class SSHProxy:
@@ -81,15 +84,24 @@ class SSHProxy:
             except ImportError as exc:
                 _raise_missing_asyncssh(exc)
 
+        if not self.config.authorized_keys:
+            raise ValueError("SSH channel requires channels.ssh.authorized_keys configured per username")
+        # Load once, before opening a listener; missing/invalid files fail closed.
+        authorized_keys = {
+            username: asyncssh.read_authorized_keys(path)
+            for username, path in self.config.authorized_keys.items()
+        }
         host_key = await self._ensure_host_key(self.config.host_key_path)
 
         self._server = await asyncssh.create_server(
-            lambda: ProxySSHServer(self.config),
+            lambda: ProxySSHServer(authorized_keys),
             self.config.listen_host,
             self.config.listen_port,
             server_host_keys=[host_key],
             process_factory=self._handle_client,
             encoding=None,
+            password_auth=False,
+            kbdint_auth=False,
         )
         logger.info(
             "[SSHChannel] listening on %s:%s -> MessageHandler "

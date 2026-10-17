@@ -88,7 +88,7 @@ After installing the wheel, start with the bundled default policy:
 ```bash
 sudo ./.venv/bin/jiuwenbox-server
 # or
-sudo ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+sudo ./.venv/bin/jiuwenbox-server --listen http://127.0.0.1:8321 --log-level debug
 ```
 
 To use a different policy or port, set `JIUWENBOX_POLICY_PATH` to an **absolute**
@@ -97,7 +97,7 @@ path (or, from a dev tree, `src/jiuwenbox/configs/<name>.yaml`):
 ```bash
 sudo env \
   JIUWENBOX_POLICY_PATH="/absolute/path/to/policy.yaml" \
-  ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 9000 --log-level debug
+  ./.venv/bin/jiuwenbox-server --listen http://127.0.0.1:9000 --log-level debug
 ```
 
 ### Docker Start
@@ -112,7 +112,8 @@ sudo ./build_docker.sh
 Run with the default policy:
 
 ```bash
-sudo ./run_docker.sh
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+sudo env JIUWENBOX_API_TOKEN="$JIUWENBOX_API_TOKEN" ./run_docker.sh
 ```
 
 ### Unix Domain Socket Deployment
@@ -126,7 +127,7 @@ conflicts.
 Listen address is controlled by a single env var:
 
 ```bash
-JIUWENBOX_LISTEN=http://0.0.0.0:8321               # default
+JIUWENBOX_LISTEN=http://127.0.0.1:8321             # local process default
 JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock  # switch to UDS (absolute path required)
 ```
 
@@ -175,24 +176,35 @@ UDS-related env vars:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `JIUWENBOX_LISTEN` | `http://0.0.0.0:8321` | Management API listen URI; accepts `http://host:port` or `unix:///abs/socket/path`. |
+| `JIUWENBOX_LISTEN` | `http://127.0.0.1:8321` | Local management API listen URI; accepts `http://host:port` or `unix:///abs/socket/path`. Docker binds `0.0.0.0` inside the container and requires a Token in HTTP mode. |
+| `JIUWENBOX_HOST_BIND` | `127.0.0.1` | Host address for the management port published by `run_docker.sh`; set `0.0.0.0` explicitly for remote access. |
 | `JIUWENBOX_UDS_MODE` | `0666` | UDS socket file permissions (octal string). The Docker default is permissive so a non-root host user can connect; for multi-tenant / hardened deployments set `0660` and pass `docker run --user $(id -u):$(id -g)`. |
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | Host directory bind-mounted by `run_docker.sh` to expose the socket. |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | Container-side mount point; must match the directory in `JIUWENBOX_LISTEN`'s socket path. |
 
-### API authentication (opt-in)
+### API authentication and network exposure
 
-When `JIUWENBOX_API_TOKEN` is set, every HTTP endpoint (including `/health`, `/api/v1/*`, and `/mcp`) requires:
+Local startup defaults to `127.0.0.1:8321`. Without a Token, only loopback connections or UDS access are allowed.
+The launcher requires a non-empty `JIUWENBOX_API_TOKEN` (or `--api-token`) for `0.0.0.0`, `::`, interface IPs,
+and other non-loopback listeners. Otherwise it exits without opening the listener.
+Setting a Token does not change the bind address; remote deployments must explicitly set both.
+
+The middleware also checks ASGI connection addresses and rejects unconfigured remote requests with
+`503` / `API_TOKEN_REQUIRED`, including when the app is run directly with uvicorn.
+Spoofed `Host` or `X-Forwarded-*` headers cannot turn a non-loopback server address into a local address.
+
+When `JIUWENBOX_API_TOKEN` is set, actual requests to every HTTP endpoint (including `/health`, `/api/v1/*`,
+and `/mcp`) require the following header. Allowed CORS preflights require no Token and execute no business logic:
 
 ```http
 Authorization: Bearer <token>
 ```
 
-Missing or invalid tokens return `401` with `{"error":"unauthorized"}`.
+After Origin validation, missing or invalid tokens return `401` with `{"error":"unauthorized"}`.
 
 ```bash
 export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
-JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN jiuwenbox-server
+jiuwenbox-server --listen http://0.0.0.0:8321
 
 export JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN
 jiuwenbox health
@@ -202,9 +214,109 @@ curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/healt
 
 | Variable / flag | Notes |
 | --- | --- |
-| `JIUWENBOX_API_TOKEN` | Shared by server and CLI; unset = auth disabled |
+| `JIUWENBOX_API_TOKEN` | Shared by server and CLI; required for non-loopback HTTP, optional for loopback / UDS; when set, checked on all HTTP endpoints |
 | `jiuwenbox-server --api-token` | Launch flag; overrides env |
 | `jiuwenbox --api-token` | CLI flag; overrides env |
+
+Docker HTTP mode requires an explicit Token even when publishing only on host loopback: the container
+listens on a non-loopback interface. `run_docker.sh` forwards the Token by environment-variable name and
+publishes `127.0.0.1:<host-port>:8321` by default. Set `JIUWENBOX_HOST_BIND=0.0.0.0` explicitly for remote access.
+The inference privacy proxy has its own listener and is outside management API authentication.
+
+On upgrade, non-loopback deployments without a Token will fail startup. Configure the Authorization header
+in CLI, HTTP, and MCP clients. External jiuwenswarm adapters must also support that header; disabling authentication
+is not a compatibility workaround. Loopback is a network boundary, not isolation from other local users.
+Use a Token behind reverse proxies, port forwarding, or on shared hosts, and HTTPS or a trusted tunnel remotely.
+Token-free UDS access relies on filesystem permissions; use `JIUWENBOX_UDS_MODE=0660` (or `0600`) with suitable UID/GID on shared hosts.
+
+Deployment acceptance: a non-loopback listener without a Token must fail startup. With a Token configured,
+missing or wrong credentials must receive `401`; a correct Token must allow `/health`, followed by sandbox API checks.
+Source-level and local tests do not replace verification of the deployed service.
+
+### Browser origins and CORS
+
+Cross-origin access is disabled by default. CLI, Python HTTP, backend provider, and MCP clients without an
+`Origin` header retain their existing authentication behavior. Same-origin pages remain usable. Without a Token,
+same-origin access additionally requires a `localhost` or loopback-IP hostname and an actual loopback connection;
+arbitrary DNS aliases resolving to loopback are not implicitly trusted.
+
+For a separate browser frontend, configure exact allowed origins and an API Token before starting the server:
+
+```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+export JIUWENBOX_CORS_ORIGINS="https://console.example,http://localhost:3000"
+jiuwenbox-server
+# Docker: run_docker.sh also forwards JIUWENBOX_CORS_ORIGINS into the container.
+```
+
+An unset or empty `JIUWENBOX_CORS_ORIGINS` grants no cross-origin access. Entries are comma-separated and
+trimmed, then matched against the complete Origin (scheme, hostname, and port), without suffix matching or DNS
+resolution. Use the Origin serialized by the browser, such as `https://console.example`, without a trailing `/`.
+Wildcards, `null`, user information, paths, queries, and fragments are rejected; invalid configuration prevents
+startup. Restart after changing the configuration. Explicitly allow the public frontend Origin behind a reverse proxy.
+
+Untrusted, empty, `null`, or duplicate Origin headers return `403` / `ORIGIN_NOT_ALLOWED` before business
+handlers, including simple POSTs and multipart uploads. Merely omitting CORS response headers would not prevent
+these writes. Allowed preflights require no Token and never call sandbox handlers. Actual requests still enforce
+Token authentication / local transport checks. Ordinary OPTIONS requests do not bypass authentication.
+
+Cross-origin responses do not enable cookie credentials (`allow_credentials=False`). Browser clients must send
+Bearer credentials explicitly, for example with a securely obtained `token`:
+
+```javascript
+fetch("http://127.0.0.1:8321/api/v1/sandboxes", {
+  credentials: "omit",
+  headers: { Authorization: `Bearer ${token}` },
+});
+```
+
+Allowed cross-origin methods are GET, HEAD, POST, PUT, DELETE, and OPTIONS. In addition to CORS-safelisted
+headers, requests may use Authorization, Content-Type, Mcp-Session-Id, MCP-Protocol-Version, and Last-Event-ID.
+Mcp-Session-Id and WWW-Authenticate response headers are exposed to browser clients. Browser MCP clients share
+this Origin allowlist; MCP Host checks remain enabled. Configure `JIUWENBOX_MCP_ALLOWED_HOSTS` separately
+for a custom server Host. An allowed Origin grants no API permissions and does not replace Token authentication;
+only allow frontends whose API-calling code you trust.
+
+Acceptance: default cross-origin reads, simple POSTs, and uploads must be rejected. After configuring an allowed
+Origin, preflights must succeed, missing / incorrect Tokens on actual requests must return `401`, and a correct
+Token must succeed. CLI and same-origin requests must remain usable. Run regression tests from `jiuwenbox`:
+
+```bash
+PYTHONPATH=src python -m pytest tests/unit/test_server_cors_security.py tests/unit/test_server_auth_security.py -q
+```
+
+### Linux sandbox control IPC authentication
+
+This internal channel is separate from serving the management HTTP API over UDS. Each Linux
+daemon adopts a listener FD created by box-server on the host. The control directory is `0700`,
+the socket is `0600`, its path is not mounted into the sandbox, and user commands do not inherit the listener FD.
+
+Each sandbox also has an independent random 256-bit control token. Box-server delivers it through
+an anonymous stdin pipe during bootstrap. The daemon consumes and closes the pipe before accepting work.
+The token is not stored in argv, environment variables, or persistent files and is separate from `JIUWENBOX_API_TOKEN`.
+Every connection must send a token frame before its request header and data. Missing, wrong, or another
+sandbox's token is rejected before dispatching exec, background jobs, file operations, or shutdown.
+Bootstrap delivery failures terminate the daemon; there is no unauthenticated legacy fallback.
+Sandbox cleanup removes the host's in-memory credential.
+
+This closes the control-channel authentication gap. Direct IPC calls can bypass gateway checks, but
+commands still inherit the daemon's namespaces, seccomp, Landlock, and mount restrictions; missing
+IPC authentication alone does not prove a host escape. Tokens do not replace separate host accounts
+for different trust domains: same-UID processes that can ptrace or read controller memory are not isolated tenants.
+
+After upgrading, restart box-server and recreate existing Linux sandboxes to replace resident old
+daemons. Updating source files alone does not authenticate an already running process.
+Run native UDS regression checks on Linux from `jiuwenbox`:
+
+```bash
+PYTHONPATH=src python -m pytest tests/unit/test_linux_ipc_auth.py tests/integration/test_linux_ipc_auth_e2e.py -q
+```
+
+These checks cover rejection of a separate same-UID process, denied writes with a wrong token,
+and authorized exec / file operations. They do not run bubblewrap and do not replace deployment
+acceptance of namespaces, Landlock, and the complete inherited-FD chain. Recreate real sandboxes and
+verify normal exec, upload/download, directory listing, background jobs, and shutdown, together with
+absence of side effects from unauthorized IPC requests. Native Linux cases are skipped on Windows.
 
 ### Persisting the audit log (`--save-logs DIR`)
 
@@ -650,7 +762,7 @@ returns the result.
 
 ```bash
 JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+jiuwenbox-server --listen http://127.0.0.1:8321 --log-level debug
 ```
 
 ### OpenCode configuration
@@ -661,7 +773,8 @@ python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-leve
     "jiuwenbox": {
       "url": "http://YOUR_HOST:8321/mcp",
       "type": "remote",
-      "enabled": true
+      "enabled": true,
+      "headers": {"Authorization": "Bearer <configured-token>"}
     }
   }
 }
@@ -670,12 +783,13 @@ python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-leve
 ### External IP deployment
 
 When JiuwenBox is deployed on an external IP (not `localhost` / `127.0.0.1`),
-set `JIUWENBOX_MCP_ALLOWED_HOSTS` to allow the client host:
+configure both an API Token and `JIUWENBOX_MCP_ALLOWED_HOSTS`; the Host allowlist does not replace authentication:
 
 ```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
 JIUWENBOX_MCP_ALLOWED_HOSTS=10.0.0.5,10.0.0.5:8321 \
 JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+jiuwenbox-server --listen http://0.0.0.0:8321 --log-level debug
 ```
 
 ### Notes
@@ -804,7 +918,7 @@ flag to maintain in sync:
 ```
 
 `test.sh` does **not** start the server; launch jiuwenbox first on the
-selected transport (TCP with `JIUWENBOX_LISTEN=http://0.0.0.0:8321` or a
+selected transport (local TCP with `JIUWENBOX_LISTEN=http://127.0.0.1:8321` or a
 custom port, UDS with `JIUWENBOX_LISTEN=unix:///...`).
 
 Run specific test cases:
@@ -813,6 +927,40 @@ Run specific test cases:
 python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_allows_external_http_requests -s --server-endpoint 127.0.0.1:8321
 python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint 127.0.0.1:8321
 ```
+
+### Full Java Host Regression
+
+`tests/integration/test_jiuwenbox_java_e2e.py` is a standalone API + SSH host test script.
+It has no default remote address, username, or password. Missing required settings cause it
+to exit before making network requests.
+
+| Environment variable | Purpose |
+| --- | --- |
+| `JIUWENBOX_TEST_SERVER` | Required: full HTTP(S) URL of the test service |
+| `JIUWENBOX_TEST_SSH_HOST` | Required: dedicated test host address |
+| `JIUWENBOX_TEST_SSH_USER` | Required: authorized test account with permissions needed by the host cases |
+| `JIUWENBOX_TEST_SSH_KEY` | Optional: client private-key path; otherwise use the SSH agent / local SSH configuration |
+| `JIUWENBOX_API_TOKEN` | Bearer Token for the HTTP API; must match the server when configured |
+
+SSH uses public-key authentication only, creates no password or askpass files, and requires
+host-key verification. Verify the host fingerprint through a trusted channel and add the
+correct host key to the runner account's `known_hosts` before running. Keep private keys
+locally or in CI secret storage, outside the repository. This script executes host commands;
+run it against an authorized, dedicated test environment.
+
+PowerShell example (run from `jiuwenbox`; replace the example address):
+
+```powershell
+$env:JIUWENBOX_TEST_SERVER = "http://192.0.2.10:8321"
+$env:JIUWENBOX_TEST_SSH_HOST = "192.0.2.10"
+$env:JIUWENBOX_TEST_SSH_USER = "test-operator"
+$env:JIUWENBOX_TEST_SSH_KEY = "$HOME/.ssh/jiuwenbox_test"
+python tests/integration/test_jiuwenbox_java_e2e.py
+```
+
+Removing a committed credential does not invalidate it. If a real credential was committed,
+rotate the exposed password immediately, review SSH access logs and persistent access,
+and assess copies in repository history, forks, and build artifacts.
 
 ### MCP Integration Tests
 

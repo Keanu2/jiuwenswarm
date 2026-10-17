@@ -217,3 +217,22 @@ vim .env.custom
 - 设置实例名（如 `JIUWENSWARM_INSTANCE_NAME=prod`）：gateway 使用实例路径 `~/.jiuwenswarm-instances/prod/config/config.yaml`
 
 实例名配置后，`jiuwenswarm-init` 和 `jiuwenswarm-gateway` 命令会自动通过 `JIUWENSWARM_DATA_DIR` 环境变量指向对应的实例目录。
+
+### SSH 入口认证
+
+本部署模板启用 `channels.ssh`，监听 `MASTER_NODE_IP` 指定的地址，端口由 `SSH_PORT` 渲染。该入口只接受按用户名授权的公钥登录，密码登录已禁用；将地址改为 `0.0.0.0` 也不会跳过认证。
+
+部署或从旧版本升级时，请将每个用户的公钥保存到网关主机上的 OpenSSH `authorized_keys` 文件，并在生成的当前实例 `config.yaml` 中配置对应关系，例如：
+
+```yaml
+channels:
+  ssh:
+    authorized_keys:
+      alice: /etc/jiuwenswarm/ssh/alice_authorized_keys
+```
+
+模板中的 `authorized_keys: {}` 是待配置项；保持为空、文件缺失、不可读或无有效条目时，SSH 通道会拒绝启动，不开放监听端口。若不需要 SSH 接入，请显式设置 `channels.ssh.enabled: false`。重新生成部署配置时也需保留或重新填入授权映射。
+
+授权用户名会作为 AgentOS `user_id` 使用，请分别授权。入站授权文件与部署机器登录目标主机的系统 SSH 密钥、以及 `gateway.agentos.ssh.client_keys_dir` 中的南向私钥用途不同，不能互相替代。修改授权文件后重启 SSH 通道或 Gateway；撤销权限时同时断开已有连接。
+
+密钥生成、完整配置、客户端命令和部署验收步骤见[频道文档的 SSH 说明](../../docs/zh/频道.md#ssh)。部署后需验证合法公钥可登录、任意密码和未授权公钥均被拒绝，确认未授权请求无法进入 `ssh.relay`。

@@ -60,12 +60,14 @@ class SshChannelConfig:
     listen_port: int = 2222
     host_key_path: str = ""
     relay_timeout_sec: float = 3600.0
+    authorized_keys: dict[str, str] = field(default_factory=dict)
 
     def to_proxy_config(self):
         raw = {
             "listen_host": self.listen_host,
             "listen_port": self.listen_port,
             "host_key_path": self.host_key_path,
+            "authorized_keys": self.authorized_keys,
         }
         return proxy_config_from_dict(raw)
 
@@ -77,6 +79,7 @@ class SshChannelConfig:
             listen_port=int(conf.get("listen_port", 2222)),
             host_key_path=str(conf.get("host_key_path") or ""),
             relay_timeout_sec=float(conf.get("relay_timeout_sec", 3600.0)),
+            authorized_keys=conf.get("authorized_keys", {}),
         )
 
 

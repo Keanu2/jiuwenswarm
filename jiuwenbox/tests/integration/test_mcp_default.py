@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
@@ -20,6 +21,7 @@ import httpx
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,11 @@ def _mcp_url(server_endpoint: str) -> str:
     return f"{_api_base_url(server_endpoint).rstrip('/')}/mcp"
 
 
+def _api_auth_headers() -> dict[str, str]:
+    token = os.environ.get("JIUWENBOX_API_TOKEN", "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 @asynccontextmanager
 async def _mcp_session(server_endpoint: str) -> AsyncGenerator[ClientSession, None]:
     """Open an initialized MCP client session over the configured transport."""
@@ -54,7 +61,7 @@ async def _mcp_session(server_endpoint: str) -> AsyncGenerator[ClientSession, No
         async with httpx.AsyncClient(
             transport=transport,
             base_url=_UDS_PLACEHOLDER_BASE_URL,
-            headers={"Host": "localhost"},
+            headers={"Host": "localhost", **_api_auth_headers()},
         ) as http_client:
             async with streamable_http_client(mcp_url, http_client=http_client) as (
                 read_stream,
@@ -65,14 +72,15 @@ async def _mcp_session(server_endpoint: str) -> AsyncGenerator[ClientSession, No
                     await session.initialize()
                     yield session
     else:
-        async with streamable_http_client(mcp_url) as (
-            read_stream,
-            write_stream,
-            _get_session_id,
-        ):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                yield session
+        async with create_mcp_http_client(headers=_api_auth_headers()) as http_client:
+            async with streamable_http_client(mcp_url, http_client=http_client) as (
+                read_stream,
+                write_stream,
+                _get_session_id,
+            ):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    yield session
 
 
 @pytest.fixture
@@ -84,12 +92,12 @@ def api_client(server_endpoint: str) -> httpx.Client:
         with httpx.Client(
             transport=transport,
             base_url=_UDS_PLACEHOLDER_BASE_URL,
-            headers={"Host": "localhost"},
+            headers={"Host": "localhost", **_api_auth_headers()},
         ) as client:
             yield client
     else:
         base_url = _api_base_url(server_endpoint)
-        with httpx.Client(base_url=base_url) as client:
+        with httpx.Client(base_url=base_url, headers=_api_auth_headers()) as client:
             yield client
 
 

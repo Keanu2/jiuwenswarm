@@ -15,7 +15,7 @@ import time
 import pytest
 
 from jiuwenbox.supervisor import sandbox_daemon, win_exec
-from jiuwenbox.supervisor.daemon_ipc import recv_frame
+from jiuwenbox.supervisor.daemon_ipc import CONTROL_TOKEN_BYTES, recv_frame, send_frame
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows soft-delete DLL")
@@ -105,10 +105,16 @@ def daemon_roundtrip(monkeypatch):
         runtime = ProcessRuntime.__new__(ProcessRuntime)
         # Only replace connection establishment. Exercise the real client
         # framing, stdin transfer, daemon dispatch, Popen and response reader.
-        monkeypatch.setattr(runtime, "_connect_daemon_socket", lambda _: client)
+        token = os.urandom(CONTROL_TOKEN_BYTES)
+
+        def connect(_):
+            send_frame(client, token)
+            return client
+
+        monkeypatch.setattr(runtime, "_connect_daemon_socket", connect)
         worker = threading.Thread(
             target=sandbox_daemon._handle_connection,
-            args=(server, sandbox_daemon.DaemonState()), daemon=True,
+            args=(server, sandbox_daemon.DaemonState(token)), daemon=True,
         )
         worker.start()
         try:

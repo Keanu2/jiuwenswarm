@@ -54,7 +54,8 @@ RUN ln -s /usr/bin/python3 /usr/bin/python
 EXPOSE 8321
 EXPOSE 8322
 
-# 默认走 HTTP; UDS 模式由调用方覆盖 JIUWENBOX_LISTEN, 例如
+# 容器内 HTTP 监听所有接口以支持端口映射，必须显式注入 JIUWENBOX_API_TOKEN。
+# 宿主机端口默认仅发布到回环地址（见 scripts/run_docker.sh）。UDS 例如
 # `docker run -e JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock \
 #             -v /tmp/jiuwenbox-sock:/run/jiuwenbox jiuwenbox`。
 ENV JIUWENBOX_LISTEN=http://0.0.0.0:8321

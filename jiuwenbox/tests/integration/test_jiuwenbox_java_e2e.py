@@ -7,9 +7,12 @@ jiuwenbox Java 支持测试 - 总测试脚本 (合并版)
 =============================================
 整合 T1-T7 + N 全部测试组共 61 条用例, 单文件可独立运行。
 
-测试环境:
-  - 端点: http://7.221.52.205:8321  (jiuwenbox:new 容器)
-  - 宿主: 7.221.52.205 (root / Cjdoe_135)
+测试环境（必须显式配置，不提供默认远程地址或凭证）:
+  - JIUWENBOX_TEST_SERVER: HTTP(S) API 端点
+  - JIUWENBOX_TEST_SSH_HOST: 专用测试宿主机
+  - JIUWENBOX_TEST_SSH_USER: 已授权的测试账户
+  - JIUWENBOX_TEST_SSH_KEY: 可选私钥路径；未设置时使用 SSH agent / 本机 SSH 配置
+  - 仅支持公钥认证，需预先核验宿主机指纹并配置 known_hosts
 
 用例分布:
   组别    用例范围         数量  执行方式
@@ -25,10 +28,10 @@ jiuwenbox Java 支持测试 - 总测试脚本 (合并版)
   合计                     61    50 API + 11 SSH
 
 输出文件: test_results_all.json
-依赖:     requests
+依赖:     requests、OpenSSH 客户端
 
 执行:
-  python jiuwen-box-test-all.py
+  python tests/integration/test_jiuwenbox_java_e2e.py
 
 说明:
   本脚本由 test_common_最终.py + T1T2-test-最终.py + T3-test-最终.py +
@@ -49,9 +52,6 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(message)s',
@@ -60,17 +60,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ===== 环境常量 =====
-ENDPOINT = "http://7.221.52.205:8321"
-HOST = "7.221.52.205"
-SSH_USER = "root"
-SSH_PWD = "Cjdoe_135"
+ENDPOINT = os.environ.get("JIUWENBOX_TEST_SERVER", "").strip().rstrip("/")
+HOST = os.environ.get("JIUWENBOX_TEST_SSH_HOST", "").strip()
+SSH_USER = os.environ.get("JIUWENBOX_TEST_SSH_USER", "").strip()
+SSH_KEY = os.environ.get("JIUWENBOX_TEST_SSH_KEY", "").strip()
 TIMEOUT = 30
-WORK_DIR = r"D:\CJDUBS\jiuwen_java0708\docs"
-POWERSHELL_PATH = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 S = requests.Session()
 S.trust_env = False
 S.proxies = {"http": None, "https": None}
+_api_token = os.environ.get("JIUWENBOX_API_TOKEN", "").strip()
+if _api_token:
+    S.headers["Authorization"] = f"Bearer {_api_token}"
 
 results: List[Dict[str, Any]] = []
 
@@ -148,6 +149,18 @@ def actual_str(r: Dict[str, Any], label: str = "") -> str:
     return f"exit={exit_code}; {truncate(out, 200)}"
 
 
+def _require_settings(settings: Dict[str, str]) -> None:
+    """Reject unconfigured targets before making any network request."""
+    missing = [name for name, value in settings.items() if not value]
+    if missing:
+        raise RuntimeError("Missing required test settings: " + ", ".join(missing))
+
+
+def _api_url(path: str) -> str:
+    _require_settings({"JIUWENBOX_TEST_SERVER": ENDPOINT})
+    return f"{ENDPOINT}{path}"
+
+
 # ----- API 客户端 -----
 def _retry(fn, url, max_retries=3, **kw):
     """带重试的 HTTP 请求 (应对服务短暂不可用)。"""
@@ -165,17 +178,17 @@ def _retry(fn, url, max_retries=3, **kw):
 
 def api_post(p: str, **kw):
     """发送 POST 请求到 API。"""
-    return _retry(S.post, f"{ENDPOINT}{p}", **kw)
+    return _retry(S.post, _api_url(p), **kw)
 
 
 def api_get(p: str, **kw):
     """发送 GET 请求到 API。"""
-    return _retry(S.get, f"{ENDPOINT}{p}", **kw)
+    return _retry(S.get, _api_url(p), **kw)
 
 
 def api_delete(p: str, **kw):
     """发送 DELETE 请求到 API。"""
-    return _retry(S.delete, f"{ENDPOINT}{p}", **kw)
+    return _retry(S.delete, _api_url(p), **kw)
 
 
 def create_sb() -> str:
@@ -255,85 +268,36 @@ def write_file(sb: str, path: str, content: str) -> Dict[str, Any]:
 
 
 # ----- SSH 远程执行器 (宿主侧用例) -----
-def _cleanup_file(filepath: str) -> None:
-    """安全删除临时文件。"""
-    try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-    except OSError as e:
-        log(f"cleanup {filepath} error: {e}")
-
-
 def ssh_exec(command: str, timeout: int = 60) -> tuple:
-    """通过 SSH 在宿主机执行命令。
+    """Run a host-side test with public-key authentication and verified host keys.
 
-    返回 (stdout, stderr, exit_code)。
-    采用 SSH_ASKPASS + Base64 编码方案, 规避 Windows 沙箱下密码交互
-    与特殊字符转义问题。
+    Return (stdout, stderr, exit_code). No password or askpass file is used.
     """
-    askpass_bat = os.path.join(WORK_DIR, "_askpass.bat")
-    with open(askpass_bat, 'w', encoding='ascii') as f:
-        f.write(f"@echo {SSH_PWD}\r\n")
-
-    stdout_file = os.path.join(WORK_DIR, "_ssh_stdout.txt")
-    stderr_file = os.path.join(WORK_DIR, "_ssh_stderr.txt")
-    for filepath in [stdout_file, stderr_file]:
-        _cleanup_file(filepath)
-
+    _require_settings({
+        "JIUWENBOX_TEST_SSH_HOST": HOST,
+        "JIUWENBOX_TEST_SSH_USER": SSH_USER,
+    })
     cmd_b64 = base64.b64encode(command.encode('utf-8')).decode('ascii')
     remote_cmd = f"echo {cmd_b64} | base64 -d | bash"
-
-    ps_cmd = (
-        f"$env:SSH_ASKPASS = '{askpass_bat}'; "
-        f"$env:SSH_ASKPASS_REQUIRE = 'force'; "
-        f"$env:DISPLAY = ':0'; "
-        f"$p = Start-Process -FilePath 'ssh.exe' "
-        f"-ArgumentList @("
-        f"'-o','StrictHostKeyChecking=no',"
-        f"'-o','UserKnownHostsFile=NUL',"
-        f"'-o','PreferredAuthentications=password',"
-        f"'-o','PubkeyAuthentication=no',"
-        f"'-o','NumberOfPasswordPrompts=1',"
-        f"'-o','ConnectTimeout=15',"
-        f"'{SSH_USER}@{HOST}',"
-        f"'{remote_cmd}'"
-        f") "
-        f"-PassThru -WindowStyle Hidden "
-        f"-RedirectStandardOutput '{stdout_file}' "
-        f"-RedirectStandardError '{stderr_file}'; "
-        f"if (-not $p.WaitForExit({timeout * 1000})) {{ $p.Kill() }}; "
-        f"exit $p.ExitCode"
-    )
-
+    args = [
+        "ssh", "-n",
+        "-o", "BatchMode=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "ConnectTimeout=15",
+    ]
+    if SSH_KEY:
+        args.extend(["-o", "IdentitiesOnly=yes", "-i", os.path.expanduser(SSH_KEY)])
+    args.extend(["-l", SSH_USER, "--", HOST, remote_cmd])
     try:
         result = subprocess.run(
-            [POWERSHELL_PATH, "-ExecutionPolicy", "Bypass",
-             "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=timeout + 30,
-            encoding='utf-8', errors='replace'
+            args, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=timeout,
+            encoding='utf-8', errors='replace',
         )
     except subprocess.TimeoutExpired:
-        for filepath in [askpass_bat, stdout_file, stderr_file]:
-            _cleanup_file(filepath)
         return "", "TIMEOUT", -1
-
-    stdout = ""
-    stderr = ""
-    try:
-        with open(stdout_file, 'r', encoding='utf-8', errors='replace') as f:
-            stdout = f.read()
-    except (OSError, IOError) as e:
-        log(f"read stdout_file error: {e}")
-    try:
-        with open(stderr_file, 'r', encoding='utf-8', errors='replace') as f:
-            stderr = f.read()
-    except (OSError, IOError) as e:
-        log(f"read stderr_file error: {e}")
-
-    for filepath in [askpass_bat, stdout_file, stderr_file]:
-        _cleanup_file(filepath)
-
-    return stdout, stderr, result.returncode
+    return result.stdout, result.stderr, result.returncode
 
 
 def save_results(filename: str) -> None:
@@ -903,7 +867,7 @@ def run_t3_host() -> None:
         detail=f"base64+xxd: {out}",
         expected="输出 4865 6c6c 6f (Hello)",
         actual=actual,
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
 
@@ -1096,7 +1060,7 @@ def run_t4_host() -> None:
         detail="宿主侧SSH验证",
         expected="jiuwenbox默认policy不限制cgroup",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
     # T4.6 cgroup 资源清理 (P2)
@@ -1112,7 +1076,7 @@ def run_t4_host() -> None:
         detail="宿主侧SSH验证",
         expected="cgroup目录存在，删除沙箱后被清理",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
     # T4.7 swap 限制 (P2)
@@ -1129,7 +1093,7 @@ def run_t4_host() -> None:
         detail="宿主侧SSH验证",
         expected="memory.swap.max限制值存在",
        actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
 
@@ -1322,7 +1286,7 @@ def run_t5_host() -> None:
         detail="宿主侧SSH验证",
         expected="ptrace_scope >= 1, jstack受限",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
 
@@ -1381,7 +1345,7 @@ def run_t6_host() -> None:
         detail="宿主侧SSH验证",
         expected="Python进程在docker cgroup中",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
     # T6.4 code-agent 场景回归 (P2)
@@ -1398,7 +1362,7 @@ def run_t6_host() -> None:
         detail="宿主侧SSH验证",
         expected="jiuwenbox:test镜像存在",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
     # T6.5 MCP/CLI 套件回归 (P2)
@@ -1416,7 +1380,7 @@ def run_t6_host() -> None:
         detail="宿主侧SSH验证",
         expected="python3.11可执行",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
 
@@ -1626,7 +1590,7 @@ def run_t7_host() -> None:
         detail="宿主侧SSH验证",
         expected="jiuwenbox server正常运行",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
     # T7.8 沙箱删除级联杀 JVM (P2)
@@ -1643,7 +1607,7 @@ def run_t7_host() -> None:
         detail="宿主侧SSH验证",
         expected="无残留Java进程",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
     # T7.9 server 退出级联杀 JVM (P2)
@@ -1660,7 +1624,7 @@ def run_t7_host() -> None:
         detail="宿主侧SSH验证",
         expected="无残留JVM进程",
         actual=f"exit_code={code} | stdout={out.strip()[:500]}",
-        script=f'ssh root@7.221.52.205 "{cmd}"',
+        script=f'ssh {SSH_USER}@{HOST} "{cmd}"',
     ))
 
 
@@ -1808,6 +1772,11 @@ def _safe_run(fn, sb=None):
 
 def main():
     """主入口: 顺序执行全部 61 条用例。"""
+    _require_settings({
+        "JIUWENBOX_TEST_SERVER": ENDPOINT,
+        "JIUWENBOX_TEST_SSH_HOST": HOST,
+        "JIUWENBOX_TEST_SSH_USER": SSH_USER,
+    })
     log("=" * 60)
     log("jiuwenbox Java 支持测试 - 全量回归 (61 cases)")
     log(f"Endpoint: {ENDPOINT}")
@@ -1860,4 +1829,6 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     main()

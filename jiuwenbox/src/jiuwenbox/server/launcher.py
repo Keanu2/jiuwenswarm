@@ -16,6 +16,8 @@ from typing import Tuple, Union
 from urllib.parse import urlparse
 
 from jiuwenbox.logging_config import configure_logging, patch_uvicorn_logging
+from jiuwenbox.server.auth import require_token_for_bind
+from jiuwenbox.server.cors import get_cors_origins
 
 logger = logging.getLogger("jiuwenbox.server.launcher")
 
@@ -27,7 +29,7 @@ ENV_UDS_MODE = "JIUWENBOX_UDS_MODE"
 # anything imports ``jiuwenbox.server.app`` lazily inside ``uvicorn.run``).
 ENV_SAVE_LOGS_DIR = "JIUWENBOX_SAVE_LOGS_DIR"
 _ENV_API_TOKEN_NAME = "JIUWENBOX_API_TOKEN"
-DEFAULT_LISTEN = "http://0.0.0.0:8321"
+DEFAULT_LISTEN = "http://127.0.0.1:8321"
 
 HttpSpec = Tuple[str, str, int]   # ("http", host, port)
 UnixSpec = Tuple[str, str]        # ("unix", abs_socket_path)
@@ -183,7 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Enable Bearer token authentication for all HTTP endpoints "
             f"(including /health and /mcp). Falls back to ${_ENV_API_TOKEN_NAME} "
-            "env; unset means authentication is disabled."
+            "env; required for non-loopback HTTP listeners."
         ),
     )
     return parser
@@ -240,7 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     raw_uri = _resolve_listen_uri(args.listen)
     try:
         spec = parse_listen(raw_uri)
-    except ListenURIError as exc:
+        get_cors_origins()
+    except ValueError as exc:
         logger.error("jiuwenbox-server: %s", exc)
         return 2
 
@@ -259,6 +262,12 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.pop(ENV_SAVE_LOGS_DIR, None)
 
     api_token = _resolve_api_token(args.api_token)
+    if spec[0] == "http":
+        try:
+            require_token_for_bind(spec[1], api_token)
+        except ValueError as exc:
+            logger.error("jiuwenbox-server: %s", exc)
+            return 2
     if api_token:
         os.environ[_ENV_API_TOKEN_NAME] = api_token
         logger.info("[launcher] API authentication enabled")
