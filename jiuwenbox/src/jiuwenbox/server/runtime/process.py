@@ -4221,12 +4221,17 @@ class ProcessRuntime(RuntimeAdapter):
     ) -> KillBackgroundJobResult:
         job = self._get_background_job_record(sandbox_id, job_id)
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            self._sync_background_job_blocking,
-            sandbox_id,
-            job,
-        )
+        try:
+            await loop.run_in_executor(
+                None,
+                self._sync_background_job_blocking,
+                sandbox_id,
+                job,
+            )
+        except BackgroundJobNotFoundError:
+            if sys.platform != "win32":
+                raise
+            return KillBackgroundJobResult(job_id=job_id, killed=False, reason="not_found")
         if job.exit_code is not None:
             return KillBackgroundJobResult(
                 job_id=job_id,
@@ -4238,15 +4243,22 @@ class ProcessRuntime(RuntimeAdapter):
         if sys.platform == "win32":
             runner = self._win_runners.get(sandbox_id)
             if runner is None:
-                return KillBackgroundJobResult(job_id=job_id, killed=False, reason="permission_denied")
+                return KillBackgroundJobResult(job_id=job_id, killed=False, reason="not_found")
             response = await self._win_runner_roundtrip(
                 sandbox_id, runner, REQUEST_TYPE_BG_KILL,
                 {"job_id": job_id, "signum": signum}, None,
-            )
-            await loop.run_in_executor(None, self._sync_background_job_blocking, sandbox_id, job)
+            ) or {}
+            if response.get("reason") != "not_found":
+                try:
+                    await loop.run_in_executor(None, self._sync_background_job_blocking, sandbox_id, job)
+                except BackgroundJobNotFoundError:
+                    # A runner restart must not discard an acknowledged kill.
+                    pass
+            exit_code = response.get("exit_code")
             return KillBackgroundJobResult(
-                job_id=job_id, killed=bool((response or {}).get("killed")),
-                reason=str((response or {}).get("reason", "permission_denied")), exit_code=job.exit_code,
+                job_id=job_id, killed=bool(response.get("killed")),
+                reason=str(response.get("reason", "permission_denied")),
+                exit_code=exit_code if isinstance(exit_code, int) else job.exit_code,
             )
 
         socket_path = self._control_socket_host_path(sandbox_id)

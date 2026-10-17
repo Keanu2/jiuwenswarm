@@ -74,6 +74,9 @@ class WindowsBackgroundJobs:
                 return {"ok": False, "started": False, "error": "exec_failed", "stderr": str(exc)}
         if not job.ready.wait(30):
             job.stop.set()
+            with self._lock:
+                if self._jobs.get(job_id) is job:
+                    self._jobs.pop(job_id)
             return {"ok": False, "started": False, "error": "start_timeout",
                     "stderr": "background process did not start within 30 seconds"}
         response = job.snapshot()
