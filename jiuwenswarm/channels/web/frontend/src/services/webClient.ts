@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { getWsBase } from '../utils/env';
 import i18n from '../i18n';
+import { requestWebAuthentication, sendWebSocketAuth, setWebAuthToken } from './webAuth';
 import { GoalRecord } from '../types/goal';
 
 type EventHandler = (event: WsEvent) => void;
@@ -131,6 +132,7 @@ class WebClient {
       return this.connectPromise;
     }
 
+    if (options.authToken !== undefined) setWebAuthToken(options.authToken);
     this.lastConnectOptions = options;
     this.manualClose = false;
     this.updateState(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
@@ -142,6 +144,7 @@ class WebClient {
       this.ws = ws;
 
       ws.onopen = () => {
+        sendWebSocketAuth(ws, options.authToken);
         logDevWsTraffic({
           direction: 'lifecycle',
           data: { event: 'open', url },
@@ -193,6 +196,11 @@ class WebClient {
             true
           )
         );
+        if (closeEvent.code === 4401) {
+          this.updateState('closed');
+          requestWebAuthentication();
+          return;
+        }
         if (this.manualClose || closeEvent.code === 1000) {
           this.updateState('closed');
           return;

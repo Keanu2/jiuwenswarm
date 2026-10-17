@@ -1,5 +1,6 @@
 import type { WebConnectionState, WebError, WsEvent, WsResponse } from '../../types';
 import { getWsBase } from '../../utils/env';
+import { requestWebAuthentication, sendWebSocketAuth } from '../../services/webAuth';
 
 type EventHandler = (event: WsEvent) => void;
 type StateHandler = (state: WebConnectionState) => void;
@@ -65,6 +66,7 @@ class GitWatchClient {
       this.ws = ws;
 
       ws.onopen = () => {
+        sendWebSocketAuth(ws);
         this.connectPromise = null;
         this.reconnectAttempts = 0;
         this.updateState('ready');
@@ -85,6 +87,11 @@ class GitWatchClient {
         this.ws = null;
         this.connectPromise = null;
         this.rejectAllPending(this.createError(`Git WebSocket closed (${event.code})`, 'WS_DISCONNECTED', true));
+        if (event.code === 4401) {
+          this.updateState('closed');
+          requestWebAuthentication();
+          return;
+        }
         if (this.manualClose || event.code === 1000) {
           this.updateState('closed');
           return;

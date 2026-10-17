@@ -99,9 +99,15 @@ async def _request_gateway_control_pipe(
 
 
 async def _request_gateway_control_websocket(request: dict[str, Any]) -> dict[str, Any]:
+    import inspect
     import websockets
+    from jiuwenswarm.common.security.web_identity import web_client_headers
 
-    async with websockets.connect(_gateway_control_url(), open_timeout=10, close_timeout=5) as ws:
+    url = _gateway_control_url()
+    headers = web_client_headers(url)
+    header_key = "additional_headers" if "additional_headers" in inspect.signature(websockets.connect).parameters else "extra_headers"
+    async with websockets.connect(url, open_timeout=10, close_timeout=5,
+                                  **({header_key: headers} if headers else {})) as ws:
         await asyncio.wait_for(ws.recv(), timeout=10)
         await ws.send(json.dumps(request, ensure_ascii=False))
         while True:

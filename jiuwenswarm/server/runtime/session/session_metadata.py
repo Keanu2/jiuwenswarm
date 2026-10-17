@@ -13,6 +13,7 @@ from typing import Any
 from datetime import datetime, timezone
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir, is_persistable_session_id
+from jiuwenswarm.common.security.web_identity import visible_resource
 from jiuwenswarm.server.runtime.session.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
@@ -1320,6 +1321,8 @@ def get_all_sessions_metadata(
         session_id = session_dir.name
         if session_id.startswith(_HEARTBEAT_SESSION_PREFIX):
             continue
+        if not visible_resource("sessions", session_id):
+            continue
         metadata = _read_metadata(session_id)
 
         if not metadata:
@@ -1389,6 +1392,8 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
             continue
         sid = session_dir.name
         if sid.startswith(_HEARTBEAT_SESSION_PREFIX):
+            continue
+        if not visible_resource("sessions", sid):
             continue
         meta = _read_metadata(sid, cache_bust=True)
         if not meta:

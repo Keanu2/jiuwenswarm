@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from jiuwenswarm.common.security.web_identity import PRINCIPAL_ATTR, WebPrincipal
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
 from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannel,
@@ -20,6 +21,7 @@ class _FakeWebSocket:
     def __init__(self) -> None:
         self.sent_frames: list[dict[str, Any]] = []
         self.remote_address = ("127.0.0.1", 12345)
+        setattr(self, PRINCIPAL_ATTR, WebPrincipal("local", workspace_owner=True))
 
     async def send(self, data: str) -> None:
         self.sent_frames.append(json.loads(data))

@@ -534,6 +534,8 @@ async def test_gateway_server_promotes_pending_session_client_after_stale_owner_
     server = GatewayServerProbe(config, DummyBus())
     route = server.config.routes["/tui"]
     old_ws = IterableFakeWebSocket()
+    old_ws.remote_address = ("127.0.0.1", 12345)
+    old_ws.local_address = ("127.0.0.1", 19001)
     new_ws = FakeWebSocket()
     server.bind_session_client("sess-race", old_ws, channel_id="tui")
 

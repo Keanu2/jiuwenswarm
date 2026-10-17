@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 def _connect_ws(url: str):
+    from jiuwenswarm.common.security.web_identity import web_client_headers
+    headers = web_client_headers(url)
     try:
         from websockets.legacy.client import connect as legacy_connect
         return legacy_connect(
@@ -20,6 +22,7 @@ def _connect_ws(url: str):
             max_size=8 * 2**20,
             ping_interval=20,
             ping_timeout=60,
+            **({"extra_headers": headers} if headers else {}),
         )
     except ImportError:
         import websockets
@@ -29,6 +32,7 @@ def _connect_ws(url: str):
             max_size=8 * 2**20,
             ping_interval=20,
             ping_timeout=60,
+            **({"additional_headers": headers} if headers else {}),
         )
 
 

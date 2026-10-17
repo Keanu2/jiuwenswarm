@@ -1542,8 +1542,13 @@ class AcpChannel(BaseChannel):
 
         try:
             from websockets.legacy.client import connect as ws_connect
+            auth_header_key = "extra_headers"
         except Exception:  # pragma: no cover
             from websockets import connect as ws_connect
+            auth_header_key = "additional_headers"
+
+        from jiuwenswarm.common.security.web_identity import web_client_headers
+        auth_headers = web_client_headers(self._gateway_url)
 
         last_exc: BaseException | None = None
         for attempt in range(1, _ACP_GATEWAY_CONNECT_MAX_ATTEMPTS + 1):
@@ -1553,6 +1558,7 @@ class AcpChannel(BaseChannel):
                     ping_interval=20,
                     ping_timeout=20,
                     open_timeout=30,
+                    **({auth_header_key: auth_headers} if auth_headers else {}),
                 )
                 self._gateway_reader_task = asyncio.create_task(
                     self._gateway_reader_loop(),
