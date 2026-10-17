@@ -207,7 +207,7 @@ class DingTalkHandler(CallbackHandler):
                 return AckMessage.STATUS_OK, "OK"
 
             logger.info(
-                f"收到来自 {sender_name} ({sender_id}) 的钉钉消息: {content[:50]}... (会话ID: {conversation_id})"
+                f"收到来自 {sender_name} ({sender_id}) 的钉钉消息 (会话ID: {conversation_id})"
             )
 
             # 转发到通道（非阻塞）
@@ -728,7 +728,7 @@ class DingTalkChannel(BaseChannel):
         权限检查。
         """
         try:
-            logger.info(f"钉钉入站消息: {message.content} 来自 {message.sender_name}")
+            logger.info(f"钉钉入站消息来自 {message.sender_name}")
             # 记录最近一次可回发的钉钉会话身份，供 cron推送兜底使用。
             try:
                 from jiuwenswarm.common.config import update_channel_in_config
