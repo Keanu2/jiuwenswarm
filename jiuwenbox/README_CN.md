@@ -15,7 +15,7 @@ agent 工具和代码片段。
 - 服务端管理的沙箱后端存储（`~/.jiuwenbox/workspace`）
 - 可选的 Linux 网络命名空间和防火墙网络隔离
 - 命名空间和 Linux capability 控制
-- 在内核支持时启用 Landlock 文件系统约束
+- Linux 默认强制 Landlock 文件系统约束，显式兼容模式报告降级状态
 - Seccomp 系统调用过滤
 - 在运行时存在时支持 Python 和 JavaScript 代码执行
 - 审计日志和持久化的沙箱生命周期状态
@@ -48,7 +48,7 @@ agent 工具和代码片段。
 - `bubblewrap`
 - 使用 `network.mode: isolated` 时需要 `iproute2`、`iptables` 和 `nftables`
 - `isolated` 模式启用 uplink 出网时，宿主机需开启 IPv4 转发（`net.ipv4.ip_forward=1`），进程需具备 `NET_ADMIN` capability
-- 启用 Landlock 和 seccomp 时需要内核支持对应能力
+- Linux 沙箱强制要求内核支持 Seccomp filter；Landlock 按 compatibility 配置启用
 - 如果需要执行 JavaScript，则需要 `nodejs`
 
 Ubuntu 安装示例：
@@ -431,7 +431,9 @@ ls /tmp/jiuwenbox-logs
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `compatibility` | `best_effort` | `disabled`：不启用 Landlock；`best_effort`：支持则启用，否则继续；`hard_requirement`：不支持则沙箱启动失败。 |
+| `compatibility` | `hard_requirement` | 默认要求 ABI >= 3，失败时拒绝启动。部署端可显式选择 `best_effort` 或 `disabled`，API 和日志显示实际保护状态；规则安装错误仍拒绝启动。沙箱请求不能降低部署要求。 |
+
+单文件按实际文件 FD 授权，根目录只读配置不再隐式允许读取所有文件。迁移、状态字段与验收见 [Landlock 安全说明](docs/landlock-security.md)。
 
 #### `syscall`
 
@@ -441,6 +443,8 @@ ls /tmp/jiuwenbox-logs
 | --- | --- |
 | `x86_64.blocked` | x86_64 上拦截的 syscall 名，如 `ptrace`、`mount`、`bpf` 等。留空表示不额外拦截。 |
 | `arm64.blocked` | arm64/aarch64 上拦截的 syscall 名。 |
+
+Linux 实际封禁集为内置最低安全基线与上述配置的并集，空列表不能关闭基线。过滤器构建或加载失败时拒绝启动沙箱；未知 syscall 名会报错。支持小端 64 位 x86_64/ARM64，Windows 桌面路径不受影响。基线、兼容性及验收步骤见 [Seccomp 安全说明](docs/seccomp-security.md)。
 
 #### `network`
 
@@ -583,7 +587,7 @@ capabilities:
   drop: []
 
 landlock:
-  compatibility: best_effort
+  compatibility: hard_requirement
 
 syscall:
   x86_64:

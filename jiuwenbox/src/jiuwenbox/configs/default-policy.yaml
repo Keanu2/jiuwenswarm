@@ -151,13 +151,13 @@ capabilities:
 landlock:
   # compatibility:
   #   disabled: do not apply Landlock
-  #   best_effort: apply Landlock when supported, otherwise continue
-  #   hard_requirement: fail sandbox startup if Landlock is unavailable
-  compatibility: best_effort
+  #   best_effort: explicit deployment opt-in; report partial/unavailable protection
+  #   hard_requirement: require ABI >= 3; any initialization error aborts startup
+  compatibility: hard_requirement
 
 # Seccomp syscall filtering.
 syscall:
-  # Syscall names to block on x86_64. Leave empty to disable explicit syscall blocking.
+  # Syscall names to block on x86_64. Empty adds no blocks; the built-in minimum baseline always applies.
   x86_64:
     blocked:
       - "kexec_load"
