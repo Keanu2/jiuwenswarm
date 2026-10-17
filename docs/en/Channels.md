@@ -93,6 +93,110 @@ In addition to the end-user chat platforms above, JiuwenSwarm also provides inte
 | [ACP Plugin Usage](ACP_Client_Config.md) | Integrate with JiuwenSwarm via the ACP protocol, suitable for custom integrations |
 | [SSH](#ssh) | Connect with an authorized public key and reach AgentOS / sandboxes through `ssh.relay` |
 
+### Web URL attachments
+
+WebChannel retains legacy URL attachments on `chat.send`, for example:
+
+```json
+{
+  "type": "req",
+  "id": "chat-with-attachment",
+  "method": "chat.send",
+  "params": {
+    "content": "Please review the attachment",
+    "files": [{"name": "report.xlsx", "url": "https://files.example/report.xlsx?signature=..."}]
+  }
+}
+```
+
+`uri` / `filename` remain aliases for `url` / `name`. URL downloads are processed only for `chat.send`;
+other methods with URL attachment lists are rejected before network or filesystem I/O.
+Current Web image and document uploads still use `media.persist` / `document.persist`. Persisted
+`files.uploaded_images`, `files.uploaded_documents`, and existing local `path` references bypass this
+downloader and retain their existing behavior.
+
+#### Public and private sources
+
+Public HTTP and HTTPS downloads need no allowlist. Custom ports, signed paths and queries, and up to five
+redirects are supported. URLs are limited to 16384 characters and cannot contain embedded credentials,
+raw whitespace, or control characters. Every redirect destination is revalidated. The connector uses checked numeric DNS
+answers directly instead of performing an unchecked second lookup. Any disallowed answer rejects the entire
+download, covering IPv4, IPv6, and IPv4-mapped addresses. Noncanonical decimal, short, and octal numeric IP
+representations cannot bypass the resolver checks.
+
+Private and loopback addresses are denied by default. For an internal attachment service, an administrator
+must set `WEB_ATTACHMENT_PRIVATE_ORIGINS` in the **Gateway process environment**, then restart Gateway:
+
+```bash
+export WEB_ATTACHMENT_PRIVATE_ORIGINS="https://files.corp.example:8443,http://10.20.30.40:8080"
+# Start Gateway with the existing deployment command.
+```
+
+PowerShell:
+
+```powershell
+$env:WEB_ATTACHMENT_PRIVATE_ORIGINS = "https://files.corp.example:8443,http://10.20.30.40:8080"
+```
+
+Setting this only in a frontend or Agent sandbox has no effect. The allowlist adds private-network exceptions;
+it does not restrict existing public downloads. Entries match the exact scheme, hostname, and effective port.
+IDNA hostnames and IPv6, such as `http://[fd12::10]:8080`, are supported. Wildcards, hostname suffix rules,
+credentials, paths, queries, fragments, and trailing `/` are rejected. Omitted ports mean HTTP 80 or HTTPS 443.
+Hostnames are normalized using DNS semantics; subdomains and different ports do not match.
+Allowlisting trusts the service and its DNS, so configure only controlled file services.
+
+Known metadata endpoints, link-local, multicast, unspecified, reserved, and special ranges such as IPv6
+transition networks remain forbidden even when allowlisted. This also applies to redirect and subsequent DNS
+destinations. Downloads do not inherit environment proxies or send browser cookies, session credentials, or
+client Authorization headers.
+
+#### Storage and resource limits
+
+Files are saved under the current Agent workspace at `attachments/<server-generated-ID>/<filename>`.
+Normal filenames, Unicode, spaces, and extensions are retained. Duplicate filenames cannot overwrite each
+other or workspace files. Path separators, drive paths, UNC paths, Windows ADS/device names, and control
+characters are rejected. Symlinks and Windows junctions below the workspace are not followed. Windows holds
+parent directory handles against replacement; Linux uses directory FDs, `O_NOFOLLOW`, and exclusive creation.
+New Windows directories inherit the workspace ACL so existing sandbox-account access is retained, rather than
+being replaced with a private DACL.
+
+After downloading, the gateway supplies `path`, `filename`, and `size_bytes`, removing the original `url` /
+`uri` and path aliases that could override the saved file. Downstream consumers do not refetch the raw URL.
+Empty files are valid. If any attachment is rejected or fails download/storage, the request returns an error
+before entering the Agent, without forwarding an unchecked URL. Files already saved by that request are
+cleaned up. Cancellation also cleans files belonging to an incomplete request.
+
+| Gateway environment variable | Default | Meaning |
+| --- | --- | --- |
+| `WEB_ATTACHMENT_PRIVATE_ORIGINS` | Empty | Comma-separated exact origins allowed to use private addresses |
+| `WEB_ATTACHMENT_MAX_BYTES` | `67108864` (64 MiB) | Maximum bytes per downloaded file; checks declared and actual decompressed sizes |
+| `WEB_ATTACHMENT_TIMEOUT_SECONDS` | `60` | Total time per download, including DNS, connection, reads, and all redirects |
+| `WEB_ATTACHMENT_MAX_FILES` | `16` | URL attachments per `chat.send`; persisted local references do not count |
+
+At most four downloads run concurrently. Connection and socket-read phases also have ceilings of 15 and 30
+seconds respectively. All three resource settings must be positive integers; invalid configuration prevents
+WebChannel initialization. Configure larger limits explicitly for large attachments or slow file services and
+restart Gateway.
+
+Failures use the existing WebSocket `res` format with `ok: false`, a readable `error`, and a `code`:
+`ATTACHMENT_REJECTED`, `ATTACHMENT_INVALID_NAME`, `ATTACHMENT_TOO_MANY_FILES`, `ATTACHMENT_TOO_LARGE`,
+`ATTACHMENT_DOWNLOAD_FAILED`, or `ATTACHMENT_SAVE_FAILED`. Rejection logs contain only the code, without
+download credentials or signed URL parameters.
+
+On upgrade, clients relying on private downloads must allowlist the specific file service. Use the gateway's
+supplied local path rather than assuming workspace-root storage or overwriting duplicate names. These rules
+apply to the legacy WebChannel downloader; Agent tools retain their own network and filesystem policies.
+
+Run regressions from the repository root:
+
+```bash
+python -m pytest tests/unit_tests/channel/test_web_attachment_security.py tests/unit_tests/channel/test_web_attachment_storage.py -o addopts= --asyncio-mode=auto -q
+```
+
+Tests use simulated responses and a local temporary HTTP server, never public or metadata services. Windows
+tests cover junctions, directory replacement, and long paths. The POSIX directory-FD race test must run on Linux.
+Source regressions do not replace deployed checks for public files, CDN redirects, private allowlisting, and uploads.
+
 ### SSH
 
 The SSH entry point is controlled by `channels.ssh`. It requires `gateway.agent_client.type: agentos_router` and the optional dependency:
