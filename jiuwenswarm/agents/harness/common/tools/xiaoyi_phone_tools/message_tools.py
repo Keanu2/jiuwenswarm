@@ -77,7 +77,7 @@ async def send_sms(phone_number: str, content: str) -> Dict[str, Any]:
     """
     try:
         logger.info(
-            f"[SEND_MESSAGE_TOOL] Starting exec - phone_number: {phone_number}, content len: {len(content)}"
+            f"[SEND_MESSAGE_TOOL] Starting exec - phone_number, content len: {len(content)}"
         )
 
         if not phone_number or not isinstance(phone_number, str):
