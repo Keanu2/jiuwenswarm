@@ -48,7 +48,7 @@ async def call_phone(
             slot_id = 0
 
         logger.info(
-            f"[CALL_PHONE_TOOL] Calling - phone_number: {phone_number}, slotId: {slot_id}"
+            f"[CALL_PHONE_TOOL] Calling - phone_number, slotId: {slot_id}"
         )
 
         if not phone_number or not isinstance(phone_number, str):
