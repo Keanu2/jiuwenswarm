@@ -541,11 +541,11 @@ print(resp.json())
 
 接口：`POST /api/v1/sandboxes/{sandbox_id}/exec_background`
 
-用途：在沙箱内启动后台进程，进程创建后立即返回。与 ``exec`` 相同，命令由沙箱 daemon 在**同一 PID 命名空间**内 ``fork+exec``，不再为每次后台任务单独 spawn bubblewrap。
+用途：在沙箱内启动后台进程，进程创建后立即返回。Linux 下，命令由沙箱 daemon 在**同一 PID 命名空间**内 ``fork+exec``，不再为每次后台任务单独 spawn bubblewrap。Windows 下，由沙箱 runner 启动进程，并使用独立 Job 管理任务进程树。
 
-`running`、`exit_code` 为**返回时刻的快照**（daemon 在 spawn 后立即响应）。瞬时命令可能在 `exec_background` 响应里已显示 `running=false`；长任务则 `running=true`。要可靠判断结束并读取输出，请轮询 `GET .../background/{job_id}`。
+`running`、`exit_code` 为**返回时刻的快照**（服务端在进程启动后立即响应）。瞬时命令可能在 `exec_background` 响应里已显示 `running=false`；长任务则 `running=true`。要可靠判断结束，请轮询 `GET .../background/{job_id}`。
 
-`pid` 为**沙箱 PID 命名空间内**的用户进程 pid（与 ``sandbox exec ps`` 中看到的 pid 一致），不是 host 上的 bwrap 监控进程 pid。
+Linux 下，`pid` 为**沙箱 PID 命名空间内**的用户进程 pid（与 ``sandbox exec ps`` 中看到的 pid 一致），不是 host 上的 bwrap 监控进程 pid。Windows 下为任务在主机上的进程 PID。
 
 请求体（`BackgroundExecRequest`）：
 
@@ -556,7 +556,7 @@ print(resp.json())
 | `workdir` | string | 否 | 沙箱内工作目录 |
 | `env` | object | 否 | 额外环境变量 |
 | `stdin` | string | 否 | 标准输入文本 |
-| `timeout_seconds` | int | 否 | 预留字段 |
+| `timeout_seconds` | int | 否 | 任务运行时限，单位秒；省略时使用服务端默认值，超时终止任务进程树，任务记录仍可查询 |
 
 后台任务**不捕获** stdout/stderr（始终丢弃）；需要输出时请使用同步 `exec`。
 
@@ -647,7 +647,7 @@ print(resp.json())
 
 响应体（`KillBackgroundJobResult`）：`job_id`、`killed`、`reason`（`ok` / `already_exited` / `permission_denied`）、`exit_code`。
 
-发信号后立即返回（非阻塞）；客户端可轮询 `GET .../background/{job_id}` 确认 `running=false`。
+Linux 下发信号后立即返回；Windows 下强制终止任务进程树，并等待终止确认后返回，`signal` 用于记录负数退出码。客户端可轮询 `GET .../background/{job_id}` 确认 `running=false`。
 
 #### CLI 对应命令
 

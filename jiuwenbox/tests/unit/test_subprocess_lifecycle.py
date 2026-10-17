@@ -25,6 +25,7 @@ def test_native_sandbox_account_runner_exec_and_cleanup(monkeypatch, tmp_path, c
     from jiuwenbox.server.runtime.process import ProcessRuntime
     from jiuwenbox.supervisor import win_setup
     from jiuwenbox.supervisor.daemon_ipc import (
+        REQUEST_TYPE_BG_KILL, REQUEST_TYPE_BG_STATUS, REQUEST_TYPE_EXEC_BACKGROUND,
         REQUEST_TYPE_EXEC, REQUEST_TYPE_SUBSCRIBE_LOG, LOG_FIELD_MESSAGE,
         encode_request, recv_frame, send_frame,
     )
@@ -93,6 +94,37 @@ def test_native_sandbox_account_runner_exec_and_cleanup(monkeypatch, tmp_path, c
             )
             assert response["exit_code"] == 0
             assert "sibling-ok" in response["stdout"]
+            # Background requests must release their IPC connection while the
+            # real process remains queryable, and retain a terminal job record.
+            for job_id, timeout in (("native-timeout", 1), ("native-kill", 30)):
+                started_at = time.monotonic()
+                response, _ = ProcessRuntime._win_roundtrip_blocking(
+                    port, REQUEST_TYPE_EXEC_BACKGROUND,
+                    {"job_id": job_id,
+                     "command": [os.environ["COMSPEC"], "/d", "/c", "ping -n 30 127.0.0.1 >nul"],
+                     "workdir": os.path.join(os.environ["SystemRoot"], "System32"), "timeout": timeout},
+                    None, False, control_token=token,
+                )
+                assert time.monotonic() - started_at < 2
+                assert response["started"] and response["running"] and response["pid"]
+                if job_id == "native-kill":
+                    response, _ = ProcessRuntime._win_roundtrip_blocking(
+                        port, REQUEST_TYPE_BG_KILL, {"job_id": job_id, "signum": 9},
+                        None, False, control_token=token,
+                    )
+                    assert response["killed"] and response["reason"] == "ok"
+                deadline = time.monotonic() + 5
+                while True:
+                    response, _ = ProcessRuntime._win_roundtrip_blocking(
+                        port, REQUEST_TYPE_BG_STATUS, {"job_id": job_id},
+                        None, False, control_token=token,
+                    )
+                    assert response["ok"]
+                    if not response["running"]:
+                        break
+                    assert time.monotonic() < deadline, "background process was not terminated"
+                    time.sleep(0.05)
+                assert response["exit_code"] == (-15 if job_id == "native-timeout" else -9)
         if close_job:
             win_job.close_job(job)
             job = None

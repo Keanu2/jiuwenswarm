@@ -764,6 +764,10 @@ class ProcessRuntime(RuntimeAdapter):
     ) -> None:
         if not response.get("ok"):
             return
+        for field_name in ("stdout", "stderr"):
+            value = response.get(field_name)
+            if isinstance(value, str):
+                setattr(job, field_name, value)
         pid = response.get("pid")
         if isinstance(pid, int):
             job.pid = pid
@@ -785,6 +789,22 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         job: BackgroundJob,
     ) -> None:
+        if sys.platform == "win32":
+            runner = self._win_runners.get(sandbox_id)
+            if runner is None:
+                raise BackgroundJobNotFoundError(f"Background job '{job.job_id}' is no longer available")
+            try:
+                response, _ = self._win_roundtrip_blocking(
+                    runner["control_port"], REQUEST_TYPE_BG_STATUS, {"job_id": job.job_id},
+                    None, False, control_token=runner.get("control_token"),
+                )
+            except (OSError, ValueError):
+                return
+            if response and response.get("error") == "not_found":
+                raise BackgroundJobNotFoundError(f"Background job '{job.job_id}' not found")
+            if response:
+                self._apply_bg_status_response(job, response)
+            return
         socket_path = self._control_socket_host_path(sandbox_id)
         if socket_path is None or not self._daemon_ipc_available(sandbox_id):
             return
@@ -3689,27 +3709,40 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         request: RuntimeBackgroundExecRequest,
     ) -> BackgroundExecResult:
-        # Windows 后台 exec 复用前台 exec 路径, 以 runner 起 child (runner 内部
-        # 不等待 child 退出). 这里简化: 直接走 _exec_windows 并标记 started.
-        # 完整后台语义 (日志文件/独立 job) 留待 Windows 实跑环境验证后补全.
-        logger.warning(
-            "Windows exec_background 降级为同步 exec (sandbox=%s)", sandbox_id,
+        runner = self._win_runners.get(sandbox_id)
+        if runner is None:
+            return BackgroundExecResult(started=False, command=list(request.command),
+                                        error_message="sandbox runner is not available")
+        payload = {"command": list(request.command), "job_id": request.job_id,
+                   "stdin_size": len(request.stdin_data or b"")}
+        if request.env:
+            payload["env"] = dict(request.env)
+        if request.workdir:
+            payload["workdir"] = request.workdir
+        if request.timeout is not None:
+            payload["timeout"] = request.timeout
+        response = await self._win_runner_roundtrip(
+            sandbox_id, runner, REQUEST_TYPE_EXEC_BACKGROUND, payload, request.stdin_data,
         )
-        result = await self._exec_windows(
-            sandbox_id,
-            RuntimeExecRequest(
-                command=request.command,
-                workdir=request.workdir,
-                env=request.env,
-                stdin_data=request.stdin_data,
-            ),
-        )
+        if not response or not response.get("ok") or not response.get("started"):
+            return BackgroundExecResult(
+                started=False, command=list(request.command),
+                error_message=str((response or {}).get("stderr") or "background start failed"),
+            )
+        pid = response.get("pid")
+        running = response.get("running", True)
+        exit_code = response.get("exit_code")
+        job = BackgroundJob(job_id=request.job_id, sandbox_id=sandbox_id,
+                            command=list(request.command), pid=pid, workdir=request.workdir)
+        self._apply_bg_status_response(job, response)
+        self._background_jobs_for_sandbox(sandbox_id)[request.job_id] = job
         return BackgroundExecResult(
             started=True,
             job_id=request.job_id,
+            pid=pid,
             command=list(request.command),
-            running=False,
-            exit_code=result.exit_code,
+            running=running,
+            exit_code=exit_code,
         )
 
     async def _write_file_windows(
@@ -3817,7 +3850,7 @@ class ProcessRuntime(RuntimeAdapter):
             # 整个 roundtrip 用 2s 会导致 socket.timeout → 关连接 → runner 发响应抛异常退出 → 后续全 409.
             # exec 读响应超时须长于 runner 端 WAIT_BUDGET_MS (120s): runner 强杀 child 后还要读 stdout+发响应,
             # 总响应可能晚于 120s, box-server 设同值会先关连接致结果丢失. 默认 130s (120s + 10s 余量).
-            if request_type == REQUEST_TYPE_EXEC:
+            if request_type in (REQUEST_TYPE_EXEC, REQUEST_TYPE_EXEC_BACKGROUND, REQUEST_TYPE_BG_KILL):
                 _exec_read_timeout = 130.0
                 if read_timeout is not None:
                     _exec_read_timeout = max(_exec_read_timeout, float(read_timeout) + 10.0)
@@ -4225,18 +4258,44 @@ class ProcessRuntime(RuntimeAdapter):
     ) -> KillBackgroundJobResult:
         job = self._get_background_job_record(sandbox_id, job_id)
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            self._sync_background_job_blocking,
-            sandbox_id,
-            job,
-        )
+        try:
+            await loop.run_in_executor(
+                None,
+                self._sync_background_job_blocking,
+                sandbox_id,
+                job,
+            )
+        except BackgroundJobNotFoundError:
+            if sys.platform != "win32":
+                raise
+            return KillBackgroundJobResult(job_id=job_id, killed=False, reason="not_found")
         if job.exit_code is not None:
             return KillBackgroundJobResult(
                 job_id=job_id,
                 killed=False,
                 reason="already_exited",
                 exit_code=job.exit_code,
+            )
+
+        if sys.platform == "win32":
+            runner = self._win_runners.get(sandbox_id)
+            if runner is None:
+                return KillBackgroundJobResult(job_id=job_id, killed=False, reason="not_found")
+            response = await self._win_runner_roundtrip(
+                sandbox_id, runner, REQUEST_TYPE_BG_KILL,
+                {"job_id": job_id, "signum": signum}, None,
+            ) or {}
+            if response.get("reason") != "not_found":
+                try:
+                    await loop.run_in_executor(None, self._sync_background_job_blocking, sandbox_id, job)
+                except BackgroundJobNotFoundError:
+                    # A runner restart must not discard an acknowledged kill.
+                    pass
+            exit_code = response.get("exit_code")
+            return KillBackgroundJobResult(
+                job_id=job_id, killed=bool(response.get("killed")),
+                reason=str(response.get("reason", "permission_denied")),
+                exit_code=exit_code if isinstance(exit_code, int) else job.exit_code,
             )
 
         socket_path = self._control_socket_host_path(sandbox_id)
@@ -4287,6 +4346,7 @@ class ProcessRuntime(RuntimeAdapter):
     async def cleanup(self, sandbox_id: str) -> None:
         await self.stop(sandbox_id)
         if sys.platform == "win32":
+            self._background_processes.pop(sandbox_id, None)
             self._win_runners.pop(sandbox_id, None)
             self._win_policies.pop(sandbox_id, None)
             self._win_acl_paths.pop(sandbox_id, None)
