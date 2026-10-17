@@ -1867,10 +1867,13 @@ async def _run(
     from jiuwenswarm.edition import is_enterprise
 
     if is_enterprise():
+        from jiuwenswarm.extensions.redis import init_gateway_redis_from_config
         from jiuwenswarm.gateway.storage_assembly.setup import start_gateway_storage
 
         try:
-            storage_ctx = await start_gateway_storage()
+            full_cfg = get_config()
+            await init_gateway_redis_from_config(dict(full_cfg or {}))
+            storage_ctx = await start_gateway_storage(full_cfg)
         except Exception:
             logger.exception(
                 "[App] enterprise Gateway storage wiring failed; aborting startup"
