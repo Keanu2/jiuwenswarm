@@ -6,11 +6,18 @@ version: 1
 name: "inference-policy"
 
 inference_privacy_proxies:
-  listen_host: "0.0.0.0"  # MUST, bind to all interfaces for edge server access
+  listen_host: "127.0.0.1"  # Set an interface IP / 0.0.0.0 only with JIUWENBOX_PROXY_TOKEN.
   listen_port: 8322  # MUST, set to enable proxy. 0 or omit to disable.
   
-  # OPTIONAL: here starts example forwarding rule.
-  # routes can be configured with REST API dynamically instead.
+  # Deployment-owned exact origins for additional API-managed routes.
+  # Corporate DNS names resolving to private IPs must be explicitly listed here.
+  allowed_origins: []
+  # Prefer a PEM enterprise CA over disabling verification:
+  # ca_file: "/etc/jiuwenbox/corp-ca.pem"
+  insecure_tls_origins: []
+
+  # Startup route origins are trusted automatically. The REST API cannot add
+  # other origins unless they were approved in allowed_origins at startup.
   routes:
     # example OpenAI API route
     - path_prefix: "openai"
@@ -26,7 +33,7 @@ inference_privacy_proxies:
     - path_prefix: "custom"
       target_endpoint: "http://192.168.1.100:9000"
       api_key: "sk_sandbox_managed_key"
-      skip_cert_verify: false # for self_signed cert server, debug only
+      skip_cert_verify: false # true additionally requires insecure_tls_origins approval
       # example:
       # curl -X POST http://127.0.0.1:8322/custom/v1/chat/completions \
       #   -H "Authorization: Bearer sk_fake_key" ...

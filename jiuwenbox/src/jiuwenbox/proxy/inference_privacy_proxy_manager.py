@@ -157,6 +157,9 @@ class InferencePrivacyProxyManager:
                 )
             
             if global_instance is None:
+                policy = config.freeze_policy()
+                for route in config.routes:
+                    policy.validate(route)
                 global_instance = ProxyInstance(config=config)
                 global_instance.state = ProxyState.STOPPED
                 for route in config.routes:
@@ -166,6 +169,8 @@ class InferencePrivacyProxyManager:
                 self._proxies["default"] = global_instance
                 logger.info("Created global proxy: listen_port=%d, routes=%d", config.listen_port, len(config.routes))
             else:
+                for route in config.routes:
+                    global_instance.config.freeze_policy().validate(route)
                 for route in config.routes:
                     route_name = self._route_name(route)
                     existing_names = [
@@ -337,6 +342,13 @@ class InferencePrivacyProxyManager:
             if route_idx is None:
                 raise ValueError(f"Proxy '{name}' not found")
 
+            # Reject policy violations before stopping any working routes.
+            for candidate in config.routes:
+                global_instance.config.freeze_policy().validate(candidate)
+            enabled_prefixes = {
+                r.path_prefix for r in global_instance.config.routes
+                if global_instance.get_route_state(self._route_name(r)) == ProxyState.RUNNING
+            }
             was_running = global_instance.state == ProxyState.RUNNING
 
             if was_running:
@@ -369,11 +381,14 @@ class InferencePrivacyProxyManager:
                     global_instance.proxy = proxy
                     global_instance.state = ProxyState.RUNNING
                     global_instance.started_at = datetime.now(timezone.utc)
+                    for prefix in enabled_prefixes:
+                        proxy.enable_route(prefix)
                     global_instance.add_log("Proxy restarted successfully")
                 except Exception as e:
                     global_instance.state = ProxyState.ERROR
                     global_instance.error_message = str(e)
                     global_instance.add_log(f"Failed to restart: {e}")
+                    raise
 
             logger.info("Updated route '%s'", name)
 
@@ -400,19 +415,24 @@ class InferencePrivacyProxyManager:
             if route_idx is None:
                 raise ValueError(f"Proxy '{name}' not found")
 
-            global_instance.config.routes.pop(route_idx)
+            deleted_route = global_instance.config.routes.pop(route_idx)
+            global_instance.route_states.pop(name, None)
+            if global_instance.proxy:
+                global_instance.proxy.disable_route(deleted_route.path_prefix)
             global_instance.add_log(f"Deleted route: {name}")
             logger.info("Deleted route '%s'", name)
 
-            if len(global_instance.config.routes) == 0:
+            if global_instance.get_enabled_route_count() == 0:
                 if global_instance.state == ProxyState.RUNNING:
                     try:
                         if global_instance.proxy:
                             await global_instance.proxy.stop()
                     except Exception as e:
                         logger.warning("Error stopping proxy during delete: %s", e)
-                del self._proxies["default"]
-                logger.info("Deleted global proxy (no routes remaining)")
+                # Retain the deployment policy after the final route is deleted.
+                global_instance.proxy = None
+                global_instance.state = ProxyState.STOPPED
+                global_instance.started_at = None
 
             return {"name": name, "deleted": True}
 
@@ -459,14 +479,13 @@ class InferencePrivacyProxyManager:
             for route_data in proxies_config.routes
         ]
 
-        if not routes:
-            logger.info("No routes configured")
-            return
-
         config = InferencePrivacyProxyConfig(
             listen_port=proxies_config.listen_port,
             listen_host=proxies_config.listen_host or "127.0.0.1",
             routes=routes,
+            allowed_origins=list(proxies_config.allowed_origins),
+            insecure_tls_origins=list(proxies_config.insecure_tls_origins),
+            ca_file=proxies_config.ca_file,
         )
 
         try:
@@ -485,6 +504,7 @@ class InferencePrivacyProxyManager:
             )
         except Exception as e:
             logger.error("Failed to load global proxy: %s", e)
+            raise
 
 
 _proxy_manager: InferencePrivacyProxyManager | None = None
