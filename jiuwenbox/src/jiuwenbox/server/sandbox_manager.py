@@ -982,6 +982,8 @@ class SandboxManager:
         sandbox_id: str,
         request: SandboxBackgroundExecRequest,
     ) -> BackgroundExecResult:
+        # Reject invalid deadlines before starting a process on either platform.
+        timeout = self.limits.effective_exec_timeout(request.timeout)
         async with self._lock:
             ref = self._get_sandbox(sandbox_id)
             if ref.phase != SandboxPhase.READY:
@@ -1017,6 +1019,7 @@ class SandboxManager:
                         ) if sys.platform == "win32" else request.env
                     ),
                     stdin_data=request.stdin_data,
+                    timeout=timeout,
                 ),
             )
         except Exception as exc:
@@ -1047,7 +1050,6 @@ class SandboxManager:
             duration_ms=int((time.monotonic() - start) * 1000),
         )
         if result.started:
-            timeout = self.limits.effective_exec_timeout(request.timeout)
             asyncio.create_task(
                 self._expire_background_job(sandbox_id, job_id, timeout),
                 name=f"jiuwenbox-bg-timeout-{sandbox_id}-{job_id}",

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import json
 import logging
 import os
@@ -33,6 +34,9 @@ from jiuwenbox.supervisor.daemon_ipc import (
     MAX_HEADER_BYTES,
     MAX_STDIN_BYTES,
     MAX_STDOUT_BYTES,
+    REQUEST_TYPE_BG_KILL,
+    REQUEST_TYPE_BG_STATUS,
+    REQUEST_TYPE_EXEC_BACKGROUND,
     REQUEST_TYPE_SUBSCRIBE_LOG,
     recv_frame,
     send_frame,
@@ -1227,6 +1231,9 @@ class _WinRunnerState:
     """Runner 共享可变状态, guarded by ``lock``."""
 
     def __init__(self, worker_limit: int = _DEFAULT_WIN_RUNNER_WORKER_LIMIT) -> None:
+        from jiuwenbox.supervisor.win_background import WindowsBackgroundJobs
+
+        self.background_jobs = WindowsBackgroundJobs()
         self.shutdown_event = _threading.Event()
         self.in_flight = 0
         self.lock = _threading.Lock()
@@ -1289,6 +1296,22 @@ def _handle_one_request(  # pylint: disable=huawei-too-many-arguments
                 _handle_exec_request(
                     conn, header, restricted_token, workspace, stdin_bytes,
                 )
+            elif req_type == REQUEST_TYPE_EXEC_BACKGROUND:
+                stdin_size = int(header.get("stdin_size", 0))
+                stdin_bytes = recv_frame(conn, MAX_STDIN_BYTES) if stdin_size > 0 else b""
+                _send_response(conn, state.background_jobs.start(
+                    header, restricted_token, workspace, stdin_bytes,
+                ))
+            elif req_type == REQUEST_TYPE_BG_STATUS:
+                _send_response(conn, state.background_jobs.status(str(header.get("job_id") or "")))
+            elif req_type == REQUEST_TYPE_BG_KILL:
+                signum = header.get("signum", 15)
+                if not isinstance(signum, int) or not 1 <= signum <= 64:
+                    _send_error_response(conn, "signum must be an integer in [1, 64]")
+                else:
+                    _send_response(conn, state.background_jobs.kill(
+                        str(header.get("job_id") or ""), signum,
+                    ))
             elif req_type == "write_file":
                 _handle_write_file_request(conn, header, conn)
             elif req_type == "read_file":
@@ -1471,6 +1494,7 @@ def runner_main(argv: list[str]) -> int:
         _push_log("ERROR",
                   f"runner accept 循环异常 (sandbox_id={args.sandbox_id})", exc=tb)
     finally:
+        state.background_jobs.shutdown(WIN_RUNNER_SHUTDOWN_DRAIN_SECONDS)
         if state.in_flight > 0:
             _push_log("INFO",
                       f"runner shutdown: drain {state.in_flight} 个在途 worker "
@@ -1732,11 +1756,28 @@ def _confirm_process_exit(kernel32, proc_handle) -> None:
         raise RuntimeError(f"cannot confirm exec process exit: wait_result={result:#x}")
 
 
-def _handle_exec_request(stream, header, restricted_token, workspace, stdin_bytes) -> None:
+def _handle_exec_request(
+    stream, header, restricted_token, workspace, stdin_bytes, *, background_job=None,
+) -> None:
     """处理 exec 请求: 起 child 子命令, 回传 stdout/stderr/exit. stdin_bytes 透传给子进程."""
+    def respond(payload):
+        if background_job is not None:
+            background_job.respond(payload)
+        else:
+            _send_response(stream, payload)
+
+    def respond_error(detail):
+        if background_job is not None:
+            respond({"ok": False, "error": "exec_failed", "exit_code": 1, "stderr": detail})
+        else:
+            _send_error_response(stream, detail)
+
+    def disconnected():
+        return background_job.stop.is_set() if background_job is not None else _exec_peer_disconnected(stream)
+
     command = header.get("command", [])
     if not command:
-        _send_error_response(stream, "exec requires non-empty command")
+        respond_error("exec requires non-empty command")
         return
     # 归一化裸名 python3/python3.x → python (venv\Scripts 只有 python.exe). 只改裸名, 不碰带路径的.
     _c0 = str(command[0])
@@ -1783,7 +1824,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     stdin_thread = None
     read_fd = None
     try:
-        if _exec_peer_disconnected(stream):
+        if disconnected():
             return
         exec_job_handle = win_job.create_exec_job()
         workdir = header.get("workdir")
@@ -1801,11 +1842,13 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         finally:
             get_kernel32().CloseHandle(wintypes.HANDLE(_self_token))
         win_job.assign_process(exec_job_handle, proc_handle)
-        if _exec_peer_disconnected(stream):
+        if disconnected():
             return
         win_job.resume_process(thread_handle)
         kernel32.CloseHandle(wintypes.HANDLE(thread_handle))
         thread_handle = 0
+        if background_job is not None:
+            background_job.started(pid)
         _push_log("INFO",
                    f"exec child 已启动: pid={pid} cmd={command[:3] if command else []!r} "
                    f"workdir={workdir} timeout_s={header.get('timeout')}")
@@ -1856,10 +1899,11 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                         break
                     if not chunk:
                         break
-                    out_buf.extend(chunk)
-                    if len(out_buf) > MAX_STDOUT_BYTES:
-                        del out_buf[MAX_STDOUT_BYTES:]
-                        break
+                    if background_job is None:
+                        out_buf.extend(chunk)
+                        if len(out_buf) > MAX_STDOUT_BYTES:
+                            del out_buf[MAX_STDOUT_BYTES:]
+                            break
             except Exception as exc:  # noqa: BLE001
                 _drain_exc.append(exc)
 
@@ -1870,12 +1914,16 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         deadline_waited_ms = 0
         _caller_timeout_s = header.get("timeout")
         try:
-            _caller_timeout_s = int(_caller_timeout_s) if _caller_timeout_s is not None else 120
+            _caller_timeout_s = float(_caller_timeout_s) if _caller_timeout_s is not None else 120
         except (TypeError, ValueError):
             _caller_timeout_s = 120
         if _caller_timeout_s <= 0:
             _caller_timeout_s = 120
-        wait_budgets = _caller_timeout_s * 1000  # noqa: N806 - Win32 SDK 常量风格
+        # Keep a runner-side deadline even if the startup response is lost.
+        wait_budgets = (
+            _caller_timeout_s * 1000
+            if background_job is None or header.get("timeout") is not None else None
+        )
         _child_killed = False  # child 是否被超时强杀 (强杀后 stdout pipe 可能不 EOF)
         _last_heartbeat_ms = 0
         while True:
@@ -1894,8 +1942,8 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                           f"exec child 等待中: pid={pid} waited={deadline_waited_ms}ms/"
                           f"{wait_budgets}ms stdout_buf={len(out_buf)}B "
                           f"cmd={command[:3] if command else []!r}")
-            disconnected = _exec_peer_disconnected(stream)
-            if disconnected or deadline_waited_ms >= wait_budgets:
+            peer_closed = disconnected()
+            if peer_closed or (wait_budgets is not None and deadline_waited_ms >= wait_budgets):
                 # child 长时间不退出, 强杀整个进程树. review #3: 优先 close_job
                 # 触发 KILL_ON_JOB_CLOSE 杀 child + 所有孙进程 (旧版只 TerminateProcess
                 # 杀 child, 孙进程继续占用端口/资源). Job 失败兜底 TerminateProcess.
@@ -1910,10 +1958,15 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                     kernel32.TerminateProcess(wintypes.HANDLE(proc_handle), 1)
                 _child_killed = True
                 _push_log("WARNING",
-                          f"exec child {'请求已取消/断开' if disconnected else '超时'} 强杀, "
+                          f"exec child {'请求已取消/断开' if peer_closed else '超时'} 强杀, "
                           f"cmd={command[:3] if command else []!r}")
                 break
         _confirm_process_exit(kernel32, proc_handle)
+        if background_job is not None and exec_job_handle:
+            # A completed background job must not leave descendants holding its
+            # output pipe open. Foreground exec retains its existing semantics.
+            win_job.close_job(exec_job_handle)
+            exec_job_handle = 0
         # 进程已退出 (正常或强杀). 等 drain 线程结束 (最多 5s, 防孙进程持写端不 EOF).
         _drain_thread.join(timeout=5.0)
         if _drain_thread.is_alive():
@@ -1942,11 +1995,13 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         kernel32.CloseHandle(wintypes.HANDLE(proc_handle))
         proc_handle = 0
         ec = int(exit_code.value)
+        if _child_killed:
+            ec = -background_job.signum if background_job is not None else 124
         out_text = _decode_child_output(out_buf)
         _push_log("INFO",
                    f"exec child 结束: pid={pid} exit_code={ec} killed={_child_killed} "
                    f"stdout_len={len(out_text)} cmd={command[:3] if command else []!r}")
-        _send_response(stream, {
+        respond({
             "ok": True,
             "exit_code": ec,
             "stdout": out_text,
@@ -1979,15 +2034,15 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             _push_log("INFO",
                       f"exec 成功 exit=0 cmd={cmd_summary!r} "
                       f"stdout_len={len(out_text)}")
-        # Normal completion (including a nonzero exit code) preserves background
-        # descendants. Keep the kill-on-close Job until all error paths are past.
+        # Foreground normal completion preserves detached descendants. Keep its
+        # kill-on-close Job until all error paths are past.
         exec_completed = True
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb
         tb = _tb.format_exc()
         # 连接已断时发 error response 会再抛 ConnectionAbortedError, 兜底吞掉 — 不让单个 exec 连接异常杀整个 runner (见上方 accept 循环注释).
         try:
-            _send_error_response(stream, f"exec failed: {exc}")
+            respond_error(f"exec failed: {exc}")
         except OSError:
             pass
         _push_log("ERROR", f"exec 处理异常: {exc}", exc=tb)
@@ -2009,7 +2064,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                 pass
         if exec_job_handle:
             try:
-                if exec_completed:
+                if exec_completed and background_job is None:
                     win_job.release_exec_job(exec_job_handle)
                 else:
                     win_job.close_job(exec_job_handle)
@@ -2050,9 +2105,23 @@ def _handle_write_file_request(stream, header, stdin) -> None:
         _send_error_response(stream, str(exc))
 
 
+def _file_error_response(exc: OSError) -> dict:
+    """Keep file-operation codes aligned with the daemon and omit path echoes."""
+    code = "io_error"
+    for kind, name in ((FileNotFoundError, "not_found"), (NotADirectoryError, "not_a_directory"),
+                       (IsADirectoryError, "is_directory"), (PermissionError, "permission_denied")):
+        if isinstance(exc, kind):
+            code = name
+            break
+    return {"ok": False, "error": code, "errno": exc.errno or 0,
+            "stderr": exc.strerror or code}
+
+
 def _handle_read_file_request(stream, header) -> None:
     path = header.get("path", "")
     try:
+        if os.path.isdir(path):
+            raise IsADirectoryError(errno.EISDIR, "Is a directory")
         with open(path, "rb") as fh:
             content = fh.read(MAX_FILE_BYTES)
         _send_response(stream, {
@@ -2060,10 +2129,7 @@ def _handle_read_file_request(stream, header) -> None:
         })
         send_frame(stream, content)
     except OSError as exc:
-        _send_response(stream, {
-            "ok": False, "error": "io_error", "errno": exc.errno,
-            "stderr": str(exc),
-        })
+        _send_response(stream, _file_error_response(exc))
     except Exception as exc:  # noqa: BLE001
         _send_error_response(stream, str(exc))
 
@@ -2074,6 +2140,10 @@ def _handle_list_dir_request(stream, header) -> None:
     include_files = bool(header.get("include_files", True))
     include_dirs = bool(header.get("include_dirs", True))
     try:
+        # os.walk silently produces no entries for a missing root.
+        os.stat(path)
+        if not os.path.isdir(path):
+            raise NotADirectoryError(errno.ENOTDIR, "Not a directory")
         items: list[dict] = []
         if recursive:
             for root, dirs, files in os.walk(path):
@@ -2093,10 +2163,7 @@ def _handle_list_dir_request(stream, header) -> None:
                     items.append({"type": "file", "name": entry, "path": full})
         _send_response(stream, {"ok": True, "items": items})
     except OSError as exc:
-        _send_response(stream, {
-            "ok": False, "error": "io_error", "errno": exc.errno,
-            "stderr": str(exc),
-        })
+        _send_response(stream, _file_error_response(exc))
     except Exception as exc:  # noqa: BLE001
         _send_error_response(stream, str(exc))
 
