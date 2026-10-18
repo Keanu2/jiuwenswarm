@@ -1,5 +1,6 @@
 """Generic core lifecycle hooks adapted to desktop behavior reporting."""
 import asyncio
+import json
 import uuid
 
 from openjiuwen.core.session import InteractiveInput
@@ -8,8 +9,17 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 
-from jiuwenswarm.common.behavior_security import ACTIVE_BEHAVIOR, _event_id, raw_event
+from jiuwenswarm.common.behavior_security import (
+    ACTIVE_BEHAVIOR,
+    SECURITY_NOTICE_TOOL,
+    _event_id,
+    raw_event,
+    tool_output_clarify_suffix,
+    tool_output_reject_instruction,
+)
 
+# 仅 tool_output_force_finish: true（回退配置）时作为强制收尾文案使用；
+# 默认路径（2026-10-18 三态 UI）改用指令模板让模型重新规划
 OUTPUT_BLOCK_MESSAGE = (
     "当前工具输出未通过安全检测，已终止本轮操作。"
     "请确认内容来源可信后清空上下文并重试。"
@@ -74,16 +84,42 @@ class BehaviorSecurityRail(DeepAgentRail):
         if decision is not None and type(decision).__name__ != "ApproveResult":
             return
         if getattr(ctx.inputs, "execution_started", False):
-            result = await self.bridge.inspect(raw_event(ctx, "tool.after"))
-            if result.is_denied:
-                ctx.inputs.tool_result = OUTPUT_BLOCK_MESSAGE
+            tool_name = str(getattr(ctx.inputs, "tool_name", "") or "")
+            if tool_name == SECURITY_NOTICE_TOOL:
+                # 安全提示工具自身不送审（防递归；其价值即通知宿主，送审只会白花时延）
+                return
+            event = raw_event(ctx, "tool.after")
+            outcome = await self.bridge.inspect(event)
+            if outcome.result.is_denied:
+                # 三态 UI（2026-10-18）：输出屏蔽 + 指令模板（原输出不进模型上下文/历史，
+                # 引导模型调 security_notice 补写横幅第二行并重新规划）；默认不再
+                # request_force_finish——轮次继续，模型重规划（tool_output_force_finish
+                # 可回退旧的强制收尾语义）
+                instruction = tool_output_reject_instruction(
+                    tool_name, outcome.reason or "工具输出安全检测未通过", event["eventId"])
+                ctx.inputs.tool_result = instruction
                 tool_msg = getattr(ctx.inputs, "tool_msg", None)
                 if tool_msg is not None and hasattr(tool_msg, "content"):
-                    tool_msg.content = OUTPUT_BLOCK_MESSAGE
-                ctx.request_force_finish({
-                    "output": OUTPUT_BLOCK_MESSAGE,
-                    "result_type": "answer",
-                })
+                    tool_msg.content = instruction
+                if self.bridge.output_force_finish_enabled():
+                    ctx.request_force_finish({
+                        "output": OUTPUT_BLOCK_MESSAGE,
+                        "result_type": "answer",
+                    })
+            elif outcome.verdict == "clarify":
+                # 疑似风险：输出保留给模型（诉求明确），追加确认指令——
+                # 模型调 security_notice 补写横幅 + ask_user 确认后才可采用该结果
+                suffix = tool_output_clarify_suffix(
+                    outcome.reason or "内容疑似存在风险", event["eventId"])
+                base = ctx.inputs.tool_result
+                ctx.inputs.tool_result = (
+                    base if isinstance(base, str)
+                    else json.dumps(base, ensure_ascii=False, default=str)
+                ) + suffix
+                tool_msg = getattr(ctx.inputs, "tool_msg", None)
+                if (tool_msg is not None and hasattr(tool_msg, "content")
+                        and isinstance(tool_msg.content, str)):
+                    tool_msg.content = tool_msg.content + suffix
 
     def uninit(self, agent):
         for task in self.bridge.tasks:

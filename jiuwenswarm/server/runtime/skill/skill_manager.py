@@ -979,6 +979,72 @@ class SkillManager:
 
         return {"success": True}
 
+    async def handle_skills_install_local(self, params: dict) -> dict:
+        """安装本地目录技能（对话内安装：用户提供的 zip 解压后的 staged 目录）.
+
+        2026-10-18 风控三态 UI（claw_desktop docs/risk-notice-ui-design-2026-10-18.md）：
+        对话内安装的正式入口——复制前经 check_agent_skill_install 云端权威闸口
+        （带会话上下文：ACCEPT/REJECT/CLARIFY 三态横幅 + CLARIFY 用户确认 +
+        授权后指纹复核），取代「agent 直接写 skills/ 目录由落盘守卫兜底」的无会话链路。
+
+        params:
+            path: 技能目录绝对路径（目录内含 SKILL.md 或任一 .md）
+        """
+        raw_path = str(params.get("path", "") or "").strip()
+        if not raw_path:
+            return {"success": False, "detail": "缺少参数: path"}
+        src = Path(raw_path)
+        if not src.is_absolute():
+            return {"success": False, "detail": "path 必须是绝对路径"}
+        if not src.exists() or not src.is_dir():
+            return {"success": False, "detail": f"技能目录不存在: {raw_path}"}
+        # 防自引用：不允许把技能安装目录（含 _quarantine 隔离区）当来源
+        try:
+            src.resolve().relative_to(self._skills_dir.resolve())
+            return {"success": False, "detail": "不允许从技能安装目录内安装"}
+        except ValueError:
+            pass
+
+        skill_file = self._try_find_skill_file(src)
+        meta = self._parse_skill_md(skill_file) if skill_file else None
+        if not meta:
+            return {"success": False, "detail": "目录内未找到有效的 SKILL.md"}
+
+        try:
+            name = _safe_path_name(meta.get("name") or src.name, "skill")
+        except ValueError as exc:
+            _log_rejected_name("skills.install_local", "skill", meta.get("name") or src.name, exc)
+            return {"success": False, "detail": str(exc)}
+
+        dest = _safe_child_path(self._skills_dir, name, "skill")
+        if dest.exists() and dest.is_dir():
+            return {"success": False, "detail": f"技能 {name} 已经安装"}
+
+        from jiuwenswarm.common.behavior_security import check_agent_skill_install
+        await check_agent_skill_install(src, dest, name, "local-import")
+
+        try:
+            shutil.copytree(src, dest)
+        except Exception as exc:
+            logger.error("安装本地技能失败: %s", exc)
+            return {"success": False, "detail": f"安装失败: {exc}"}
+
+        self._add_installed_plugin(
+            {
+                "name": name,
+                "marketplace": "local",
+                "version": meta.get("version", ""),
+                "commit": "",
+                "source": "local",
+                "installed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        # 刷新索引
+        self._refresh_agent_data_indexes()
+
+        return {"success": True}
+
     @staticmethod
     def _normalize_online_search_identifier(source: str, identifier: str) -> str:
         """Build a conservative identity key for safe result merging."""
