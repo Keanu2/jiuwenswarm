@@ -233,14 +233,22 @@ CLAUDE.md 旧表述「凭据齐全才拉起 gateway」**已过时**。当前实�
   → MessageHandler._forward_loop（会话分配/命令拦截/E2A 归一化 e2a_from_agent_fields）
   → WebSocketAgentServerClient.send_request_stream
       connect() 时 resolve_agent_e2a_pipe_path()（agent_client.py:102-122）
-      命中密钥包 pipes.agentE2a → open_pipe(\\.\pipe\claw-agent-e2a)
-      → 发 auth 首帧 {"type":"auth","token":e2aToken}（agent_client.py:335-348）
+      命中密钥包 pipes.agentE2a → open_pipe(\\.\pipe\claw-agent-e2a,
+        server_images={sys.executable, sys._base_executable})
+      → 双向握手（2026-10-17 起）：auth-hello{challenge} → 服务端回
+        auth-proof{HMAC(e2aToken, "e2a-pipe-proof:"+challenge)} → 客户端校验通过
+        后才发 auth 首帧 {"type":"auth","token":e2aToken}
   ═══ 命名管道：4 字节小端长度前缀 + UTF-8 JSON 帧 ═══
   → AgentServer e2a_desktop._handle_pipe_connection（e2a_desktop.py:182-206）
-      三重校验：SDDL 仅本人+SYSTEM → GetNamedPipeClientProcessId 镜像白名单
+      四重校验：SDDL 仅本人+SYSTEM → GetNamedPipeClientProcessId 镜像白名单
       （{sys.executable, sys._base_executable}——gateway 与 agent 同一个
       jiuwenswarm.exe；_base_executable 兼容 uv trampoline .venv）→
-      e2aToken 首帧 hmac.compare_digest（10s 超时，失败仅断该连接）
+      auth-hello/proof 挑战应答（证明持有 e2aToken）→ auth 首帧 hmac.compare_digest
+      （10s 超时，失败仅断该连接）
+      ※ 2026-10-17 跨 SID 预创建抢占收口（《SID管道漏洞分析报告》）：客户端侧
+      open_pipe 新增 GetNamedPipeServerProcessId→服务端镜像白名单校验
+      （默认白名单=密钥包 desktopExe；发送任何字节前完成，失败 fail-closed）；
+      旧版「首帧直发 token」协议不再被服务端接受（抢占者可白捡令牌）。
   → run_connection 公共连接内核 → 回 connection.ack → dispatch(chat.send)
   → JiuWenSwarm.process_message_stream → DeepAgent → LLM
 

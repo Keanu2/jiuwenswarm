@@ -45,9 +45,13 @@ from jiuwenswarm.server.e2a_desktop import (
 from jiuwenswarm.server.e2a_transports import (
     StdioMessageTransport,
     WsMessageTransport,
+    build_auth_hello_frame,
+    build_auth_proof_frame,
     build_connection_ack_frame,
     encode_text_frame,
+    extract_auth_hello_challenge,
     verify_auth_frame,
+    verify_auth_proof_frame,
 )
 from jiuwenswarm.server.ws_send import send_wire_payload
 
@@ -240,6 +244,43 @@ class TestAuthFrame:
 
     def test_empty_expected_rejected(self) -> None:
         assert verify_auth_frame({"type": "auth", "token": "t-1"}, "") is False
+
+
+class TestAuthHandshake:
+    """auth-hello/proof 挑战握手纯函数（2026-10-17，跨 SID 预创建抢占防护）。"""
+
+    def test_hello_proof_roundtrip(self) -> None:
+        hello, challenge = build_auth_hello_frame()
+        assert hello["type"] == "auth-hello"
+        assert extract_auth_hello_challenge(hello) == challenge
+        proof = build_auth_proof_frame("t-1", challenge)
+        assert verify_auth_proof_frame(proof, "t-1", challenge) is True
+
+    def test_proof_wrong_token_rejected(self) -> None:
+        _hello, challenge = build_auth_hello_frame()
+        proof = build_auth_proof_frame("attacker-token", challenge)
+        # 抢占者不知 e2aToken，伪造的 proof 必然不匹配
+        assert verify_auth_proof_frame(proof, "t-1", challenge) is False
+
+    def test_proof_replay_other_challenge_rejected(self) -> None:
+        _hello, challenge = build_auth_hello_frame()
+        proof = build_auth_proof_frame("t-1", challenge)
+        _hello2, other = build_auth_hello_frame()
+        assert other != challenge
+        # 挑战一次性：旧 proof 无法重放到新连接
+        assert verify_auth_proof_frame(proof, "t-1", other) is False
+
+    def test_hello_malformed_rejected(self) -> None:
+        assert extract_auth_hello_challenge(None) is None
+        assert extract_auth_hello_challenge({"type": "auth"}) is None
+        assert extract_auth_hello_challenge({"type": "auth-hello", "challenge": "短"}) is None
+        assert extract_auth_hello_challenge({"type": "auth-hello", "challenge": "x" * 200}) is None
+
+    def test_proof_malformed_rejected(self) -> None:
+        assert verify_auth_proof_frame(None, "t-1", "c") is False
+        assert verify_auth_proof_frame({"type": "auth"}, "t-1", "c") is False
+        # 令牌缺失一律拒绝
+        assert verify_auth_proof_frame({"type": "auth-proof", "proof": "x"}, "", "c") is False
 
 
 class TestEncodeTextFrame:
@@ -464,6 +505,19 @@ class TestDesktopChannelsStdio:
 
 
 class TestDesktopChannelsPipe:
+    async def _handshake(self, client: Any, token: str = _TEST_TOKEN) -> None:
+        """新协议握手（auth-hello → proof → auth）；token 可故意传错。"""
+        from jiuwenswarm.server.e2a_transports import (
+            build_auth_hello_frame,
+            verify_auth_proof_frame,
+        )
+
+        hello, challenge = build_auth_hello_frame()
+        await client.send_frame(hello)
+        proof = await client.recv_frame(timeout=5)
+        assert verify_auth_proof_frame(proof, _TEST_TOKEN, challenge) is True
+        await client.send_frame({"type": "auth", "token": token})
+
     @pytest.mark.asyncio
     async def test_pipe_auth_wrong_token_rejected(
         self, monkeypatch: pytest.MonkeyPatch
@@ -478,9 +532,37 @@ class TestDesktopChannelsPipe:
         try:
             client = await open_pipe(path, timeout=5)
             try:
-                await client.send_frame({"type": "auth", "token": "wrong"})
+                await self._handshake(client, token="wrong")
             except PipeClosedError:
                 pass  # 服务端已断开（写缓冲竞态），读侧断言关闭即可
+            with pytest.raises(PipeClosedError):
+                await client.recv_frame(timeout=3)
+            await client.close()
+            assert kernel.connections == []
+        finally:
+            pair.feed_eof()
+            await channels.stop()
+            await pair.close()
+        gc.collect()
+
+    @pytest.mark.asyncio
+    async def test_pipe_legacy_direct_token_frame_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """旧版「首帧直接带 token」不再接受（抢占者可白捡令牌）——auth-hello 前置。"""
+        path = _pipe_path("legacy-token")
+        _feed_secrets(monkeypatch, path)
+        monkeypatch.setattr(sys, "executable", _real_process_image())
+        kernel = _FakeKernel()
+        channels, pair = await _make_channels(kernel)
+        await channels.start()
+        assert channels.pipe_server is not None
+        try:
+            client = await open_pipe(path, timeout=5)
+            try:
+                await client.send_frame({"type": "auth", "token": _TEST_TOKEN})
+            except PipeClosedError:
+                pass
             with pytest.raises(PipeClosedError):
                 await client.recv_frame(timeout=3)
             await client.close()
@@ -504,8 +586,8 @@ class TestDesktopChannelsPipe:
         assert channels.pipe_server is not None
         client = await open_pipe(path, timeout=5)
         try:
-            # auth 首帧 → connection.ack（与 WS 形态一致的首事件）
-            await client.send_frame({"type": "auth", "token": _TEST_TOKEN})
+            # auth-hello/proof 握手 + auth 首帧 → connection.ack（与 WS 形态一致的首事件）
+            await self._handshake(client)
             ack = await client.recv_frame(timeout=5)
             assert ack == build_connection_ack_frame()
             # echo roundtrip
@@ -577,14 +659,27 @@ class _FakeAgentPipeServer:
     async def _handle(self, stream: Any) -> None:
         from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire
         from jiuwenswarm.common.schema.agent import AgentResponse
+        from jiuwenswarm.server.e2a_transports import (
+            build_auth_proof_frame,
+            extract_auth_hello_challenge,
+        )
 
         self.connections += 1
         try:
             first = await stream.recv_frame(timeout=5)
         except Exception:
             return
-        self.auth_frames.append(first)
-        if not verify_auth_frame(first, self.token):
+        # 新协议：auth-hello → proof 应答 → auth 首帧（2026-10-17 抢占防护）
+        challenge = extract_auth_hello_challenge(first)
+        if challenge is None:
+            return
+        await stream.send_frame(build_auth_proof_frame(self.token, challenge))
+        try:
+            second = await stream.recv_frame(timeout=5)
+        except Exception:
+            return
+        self.auth_frames.append(second)
+        if not verify_auth_frame(second, self.token):
             return
         await stream.send_frame(build_connection_ack_frame())
         while True:

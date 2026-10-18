@@ -347,28 +347,123 @@ class PipeStream:
 # ---------------------------------------------------------------------------
 
 
-def open_pipe_sync(path: str, *, timeout: float = 10.0) -> "PipeStreamSync":
+# ---------------------------------------------------------------------------
+# 出站连接的「服务端身份校验」（跨 SID 管道预创建抢占防护，2026-10-17）
+#
+# 背景（问题附件《SID管道漏洞分析报告》）：管道名在 \Device\NamedPipe 下全局
+# 可枚举、不构成秘密；异 SID 攻击者可抢先以 nMaxInstances=1 创建同名管道实例
+# （squatting），此后客户端 CreateFile 只会命中攻击者实例，首帧即把
+# 提示词/e2aToken/proxyKey 明文发给它，攻击者再回注伪造响应。SDDL 只保护
+# 产品自己创建的实例，管不到「客户端连错实例」这个方向；proxyKey 等令牌是
+# 客户端→服务端的单向鉴权，同样挡不住。
+#
+# 防线：CreateFile 成功后、发送任何字节之前，GetNamedPipeServerProcessId 取
+# 服务端 PID → 进程镜像路径白名单比对（复用服务端同款 make_image_verifier
+# 能力）。校验失败即断管并有限重试（多实例管道 Windows 按序轮转派发实例，
+# 同机多用户会话各有合法实例时重试可轮到自己的实例）；超过上限 fail-closed
+# 抛错——绝不把任何请求字节发给身份不明的服务端。
+# ---------------------------------------------------------------------------
+
+# 校验失败的换实例重试上限（多会话轮转兼容 + 抢占场景 fail-closed）
+_SERVER_VERIFY_MAX_ATTEMPTS = 5
+
+# 默认白名单的惰性缓存（None=未解析；解析结果经 make_image_verifier 固化）
+_default_server_verifier: Callable[[int], bool] | None = None
+# 显式配置（configure_pipe_server_images 注入）；未配置时按密钥包 desktopExe 惰性求值
+_configured_server_images: frozenset[str] | None = None
+
+
+def get_pipe_server_pid(handle: int) -> int:
+    """取命名管道服务端进程 PID；查询失败返回 -1（调用方按校验失败处理）。"""
+    if sys.platform != "win32":
+        return -1
+    try:
+        return int(win32pipe.GetNamedPipeServerProcessId(handle))
+    except (pywintypes.error, ValueError, OverflowError):
+        return -1
+
+
+def configure_pipe_server_images(image_paths: Collection[str] | None) -> None:
+    """显式配置出站管道连接的服务端镜像白名单（进程级；测试与特殊通道用）。
+
+    - None：恢复默认（按密钥包 desktopExe 惰性求值；无密钥包则不校验）；
+    - 空集：显式关闭校验（仅限确知安全的测试场景）；
+    - 非空：所有未显式指定 server_images 的 open_pipe/open_pipe_sync 用之。
+    """
+    global _configured_server_images, _default_server_verifier
+    _configured_server_images = None if image_paths is None else frozenset(image_paths)
+    _default_server_verifier = None
+
+
+def _resolve_server_verifier(
+    server_images: Collection[str] | None,
+) -> Callable[[int], bool] | None:
+    """解析本次连接的服务端校验器。返回 None = 不校验（非桌面形态兼容行为）。"""
+    global _default_server_verifier
+    if server_images is not None:
+        if not server_images:
+            return None
+        return make_image_verifier(server_images)
+    if _configured_server_images is not None:
+        if not _configured_server_images:
+            return None
+        return make_image_verifier(_configured_server_images)
+    if _default_server_verifier is not None:
+        return _default_server_verifier
+    # 默认：密钥包 desktopExe（桌面主进程——模型/上传/计费/技能/中转等
+    # 代理管道的唯一合法服务端）。惰性 import 防与 secrets_bootstrap 循环依赖。
+    try:
+        from jiuwenswarm.common.secrets_bootstrap import get_secret
+
+        desktop_exe = str(get_secret("desktopExe", "") or "").strip()
+    except Exception:  # noqa: BLE001 - 密钥包缺失等异常一律按「不校验」兼容旧形态
+        return None
+    if not desktop_exe:
+        return None
+    _default_server_verifier = make_image_verifier({desktop_exe})
+    return _default_server_verifier
+
+
+def open_pipe_sync(
+    path: str, *, timeout: float = 10.0, server_images: Collection[str] | None = None
+) -> "PipeStreamSync":
     """连接命名管道（同步形态，供 httpx 同步 transport / 非异步调用点使用）。
 
     同步形态按「写请求→读响应」严格串行使用，无需 overlapped。
+    server_images：服务端进程镜像白名单（None=默认按密钥包 desktopExe）；
+    校验失败换实例重试，超限 fail-closed。
     """
-    handle = _connect_handle(path, timeout=timeout, overlapped=False)
+    handle = _connect_handle(path, timeout=timeout, overlapped=False, server_images=server_images)
     return PipeStreamSync(handle)
 
 
-async def open_pipe(path: str, *, timeout: float = 10.0) -> PipeStream:
+async def open_pipe(
+    path: str, *, timeout: float = 10.0, server_images: Collection[str] | None = None
+) -> PipeStream:
     """连接命名管道（异步形态，FILE_FLAG_OVERLAPPED——全双工并发读写的前提）。
-    服务端未起/实例忙时重试至 timeout。"""
-    handle = await asyncio.to_thread(_connect_handle, path, timeout=timeout, overlapped=True)
+    服务端未起/实例忙时重试至 timeout。
+    server_images：服务端进程镜像白名单（None=默认按密钥包 desktopExe）。"""
+    handle = await asyncio.to_thread(
+        _connect_handle, path, timeout=timeout, overlapped=True, server_images=server_images
+    )
     return PipeStream(handle)
 
 
-def _connect_handle(path: str, *, timeout: float, overlapped: bool) -> int:
+def _connect_handle(
+    path: str,
+    *,
+    timeout: float,
+    overlapped: bool,
+    server_images: Collection[str] | None = None,
+) -> int:
+    verifier = _resolve_server_verifier(server_images)
     deadline = time.monotonic() + timeout
     flags = win32file.FILE_FLAG_OVERLAPPED if overlapped else 0
+    verify_failures = 0
     while True:
+        handle: int | None = None
         try:
-            return win32file.CreateFile(
+            handle = win32file.CreateFile(
                 path,
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                 0,
@@ -389,6 +484,23 @@ def _connect_handle(path: str, *, timeout: float, overlapped: bool) -> int:
             if time.monotonic() >= deadline:
                 raise PipeTimeoutError(f"连接命名管道超时（{timeout}s）：{path}") from exc
             time.sleep(0.05)
+            continue
+        if verifier is None:
+            return handle
+        # 服务端身份校验（防跨 SID 预创建抢占）：失败换实例重试，超限 fail-closed
+        pid = get_pipe_server_pid(handle)
+        if pid >= 0 and verifier(pid):
+            return handle
+        _close_handle_silently(handle)
+        verify_failures += 1
+        if verify_failures >= _SERVER_VERIFY_MAX_ATTEMPTS:
+            raise PipeError(
+                f"管道服务端身份校验连续失败（{path}，{_SERVER_VERIFY_MAX_ATTEMPTS} 次），"
+                "疑似管道被抢占，已拒绝连接（未发送任何数据）"
+            )
+        if time.monotonic() >= deadline:
+            raise PipeTimeoutError(f"连接命名管道超时（{timeout}s）：{path}")
+        time.sleep(0.05)
 
 
 class PipeStreamSync:

@@ -97,12 +97,38 @@ async def test_cloud_unavailable_respects_total_fail_closed_switch(fail_closed, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('decision,expected', [('allow', PermissionLevel.ALLOW), ('deny', PermissionLevel.DENY),
+    ('clarify', PermissionLevel.ALLOW), ('unavailable', PermissionLevel.ASK)])
+async def test_decide_authoritative_always_waits_for_cloud(decision, expected):
+    """安装审核权威口径：不看本地裁决，一律 authorize 同步等云端；unavailable 默认转 ASK。"""
+    b, events = bridge(decision=decision)
+    event = raw_event(context(), 'skill.before_install')
+    for _ in range(2):
+        result = await b.decide_authoritative(event)
+        assert result.permission == expected
+    assert len(events) == 1
+    assert events[0]['mode'] == 'authorize'
+    await b.close()
+
+
+@pytest.mark.asyncio
 async def test_skill_install_stays_ask_when_cloud_unavailable():
     b, _ = bridge(decision='unavailable')
     result = await b.decide(
         raw_event(context(), 'skill.before_install'), PermissionResult(PermissionLevel.UNDETERMINED),
     )
     assert result.permission == PermissionLevel.ASK
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_decide_authoritative_unavailable_fail_open_allows():
+    """skill_install_fail_open: true 时云端不可用静默放行（缺省 false 转用户确认）。"""
+    b, events = bridge(decision='unavailable')
+    b.config['xiaoyi_work_security']['cloud_authorization']['skill_install_fail_open'] = True
+    result = await b.decide_authoritative(raw_event(context(), 'skill.before_install'))
+    assert result.permission == PermissionLevel.ALLOW
+    assert events[0]['mode'] == 'authorize'
     await b.close()
 
 
@@ -132,6 +158,57 @@ async def test_policy_revision_changes_event_identity_and_discards_old_reply():
     assert (await pending).permission == PermissionLevel.DENY
     assert not b.decisions
     await b.close()
+
+
+@pytest.mark.asyncio
+async def test_install_gate_cloud_deny_blocks_despite_local_allow(tmp_path):
+    """云端权威化回归：发起工具本地已 ALLOW 时，云端 REJECT 仍阻断安装（此前只 report 无人消费）。"""
+    b, events = bridge(decision='deny')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    ctx.extra['behavior.local_permission'] = PermissionResult(PermissionLevel.ALLOW)
+    staged = tmp_path / 'staged'
+    staged.mkdir()
+    (staged / 'SKILL.md').write_text('skill content')
+    dest = tmp_path / 'installed'
+    dest.mkdir()
+    old = dest / 'SKILL.md'
+    old.write_text('original')
+    await rail.before_tool_call(ctx)
+    with pytest.raises(PermissionError, match='云端拒绝了本次安装'):
+        await check_agent_skill_install(staged, dest, 'example', 'download')
+    assert old.read_text() == 'original'
+    assert events[0]['stage'] == 'skill.before_install'
+    assert events[0]['mode'] == 'authorize'
+    await rail.after_tool_call(ctx)
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_install_gate_download_url_passthrough(tmp_path):
+    """来源下载地址透传进事件 skill.downloadUrl（云端回拉全量包审核）；缺省不出现该键。"""
+    b, events = bridge(decision='allow')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    staged = tmp_path / 'staged'
+    staged.mkdir()
+    (staged / 'SKILL.md').write_text('skill content')
+    dest = tmp_path / 'installed'
+    await rail.before_tool_call(ctx)
+    await check_agent_skill_install(staged, dest, 'example', 'clawhub',
+                                    download_url='https://clawhub.ai/api/v1/download?slug=example')
+    assert events[0]['skill']['downloadUrl'] == 'https://clawhub.ai/api/v1/download?slug=example'
+    await rail.after_tool_call(ctx)
+    await b.close()
+
+    b2, events2 = bridge(decision='allow')
+    rail2 = BehaviorSecurityRail(b2)
+    ctx2 = context()
+    await rail2.before_tool_call(ctx2)
+    await check_agent_skill_install(staged, dest, 'example', 'builtin')
+    assert 'downloadUrl' not in events2[0]['skill']
+    await rail2.after_tool_call(ctx2)
+    await b2.close()
 
 
 @pytest.mark.parametrize('enabled,expected', [

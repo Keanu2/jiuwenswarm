@@ -22,7 +22,7 @@ import zipfile
 from datetime import datetime, date, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Awaitable, Callable
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 import yaml
 import urllib3
 import httpx
@@ -138,7 +138,6 @@ from jiuwenswarm.server.runtime.skill.skilldev.state_utils import (
     get_skill_enabled,
     get_state_file,
     list_disabled_skills,
-    list_execution_disabled_skills,
     normalize_local_skills,
     normalize_skill_configs,
     remove_skill_config,
@@ -1549,7 +1548,10 @@ class SkillManager:
                         }
 
                     from jiuwenswarm.common.behavior_security import check_agent_skill_install
-                    await check_agent_skill_install(skill_dir, dest, slug, "clawhub")
+                    # 下载地址（含 slug/version 等 query，不含 token）透传给云端回拉全量审核
+                    await check_agent_skill_install(
+                        skill_dir, dest, slug, "clawhub",
+                        download_url=f"{download_url}?{urlencode(download_params)}")
 
                     # 删除已存在的
                     if dest.exists():
@@ -1988,7 +1990,7 @@ class SkillManager:
                 install_root.mkdir(parents=True, exist_ok=True)
                 dest = install_root / skill_name
                 from jiuwenswarm.common.behavior_security import check_agent_skill_install
-                await check_agent_skill_install(skill_dir, dest, skill_name, "teamskillshub")
+                await check_agent_skill_install(skill_dir, dest, skill_name, "teamskillshub", download_url=download_url)
                 if dest.exists():
                     if not force:
                         return {"success": False, "detail": f"技能 {skill_name} 已安装"}
@@ -2267,7 +2269,7 @@ class SkillManager:
                     return {"ok": False, "detail": str(exc)}
                 dest = _safe_child_path(self._skills_dir, skill_name, "skill")
                 from jiuwenswarm.common.behavior_security import check_agent_skill_install_sync
-                check_agent_skill_install_sync(skill_dir, dest, skill_name, "skillnet")
+                check_agent_skill_install_sync(skill_dir, dest, skill_name, "skillnet", download_url=skill_url)
                 if dest.exists():
                     if not force:
                         return {
@@ -4384,22 +4386,70 @@ class SkillManager:
         payload["enabled"] = enabled
         payload["config"] = {"enabled": enabled}
 
+    def _canonical_skill_config_key(self, skill_name: str) -> str:
+        """返回 skill_configs 的规范化键：技能目录名。
+
+        执行面（SkillUseRail 过滤 / list_skill 可见名单 / 技能检索）一律按技能
+        目录名比对 disabled 名单，而管理面（skills.list/get/toggle）按 SKILL.md
+        frontmatter 的 name 寻址——两者不一致时（如索引型技能：目录
+        xiaoyi-health-win、frontmatter 名 xiaoyi-health-cli-index），以
+        frontmatter 名写入的禁用配置在执行面永远匹配不上。统一以目录名为键
+        与执行面对齐；目录解析不到（未安装/已卸载）时退化为原名。
+        """
+        if not skill_name:
+            return skill_name
+        skill_dir = self._resolve_local_skill_dir(skill_name)
+        return skill_dir.name if skill_dir is not None else skill_name
+
     def get_skill_enabled(self, skill_name: str) -> bool:
+        canonical = self._canonical_skill_config_key(skill_name)
+        if canonical != skill_name:
+            configs = self._state.get("skill_configs")
+            if isinstance(configs, dict) and canonical in configs:
+                return get_skill_enabled(self._state, canonical)
+            # 目录名键缺失时回退原名键，兼容存量以 frontmatter 名写入的配置
+            return get_skill_enabled(self._state, skill_name)
         return get_skill_enabled(self._state, skill_name)
 
     def set_skill_enabled(self, skill_name: str, enabled: bool) -> None:
-        set_skill_enabled(self._state, skill_name, enabled)
+        canonical = self._canonical_skill_config_key(skill_name)
+        set_skill_enabled(self._state, canonical, enabled)
+        if canonical != skill_name:
+            # 清掉同技能的旧 frontmatter 名键，避免新旧两键并存漂移
+            remove_skill_config(self._state, skill_name)
         self._save_state()
 
     def remove_skill_config(self, skill_name: str) -> None:
-        if remove_skill_config(self._state, skill_name):
+        canonical = self._canonical_skill_config_key(skill_name)
+        removed = remove_skill_config(self._state, canonical)
+        if canonical != skill_name:
+            removed = remove_skill_config(self._state, skill_name) or removed
+        if removed:
             self._save_state()
 
     def list_disabled_skills(self) -> list[str]:
         return list_disabled_skills(self._state)
 
     def list_execution_disabled_skills(self) -> list[str]:
-        return list_execution_disabled_skills(self._state)
+        """执行面禁用名单：可解析的键统一归一到技能目录名。
+
+        目录现存即视为存活（本地技能登记的是 frontmatter 名，目录名键按
+        注册表判存活会被误丢）；目录解析不到时退回注册表门禁（兼容
+        marketplace 等目录不在 skills 根下的形态）。存量 frontmatter 名键
+        在此一并归一为目录名，执行面即时生效，不必等下一次 toggle。
+        """
+        disabled = list_disabled_skills(self._state)
+        if not disabled:
+            return []
+        registered = get_registered_skill_names(self._state)
+        result: set[str] = set()
+        for name in disabled:
+            skill_dir = self._resolve_local_skill_dir(name)
+            if skill_dir is not None:
+                result.add(skill_dir.name)
+            elif name in registered:
+                result.add(name)
+        return sorted(result)
 
     def get_skill_meta(self, skill_name: str) -> dict[str, Any] | None:
         """返回本地 skill 的解析元数据，附带目录与 skill 文件路径。"""

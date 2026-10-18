@@ -974,6 +974,9 @@ xiaoyi_work_security:
   cloud_authorization:
     enabled: true
     timeout_ms: 4000
+    # 技能安装强制云端权威裁决（不看本地裁决，REJECT 真阻断）；云端不可用时
+    # false=转用户确认（复用安装确认打断点），true=静默放行
+    skill_install_fail_open: false
 
 permissions:
   enabled: true

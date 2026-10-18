@@ -242,6 +242,38 @@ class BehaviorSecurityBridge:
             self.decisions.popitem(last=False)
         return result
 
+    async def decide_authoritative(self, event: dict) -> PermissionResult:
+        """Cloud-authoritative decision: the local verdict is deliberately NOT consulted.
+
+        Skill installation is a low-frequency, high-risk action: when cloud
+        authorization is enabled, a cloud REJECT must block the install even when
+        the initiating tool call was locally allowed or confirmed by the user
+        (decide() would otherwise degrade the cloud verdict to a report nobody
+        consumes). Used by check_agent_skill_install.
+        """
+        key = event["eventId"]
+        if key in self.decisions:
+            return self.decisions[key]
+        reply = await self._send({**event, "mode": "authorize"})
+        decision = reply.get("decision")
+        if decision in {"allow", "clarify"}:
+            # Same compatibility as decide(): older desktops may return "clarify".
+            result = PermissionResult(PermissionLevel.ALLOW, reason="cloud:" + decision)
+        elif decision == "deny":
+            result = PermissionResult(PermissionLevel.DENY, reason=str(reply.get("reason") or "云端拒绝了本次安装"))
+        else:
+            # 云端不可用：默认转用户确认（复用闸口的 ASK 打断点），
+            # skill_install_fail_open: true 时才静默放行
+            section = self.config.get("xiaoyi_work_security", {}).get("cloud_authorization", {})
+            if bool(section.get("skill_install_fail_open", False)):
+                result = PermissionResult(PermissionLevel.ALLOW, reason="cloud:unavailable-fail-open")
+            else:
+                result = PermissionResult(PermissionLevel.ASK, reason="云端不可用，请确认是否安装")
+        self.decisions[key] = result
+        if len(self.decisions) > 512:
+            self.decisions.popitem(last=False)
+        return result
+
     async def on_permission_evaluated(self, request):
         ctx = request.ctx
         ctx.extra["behavior.local_permission"] = request.result
@@ -262,8 +294,14 @@ def skill_confirmation_pending(ctx: Any) -> bool:
     return bool(ctx.session and ctx.session.get_state(PENDING_SKILL + ":" + _event_id(ctx, "tool.before")))
 
 
-async def check_agent_skill_install(staged: Path, destination: Path, name: str, source: str) -> None:
-    """Barrier immediately before mutation. Non-Agent installation is outside this phase."""
+async def check_agent_skill_install(staged: Path, destination: Path, name: str, source: str,
+                                    download_url: str | None = None) -> None:
+    """Barrier immediately before mutation. Non-Agent installation is outside this phase.
+
+    download_url：来源市场的包下载地址（clawhub/teamskillshub/skillnet），透传进事件
+    skill.downloadUrl——桌面端存在时覆盖送审 file.url，云端可回拉全量包审核（不止
+    hash+SKILL.md 文本）；无地址来源（builtin）保持缺省，走 hash+SKILL.md 降级形态。
+    """
     active = ACTIVE_BEHAVIOR.get()
     if active is None:
         return
@@ -284,6 +322,8 @@ async def check_agent_skill_install(staged: Path, destination: Path, name: str, 
     snapshot = await asyncio.to_thread(fingerprint)
     event = raw_event(ctx, "skill.before_install", f"{destination}:{snapshot}")
     event["skill"] = {"name": name, "source": source, "stagedPath": str(staged), "destination": str(destination)}
+    if download_url:
+        event["skill"]["downloadUrl"] = download_url
     context = SkillInstallContext(event["eventId"], name, source, staged, destination)
     state_key = PENDING_SKILL + ":" + _event_id(ctx, "tool.before")
     pending = ctx.session.get_state(state_key) if ctx.session else None
@@ -300,6 +340,11 @@ async def check_agent_skill_install(staged: Path, destination: Path, name: str, 
             raise PermissionError("用户拒绝安装技能")
 
     async def evaluate(_context):
+        # 技能安装是低频高危动作：云端启用时不看本地裁决，一律权威送审——
+        # 否则发起工具本地已裁决（ALLOW / 用户确认后 ASK→ALLOW）时云端 REJECT
+        # 只落得一条 report，无人消费（decide() 本地优先遮蔽）。
+        if cloud_authorization_enabled(bridge.config):
+            return await bridge.decide_authoritative(event)
         local = ctx.extra.get("behavior.local_permission")
         if local is None:
             local = PermissionResult(PermissionLevel.UNDETERMINED)
@@ -324,11 +369,13 @@ async def check_agent_skill_install(staged: Path, destination: Path, name: str, 
     raise PermissionError(result.reason or "技能安装未获授权")
 
 
-def check_agent_skill_install_sync(staged: Path, destination: Path, name: str, source: str) -> None:
+def check_agent_skill_install_sync(staged: Path, destination: Path, name: str, source: str,
+                                   download_url: str | None = None) -> None:
     """Worker-thread adapter; contextvars are propagated by asyncio.to_thread."""
     active = ACTIVE_BEHAVIOR.get()
     if active is not None:
-        future = asyncio.run_coroutine_threadsafe(check_agent_skill_install(staged, destination, name, source), active[2])
+        future = asyncio.run_coroutine_threadsafe(
+            check_agent_skill_install(staged, destination, name, source, download_url), active[2])
         try:
             future.result(timeout=35)
         except BaseException:
