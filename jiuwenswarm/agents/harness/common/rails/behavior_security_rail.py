@@ -13,6 +13,7 @@ from jiuwenswarm.common.behavior_security import (
     ACTIVE_BEHAVIOR,
     SECURITY_NOTICE_TOOL,
     _event_id,
+    _risk_category,
     raw_event,
     tool_output_clarify_suffix,
     tool_output_reject_instruction,
@@ -94,9 +95,10 @@ class BehaviorSecurityRail(DeepAgentRail):
                 # 三态 UI（2026-10-18）：输出屏蔽 + 指令模板（原输出不进模型上下文/历史，
                 # 引导模型调 security_notice 补写横幅第二行并重新规划）；默认不再
                 # request_force_finish——轮次继续，模型重规划（tool_output_force_finish
-                # 可回退旧的强制收尾语义）
+                # 可回退旧的强制收尾语义）。指令只带风险类别、不带 remind 原文
+                #（防 answer 滑窗对宿主指令二次送审自我命中清屏）
                 instruction = tool_output_reject_instruction(
-                    tool_name, outcome.reason or "工具输出安全检测未通过", event["eventId"])
+                    tool_name, _risk_category(outcome.labels), event["eventId"])
                 ctx.inputs.tool_result = instruction
                 tool_msg = getattr(ctx.inputs, "tool_msg", None)
                 if tool_msg is not None and hasattr(tool_msg, "content"):
@@ -109,8 +111,7 @@ class BehaviorSecurityRail(DeepAgentRail):
             elif outcome.verdict == "clarify":
                 # 疑似风险：输出保留给模型（诉求明确），追加确认指令——
                 # 模型调 security_notice 补写横幅 + ask_user 确认后才可采用该结果
-                suffix = tool_output_clarify_suffix(
-                    outcome.reason or "内容疑似存在风险", event["eventId"])
+                suffix = tool_output_clarify_suffix(_risk_category(outcome.labels), event["eventId"])
                 base = ctx.inputs.tool_result
                 ctx.inputs.tool_result = (
                     base if isinstance(base, str)

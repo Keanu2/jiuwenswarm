@@ -176,7 +176,7 @@ async def test_install_gate_cloud_deny_blocks_despite_local_allow(tmp_path):
     old = dest / 'SKILL.md'
     old.write_text('original')
     await rail.before_tool_call(ctx)
-    with pytest.raises(PermissionError, match='云端拒绝了本次安装'):
+    with pytest.raises(PermissionError, match='已拒绝安装'):
         await check_agent_skill_install(staged, dest, 'example', 'download')
     assert old.read_text() == 'original'
     assert events[0]['stage'] == 'skill.before_install'
@@ -445,6 +445,23 @@ async def test_decide_deny_reason_carries_security_notice_instruction():
 
 
 @pytest.mark.asyncio
+async def test_deny_instruction_carries_labels_not_raw_remind():
+    """防自我命中回归（2026-10-18 二次迭代）：指令带风险类别 labels，
+    绝不带 remind 原文（劣质 remind 含命中特征，进入模型上下文会被滑窗二次 REJECT 清屏）。"""
+    b, _ = bridge()
+    b._send = AsyncMock(return_value={
+        'decision': 'deny', 'reason': 'qc: 命中恶意特征[tcpclient]', 'labels': ['恶意代码'],
+    })
+    event = raw_event(context(), 'tool.before')
+    result = await b.decide(event, PermissionResult(PermissionLevel.UNDETERMINED))
+    assert result.permission == PermissionLevel.DENY
+    assert '恶意代码' in result.reason
+    assert 'tcpclient' not in result.reason
+    assert '命中恶意特征' not in result.reason
+    await b.close()
+
+
+@pytest.mark.asyncio
 async def test_decide_clarify_asks_with_remind():
     """toolInput clarify → ASK（转用户审批卡），reason 带云端 remind。"""
     b, _ = bridge()
@@ -457,16 +474,20 @@ async def test_decide_clarify_asks_with_remind():
 
 @pytest.mark.asyncio
 async def test_decide_authoritative_deny_carries_skill_install_instruction():
-    """skill 安装 deny：reason=安装拒绝指令模板（含技能名/remind/notice_id）。"""
+    """skill 安装 deny：reason=安装拒绝指令模板（含技能名/风险类别 labels/notice_id，
+    不带 remind 原文）。"""
     b, _ = bridge()
-    b._send = AsyncMock(return_value={'decision': 'deny', 'reason': '发现恶意行为'})
+    b._send = AsyncMock(return_value={
+        'decision': 'deny', 'reason': '发现恶意行为[tcpclient]', 'labels': ['恶意软件'],
+    })
     event = raw_event(context(), 'skill.before_install')
     event['skill'] = {'name': 'evil-skill', 'source': 'local-import', 'stagedPath': '/tmp/x', 'destination': '/tmp/y'}
     result = await b.decide_authoritative(event)
     assert result.permission == PermissionLevel.DENY
     assert result.reason.startswith('[安全风控]')
     assert 'evil-skill' in result.reason
-    assert '发现恶意行为' in result.reason
+    assert '恶意软件' in result.reason
+    assert 'tcpclient' not in result.reason
     assert event['eventId'] in result.reason
     await b.close()
 
