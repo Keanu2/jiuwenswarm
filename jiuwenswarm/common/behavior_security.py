@@ -22,6 +22,9 @@ from jiuwenswarm.common.utils import logger
 
 ACTIVE_BEHAVIOR: contextvars.ContextVar[tuple | None] = contextvars.ContextVar("active_behavior", default=None)
 PENDING_SKILL = "behavior_security.pending_skill"
+# toolOutput CLARIFY 待确认标记（session state）：key = f"{PENDING_OUTPUT}:{tool_call_id}"，
+# value = 行为事件 eventId；resume 时凭用户答复从 bridge.output_stash 取回/屏蔽输出
+PENDING_OUTPUT = "behavior_security.pending_output"
 _OUTPUT_CHUNK_CHARS = 5500
 _OUTPUT_CHUNK_OVERLAP = 256
 _MAX_OUTPUT_INSPECTION_CHARS = 64 * 1024
@@ -77,14 +80,42 @@ def tool_output_reject_instruction(tool_name: str, category: str, notice_id: str
     )
 
 
-def tool_output_clarify_suffix(category: str, notice_id: str) -> str:
+def tool_output_clarify_confirm_message(tool_name: str, category: str) -> str:
+    """toolOutput CLARIFY 用户确认卡话术（用户可见；只带类别不带 remind 原文）。
+
+    末尾 call_goal 行供宿主审批卡提取标题（approval extractCallGoal 契约），
+    让标题读作「确认是否采纳疑似风险输出」而非工具命令本身。
+    """
     return (
-        "\n\n[安全风控] 上述工具输出经安全审核为疑似风险。\n"
-        f"风险类别：{category}（审核详情已通过界面安全提示直接展示给用户，你看不到也无需追问）。\n"
-        f"请调用 security_notice 工具向用户补写安全提示（notice_id=\"{notice_id}\"，message 简述疑点，"
-        "要求同上），并调用 ask_user 向用户确认是否采纳该结果。用户确认前不要在回答中转述其具体内容；"
-        "用户拒绝则放弃该结果并重新规划。"
+        f"安全确认：工具 {tool_name} 的输出经安全审核为疑似风险（{category}）。\n"
+        "采纳该结果将继续基于它完成任务；拒绝则屏蔽该结果并重新规划。\n"
+        'call_goal: "确认是否采纳该疑似风险输出"'
     )
+
+
+def tool_output_clarify_approved_note() -> str:
+    """用户确认采纳后拼回工具输出的尾注（模型可见，解释刚才的确认停顿）。"""
+    return "\n\n[安全风控] 该输出经安全审核为疑似风险，已由用户确认采纳。"
+
+
+def tool_output_clarify_rejected_instruction(tool_name: str, category: str) -> str:
+    """用户拒绝采纳疑似风险输出后的模型可见指令（原输出不进上下文）。"""
+    return (
+        f"[安全风控] 工具 {tool_name} 的输出经安全审核为疑似风险（{category}），"
+        "用户已拒绝采纳，内容已被屏蔽（不会提供给你）。\n"
+        "请向用户说明情况并基于已有信息重新规划方案。不要重试该工具，"
+        "也不要尝试以其他方式获取同内容。"
+    )
+
+
+class OutputStashEntry(NamedTuple):
+    """toolOutput CLARIFY 暂存：待用户确认的工具输出（确认前不进模型上下文）。"""
+
+    tool_call_id: str
+    tool_name: str
+    category: str
+    tool_result: Any
+    tool_msg: Any
 
 
 class OutputInspection(NamedTuple):
@@ -164,6 +195,17 @@ class BehaviorSecurityBridge:
         self.tasks: set[asyncio.Task] = set()
         self.decisions: OrderedDict[str, PermissionResult] = OrderedDict()
         self.local_decisions: OrderedDict[str, PermissionResult] = OrderedDict()
+        # toolOutput CLARIFY 暂存（eventId → 输出快照）：用户确认前输出不进模型上下文，
+        # resume 批准后原样拼回（工具不重执行）；拒绝则替换为屏蔽指令
+        self.output_stash: OrderedDict[str, OutputStashEntry] = OrderedDict()
+
+    def stash_output(self, event_id: str, entry: OutputStashEntry) -> None:
+        self.output_stash[event_id] = entry
+        if len(self.output_stash) > 128:
+            self.output_stash.popitem(last=False)
+
+    def pop_output_stash(self, event_id: str) -> OutputStashEntry | None:
+        return self.output_stash.pop(event_id, None)
 
     def policy_revision(self) -> str:
         permissions = self.config.get("permissions", {})
@@ -243,7 +285,8 @@ class BehaviorSecurityBridge:
         """Synchronously decide whether a tool result may be exposed to the model.
 
         deny：只有明确云端 REJECT 屏蔽整个输出（工具结果替换为屏蔽指令）；
-        clarify：输出放行但附带用户确认指令（三态 UI 2026-10-18）；
+        clarify：输出暂存待用户确认卡定夺（三态 UI 2026-10-18 二次迭代：
+        确定性确认卡替代模型自觉 ask_user，批准原样拼回、拒绝屏蔽）；
         超时/传输错误/未确认结论/超大载荷 fail-open 放行原样。
         """
         events = self._output_inspection_events(event)
