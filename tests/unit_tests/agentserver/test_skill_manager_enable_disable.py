@@ -258,3 +258,98 @@ def test_uninstall_clears_disabled_config_so_reinstall_starts_enabled(monkeypatc
     # No residual config → a freshly reinstalled skill of the same name defaults to enabled.
     assert "demo-skill" not in manager.list_disabled_skills()
     assert manager.get_skill_enabled("demo-skill") is True
+
+
+def _make_index_skill_dir(skills_dir, dir_name, frontmatter_name):
+    """Create a skill whose SKILL.md frontmatter name differs from its dir name."""
+    body = f"---\nname: {frontmatter_name}\ndescription: index skill\n---\n\n# index\n"
+    return _make_skill_dir(skills_dir, dir_name, body)
+
+
+def test_toggle_mismatched_frontmatter_name_writes_dir_name_key(monkeypatch, tmp_path):
+    """frontmatter 名 ≠ 目录名的技能：禁用必须以目录名为键，执行面过滤才能命中。"""
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir(parents=True, exist_ok=True)
+    _make_index_skill_dir(skills_dir, "health-win", "health-cli-index")
+
+    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
+    manager.set_skill_enabled("health-cli-index", False)
+
+    state = json.loads((skills_dir / "skills_state.json").read_text(encoding="utf-8"))
+    assert state["skill_configs"] == {"health-win": {"enabled": False}}
+    # 执行面名单输出目录名 —— SkillUseRail 的 skill.name 即目录名，过滤得以命中
+    assert manager.list_execution_disabled_skills() == ["health-win"]
+    # 管理面按 frontmatter 名读到的也是禁用（UI 开关状态正确）
+    assert manager.get_skill_enabled("health-cli-index") is False
+    assert manager.get_skill_enabled("health-win") is False
+
+
+def test_legacy_frontmatter_key_effective_immediately_and_cleaned_on_write(monkeypatch, tmp_path):
+    """存量 frontmatter 名旧键：不重新 toggle 也应对执行面生效，且下次写入时被清理。"""
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir(parents=True, exist_ok=True)
+    _make_index_skill_dir(skills_dir, "health-win", "health-cli-index")
+
+    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
+    # 模拟旧版本写入的 frontmatter 名键（绕过修复后的 set_skill_enabled）
+    manager._state.setdefault("skill_configs", {})["health-cli-index"] = {"enabled": False}
+    manager._save_state()
+
+    # 读取回退旧键（UI 仍显示关闭）
+    assert manager.get_skill_enabled("health-cli-index") is False
+    # 执行面名单归一到目录名 —— 不重新 toggle 也立即生效
+    assert manager.list_execution_disabled_skills() == ["health-win"]
+
+    # 重新 toggle：写入目录名键并清掉旧键
+    manager.set_skill_enabled("health-cli-index", False)
+    state = json.loads((skills_dir / "skills_state.json").read_text(encoding="utf-8"))
+    assert state["skill_configs"] == {"health-win": {"enabled": False}}
+
+
+def test_remove_skill_config_clears_both_key_forms(monkeypatch, tmp_path):
+    """卸载清理需同时移除目录名键与 frontmatter 名旧键，重装后默认启用。"""
+    skills_dir = tmp_path / "skills"
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir(parents=True, exist_ok=True)
+    _make_index_skill_dir(skills_dir, "health-win", "health-cli-index")
+
+    manager = _init_manager_with_skills_dir(monkeypatch, skills_dir, builtin_dir)
+    manager._state.setdefault("skill_configs", {})["health-cli-index"] = {"enabled": False}
+    manager.set_skill_enabled("health-cli-index", True)  # 触发迁移：health-win 键 + 旧键清理
+    manager.set_skill_enabled("health-cli-index", False)
+
+    manager.remove_skill_config("health-cli-index")
+
+    assert "health-win" not in manager.list_disabled_skills()
+    assert "health-cli-index" not in manager.list_disabled_skills()
+    assert manager.get_skill_enabled("health-cli-index") is True
+
+
+def test_load_execution_disabled_skills_accepts_dir_name_key_for_local_skill(monkeypatch, tmp_path):
+    """本地技能只登记 frontmatter 名时，目录名配置键也不应被注册表门禁误丢。"""
+    from jiuwenswarm.server.runtime.skill.skilldev.state_utils import (
+        load_execution_disabled_skills,
+    )
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(parents=True)
+    _make_index_skill_dir(skills_dir, "health-win", "health-cli-index")
+    (skills_dir / "skills_state.json").write_text(
+        json.dumps(
+            {
+                "marketplaces": [],
+                "installed_plugins": [],
+                "local_skills": [{"name": "health-cli-index", "origin": "local", "source": "local"}],
+                "skill_configs": {"health-win": {"enabled": False}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skilldev.state_utils.get_agent_skills_dir",
+        lambda: skills_dir,
+    )
+
+    assert load_execution_disabled_skills() == ["health-win"]

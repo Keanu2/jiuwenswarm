@@ -133,9 +133,21 @@ def list_disabled_skills(state: dict[str, Any]) -> list[str]:
     return sorted(disabled)
 
 
-def list_execution_disabled_skills(state: dict[str, Any]) -> list[str]:
-    """Return disabled skill names that are currently installed."""
+def list_execution_disabled_skills(
+    state: dict[str, Any],
+    *,
+    extra_registered: set[str] | None = None,
+) -> list[str]:
+    """Return disabled skill names that are currently installed.
+
+    extra_registered: additional names treated as registered — used by
+    load_execution_disabled_skills to pass existing skill dir names, since
+    skill_configs is canonically keyed by directory name while local_skills
+    registers frontmatter names (they differ for index-style skills).
+    """
     registered = get_registered_skill_names(state)
+    if extra_registered:
+        registered = registered | extra_registered
     if not registered:
         return []
     return [
@@ -150,7 +162,13 @@ def load_execution_disabled_skills() -> list[str]:
         state_file = get_state_file()
         if state_file.exists():
             state = json.loads(state_file.read_text(encoding="utf-8"))
-            return list_execution_disabled_skills(state)
+            skills_dir = state_file.parent
+            existing_dirs = (
+                {p.name for p in skills_dir.iterdir() if p.is_dir()}
+                if skills_dir.is_dir()
+                else set()
+            )
+            return list_execution_disabled_skills(state, extra_registered=existing_dirs)
     except Exception as exc:
         logger.warning("[SkillState] Failed to load disabled skills: %s", exc)
     return []
