@@ -13,7 +13,7 @@ from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult
 from openjiuwen.harness.security import PermissionLevel, PermissionResult
 from jiuwenswarm.common.behavior_security import (
-    BehaviorSecurityBridge, check_agent_skill_install, cloud_authorization_enabled, raw_event,
+    PENDING_OUTPUT, BehaviorSecurityBridge, check_agent_skill_install, cloud_authorization_enabled, raw_event,
 )
 from jiuwenswarm.agents.harness.common.rails.behavior_security_rail import (
     BehaviorSecurityRail,
@@ -329,6 +329,18 @@ async def test_output_inspection_blocks_only_explicit_reject(decision, expected_
     ctx.inputs.tool_result = {'result': 'ok'}
     ctx.inputs.tool_msg = SimpleNamespace(content='原始输出内容')
     ctx.inputs.execution_started = True
+    if expected_kind == 'clarified':
+        # clarify（2026-10-18 二次迭代）：输出暂存 + 打断点弹确定性确认卡——
+        # 用户确认前输出不进模型上下文（替代旧的「放行+模型自觉 ask_user」后缀方案）
+        with pytest.raises(AbortError) as exc_info:
+            await rail.after_tool_call(ctx)
+        request = exc_info.value.cause.request
+        assert '疑似风险' in request.message
+        assert 'call-1' in str(exc_info.value.cause.tool_call.id)
+        assert ctx.session.get_state(f'{PENDING_OUTPUT}:call-1') == events[0]['eventId']
+        stashed = b.output_stash.get(events[0]['eventId'])
+        assert stashed is not None and stashed.tool_msg.content == '原始输出内容'
+        return
     await rail.after_tool_call(ctx)
     assert events[0]['mode'] == 'inspect'
     assert ctx.force_finish_requests == []
@@ -336,15 +348,58 @@ async def test_output_inspection_blocks_only_explicit_reject(decision, expected_
         assert ctx.inputs.tool_result.startswith('[安全风控]')
         assert '原始输出内容' not in ctx.inputs.tool_result
         assert ctx.inputs.tool_msg.content == ctx.inputs.tool_result
-    elif expected_kind == 'clarified':
-        # clarify：原输出保留给模型，追加 ask_user 确认指令后缀
-        assert '原始输出内容' in ctx.inputs.tool_msg.content
-        assert '[安全风控]' in ctx.inputs.tool_msg.content
-        assert 'ask_user' in ctx.inputs.tool_msg.content
-        assert events[0]['eventId'] in ctx.inputs.tool_msg.content
     else:
         assert ctx.inputs.tool_result == {'result': 'ok'}
         assert ctx.inputs.tool_msg.content == '原始输出内容'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('approved', [True, False])
+async def test_output_clarify_resume_restores_or_masks_without_rerun(approved):
+    """确认卡续跑：批准→暂存输出原样拼回（带采纳尾注）；拒绝→屏蔽指令。均 _skip_tool 不重执行。"""
+    b, events = bridge(decision='clarify')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = '机密输出原文'
+    ctx.inputs.tool_msg = SimpleNamespace(content='机密输出原文')
+    ctx.inputs.execution_started = True
+    with pytest.raises(AbortError):
+        await rail.after_tool_call(ctx)
+    event_id = events[0]['eventId']
+
+    resumed = context(ctx.session)
+    resumed.inputs.tool_name = 'bash'
+    resumed.extra[RESUME_USER_INPUT_KEY] = {'approved': approved, 'feedback': '' if approved else '别用这个'}
+    await rail.before_tool_call(resumed)
+    assert resumed.extra.get('_skip_tool') is True
+    assert ctx.session.get_state(f'{PENDING_OUTPUT}:call-1') is None
+    assert b.output_stash.get(event_id) is None
+    if approved:
+        assert '机密输出原文' in resumed.inputs.tool_result
+        assert '用户确认采纳' in resumed.inputs.tool_result
+        assert resumed.inputs.tool_msg.content == resumed.inputs.tool_result
+    else:
+        assert '机密输出原文' not in resumed.inputs.tool_result
+        assert resumed.inputs.tool_result.startswith('[安全风控]')
+        assert '别用这个' in resumed.inputs.tool_result
+        assert resumed.inputs.tool_msg.content == resumed.inputs.tool_result
+    # after_tool_call 对跳过的调用不再送审（execution_started=False）
+    await rail.after_tool_call(resumed)
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_output_clarify_stale_marker_without_user_input_falls_through():
+    """陈旧待确认标记（中断后未恢复直接新轮）：清掉标记，工具按正常流程走。"""
+    b, _ = bridge(decision='allow')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    ctx.session.update_state({f'{PENDING_OUTPUT}:call-1': 'stale-event'})
+    await rail.before_tool_call(ctx)
+    assert ctx.session.get_state(f'{PENDING_OUTPUT}:call-1') is None
+    assert '_skip_tool' not in ctx.extra
+    assert ctx.extra.get('behavior.context_token') is not None
 
 
 @pytest.mark.asyncio
