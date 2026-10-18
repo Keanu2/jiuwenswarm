@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 _AUTO_SOURCE = "auto"
 _DEFAULT_SOURCE = "skillnet"
 _SEARCHABLE_SOURCES = {"skillnet", "clawhub", "teamskillshub", "builtin"}
-_SUPPORTED_SOURCES = {"skillnet", "clawhub", "teamskillshub", "builtin"}
+# local（2026-10-18）：对话内安装本地 staged 目录（用户提供的 zip 解压后路径），
+# 经 check_agent_skill_install 云端权威闸口（三态横幅+确认卡）；仅作安装来源，不可搜索
+_SUPPORTED_SOURCES = {"skillnet", "clawhub", "teamskillshub", "builtin", "local"}
 # identifier 对模型是统一字段；这里根据其形态推断底层来源。
 _INSTALL_SOURCE_BY_TARGET: tuple[tuple[str, str], ...] = (
     (r"^https?://", "skillnet"),
@@ -508,7 +510,7 @@ class SkillToolkit:
                         "source is required; "
                         "must be one of: "
                         "'skillnet', 'clawhub', "
-                        "'teamskillshub', or 'builtin'"
+                        "'teamskillshub', 'builtin', or 'local'"
                     ),
                 }
             normalized_source = self._normalize_source(raw_source)
@@ -520,7 +522,7 @@ class SkillToolkit:
                     "detail": (
                         "source must be explicitly set "
                         "to 'skillnet', 'clawhub', "
-                        "'teamskillshub', or 'builtin'"
+                        "'teamskillshub', 'builtin', or 'local'"
                     ),
                 }
 
@@ -542,6 +544,12 @@ class SkillToolkit:
             elif resolved_source == "builtin":
                 payload = await self._manager.handle_skills_install_builtin(
                     {"name": target}
+                )
+            elif resolved_source == "local":
+                # 对话内本地安装（zip 解压后的 staged 目录）：identifier=目录绝对路径；
+                # 风控闸口（check_agent_skill_install）在 manager 内 staged→落盘前拦截
+                payload = await self._manager.handle_skills_install_local(
+                    {"path": target}
                 )
             else:
                 clawhub_slug = target

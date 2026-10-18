@@ -9,7 +9,7 @@ import json
 import os
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -25,6 +25,64 @@ PENDING_SKILL = "behavior_security.pending_skill"
 _OUTPUT_CHUNK_CHARS = 5500
 _OUTPUT_CHUNK_OVERLAP = 256
 _MAX_OUTPUT_INSPECTION_CHARS = 64 * 1024
+
+# 风控三态 UI（2026-10-18，设计 claw_desktop docs/risk-notice-ui-design-2026-10-18.md）：
+# 安全提示内置工具名——该工具不上报不送审（防递归），权限评估本地直接放行。
+SECURITY_NOTICE_TOOL = "security_notice"
+
+
+# ---------------------------------------------------------------------------
+# 三态 UI 指令模板：deny/clarify 时给模型的引导文案，经 agent-core
+# reject(tool_result=...) / tool_result 替换原样进入模型视野——横幅本体由桌面宿主
+# 在裁决当下直发（risk-notice 事件），此处只引导模型调 security_notice 补写
+# 第二行融合话术（notice_id=行为事件 eventId，与桌面登记簿同键）并完成后续动作。
+# ---------------------------------------------------------------------------
+
+def tool_input_reject_instruction(tool_name: str, remind: str, notice_id: str) -> str:
+    return (
+        f"[安全风控] 工具 {tool_name} 的输入未通过安全审核，本次调用已被拦截，工具未执行。\n"
+        f"审核意见：{remind}\n"
+        f"请调用 security_notice 工具向用户补写安全提示（notice_id=\"{notice_id}\"，message 用一句"
+        "自然语言向用户说明安全审计结果与建议；不要复述审核意见原文，不要带「安全审计结果：」前缀）；"
+        "然后用一段话向用户说明情况并调整后续计划。不要重试相同或相似的调用。"
+    )
+
+
+def skill_install_reject_instruction(name: str, remind: str, notice_id: str) -> str:
+    return (
+        f"[安全风控] 技能「{name}」未通过安全审核，已拒绝安装。\n"
+        f"审核意见：{remind}\n"
+        f"请调用 security_notice 工具向用户补写安全提示（notice_id=\"{notice_id}\"，message 要求同上）；"
+        "然后向用户说明情况。不要再尝试安装该技能或内容相同的技能包。"
+    )
+
+
+def tool_output_reject_instruction(tool_name: str, remind: str, notice_id: str) -> str:
+    return (
+        f"[安全风控] 工具 {tool_name} 的输出未通过安全审核，已被屏蔽（内容不会提供给你）。\n"
+        f"审核意见：{remind}\n"
+        f"请调用 security_notice 工具向用户补写安全提示（notice_id=\"{notice_id}\"，message 向用户"
+        "说明「该工具结果存在安全风险、已屏蔽」及你的应对，要求同上）；然后向用户说明情况并基于"
+        "已有信息重新规划方案。不要重试该工具，也不要尝试以其他方式获取同内容。"
+    )
+
+
+def tool_output_clarify_suffix(remind: str, notice_id: str) -> str:
+    return (
+        "\n\n[安全风控] 上述工具输出经安全审核为疑似风险。\n"
+        f"审核意见：{remind}\n"
+        f"请调用 security_notice 工具向用户补写安全提示（notice_id=\"{notice_id}\"，message 简述疑点，"
+        "要求同上），并调用 ask_user 向用户确认是否采纳该结果。用户确认前不要在回答中转述其具体内容；"
+        "用户拒绝则放弃该结果并重新规划。"
+    )
+
+
+class OutputInspection(NamedTuple):
+    """tool.after 送审结论（三态）：deny 屏蔽 / clarify 放行+确认指令 / allow 放行。"""
+
+    result: PermissionResult
+    verdict: str  # "deny" | "clarify" | "allow"
+    reason: str   # deny/clarify 时的云端 remind（指令模板用）
 
 
 def desktop_security_active() -> bool:
@@ -170,27 +228,36 @@ class BehaviorSecurityBridge:
             output.append(item)
         return output
 
-    async def inspect(self, event: dict) -> PermissionResult:
+    async def inspect(self, event: dict) -> OutputInspection:
         """Synchronously decide whether a tool result may be exposed to the model.
 
-        Only an explicit cloud REJECT blocks the whole output. Timeout, transport
-        errors, unconfirmed results and oversized payloads fail-open so the
-        original payload continues.
+        deny：只有明确云端 REJECT 屏蔽整个输出（工具结果替换为屏蔽指令）；
+        clarify：输出放行但附带用户确认指令（三态 UI 2026-10-18）；
+        超时/传输错误/未确认结论/超大载荷 fail-open 放行原样。
         """
         events = self._output_inspection_events(event)
         if events is None:
             logger.warning("[behavior-security] tool.after inspect skipped: output exceeds limit")
-            return PermissionResult(PermissionLevel.ALLOW, reason="cloud:allow")
+            return OutputInspection(PermissionResult(PermissionLevel.ALLOW, reason="cloud:allow"), "allow", "")
         replies = await asyncio.gather(*(
             self._send({**item, "mode": "inspect"}) for item in events
         ))
+        clarified = False
+        clarify_reason = ""
         for reply in replies:
             if reply.get("decision") == "deny":
-                return PermissionResult(
-                    PermissionLevel.DENY,
-                    reason=str(reply.get("reason") or "工具输出安全检测未通过"),
+                reason = str(reply.get("reason") or "工具输出安全检测未通过")
+                return OutputInspection(
+                    PermissionResult(PermissionLevel.DENY, reason=reason), "deny", reason,
                 )
-        return PermissionResult(PermissionLevel.ALLOW, reason="cloud:allow")
+            if reply.get("decision") == "clarify" and not clarified:
+                clarified = True
+                clarify_reason = str(reply.get("reason") or "").strip()
+        if clarified:
+            return OutputInspection(
+                PermissionResult(PermissionLevel.ALLOW, reason="cloud:clarify"), "clarify", clarify_reason,
+            )
+        return OutputInspection(PermissionResult(PermissionLevel.ALLOW, reason="cloud:allow"), "allow", "")
 
     async def decide(self, event: dict, local: PermissionResult) -> PermissionResult:
         revision = self.policy_revision()
@@ -220,12 +287,23 @@ class BehaviorSecurityBridge:
         else:
             reply = await self._send({**event, "mode": "authorize"})
             decision = reply.get("decision")
-            if decision in {"allow", "clarify"}:
-                # Keep compatibility with older desktops returning "clarify";
-                # current desktops normalize all non-REJECT results to "allow".
-                result = PermissionResult(PermissionLevel.ALLOW, reason="cloud:" + decision)
+            if decision == "allow":
+                result = PermissionResult(PermissionLevel.ALLOW, reason="cloud:allow")
+            elif decision == "clarify":
+                # 三态 UI（2026-10-18）：toolInput CLARIFY 转用户审批卡确认（ASK 打断点）。
+                # 授权记忆由权限系统承担——resume 批准后本地已 ALLOW，下次评估走
+                # 本地优先分支，不会重入云端 clarify，无环路。
+                remind = str(reply.get("reason") or "").strip() or "该操作存在安全风险，请确认是否继续"
+                result = PermissionResult(PermissionLevel.ASK, reason=remind)
             elif decision == "deny":
-                result = PermissionResult(PermissionLevel.DENY, reason=str(reply.get("reason") or "云端拒绝本次操作"))
+                # reason = 给模型的指令模板（经 reject(tool_result=...) 原样送达），
+                # 引导调 security_notice 补写横幅第二行（notice_id=eventId 与桌面登记簿同键）
+                remind = str(reply.get("reason") or "云端拒绝本次操作")
+                result = PermissionResult(
+                    PermissionLevel.DENY,
+                    reason=tool_input_reject_instruction(
+                        str(event["tool"].get("name") or ""), remind, event["eventId"]),
+                )
             else:
                 fail_closed = self.config.get("security", {}).get("fail_closed", {}).get("enabled") is True
                 if fail_closed:
@@ -256,11 +334,23 @@ class BehaviorSecurityBridge:
             return self.decisions[key]
         reply = await self._send({**event, "mode": "authorize"})
         decision = reply.get("decision")
-        if decision in {"allow", "clarify"}:
-            # Same compatibility as decide(): older desktops may return "clarify".
-            result = PermissionResult(PermissionLevel.ALLOW, reason="cloud:" + decision)
+        if decision == "allow":
+            result = PermissionResult(PermissionLevel.ALLOW, reason="cloud:allow")
+        elif decision == "clarify":
+            # 三态 UI（2026-10-18）：skill 安装 CLARIFY 复用 ASK 打断点（install_confirmation
+            # 状态机 + 指纹复核现成），审批卡话术带云端 remind；用户确认后继续安装。
+            remind = str(reply.get("reason") or "").strip()
+            result = PermissionResult(
+                PermissionLevel.ASK,
+                reason=remind or "云端提示该技能存在安全风险，请确认是否继续安装",
+            )
         elif decision == "deny":
-            result = PermissionResult(PermissionLevel.DENY, reason=str(reply.get("reason") or "云端拒绝了本次安装"))
+            remind = str(reply.get("reason") or "云端拒绝了本次安装")
+            skill_name = str((event.get("skill") or {}).get("name") or "")
+            result = PermissionResult(
+                PermissionLevel.DENY,
+                reason=skill_install_reject_instruction(skill_name, remind, event["eventId"]),
+            )
         else:
             # 云端不可用：默认转用户确认（复用闸口的 ASK 打断点），
             # skill_install_fail_open: true 时才静默放行
@@ -274,10 +364,20 @@ class BehaviorSecurityBridge:
             self.decisions.popitem(last=False)
         return result
 
+    def output_force_finish_enabled(self) -> bool:
+        """toolOutput REJECT 后是否强制收尾（2026-10-18 三态 UI 起默认 False：
+        屏蔽输出后让模型重新规划；true 回退旧的 request_force_finish 收尾语义）。"""
+        section = self.config.get("xiaoyi_work_security", {}).get("cloud_authorization", {})
+        return bool(section.get("tool_output_force_finish", False))
+
     async def on_permission_evaluated(self, request):
         ctx = request.ctx
         ctx.extra["behavior.local_permission"] = request.result
         ctx.extra["behavior.input_observed"] = True
+        # 安全提示工具：不上报不送审、本地直接放行（防递归；其价值即通知宿主，
+        # 阻断/审批它没有意义，反而会让「补写安全横幅」本身弹审批）
+        if str(getattr(ctx.inputs, "tool_name", "") or "") == SECURITY_NOTICE_TOOL:
+            return PermissionResult(PermissionLevel.ALLOW, reason="builtin_security_notice")
         self.local_decisions[_event_id(ctx, "tool.before")] = request.result
         if len(self.local_decisions) > 512:
             self.local_decisions.popitem(last=False)

@@ -972,6 +972,10 @@ xiaoyi_work_security:
     # 技能安装强制云端权威裁决（不看本地裁决，REJECT 真阻断）；云端不可用时
     # false=转用户确认（复用安装确认打断点），true=静默放行
     skill_install_fail_open: false
+    # 工具输出 REJECT 后的收尾方式（2026-10-18 三态 UI）：false=屏蔽输出后轮次继续，
+    # 模型按指令调 security_notice 补写安全横幅并重新规划；true=回退旧语义（强制收尾，
+    # 最终答复固定为 OUTPUT_BLOCK_MESSAGE）
+    tool_output_force_finish: false
 
 permissions:
   enabled: true
