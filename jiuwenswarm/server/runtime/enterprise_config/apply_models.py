@@ -19,6 +19,22 @@ SLOT_TO_CONFIG_KEY: dict[TemplateRefSlot, str] = {
 }
 
 
+def model_headers_from_data(data: Any) -> dict[str, str] | None:
+    """读取 ``model_template.data.headers``，供 ``model_client_config.custom_headers`` 使用。"""
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("headers")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    headers: dict[str, str] = {}
+    for raw_name, raw_value in raw.items():
+        name = str(raw_name).strip()
+        if not name or not isinstance(raw_value, str):
+            continue
+        headers[name] = raw_value
+    return headers or None
+
+
 def model_entity_to_config_entry(entity: dict[str, Any]) -> dict[str, Any]:
     """将 ``model_template`` 行转为 ``get_default_models`` 兼容的条目。"""
     parameters = entity.get("parameters")
@@ -33,6 +49,9 @@ def model_entity_to_config_entry(entity: dict[str, Any]) -> dict[str, Any]:
         "timeout": entity.get("timeout", 1800),
         "verify_ssl": bool(entity.get("verify_ssl", False)),
     }
+    headers = model_headers_from_data(entity.get("data"))
+    if headers:
+        mcc["custom_headers"] = headers
     retry_count = entity.get("retry_count")
     if retry_count is not None:
         mcc["max_retries"] = retry_count
