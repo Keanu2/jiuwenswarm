@@ -9,26 +9,16 @@ import {
   type EnterpriseContextValue,
   type EnterpriseUser,
 } from './services/enterpriseContext';
-import { getRuntimeScope, parseRuntimeScope, setRuntimeScope } from './services/runtimeScope';
+import { parseRuntimeScope, setRuntimeScope } from './services/runtimeScope';
+import { logoutManagerSession, managerAuthenticatedFetch, managerLoginPath } from './services/managerSession';
 
-const ACCESS_KEY = 'openjiuwen_access_token';
-const REFRESH_KEY = 'openjiuwen_refresh_token';
 const CLUSTER_KEY = 'jiuwenclaw_active_cluster';
 
 type ManagerBody<T> = { code?: number; message?: string; data?: T };
 
-function authHeaders(): Record<string, string> {
-  const token = window.localStorage.getItem(ACCESS_KEY)?.trim();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 async function readManager<T>(url: string, init: RequestInit = {}): Promise<ManagerBody<T>> {
-  const response = await fetch(url, {
-    ...init,
-    credentials: 'include',
-    headers: { ...authHeaders(), ...(init.headers ?? {}) },
-  });
-  const body = await response.json().catch(() => ({})) as ManagerBody<T> & { detail?: string };
+  const response = await managerAuthenticatedFetch(url, init);
+  const body = (await response.json().catch(() => ({}))) as ManagerBody<T> & { detail?: string };
   if (!response.ok || (body.code != null && body.code !== 200)) {
     throw new Error(body.message || body.detail || `HTTP ${response.status}`);
   }
@@ -56,13 +46,15 @@ function chooseAgentContext(
   preferred: { botId?: string; groupId?: string; userId?: string; jiuwenclawId?: string },
 ): EnterpriseAgentContext | null {
   if (!contexts.length) return null;
-  const exact = contexts.find(item =>
-    item.bot_id === preferred.botId
-    && item.group_id === preferred.groupId
-    && item.user_id === preferred.userId
-    && (!preferred.jiuwenclawId || item.jiuwenclaw_id === preferred.jiuwenclawId));
+  const exact = contexts.find(
+    (item) =>
+      item.bot_id === preferred.botId &&
+      item.group_id === preferred.groupId &&
+      item.user_id === preferred.userId &&
+      (!preferred.jiuwenclawId || item.jiuwenclaw_id === preferred.jiuwenclawId),
+  );
   if (exact) return exact;
-  return contexts.find(item => item.bot_id === preferred.botId) ?? contexts[0] ?? null;
+  return contexts.find((item) => item.bot_id === preferred.botId) ?? contexts[0] ?? null;
 }
 
 function contextUrl(selected: EnterpriseAgentContext, debugContext: boolean): string {
@@ -87,21 +79,12 @@ function applyScope(selected: EnterpriseAgentContext): void {
 async function ensureActiveCluster(jiuwenclawId: string): Promise<void> {
   const next = jiuwenclawId.trim();
   if (!next) return;
-  const prev = sessionStorage.getItem(CLUSTER_KEY) || '';
-  if (prev === next) return;
   await readManager('/manager-api/v1/user-console/active-cluster', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jiuwenclaw_id: next }),
   });
   sessionStorage.setItem(CLUSTER_KEY, next);
-}
-
-function loginPath(): string {
-  const pathname = window.location.pathname;
-  const chatIndex = pathname.indexOf('/chat');
-  const prefix = chatIndex !== -1 ? pathname.slice(0, chatIndex) : '';
-  return prefix ? `${prefix}/auth` : '/auth';
 }
 
 export function EnterpriseEntry({ children }: { children: ReactNode }) {
@@ -115,13 +98,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
   const [managerAccess, setManagerAccess] = useState(false);
 
   const logout = useCallback(() => {
-    window.localStorage.removeItem(ACCESS_KEY);
-    window.localStorage.removeItem(REFRESH_KEY);
-    sessionStorage.removeItem(CLUSTER_KEY);
-    void fetch('/manager-api/v1/user-console/active-cluster', { method: 'DELETE', credentials: 'include' })
-      .finally(() => {
-        window.location.replace(loginPath());
-      });
+    void logoutManagerSession();
   }, []);
 
   const switchToManager = useCallback(() => {
@@ -134,20 +111,16 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
     const bootstrap = async () => {
       try {
         const preferred = parseRuntimeScope(window.location.search);
-        const preferredCluster = new URLSearchParams(window.location.search).get('jiuwenclaw_id')?.trim()
-          || sessionStorage.getItem(CLUSTER_KEY)
-          || '';
+        const preferredCluster =
+          new URLSearchParams(window.location.search).get('jiuwenclaw_id')?.trim() ||
+          sessionStorage.getItem(CLUSTER_KEY) ||
+          '';
         const debug = new URLSearchParams(window.location.search).get('debug_context') === '1';
-        let user: EnterpriseUser = {
-          user_id: preferred.userId || '',
-          display_name: preferred.userId || '',
-        };
-        try {
-          const me = await readManager<EnterpriseUser>('/idp/v1/auth/me');
-          if (me.data?.user_id) user = me.data;
-        } catch {
-          // 展示名读不到时仍用上下文里的 user_id。
-        }
+        // Identity returns UserOut directly; Manager uses a code/data envelope.
+        const meResponse = await managerAuthenticatedFetch('/idp/v1/auth/me');
+        if (!meResponse.ok) throw new Error(`Identity HTTP ${meResponse.status}`);
+        const user = (await meResponse.json()) as EnterpriseUser;
+        if (!user.user_id) throw new Error(t('enterpriseEntry.invalidIdentity'));
         try {
           const access = await readManager<{ manager_access?: boolean; is_platform_admin?: boolean }>(
             '/manager-api/v1/authz/me',
@@ -162,16 +135,16 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
           '/manager-api/v1/user-console/agent-contexts',
         );
         const contexts = (listed.data?.contexts ?? [])
-          .map(item => normalizeContext(item))
+          .map((item) => normalizeContext(item))
           .filter((item): item is EnterpriseAgentContext => item !== null);
         if (cancelled) return;
         let selected = debug
           ? normalizeContext({
-            bot_id: preferred.botId,
-            group_id: preferred.groupId,
-            user_id: preferred.userId || user.user_id,
-            jiuwenclaw_id: preferredCluster,
-          })
+              bot_id: preferred.botId,
+              group_id: preferred.groupId,
+              user_id: preferred.userId || user.user_id,
+              jiuwenclaw_id: preferredCluster,
+            })
           : null;
         if (!selected) {
           selected = chooseAgentContext(contexts, {
@@ -181,20 +154,20 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
             jiuwenclawId: preferredCluster,
           });
         }
-        if (!selected) throw new Error('当前账号没有可用的 Agent，请先在管理面完成授权。');
-        if (!user.user_id) user = { user_id: selected.user_id, display_name: selected.user_id };
+        if (!selected) throw new Error(t('enterpriseEntry.noContext'));
+        await ensureActiveCluster(selected.jiuwenclaw_id);
+        if (cancelled) return;
         applyScope(selected);
-        window.history.replaceState({}, '', contextUrl(selected, debug && !contexts.some(item => agentContextKey(item) === agentContextKey(selected!))));
+        window.history.replaceState(
+          {},
+          '',
+          contextUrl(selected, debug && !contexts.some((item) => agentContextKey(item) === agentContextKey(selected!))),
+        );
         setContext({ user, contexts, selected });
         setPhase('ready');
       } catch (bootstrapError) {
         if (cancelled) return;
-        const scope = getRuntimeScope();
-        if (scope.userId && scope.groupId && scope.botId) {
-          setPhase('ready');
-          return;
-        }
-        setError(bootstrapError instanceof Error ? bootstrapError.message : '加载 Agent 上下文失败');
+        setError(bootstrapError instanceof Error ? bootstrapError.message : t('enterpriseEntry.loadFailed'));
         setPhase('error');
       }
     };
@@ -202,7 +175,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [enterprise]);
+  }, [enterprise, t]);
 
   const contextValue = useMemo<EnterpriseContextValue | null>(() => {
     if (!context) return null;
@@ -211,9 +184,9 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
       managerAccess,
       contextError,
       contextSwitching,
-      onContextChange: key => {
+      onContextChange: (key) => {
         if (contextSwitching) return;
-        const selected = context.contexts.find(item => agentContextKey(item) === key);
+        const selected = context.contexts.find((item) => agentContextKey(item) === key);
         if (!selected || agentContextKey(selected) === agentContextKey(context.selected)) return;
         setContextSwitching(true);
         setContextError('');
@@ -221,12 +194,12 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
           .then(() => {
             window.location.replace(contextUrl(selected, false));
           })
-          .catch(switchError => {
+          .catch((switchError) => {
             setContextSwitching(false);
-            setContextError(switchError instanceof Error ? switchError.message : '切换身份失败');
+            setContextError(switchError instanceof Error ? switchError.message : t('enterpriseEntry.switchFailed'));
           });
       },
-      onCustomContextApply: input => {
+      onCustomContextApply: (input) => {
         if (contextSwitching) return;
         const botId = input.botId.trim();
         const groupId = input.groupId.trim();
@@ -236,7 +209,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
           setContextError(t('sessionSidebar.enterpriseContext.customRequired'));
           return;
         }
-        const matched = context.contexts.find(item => item.jiuwenclaw_id === jiuwenclawId);
+        const matched = context.contexts.find((item) => item.jiuwenclaw_id === jiuwenclawId);
         setContextSwitching(true);
         setContextError('');
         const selected: EnterpriseAgentContext = {
@@ -252,9 +225,9 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
           .then(() => {
             window.location.replace(contextUrl(selected, true));
           })
-          .catch(switchError => {
+          .catch((switchError) => {
             setContextSwitching(false);
-            setContextError(switchError instanceof Error ? switchError.message : '切换身份失败');
+            setContextError(switchError instanceof Error ? switchError.message : t('enterpriseEntry.switchFailed'));
           });
       },
       onSwitchToManager: switchToManager,
@@ -267,14 +240,33 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
     return <EnterpriseContext.Provider value={contextValue}>{children}</EnterpriseContext.Provider>;
   }
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: '#0b1020', color: '#eef4ff' }}>
+    <div
+      data-testid="enterprise-entry"
+      style={{
+        minHeight: '100vh',
+        display: 'grid',
+        placeItems: 'center',
+        background: 'var(--color-bg-primary)',
+        color: 'var(--color-text-primary)',
+      }}
+    >
       <div style={{ width: 'min(100%, 420px)', padding: 32 }}>
-        <h1 style={{ margin: '0 0 12px', fontSize: 28 }}>
-          {phase === 'error' ? '无法进入工作空间' : '正在加载工作空间'}
+        <h1 data-testid="enterprise-entry-title" style={{ margin: '0 0 12px', fontSize: 28 }}>
+          {t(phase === 'error' ? 'enterpriseEntry.errorTitle' : 'enterpriseEntry.loadingTitle')}
         </h1>
-        <p style={{ margin: 0, lineHeight: 1.6 }}>
-          {phase === 'error' ? error : '正在读取当前账号可用的 Agent。'}
+        <p data-testid="enterprise-entry-status" style={{ margin: 0, lineHeight: 1.6 }}>
+          {phase === 'error' ? error : t('enterpriseEntry.loading')}
         </p>
+        {phase === 'error' && (
+          <>
+            <button data-testid="enterprise-entry-retry" onClick={() => window.location.reload()}>
+              {t('enterpriseEntry.retry')}
+            </button>
+            <a data-testid="enterprise-entry-login" href={managerLoginPath()}>
+              {t('enterpriseEntry.login')}
+            </a>
+          </>
+        )}
       </div>
     </div>
   );
