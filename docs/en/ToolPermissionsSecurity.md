@@ -236,6 +236,8 @@ The client submits optional fields in `chat.user_answer` → `params.answers[]`:
 
 Commands cannot be broadened. Grants for bash, powershell and mcp_exec_command bind their execution `workdir` (or contextual working directory) and `shell_type`; an unrecognised `cwd` cannot override that binding. Custom shell tools bind all arguments conservatively. Older object command grants without interpreter information require approval again. Scope and lifetime are independent; allow-once does not save a scope for future calls. Clients must use server-provided option values and scope choices, and cannot supply an arbitrary path or domain. Missing scope metadata should result in exact-only UI. Old clients omitting both new fields retain `allow/exact` behavior; these fields do not change ordinary question or other confirmation flows.
 
+Ordinary permission prompts and ACP command prompts display the working directory captured when approval is requested: the tool's `workdir`, or the execution context directory when omitted. This display snapshot does not rewrite tool arguments and remains stable if the context later changes.
+
 Example session grant using domain scope:
 
 ```json

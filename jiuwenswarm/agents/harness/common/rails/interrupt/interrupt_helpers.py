@@ -432,17 +432,23 @@ def build_permission_rail(
                 build_permission_ask_presentation,
                 render_ask_presentation_message,
             )
+            from openjiuwen.harness.security.permission_engine.approve.operation_grants import operation_subject
 
             tool_args = _normalize_tool_args(tool_args_raw) or {}
             presentation = build_permission_ask_presentation(
                 tool_name, tool_args, req.result, permission_config=permission_config,
                 workspace=get_workspace_dir(),
             )
+            subject = operation_subject(
+                permission_rail._normalize_tool_name(tool_name), tool_args,
+                permission_config, get_workspace_dir(),
+            )
             title, prompt = build_permission_prompt(
                 tool_name, tool_args, render_ask_presentation_message(presentation),
                 {
                     "ask_title": presentation.title, "ask_reason": req.result.reason,
                     "ask_risk_level": presentation.risk_level,
+                    "workdir": subject.get("cwd", ""),
                     "file_operations": [
                         {"path": path, "action": action, "source": source}
                         for path, action, source in presentation.file_operations

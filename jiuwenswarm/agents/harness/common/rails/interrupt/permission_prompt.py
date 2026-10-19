@@ -211,7 +211,7 @@ def build_permission_prompt(
             shell_type = "powershell"
         lines = _command_lines(command, shell_type)
         parts.append(f"将运行以下 {len(lines)} 条指令，本次授权适用于整组指令。")
-        workdir = args.get("workdir")
+        workdir = metadata.get("workdir") or args.get("workdir")
         if isinstance(workdir, str) and workdir.strip():
             parts.append(f"工作目录：\n\n{_code_block(workdir)}")
         parts.append(
