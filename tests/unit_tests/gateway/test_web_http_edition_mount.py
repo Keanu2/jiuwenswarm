@@ -161,6 +161,23 @@ def test_register_http_routes_enterprise_mounts_core(monkeypatch: pytest.MonkeyP
     routes_pkg = ModuleType("jiuwenswarm.gateway.channel_manager.web.http_routes")
     routes_pkg.__path__ = []  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, routes_pkg.__name__, routes_pkg)
+    share_jobs = ModuleType(routes_pkg.__name__ + ".share_jobs")
+    share_jobs.register_share_job_routes = lambda app: None
+    monkeypatch.setitem(sys.modules, share_jobs.__name__, share_jobs)
+
+    # This fixture checks route mounting only; admission/file behavior has its
+    # own tests against the real middleware and AgentServer adapter.
+    files = ModuleType("jiuwenswarm.gateway.channel_manager.web.enterprise_files")
+    files.register_enterprise_file_routes = lambda app, channel: None
+    monkeypatch.setitem(sys.modules, files.__name__, files)
+    access = ModuleType("jiuwenswarm.gateway.channel_manager.web.enterprise_access")
+    class AccessMiddleware:
+        def __init__(self, app, **kwargs):
+            self.app = app
+        async def __call__(self, scope, receive, send):
+            await self.app(scope, receive, send)
+    access.EnterpriseAccessMiddleware = AccessMiddleware
+    monkeypatch.setitem(sys.modules, access.__name__, access)
 
     mapped = _load_module(
         "jiuwenswarm.gateway.channel_manager.web.http_routes.mapped",
@@ -179,7 +196,8 @@ def test_register_http_routes_enterprise_mounts_core(monkeypatch: pytest.MonkeyP
 
     channel_app = _load_module("jw_web_channel_app_ent_ut", CHANNEL_APP_PATH)
     app = FastAPI()
-    channel_app.register_http_routes(app, object())
+    from types import SimpleNamespace
+    channel_app.register_http_routes(app, SimpleNamespace(config=SimpleNamespace(path="/ws")))
     client = TestClient(app)
     assert client.get("/api/v1/health").status_code == 200
     catalog = client.get("/api/v1/catalog").json()

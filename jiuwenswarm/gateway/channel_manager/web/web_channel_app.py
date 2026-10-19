@@ -140,6 +140,7 @@ def register_http_routes(app: FastAPI, channel: WebChannel) -> None:
         logger.exception("failed to register Manager config routes")
 
     if is_enterprise():
+        before_user_routes = tuple(app.routes)
         from jiuwenswarm.gateway.channel_manager.web.web_http_routes import (
             register_web_http_api_routes,
         )
@@ -148,6 +149,13 @@ def register_http_routes(app: FastAPI, channel: WebChannel) -> None:
             app,
             channel,
             enterprise=True,
+        )
+        from jiuwenswarm.gateway.channel_manager.web.enterprise_access import EnterpriseAccessMiddleware
+
+        app.add_middleware(
+            EnterpriseAccessMiddleware,
+            routes=[route for route in app.routes if route not in before_user_routes],
+            websocket_paths={normalize_web_ws_path(channel.config.path), _GIT_WS_PATH},
         )
         logger.info(
             "WebChannel enterprise HTTP/SSE mounted on same port "
