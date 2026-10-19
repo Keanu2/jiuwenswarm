@@ -40,11 +40,19 @@ def _enterprise_checkers():
 async def authorize_agent(envelope: E2AEnvelope) -> tuple[str, str, str] | None:
     if envelope.method not in CHAT_METHODS:
         return None
+    return await authorize_agent_identity(*routing_triple_from_envelope(envelope), allow_missing=True)
+
+
+async def authorize_agent_identity(
+    group_id: str, bot_id: str, user_id: str, *, allow_missing: bool = False,
+) -> tuple[str, str, str] | None:
+    """Reuse the local resource admission rules at authenticated user ingress."""
     checkers = _enterprise_checkers()
     if checkers is None:
-        return None
+        if allow_missing:
+            return None
+        raise RuntimeError("enterprise access repository is unavailable")
     get_enterprise_record_repository, matches = checkers
-    group_id, bot_id, user_id = routing_triple_from_envelope(envelope)
     identity = {"group_id": group_id, "bot_id": bot_id, "user_id": user_id}
     if not all(identity.values()):
         raise FatalRouteError("Agent routing identity is required", code="FORBIDDEN")
