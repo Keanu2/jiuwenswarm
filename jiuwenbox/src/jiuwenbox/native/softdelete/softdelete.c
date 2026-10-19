@@ -8,15 +8,18 @@
  * cannot load this x64 DLL and is left unhooked. If the patch fails, the
  * child is resumed anyway:
  * the command must run, and soft-delete simply does not apply there.
- * Those processes install hooks with Detours. Git Bash delete tools do not:
- * Detours patches break cygwin fork and rm, so rm/rmdir/unlink/shred keep
- * the inline hooks and are loaded from the debug loop below.
+ * Every hooked process installs with DetourAttach, including rm/rmdir/unlink/shred.
+ * Git Bash itself is not injected. Those delete tools are loaded from the
+ * debug loop below, then they install the same DetourAttach hooks.
  * MSYS/Cygwin shells such as Git Bash are not injected: any extra DLL
  * makes their fork wait forever. They are started under a debug loop
  * that loads this DLL into Windows descendants before main runs, and
  * also into short-lived POSIX delete tools those shells spawn (rm,
  * rmdir, unlink, shred). Those tools unlink in-process and do not fork
  * like bash, so the ntdll delete hooks can see Git Bash `rm -rf`.
+ * Log paths copied through MSYS (/c/...) are turned back into drive paths so
+ * short-lived Git tools can append the existing full.log. Every line is
+ * marked [soft_delete].
  * Console hosts (conhost.exe) are left alone: injecting them crashes
  * the host and the parent exits with STATUS_DLL_INIT_FAILED.
  * MinGW images (libwinpthread-1.dll beside the exe, including git.exe)
@@ -34,8 +37,10 @@
  * returns STATUS_ACCESS_DENIED. NtClose and NtSetInformationFile put the
  * calling thread's last error back: those calls also run while another
  * API is cleaning up, and that API still needs its own error. If one
- * hook cannot be installed, every hook is removed and the loader records
- * which export failed.
+ * hook cannot be installed, the transaction is aborted and the loader
+ * records which export failed. A fault during DetourAttach is caught:
+ * an import-table load keeps the process running without hooks, and a
+ * LoadLibrary load fails so the caller unloads this DLL and continues.
  */
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
@@ -308,8 +313,6 @@ static int memory_ok(const void *ptr, size_t bytes, int writable) {
 #define PENDING_MAX 1024
 #define PATH_CAP 32768
 #define INFO_COPY_MAX (20u + (PATH_CAP * (ULONG)sizeof(wchar_t)))
-#define STOLEN_MAX 32
-#define HOOK_MAX 12
 
 typedef LONG NTSTATUS;
 typedef ULONG ACCESS_MASK;
@@ -336,15 +339,6 @@ typedef struct _IO_STATUS_BLOCK_ {
     } StatusUnion;
     ULONG_PTR Information;
 } IO_STATUS_BLOCK_;
-
-typedef struct _Hook {
-    void *target;
-    void *relay;
-    void *trampoline;
-    uint8_t saved[STOLEN_MAX];
-    int stolen;
-    int installed;
-} Hook;
 
 typedef NTSTATUS(NTAPI *FnNtClose)(HANDLE);
 typedef NTSTATUS(NTAPI *FnNtDeleteFile)(OBJECT_ATTRIBUTES_ *);
@@ -404,8 +398,6 @@ static SoftTls *soft_tls(void) {
 #define t_bypass (soft_tls()->bypass)
 #define t_worker_creating (soft_tls()->worker)
 
-static Hook g_hooks[HOOK_MAX];
-static int g_hook_count;
 static int g_detours;
 static FnNtClose g_nt_close;
 static FnNtDeleteFile g_nt_delete_file;
@@ -420,443 +412,6 @@ static HANDLE g_pending_handle[PENDING_MAX];
 static wchar_t *g_pending_path[PENDING_MAX];
 
 static void log_line(const wchar_t *text);
-
-/* -------------------------------------------------------------------------- */
-/* x64 length decoder. Enough for ntdll syscall stubs and typical prologues. */
-/* A relative instruction returns -2 so the caller refuses to steal it.      */
-/* -------------------------------------------------------------------------- */
-
-static int modrm_len(const uint8_t *code, int avail, int *reg_out, int *rip_rel) {
-    int mod;
-    int rm;
-    int n;
-    if (avail < 1) {
-        return -1;
-    }
-    mod = code[0] >> 6;
-    if (reg_out != NULL) {
-        *reg_out = (code[0] >> 3) & 7;
-    }
-    rm = code[0] & 7;
-    n = 1;
-    if (rip_rel != NULL) {
-        *rip_rel = 0;
-    }
-    if (mod != 3 && rm == 4) {
-        int base;
-        if (avail < 2) {
-            return -1;
-        }
-        base = code[1] & 7;
-        n = 2;
-        if (mod == 0 && base == 5) {
-            n += 4;
-        }
-    } else if (mod == 0 && rm == 5) {
-        n += 4;
-        if (rip_rel != NULL) {
-            *rip_rel = 1;
-        }
-    }
-    if (mod == 1) {
-        n += 1;
-    } else if (mod == 2) {
-        n += 4;
-    }
-    if (n > avail) {
-        return -1;
-    }
-    return n;
-}
-
-static int decode_one(const uint8_t *code, int avail, int *is_rel) {
-    int i = 0;
-    int rex_w = 0;
-    int operand16 = 0;
-    uint8_t op;
-    int reg = 0;
-    int rip = 0;
-    int mlen;
-    *is_rel = 0;
-    if (avail < 1) {
-        return -1;
-    }
-    /* ENDBR64 / ENDBR32. CET builds of kernelbase start with this. It is
-     * not a branch, so it can be copied into the trampoline. */
-    if (avail >= 4 && code[0] == 0xF3 && code[1] == 0x0F && code[2] == 0x1E
-        && (code[3] == 0xFA || code[3] == 0xFB)) {
-        return 4;
-    }
-    for (;;) {
-        uint8_t pref;
-        if (i >= avail) {
-            return -1;
-        }
-        pref = code[i];
-        if (pref == 0x66 || pref == 0x67 || pref == 0xF0 || pref == 0xF2 || pref == 0xF3
-            || pref == 0x2E || pref == 0x36 || pref == 0x3E || pref == 0x26
-            || pref == 0x64 || pref == 0x65 || (pref >= 0x40 && pref <= 0x4F)) {
-            if (pref == 0x66) {
-                operand16 = 1;
-            }
-            if (pref >= 0x40 && pref <= 0x4F && (pref & 0x08) != 0) {
-                rex_w = 1;
-            }
-            i++;
-            continue;
-        }
-        break;
-    }
-    op = code[i++];
-    if (op >= 0x50 && op <= 0x5F) {
-        return i;
-    }
-    if (op == 0x90 || op == 0xC3 || op == 0xCC) {
-        return i;
-    }
-    if (op == 0xCD) {
-        return (i + 1 <= avail) ? i + 1 : -1;
-    }
-    if (op == 0xE8 || op == 0xE9) {
-        *is_rel = 1;
-        return -2;
-    }
-    if (op == 0xEB || (op >= 0x70 && op <= 0x7F)) {
-        *is_rel = 1;
-        return -2;
-    }
-    if (op >= 0xB8 && op <= 0xBF) {
-        int imm = rex_w ? 8 : 4;
-        return (i + imm <= avail) ? i + imm : -1;
-    }
-    if (op == 0x0F) {
-        uint8_t op2;
-        if (i >= avail) {
-            return -1;
-        }
-        op2 = code[i++];
-        if (op2 == 0x05) {
-            return i;
-        }
-        if (op2 == 0x1F) {
-            mlen = modrm_len(code + i, avail - i, NULL, &rip);
-            if (mlen < 0) {
-                return -1;
-            }
-            if (rip) {
-                *is_rel = 1;
-                return -2;
-            }
-            return i + mlen;
-        }
-        if (op2 >= 0x80 && op2 <= 0x8F) {
-            *is_rel = 1;
-            return -2;
-        }
-        return -1;
-    }
-
-    if (op == 0x83 || op == 0x80 || op == 0xC0 || op == 0xC1 || op == 0x6B) {
-        mlen = modrm_len(code + i, avail - i, NULL, &rip);
-        if (mlen < 0) {
-            return -1;
-        }
-        if (rip) {
-            *is_rel = 1;
-            return -2;
-        }
-        if (i + mlen + 1 > avail) {
-            return -1;
-        }
-        return i + mlen + 1;
-    }
-    if (op == 0x81 || op == 0x69 || op == 0xC7) {
-        int imm = operand16 ? 2 : 4;
-        mlen = modrm_len(code + i, avail - i, NULL, &rip);
-        if (mlen < 0) {
-            return -1;
-        }
-        if (rip) {
-            *is_rel = 1;
-            return -2;
-        }
-        if (i + mlen + imm > avail) {
-            return -1;
-        }
-        return i + mlen + imm;
-    }
-    if (op == 0xC6) {
-        mlen = modrm_len(code + i, avail - i, NULL, &rip);
-        if (mlen < 0) {
-            return -1;
-        }
-        if (rip) {
-            *is_rel = 1;
-            return -2;
-        }
-        if (i + mlen + 1 > avail) {
-            return -1;
-        }
-        return i + mlen + 1;
-    }
-    if (op == 0xF6 || op == 0xF7) {
-        int imm;
-        mlen = modrm_len(code + i, avail - i, &reg, &rip);
-        if (mlen < 0) {
-            return -1;
-        }
-        if (rip) {
-            *is_rel = 1;
-            return -2;
-        }
-        imm = 0;
-        if (reg <= 1) {
-            imm = (op == 0xF6) ? 1 : (operand16 ? 2 : 4);
-        }
-        if (i + mlen + imm > avail) {
-            return -1;
-        }
-        return i + mlen + imm;
-    }
-    if (op == 0x01 || op == 0x03 || op == 0x09 || op == 0x0B || op == 0x21 || op == 0x23
-        || op == 0x29 || op == 0x2B || op == 0x31 || op == 0x33 || op == 0x39 || op == 0x3B
-        || op == 0x85 || op == 0x87 || op == 0x89 || op == 0x8B || op == 0x8D || op == 0x8F
-        || op == 0x63 || op == 0xFF) {
-        mlen = modrm_len(code + i, avail - i, NULL, &rip);
-        if (mlen < 0) {
-            return -1;
-        }
-        if (rip) {
-            *is_rel = 1;
-            return -2;
-        }
-        return i + mlen;
-    }
-    return -1;
-}
-
-/* Positive length, -1 if the prologue cannot be decoded, -2 if a relative
- * instruction sits inside the bytes a 5-byte jump would overwrite. */
-static int steal_length(const uint8_t *code, int avail) {
-    int total = 0;
-    while (total < 5) {
-        int rel = 0;
-        int n = decode_one(code + total, avail - total, &rel);
-        if (n == -2 || rel) {
-            return -2;
-        }
-        if (n <= 0) {
-            return -1;
-        }
-        total += n;
-        if (total > STOLEN_MAX) {
-            return -1;
-        }
-    }
-    return total;
-}
-
-static void *alloc_near(void *target, SIZE_T size) {
-    SYSTEM_INFO info;
-    uintptr_t gran;
-    uintptr_t origin;
-    uintptr_t low;
-    uintptr_t high;
-    int dir;
-    GetSystemInfo(&info);
-    gran = info.dwAllocationGranularity;
-    if (gran == 0) {
-        gran = 65536;
-    }
-    origin = (uintptr_t)target & ~(gran - 1);
-    low = (uintptr_t)info.lpMinimumApplicationAddress;
-    high = (uintptr_t)info.lpMaximumApplicationAddress;
-    if (origin > 0x7FFF0000ULL && origin - 0x7FFF0000ULL > low) {
-        low = origin - 0x7FFF0000ULL;
-    }
-    if (origin + 0x7FFF0000ULL < high) {
-        high = origin + 0x7FFF0000ULL;
-    }
-    for (dir = 0; dir < 2; dir++) {
-        uintptr_t addr = origin;
-        int step;
-        for (step = 0; step < 4096; step++) {
-            MEMORY_BASIC_INFORMATION mbi;
-            if (dir == 0) {
-                if (addr <= low + gran) {
-                    break;
-                }
-                addr -= gran;
-            } else if (addr >= high - gran) {
-                break;
-            } else {
-                addr += gran;
-            }
-            if (VirtualQuery((void *)addr, &mbi, sizeof mbi) == 0) {
-                continue;
-            }
-            if (mbi.State != MEM_FREE) {
-                continue;
-            }
-            {
-                void *mem = VirtualAlloc(
-                    (void *)addr, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-                if (mem != NULL) {
-                    return mem;
-                }
-            }
-        }
-    }
-    return NULL;
-}
-
-static int rel32_ok(void *from_next, void *dest, int32_t *rel_out) {
-    int64_t rel = (int64_t)(uintptr_t)dest - (int64_t)(uintptr_t)from_next;
-    if (rel > INT32_MAX || rel < INT32_MIN) {
-        return 0;
-    }
-    *rel_out = (int32_t)rel;
-    return 1;
-}
-
-static int write_rel_jmp(uint8_t *at, void *dest) {
-    int32_t rel = 0;
-    if (!rel32_ok(at + 5, dest, &rel)) {
-        return 0;
-    }
-    at[0] = 0xE9;
-    memcpy(at + 1, &rel, sizeof rel);
-    return 1;
-}
-
-/* jmp qword ptr [rip+0]; dq dest. Valid from any address, so the trampoline
- * does not have to sit within 2GB of the hooked function. */
-#define ABS_JMP_LEN 14
-#if STOLEN_MAX + ABS_JMP_LEN > 64
-#error trampoline return jump overlaps the relay slot
-#endif
-
-static void write_abs_jmp(uint8_t *at, void *dest) {
-    uint64_t abs_dest = (uint64_t)(uintptr_t)dest;
-    at[0] = 0xFF;
-    at[1] = 0x25;
-    at[2] = 0x00;
-    at[3] = 0x00;
-    at[4] = 0x00;
-    at[5] = 0x00;
-    memcpy(at + 6, &abs_dest, sizeof abs_dest);
-}
-
-static void set_hook_reason(const wchar_t **reason, const wchar_t *text) {
-    if (reason != NULL) {
-        *reason = text;
-    }
-}
-
-static int install_hook(void *target, void *hook_fn, const wchar_t **reason) {
-    Hook *hook;
-    int stolen;
-    uint8_t *page;
-    uint8_t *relay;
-    DWORD old_prot = 0;
-    int32_t rel = 0;
-    void *jmp_dest;
-    int hook_is_far;
-    set_hook_reason(reason, L"unknown");
-    if (g_hook_count >= HOOK_MAX) {
-        set_hook_reason(reason, L"hook table is full");
-        return 0;
-    }
-    if (target == NULL || hook_fn == NULL) {
-        set_hook_reason(reason, L"target is missing");
-        return 0;
-    }
-    stolen = steal_length((const uint8_t *)target, 48);
-    if (stolen == -2) {
-        set_hook_reason(reason, L"relative instruction in prologue");
-        return 0;
-    }
-    if (stolen < 5) {
-        set_hook_reason(reason, L"prologue could not be decoded");
-        return 0;
-    }
-    hook_is_far = !rel32_ok((uint8_t *)target + 5, hook_fn, &rel);
-    page = (uint8_t *)alloc_near(target, 4096);
-    if (page == NULL && hook_is_far) {
-        set_hook_reason(reason, L"no executable page within 2GB of target");
-        return 0;
-    }
-    if (page == NULL) {
-        page = (uint8_t *)VirtualAlloc(
-            NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-        if (page == NULL) {
-            set_hook_reason(reason, L"executable page allocation failed");
-            return 0;
-        }
-    }
-    hook = &g_hooks[g_hook_count];
-    memset(hook, 0, sizeof *hook);
-    hook->target = target;
-    hook->trampoline = page;
-    hook->stolen = stolen;
-    memcpy(hook->saved, target, (size_t)stolen);
-    memcpy(page, target, (size_t)stolen);
-    write_abs_jmp(page + stolen, (uint8_t *)target + stolen);
-
-    relay = page + 64;
-    if (!hook_is_far) {
-        jmp_dest = hook_fn;
-        hook->relay = NULL;
-    } else if (!rel32_ok((uint8_t *)target + 5, relay, &rel)) {
-        VirtualFree(page, 0, MEM_RELEASE);
-        set_hook_reason(reason, L"no executable page within 2GB of target");
-        return 0;
-    } else {
-        /* Absolute jump lives next to the target; the 5-byte patch stays in range. */
-        write_abs_jmp(relay, hook_fn);
-        jmp_dest = relay;
-        hook->relay = relay;
-    }
-    if (!VirtualProtect(target, (SIZE_T)stolen, PAGE_EXECUTE_READWRITE, &old_prot)) {
-        VirtualFree(page, 0, MEM_RELEASE);
-        set_hook_reason(reason, L"target page protection could not be changed");
-        return 0;
-    }
-    if (!write_rel_jmp((uint8_t *)target, jmp_dest)) {
-        VirtualProtect(target, (SIZE_T)stolen, old_prot, &old_prot);
-        VirtualFree(page, 0, MEM_RELEASE);
-        set_hook_reason(reason, L"jump to hook is out of range");
-        return 0;
-    }
-    VirtualProtect(target, (SIZE_T)stolen, old_prot, &old_prot);
-    FlushInstructionCache(GetCurrentProcess(), target, (SIZE_T)stolen);
-    FlushInstructionCache(GetCurrentProcess(), page, 128);
-    hook->installed = 1;
-    g_hook_count++;
-    return 1;
-}
-
-static void remove_inline_hooks(void) {
-    int i;
-    for (i = g_hook_count - 1; i >= 0; i--) {
-        Hook *hook = &g_hooks[i];
-        DWORD old_prot = 0;
-        if (!hook->installed) {
-            continue;
-        }
-        if (VirtualProtect(hook->target, (SIZE_T)hook->stolen, PAGE_EXECUTE_READWRITE, &old_prot)) {
-            memcpy(hook->target, hook->saved, (size_t)hook->stolen);
-            VirtualProtect(hook->target, (SIZE_T)hook->stolen, old_prot, &old_prot);
-            FlushInstructionCache(GetCurrentProcess(), hook->target, (SIZE_T)hook->stolen);
-        }
-        if (hook->trampoline != NULL) {
-            VirtualFree(hook->trampoline, 0, MEM_RELEASE);
-            hook->trampoline = NULL;
-        }
-        hook->installed = 0;
-    }
-    g_hook_count = 0;
-}
 
 /* -------------------------------------------------------------------------- */
 /* Paths and the actual move.                                                 */
@@ -1527,6 +1082,11 @@ static int send_to_recycle(const wchar_t *dos_path) {
     rc = SHFileOperationW(&op);
     HeapFree(GetProcessHeap(), 0, from);
     if (rc != 0 || op.fAnyOperationsAborted) {
+        wchar_t msg[1024];
+        swprintf_s(
+            msg, 1024, L"recycle failed shfileop=%d aborted=%d %s",
+            rc, op.fAnyOperationsAborted ? 1 : 0, dos_path);
+        log_line(msg);
         return 0;
     }
     if (path_exists(dos_path)) {
@@ -1967,8 +1527,45 @@ static int ensure_dir(const wchar_t *dir) {
     return 1;
 }
 
-/* Same directory as full.log: JIUWENSWARM_LOG_DIR, or the dated layout when
- * JIUWENSWARM_LOG_DATE_ROOT is set. No separate temp log. */
+/* MSYS/Git Bash stores Windows paths as /c/Users/... or /cygdrive/c/Users/...
+ * inside its own processes. CreateFileW cannot open those. */
+static int env_drive_letter(wchar_t ch) {
+    return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z');
+}
+
+static void slashes_to_backslashes(wchar_t *text) {
+    wchar_t *cursor;
+    for (cursor = text; cursor != NULL && *cursor != L'\0'; cursor++) {
+        if (*cursor == L'/') {
+            *cursor = L'\\';
+        }
+    }
+}
+
+static void normalize_log_env_path(wchar_t *path, size_t cch) {
+    wchar_t tmp[1024];
+    if (path == NULL || path[0] == L'\0' || cch < 4) {
+        return;
+    }
+    if (_wcsnicmp(path, L"/cygdrive/", 10) == 0 && env_drive_letter(path[10]) && path[11] == L'/') {
+        if (swprintf_s(tmp, 1024, L"%c:%s", path[10], path + 11) > 0) {
+            slashes_to_backslashes(tmp);
+            wcscpy_s(path, cch, tmp);
+        }
+        return;
+    }
+    if (path[0] == L'/' && env_drive_letter(path[1]) && path[2] == L'/') {
+        if (swprintf_s(tmp, 1024, L"%c:%s", path[1], path + 2) > 0) {
+            slashes_to_backslashes(tmp);
+            wcscpy_s(path, cch, tmp);
+        }
+        return;
+    }
+    slashes_to_backslashes(path);
+}
+
+/* Same file as the Python aggregate log. JIUWENSWARM_LOG_DIR, or the dated
+ * layout when JIUWENSWARM_LOG_DATE_ROOT is set. */
 static int resolve_soft_log_path(wchar_t *out, size_t cch) {
     wchar_t log_dir[1024];
     wchar_t date_root[1024];
@@ -1984,8 +1581,14 @@ static int resolve_soft_log_path(wchar_t *out, size_t cch) {
         return 0;
     }
     n = GetEnvironmentVariableW(L"JIUWENSWARM_LOG_DIR", log_dir, 1024);
+    if (n > 0 && n < 1024) {
+        normalize_log_env_path(log_dir, 1024);
+    }
     if (n == 0 || n >= 1024) {
         DWORD data_n = GetEnvironmentVariableW(L"JIUWENSWARM_DATA_DIR", data_dir, 1024);
+        if (data_n > 0 && data_n < 1024) {
+            normalize_log_env_path(data_dir, 1024);
+        }
         if (data_n == 0 || data_n >= 1024) {
             DWORD home_n = GetEnvironmentVariableW(L"USERPROFILE", data_dir, 1024);
             if (home_n == 0 || home_n >= 900) {
@@ -1999,6 +1602,9 @@ static int resolve_soft_log_path(wchar_t *out, size_t cch) {
         }
     }
     root_n = GetEnvironmentVariableW(L"JIUWENSWARM_LOG_DATE_ROOT", date_root, 1024);
+    if (root_n > 0 && root_n < 1024) {
+        normalize_log_env_path(date_root, 1024);
+    }
     root_len = (root_n > 0 && root_n < 1024) ? wcslen(date_root) : 0;
     while (root_len > 0 && (date_root[root_len - 1] == L'\\' || date_root[root_len - 1] == L'/')) {
         date_root[--root_len] = L'\0';
@@ -2010,11 +1616,11 @@ static int resolve_soft_log_path(wchar_t *out, size_t cch) {
             rel++;
         }
         if (*rel == L'\0') {
-            return swprintf_s(out, cch, L"%s\\%s\\softdelete.log", date_root, day) > 0;
+            return swprintf_s(out, cch, L"%s\\%s\\full.log", date_root, day) > 0;
         }
-        return swprintf_s(out, cch, L"%s\\%s\\%s\\softdelete.log", date_root, day, rel) > 0;
+        return swprintf_s(out, cch, L"%s\\%s\\%s\\full.log", date_root, day, rel) > 0;
     }
-    return swprintf_s(out, cch, L"%s\\%s\\softdelete.log", log_dir, day) > 0;
+    return swprintf_s(out, cch, L"%s\\%s\\full.log", log_dir, day) > 0;
 }
 
 static void log_line(const wchar_t *text) {
@@ -2024,13 +1630,14 @@ static void log_line(const wchar_t *text) {
     HANDLE file;
     DWORD written = 0;
     char utf8[2048];
-    char prefix[80];
+    char prefix[160];
     int n;
     int saved_bypass;
     SYSTEMTIME st;
     if (text == NULL) {
         return;
     }
+    OutputDebugStringW(L"[soft_delete] ");
     OutputDebugStringW(text);
     OutputDebugStringW(L"\n");
     if (!resolve_soft_log_path(path, 1024)) {
@@ -2055,11 +1662,19 @@ static void log_line(const wchar_t *text) {
         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     t_bypass = saved_bypass;
     if (file == INVALID_HANDLE_VALUE) {
+        static LONG open_failed = 0;
+        if (InterlockedCompareExchange(&open_failed, 1, 0) == 0) {
+            wchar_t msg[1200];
+            swprintf_s(msg, 1200, L"[soft_delete] log open failed winerror=%lu path=%s", GetLastError(), path);
+            OutputDebugStringW(msg);
+            OutputDebugStringW(L"\n");
+        }
         return;
     }
     GetLocalTime(&st);
     n = sprintf_s(
-        prefix, sizeof prefix, "%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu ",
+        prefix, sizeof prefix,
+        "%04u-%02u-%02u %02u:%02u:%02u.%03u INFO soft_delete softdelete.c:0: [soft_delete] pid=%lu ",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
         st.wMilliseconds, GetCurrentProcessId());
     if (n > 0) {
@@ -2070,6 +1685,7 @@ static void log_line(const wchar_t *text) {
         WriteFile(file, utf8, (DWORD)(n - 1), &written, NULL);
     }
     WriteFile(file, "\r\n", 2, &written, NULL);
+    FlushFileBuffers(file);
     CloseHandle(file);
 }
 
@@ -2217,9 +1833,7 @@ static int rename_replace_dest(ULONG cls, const uint8_t *info, ULONG length, wch
     memcpy(name, info + 20, name_bytes);
     name[name_bytes / sizeof(wchar_t)] = L'\0';
     ok = join_root_name(root, name, dest, cch);
-    if (name != NULL) {
-        HeapFree(GetProcessHeap(), 0, name);
-    }
+    HeapFree(GetProcessHeap(), 0, name);
     return ok;
 }
 
@@ -2307,13 +1921,18 @@ static NTSTATUS NTAPI hook_NtClose(HANDLE handle) {
     }
     if (!soft_delete_path(path)) {
         int gone = !path_exists(path);
-        HeapFree(GetProcessHeap(), 0, path);
-        SetLastError(saved);
         if (gone) {
+            wchar_t msg[1024];
             /* The close already succeeded and the path is empty. Reporting
              * STATUS_OBJECT_NAME_NOT_FOUND here becomes WinError 2. */
+            swprintf_s(msg, 1024, L"delete already gone; hard delete accepted %s", path);
+            log_line(msg);
+            HeapFree(GetProcessHeap(), 0, path);
+            SetLastError(saved);
             return status;
         }
+        HeapFree(GetProcessHeap(), 0, path);
+        SetLastError(saved);
         return STATUS_ACCESS_DENIED;
     }
     HeapFree(GetProcessHeap(), 0, path);
@@ -3394,6 +3013,7 @@ static wchar_t *merge_child_soft_env(const wchar_t *block, int *ok) {
     static const wchar_t *keys[] = {
         ENV_ENABLED, ENV_ARCHIVE, ENV_DLL, ENV_RECYCLE_PORT, ENV_RECYCLE_TOKEN,
         L"SystemRoot",
+        L"JIUWENSWARM_LOG_DIR", L"JIUWENSWARM_LOG_DATE_ROOT", L"JIUWENSWARM_DATA_DIR",
     };
     wchar_t *values[sizeof keys / sizeof keys[0]];
     size_t base = 1;
@@ -3693,20 +3313,6 @@ static void write_load_error(const wchar_t *text) {
     CloseHandle(file);
 }
 
-static int install_named(void *target, void *hook_fn, const wchar_t *name) {
-    const wchar_t *reason = L"unknown";
-    wchar_t msg[512];
-    if (install_hook(target, hook_fn, &reason)) {
-        return 1;
-    }
-    if (reason == NULL || reason[0] == L'\0') {
-        reason = L"unknown";
-    }
-    swprintf_s(msg, 512, L"inline hook could not be installed: %s: %s", name, reason);
-    write_load_error(msg);
-    return 0;
-}
-
 static int resolve_hook_targets(void) {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
@@ -3729,51 +3335,6 @@ static int resolve_hook_targets(void) {
         return 0;
     }
     return 1;
-}
-
-static int install_inline(void) {
-    if (!resolve_hook_targets()) {
-        return 0;
-    }
-    t_bypass = 1;
-    if (!install_named((void *)g_nt_close, (void *)hook_NtClose, L"NtClose")) {
-        goto fail;
-    }
-    g_nt_close = (FnNtClose)g_hooks[g_hook_count - 1].trampoline;
-    if (!install_named((void *)g_nt_delete_file, (void *)hook_NtDeleteFile, L"NtDeleteFile")) {
-        goto fail;
-    }
-    g_nt_delete_file = (FnNtDeleteFile)g_hooks[g_hook_count - 1].trampoline;
-    if (!install_named((void *)g_nt_set_info, (void *)hook_NtSetInformationFile, L"NtSetInformationFile")) {
-        goto fail;
-    }
-    g_nt_set_info = (FnNtSetInformationFile)g_hooks[g_hook_count - 1].trampoline;
-    if (!install_named((void *)g_nt_create_file, (void *)hook_NtCreateFile, L"NtCreateFile")) {
-        goto fail;
-    }
-    g_nt_create_file = (FnNtCreateFile)g_hooks[g_hook_count - 1].trampoline;
-    if (!install_named((void *)g_nt_open_file, (void *)hook_NtOpenFile, L"NtOpenFile")) {
-        goto fail;
-    }
-    g_nt_open_file = (FnNtOpenFile)g_hooks[g_hook_count - 1].trampoline;
-    if (!install_named((void *)g_create_process, (void *)hook_CreateProcessInternalW, L"CreateProcessInternalW")) {
-        goto fail;
-    }
-    g_create_process = (FnCreateProcessInternalW)g_hooks[g_hook_count - 1].trampoline;
-    if (!install_named((void *)g_delete_file, (void *)hook_DeleteFileW, L"DeleteFileW")) {
-        goto fail;
-    }
-    g_delete_file = (BOOL(WINAPI *)(LPCWSTR))g_hooks[g_hook_count - 1].trampoline;
-    if (!install_named((void *)g_remove_directory, (void *)hook_RemoveDirectoryW, L"RemoveDirectoryW")) {
-        goto fail;
-    }
-    g_remove_directory = (BOOL(WINAPI *)(LPCWSTR))g_hooks[g_hook_count - 1].trampoline;
-    t_bypass = 0;
-    return 1;
-fail:
-    remove_inline_hooks();
-    t_bypass = 0;
-    return 0;
 }
 
 static int attach_slot(void **slot, void *hook_fn, const wchar_t *name) {
@@ -3809,11 +3370,7 @@ static void remove_detour_hooks(void) {
 }
 
 static void remove_hooks(void) {
-    if (g_detours) {
-        remove_detour_hooks();
-        return;
-    }
-    remove_inline_hooks();
+    remove_detour_hooks();
 }
 
 static int install_detours(void) {
@@ -3856,11 +3413,6 @@ static int install_detours(void) {
 }
 
 static int install_all(void) {
-    wchar_t exe[1024];
-    DWORD n = GetModuleFileNameW(NULL, exe, 1024);
-    if (n > 0 && n < 1024 && image_is_posix_delete_tool(exe)) {
-        return install_inline();
-    }
     return install_detours();
 }
 
@@ -3900,17 +3452,36 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(instance);
         InitializeCriticalSection(&g_lock);
         g_lock_ready = 1;
-        if (!install_all()) {
-            static_load = (reserved != NULL);
-            if (!static_load) {
-                if (g_lock_ready) {
-                    DeleteCriticalSection(&g_lock);
-                    g_lock_ready = 0;
+        {
+            int installed = 0;
+#if defined(_MSC_VER)
+            __try {
+                installed = install_all();
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                installed = 0;
+                t_bypass = 0;
+                __try {
+                    DetourTransactionAbort();
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
                 }
-                return FALSE;
+                log_line(L"softdelete: hook install faulted; process continues without soft-delete");
             }
-            /* Import-table load: returning FALSE would abort the child. */
-            log_line(L"softdelete: hook install failed during import load; process continues without soft-delete");
+#else
+            installed = install_all();
+#endif
+            if (!installed) {
+                static_load = (reserved != NULL);
+                if (!static_load) {
+                    if (g_lock_ready) {
+                        DeleteCriticalSection(&g_lock);
+                        g_lock_ready = 0;
+                    }
+                    /* Dynamic LoadLibrary: unload this DLL. Callers keep running. */
+                    return FALSE;
+                }
+                /* Import-table load: returning FALSE would abort the child. */
+                log_line(L"softdelete: hook install failed during import load; process continues without soft-delete");
+            }
         }
     } else if (reason == DLL_PROCESS_DETACH && reserved == NULL) {
         remove_hooks();

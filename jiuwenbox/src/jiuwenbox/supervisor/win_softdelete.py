@@ -2,7 +2,7 @@
 """Windows 软删除 DLL 的路径、沙箱 ACL 和挂起进程注入.
 
 DLL 本体在普通 Windows 进程里用 Detours 挂钩删除和创建进程。
-Git Bash 不注入；它拉起的 rm 等仍由 DLL 的调试循环装入，并使用手写钩子。
+Git Bash 不注入；它拉起的 rm 等仍由 DLL 的调试循环装入，装钩与普通进程一样用 DetourAttach。
 本模块负责:
 - 找到 ``jiuwen_softdelete.dll``
 - 给 jbx-sandbox 读和执行权限
