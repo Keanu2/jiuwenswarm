@@ -651,7 +651,13 @@ class CronSchedulerService:
         now = datetime.now(tz=ZoneInfo(job.timezone))
         push_dt = now
         wake_dt = now
-        run_id = f"{job.id}:{uuid.uuid4().hex}:{int(push_dt.timestamp())}"
+        # run_id 必须与到点触发同形（单冒号+秒级 ts，供 split(":")[-1] 解析 push_ts）：
+        # 模型网关会拒绝多段冒号的 id 并返回空 error 信封，导致 run-now 100% 报
+        # [181001] 模型返回空响应。同秒重复点击复用进行中的 run，不再嵌 uuid。
+        run_id = f"{job.id}:{int(push_dt.timestamp())}"
+        existing = self._runs.get(run_id)
+        if existing is not None and existing.status in ("pending", "running"):
+            return {"run_id": run_id, "session_id": existing.exec_session_id}
         channel_id, exec_session_id = self._make_execution_context(job)
         self._runs[run_id] = CronRunState(
             run_id=run_id,
