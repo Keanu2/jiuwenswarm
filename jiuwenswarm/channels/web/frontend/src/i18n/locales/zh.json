@@ -1,4 +1,15 @@
 {
+  "enterpriseEntry": {
+    "invalidIdentity": "Identity 未返回用户标识。",
+    "noContext": "当前账号没有可用的 Agent，请先在管理面完成授权。",
+    "loadFailed": "加载 Agent 上下文失败。",
+    "switchFailed": "切换身份失败。",
+    "errorTitle": "无法进入工作空间",
+    "loadingTitle": "正在加载工作空间",
+    "loading": "正在读取当前账号可用的 Agent。",
+    "retry": "重试",
+    "login": "前往登录"
+  },
   "common": {
     "noData": "暂无数据",
     "confirm": "确认",

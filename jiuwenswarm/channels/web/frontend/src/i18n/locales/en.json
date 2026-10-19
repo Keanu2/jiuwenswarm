@@ -1,4 +1,15 @@
 {
+  "enterpriseEntry": {
+    "invalidIdentity": "Identity returned no user ID.",
+    "noContext": "No Agent is available for this account. Ask an administrator to grant access.",
+    "loadFailed": "Failed to load Agent contexts.",
+    "switchFailed": "Failed to switch context.",
+    "errorTitle": "Unable to enter workspace",
+    "loadingTitle": "Loading workspace",
+    "loading": "Loading the Agents available to this account.",
+    "retry": "Retry",
+    "login": "Go to login"
+  },
   "common": {
     "noData": "No data",
     "confirm": "Confirm",

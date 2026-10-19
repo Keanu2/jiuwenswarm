@@ -1,4 +1,5 @@
 import { AssetPublishHost } from './components/AssetPublishDrawer';
+import { isEnterprise, ENTERPRISE_HIDDEN_NAV_ITEMS } from './edition';
 // Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 /**
@@ -856,7 +857,10 @@ function AppContent({
   );
   const rsiFeatureEnabled = useRSIFeatureEnabled();
   const hiddenNavItems = useMemo<MainNavKey[]>(() => {
-    const base = getHiddenNavItemsForPlatform(frontendPlatform);
+    const base: MainNavKey[] = [
+      ...getHiddenNavItemsForPlatform(frontendPlatform),
+      ...(isEnterprise() ? ENTERPRISE_HIDDEN_NAV_ITEMS : []),
+    ];
     const rsiFiltered: MainNavKey[] = rsiFeatureEnabled
       ? base
       : [...base, 'experiments'];
@@ -868,6 +872,12 @@ function AppContent({
     if (!masterEnabled) return [...rsiFiltered, 'personalContext'];
     return rsiFiltered;
   }, [frontendPlatform, masterEnabled, rsiFeatureEnabled]);
+
+  useEffect(() => {
+    if (isEnterprise() && (ENTERPRISE_HIDDEN_NAV_ITEMS as readonly string[]).includes(activeNav)) {
+      setActiveNav('chat');
+    }
+  }, [activeNav]);
 
   useEffect(() => {
     if (!rsiFeatureEnabled && activeNav === 'experiments') {
@@ -1726,7 +1736,7 @@ function AppContent({
       setConfigError(null);
       if (!modelSetupGuideEvaluatedRef.current) {
         modelSetupGuideEvaluatedRef.current = true;
-        if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
+        if (!isEnterprise() && (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled))) {
           setActiveNav('chat');
           setModelSetupGuideStep(1);
         }
@@ -1748,7 +1758,7 @@ function AppContent({
   }, [request, t, setAvailableModels]);
 
   useEffect(() => {
-    if (!FEATURE_APP_UPDATER_UI || !isConnected || startupUpdateCheckRef.current) {
+    if (isEnterprise() || !FEATURE_APP_UPDATER_UI || !isConnected || startupUpdateCheckRef.current) {
       return;
     }
     startupUpdateCheckRef.current = true;
