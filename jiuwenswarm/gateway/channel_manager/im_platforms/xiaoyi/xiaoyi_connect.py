@@ -474,6 +474,8 @@ class XiaoyiChannel(BaseChannel):
         # 桌面 cloud-ws-relay 统一保活，不进本表。
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}
         self._session_task_map: dict[str, str] = {}
+        # (logical session, task) -> (JSON-RPC request ID, root reply session).
+        self._platform_request_ids: dict[tuple[str, str], tuple[str, str]] = {}
         # Team responses are produced by the first request's long-lived
         # stream. Keep the current platform task for each stable session so
         # those responses reach the user's latest A2A request.
@@ -659,6 +661,7 @@ class XiaoyiChannel(BaseChannel):
         self._active_tasks.clear()
         self._canceled_platform_tasks.clear()
         self._latest_platform_tasks.clear()
+        self._platform_request_ids.clear()
         self._sessions_waiting_for_push.clear()
         self._team_sessions.clear()
         self._team_tasks.clear()
@@ -3070,6 +3073,9 @@ class XiaoyiChannel(BaseChannel):
 
         self._mark_session_active(session_id, task_id)
         self._remember_active_platform_task(session_id, task_id)
+        self._platform_request_ids[(session_id, task_id)] = (
+            metadata["xiaoyi_rpc_id"] or task_id, top_session_id,
+        )
         if session_id in self._team_sessions:
             self._team_tasks.add((session_id, task_id))
         self._session_task_map[task_id] = session_id
@@ -3450,7 +3456,7 @@ class XiaoyiChannel(BaseChannel):
         """发送状态更新消息（A2A 格式）."""
         response = {
             "jsonrpc": "2.0",
-            "id": f"msg_{int(time.time() * 1000)}",
+            "id": self._response_rpc_id(session_id, task_id),
             "result": {
                 "taskId": task_id,
                 "kind": "status-update",
@@ -3490,7 +3496,7 @@ class XiaoyiChannel(BaseChannel):
             extra_part: dict | None = None,
     ) -> None:
         """发送状态更新消息（A2A 格式），支持自定义状态."""
-        is_final = state in {"completed", "failed", "canceled"}
+        is_final = state in {"failed", "canceled"}
         parts: list[dict] = [{"kind": "text", "text": message}]
         # 工具事件附结构化 data part（kind:"data"，A2A 规范内），端侧据此渲染工具卡；
         # 老客户端忽略未知 part，text 文案仍照常下发。
@@ -3498,7 +3504,7 @@ class XiaoyiChannel(BaseChannel):
             parts.append(extra_part)
         response = {
             "jsonrpc": "2.0",
-            "id": f"msg_{int(time.time() * 1000)}",
+            "id": self._response_rpc_id(session_id, task_id),
             "result": {
                 "taskId": task_id,
                 "kind": "status-update",
@@ -3526,6 +3532,13 @@ class XiaoyiChannel(BaseChannel):
         )
         await self._send_agent_response(session_id, task_id, response, url_key)
 
+        if state == "completed":
+            # 桌面端通过 artifact 终帧完成任务；空增量保留此前已发送的正文。
+            await self._send_text_response(
+                session_id, task_id, "", url_key,
+                append=True, last_chunk=True, is_final=True, kind="text",
+            )
+
     def _is_session_active(self, session_id: str, task_id: str | None = None) -> bool:
         """检查会话是否有活跃任务."""
         if task_id:
@@ -3538,6 +3551,17 @@ class XiaoyiChannel(BaseChannel):
         """Remember the latest inbound A2A task for a stable Xiaoyi session."""
         if session_id and task_id:
             self._latest_platform_tasks[session_id] = task_id
+
+    def _response_rpc_id(self, session_id: str, task_id: str, fallback: str = "") -> str:
+        """Echo the originating stream's request ID, including deferred output and keepalives."""
+        request = self._platform_request_ids.get((session_id, task_id))
+        if request:
+            return request[0]
+        # Team delivery uses the root reply session rather than the logical session.
+        for (_, candidate_task), (rpc_id, root_session) in self._platform_request_ids.items():
+            if session_id and candidate_task == task_id and root_session == session_id:
+                return rpc_id
+        return fallback or task_id
 
     def _should_drop_canceled_output(
         self, msg: Message, session_id: str, source_task_id: str, delivery_task_id: str
@@ -3604,7 +3628,7 @@ class XiaoyiChannel(BaseChannel):
         self._clear_session_waiting_for_push(session_id, task_id)
         self._clear_task_timeout(session_id, task_id)
         self._clear_session_timeout(session_id, task_id)
-        self._mark_session_completed(session_id, task_id)
+        self._mark_session_completed(session_id, task_id, preserve_request_id=True)
         self._team_tasks.discard((session_id, task_id))
         self._team_last_leader_finals.pop((session_id, task_id), None)
         for agent_id, entry in list(self._active_push_sessions.items()):
@@ -3628,6 +3652,7 @@ class XiaoyiChannel(BaseChannel):
             await self._send_status_update_with_state(
                 task_id, session_id, "", "canceled", url_key,
             )
+        self._platform_request_ids.pop((session_id, task_id), None)
         if not self._is_session_active(session_id):
             if session_id:
                 await self._stop_session_heartbeat(session_id)
@@ -3640,8 +3665,18 @@ class XiaoyiChannel(BaseChannel):
         if task_id:
             self._active_tasks.add((session_id, task_id))
 
-    def _mark_session_completed(self, session_id: str, task_id: str | None = None) -> None:
+    def _mark_session_completed(
+        self, session_id: str, task_id: str | None = None, *, preserve_request_id: bool = False,
+    ) -> None:
         """标记会话已完成."""
+        # Cancellation revokes activity before sending its terminal status; retain its ID until then.
+        if not preserve_request_id:
+            if task_id:
+                self._platform_request_ids.pop((session_id, task_id), None)
+            else:
+                self._platform_request_ids = {
+                    key: value for key, value in self._platform_request_ids.items() if key[0] != session_id
+                }
         if task_id:
             self._active_tasks.discard((session_id, task_id))
             if any(key[0] == session_id for key in self._active_tasks):
@@ -3843,7 +3878,7 @@ class XiaoyiChannel(BaseChannel):
             self._clear_session_waiting_for_push(session_id, task_id)
             self._clear_task_timeout(session_id, task_id)
             self._clear_session_timeout(session_id, task_id)
-            self._mark_session_completed(session_id, task_id)
+            self._mark_session_completed(session_id, task_id, preserve_request_id=True)
             self._team_tasks.discard((session_id, task_id))
             self._team_last_leader_finals.pop((session_id, task_id), None)
             for agent_id, entry in list(self._active_push_sessions.items()):
@@ -3871,6 +3906,7 @@ class XiaoyiChannel(BaseChannel):
             await self._send_status_update_with_state(
                 task_id, session_id, "", "canceled", url_key,
             )
+        self._platform_request_ids.pop((session_id, task_id), None)
         if not self._is_session_active(session_id):
             if session_id:
                 await self._stop_session_heartbeat(session_id)
@@ -3984,7 +4020,7 @@ class XiaoyiChannel(BaseChannel):
             data = {"kind": "text", "text": text}
         response = {
             "jsonrpc": "2.0",
-            "id": f"msg_{int(time.time() * 1000)}",
+            "id": self._response_rpc_id(session_id, task_id),
             "result": {
                 "taskId": task_id,
                 "kind": "artifact-update",
@@ -4178,7 +4214,7 @@ class XiaoyiChannel(BaseChannel):
                     # Send file reference response
                     payload = {
                         "jsonrpc": "2.0",
-                        "id": task_id,
+                        "id": self._response_rpc_id(session_id, task_id),
                         "result": {
                             "kind": "artifact-update",
                             "append": True,
@@ -4234,7 +4270,7 @@ class XiaoyiChannel(BaseChannel):
     ) -> None:
         """发送参考来源卡片（对齐 OpenClaw sendReference / data.reference）。"""
         try:
-            rpc_id = message_id or task_id
+            rpc_id = self._response_rpc_id(session_id, task_id, message_id)
             payload = {
                 "jsonrpc": "2.0",
                 "id": rpc_id,
@@ -4283,7 +4319,7 @@ class XiaoyiChannel(BaseChannel):
     ) -> None:
         """发送 HTML H5 卡片（对齐 openclaw sendCard / clawH5）."""
         try:
-            rpc_id = message_id or task_id
+            rpc_id = self._response_rpc_id(session_id, task_id, message_id)
             payload = {
                 "jsonrpc": "2.0",
                 "id": rpc_id,

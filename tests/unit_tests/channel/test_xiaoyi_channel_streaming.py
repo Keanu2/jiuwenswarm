@@ -89,7 +89,7 @@ async def test_streaming_final_and_gateway_notice_use_expected_terminal_frames()
         )
     )
 
-    assert len(sent) == 2
+    assert len(sent) == 3
     artifact = _result(sent[0])
     assert artifact["kind"] == "artifact-update"
     # 终帧按「扣住末片、段末补换行」语义作为增量收尾帧下发：append=True、
@@ -106,7 +106,15 @@ async def test_streaming_final_and_gateway_notice_use_expected_terminal_frames()
     assert status["status"]["message"]["parts"] == [
         {"kind": "text", "text": "任务处理已完成~"}
     ]
-    assert status["final"] is True
+    assert status["final"] is False
+
+    terminal = _result(sent[2])
+    assert terminal["taskId"] == artifact["taskId"]
+    assert terminal["kind"] == "artifact-update"
+    assert terminal["append"] is True
+    assert terminal["lastChunk"] is True
+    assert terminal["final"] is True
+    assert terminal["artifact"]["parts"] == [{"kind": "text", "text": ""}]
 
     notices: list[Message] = []
     handler = object.__new__(MessageHandler)
@@ -166,7 +174,7 @@ async def test_processing_started_is_non_terminal_status_update() -> None:
 
 
 @pytest.mark.asyncio
-async def test_completed_status_is_terminal_without_final_text() -> None:
+async def test_completed_status_sends_terminal_artifact_without_final_text() -> None:
     channel, sent = _build_channel()
     channel._mark_session_active("xiaoyi-session-1")
 
@@ -181,11 +189,66 @@ async def test_completed_status_is_terminal_without_final_text() -> None:
         )
     )
 
-    assert len(sent) == 1
+    assert len(sent) == 2
     status = _result(sent[0])
     assert status["kind"] == "status-update"
     assert status["status"]["state"] == "completed"
-    assert status["final"] is True
+    assert status["final"] is False
+    terminal = _result(sent[1])
+    assert terminal["kind"] == "artifact-update"
+    assert terminal["append"] is True
+    assert terminal["lastChunk"] is True
+    assert terminal["final"] is True
+    assert terminal["artifact"]["parts"] == [{"kind": "text", "text": ""}]
+
+
+@pytest.mark.asyncio
+async def test_completion_reaches_each_connection_before_request_id_cleanup() -> None:
+    channel, _ = _build_channel()
+    session_id, task_id = "xiaoyi-session-1", "xiaoyi-task-1"
+    channel._mark_session_active(session_id, task_id)
+    channel._platform_request_ids[(session_id, task_id)] = ("rpc-1", session_id)
+    channel._ws_connections = {"ws_url1": object(), "ws_url2": object()}
+    sent: dict[str, list[dict[str, Any]]] = {"ws_url1": [], "ws_url2": []}
+
+    async def capture(url_key: str, payload: dict[str, Any]) -> None:
+        assert channel._is_session_active(session_id, task_id)
+        rpc = json.loads(payload["msgDetail"])
+        assert rpc["id"] == "rpc-1"
+        assert rpc["result"]["taskId"] == task_id
+        sent[url_key].append(rpc["result"])
+
+    channel._safe_ws_send = capture
+    completion = _message(
+        EventType.CHAT_PROCESSING_STATUS,
+        {"event_type": "chat.processing_status", "is_processing": False, "is_complete": True},
+    )
+    await channel.send(completion)
+
+    for frames in sent.values():
+        assert [(frame["kind"], frame["final"]) for frame in frames] == [
+            ("status-update", False), ("artifact-update", True),
+        ]
+    assert not channel._is_session_active(session_id, task_id)
+    assert (session_id, task_id) not in channel._platform_request_ids
+    await channel.send(completion)
+    assert [len(frames) for frames in sent.values()] == [2, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("state", "final"), [("working", False), ("failed", True), ("canceled", True)])
+async def test_other_status_states_keep_single_status_frame(state: str, final: bool) -> None:
+    channel, sent = _build_channel()
+
+    await channel._send_status_update_with_state(
+        "xiaoyi-task-1", "xiaoyi-session-1", "状态通知", state, "ws_url1",
+    )
+
+    assert len(sent) == 1
+    result = _result(sent[0])
+    assert result["kind"] == "status-update"
+    assert result["status"]["state"] == state
+    assert result["final"] is final
 
 
 @pytest.mark.asyncio

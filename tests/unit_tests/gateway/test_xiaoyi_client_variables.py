@@ -59,11 +59,13 @@ def _make_channel(captured: list, sent: list) -> XiaoyiChannel:
     ch._on_message_cb = lambda m: (captured.append(m) or True)
     ch.bus = None
     ch._session_task_map = {}
+    ch._platform_request_ids = {}
     ch._session_active = set()
     ch._active_push_sessions = {}
     ch._task_timeout_tasks = {}
     ch._session_timeout_tasks = {}
     ch._session_heartbeat_tasks = {}
+    ch._status_update_interval = 20.0
     ch._sessions_waiting_for_push = {}
     ch._pending_approvals = {}
     ch._ws_connections = {"k": _FakeWs(sent)}
@@ -160,6 +162,136 @@ def workspace(tmp_path):
 def _cleanup_tasks(ch: XiaoyiChannel) -> None:
     for t in list(ch._task_timeout_tasks.values()) + list(ch._session_timeout_tasks.values()):
         t.cancel()
+
+
+# ------------------------------------------------------------------ JSON-RPC response correlation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["text", "reasoning", "status", "heartbeat", "reference", "html", "file"])
+@pytest.mark.parametrize("response_session", ["conv-1", "top-1"])
+async def test_stream_responses_echo_request_id_when_task_id_differs(
+    cfg_file, tmp_path, monkeypatch, response_kind, response_session,
+):
+    captured, sent = [], []
+    ch = _make_channel(captured, sent)
+    request = _build_stream_msg("查询天气")
+    request["id"] = "rpc-weather-1"
+    try:
+        await ch._handle_message_stream(request)
+        if response_kind in {"text", "reasoning"}:
+            await ch._send_text_response(
+                response_session, "task-1", "天气晴朗", "k", append=True,
+                last_chunk=False, is_final=False,
+                kind="reasoningText" if response_kind == "reasoning" else "text",
+            )
+        elif response_kind == "status":
+            await ch._send_status_update_with_state("task-1", response_session, "已完成", "completed", "k")
+        elif response_kind == "heartbeat":
+            await ch._send_status_update("task-1", response_session, "处理中")
+        elif response_kind == "reference":
+            await ch._send_reference_response(response_session, "task-1", "internal-event", [], "k")
+        elif response_kind == "html":
+            await ch._send_html_card_response(response_session, "task-1", "internal-event", [], "k")
+        else:
+            import jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_connect as xiaoyi_mod
+
+            class Upload:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *args):
+                    pass
+
+                async def upload_file(self, path):
+                    return "file-object-1"
+
+            monkeypatch.setattr(xiaoyi_mod, "XYFileUploadService", lambda *args: Upload())
+            ch.file_upload_config = {"baseUrl": "https://upload.invalid", "uid": "user-1"}
+            path = tmp_path / "weather.txt"
+            path.write_text("晴朗", encoding="utf-8")
+            await ch._send_file_response_base64(response_session, "task-1", {"fullPath": str(path)}, "k")
+
+        rpc = json.loads(sent[-1]["msgDetail"])
+        assert rpc["id"] == "rpc-weather-1"
+        assert sent[-1]["taskId"] == "task-1"
+        if response_kind == "status":
+            assert len(sent) == 2
+            status = json.loads(sent[-2]["msgDetail"])
+            assert status["id"] == "rpc-weather-1"
+            assert status["result"]["kind"] == "status-update"
+            assert status["result"]["final"] is False
+            assert rpc["result"]["kind"] == "artifact-update"
+            assert rpc["result"]["final"] is True
+        elif response_kind in {"text", "reasoning"}:
+            assert rpc["result"]["final"] is False
+            assert rpc["result"]["artifact"]["parts"][0]["kind"] == (
+                "reasoningText" if response_kind == "reasoning" else "text"
+            )
+        elif response_kind == "file":
+            assert rpc["result"]["artifact"]["parts"][0]["file"]["fileId"] == "file-object-1"
+    finally:
+        _cleanup_tasks(ch)
+
+
+@pytest.mark.asyncio
+async def test_response_ids_are_isolated_by_session_and_released_on_completion(cfg_file):
+    ch = _make_channel([], [])
+    sent = ch._ws_connections["k"].sink
+    try:
+        for conv, rpc_id in [("conv-1", "rpc-1"), ("conv-2", "rpc-2")]:
+            request = _build_stream_msg("查询", conv=conv, task="shared-task")
+            request["id"] = rpc_id
+            await ch._handle_message_stream(request)
+        await ch._send_status_update("shared-task", "conv-1", "处理中")
+        await ch._send_status_update("shared-task", "conv-2", "处理中")
+        assert [json.loads(frame["msgDetail"])["id"] for frame in sent[-2:]] == ["rpc-1", "rpc-2"]
+
+        await ch._finalize_session("conv-1", "shared-task")
+        await ch._send_status_update("shared-task", "conv-1", "处理中")
+        await ch._send_status_update("shared-task", "conv-2", "处理中")
+        assert [json.loads(frame["msgDetail"])["id"] for frame in sent[-2:]] == ["shared-task", "rpc-2"]
+    finally:
+        _cleanup_tasks(ch)
+
+
+@pytest.mark.asyncio
+async def test_cancel_ack_keeps_own_id_and_terminal_status_keeps_stream_id(cfg_file):
+    captured, sent = [], []
+    ch = _make_channel(captured, sent)
+    request = _build_stream_msg("查询")
+    request["id"] = "stream-rpc"
+    try:
+        await ch._handle_message_stream(request)
+        await ch._handle_tasks_cancel({
+            "id": "cancel-rpc", "params": {"id": "task-1", "sessionId": "conv-1"},
+        })
+        rpc_frames = [json.loads(frame["msgDetail"]) for frame in sent]
+        assert [frame["id"] for frame in rpc_frames[-2:]] == ["cancel-rpc", "stream-rpc"]
+        assert rpc_frames[-1]["result"]["status"]["state"] == "canceled"
+        assert rpc_frames[-1]["result"]["final"] is True
+        await ch._send_status_update("task-1", "conv-1", "处理中")
+        assert json.loads(sent[-1]["msgDetail"])["id"] == "task-1"
+    finally:
+        _cleanup_tasks(ch)
+
+
+@pytest.mark.asyncio
+async def test_superseded_task_terminal_response_keeps_previous_request_id(cfg_file):
+    ch = _make_channel([], [])
+    sent = ch._ws_connections["k"].sink
+    try:
+        for task, rpc_id in [("task-1", "rpc-1"), ("task-2", "rpc-2")]:
+            request = _build_stream_msg("查询", task=task)
+            request["id"] = rpc_id
+            await ch._handle_message_stream(request)
+        canceled = json.loads(sent[-1]["msgDetail"])
+        assert canceled["id"] == "rpc-1"
+        assert canceled["result"]["taskId"] == "task-1"
+        await ch._send_status_update("task-2", "conv-1", "处理中")
+        assert json.loads(sent[-1]["msgDetail"])["id"] == "rpc-2"
+    finally:
+        _cleanup_tasks(ch)
 
 
 # ------------------------------------------------------------------ permission_profile 纯函数
