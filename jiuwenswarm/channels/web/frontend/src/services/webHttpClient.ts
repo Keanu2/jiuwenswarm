@@ -16,26 +16,7 @@ import { buildRuntimeIdentityHeaders } from './runtimeScope';
 import { createSessionEventGate } from './sessionEventGate';
 import { PauseBufferHook, PAUSABLE_STREAM_EVENTS } from './webClient';
 
-const MANAGER_ACCESS_KEY = 'openjiuwen_access_token';
-
-function managerAccessToken(): string | null {
-  if (typeof localStorage === 'undefined') return null;
-  const token = localStorage.getItem(MANAGER_ACCESS_KEY)?.trim();
-  return token || null;
-}
-
-function hasManagerSessionCredentials(): boolean {
-  return Boolean(managerAccessToken());
-}
-
-function managerAuthenticatedFetch(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
-  const headers = new Headers(init.headers);
-  const token = managerAccessToken();
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
-  return fetch(input, { ...init, headers, credentials: 'include' });
-}
+import { hasManagerSessionCredentials, managerAccessToken, managerAuthenticatedFetch } from './managerSession';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -85,6 +66,11 @@ interface RouteRow {
 }
 
 const ROUTES: Record<string, RouteRow> = {
+  'media.persist': { verb: 'POST', path: '/sessions/{session_id}/media', kind: 'unary' },
+  'media.discard': { verb: 'DELETE', path: '/sessions/{session_id}/media', kind: 'unary' },
+  'document.persist': { verb: 'POST', path: '/sessions/{session_id}/documents', kind: 'unary' },
+  'document.formats': { verb: 'GET', path: '/documents/formats', kind: 'unary' },
+  'file.import_url': { verb: 'POST', path: '/sessions/{session_id}/files/import', kind: 'unary' },
   'connection.status': { verb: 'GET', path: '/connection/status', kind: 'unary' },
   'session.list': { verb: 'GET', path: '/sessions', kind: 'unary' },
   'session.create': { verb: 'POST', path: '/sessions', kind: 'unary' },

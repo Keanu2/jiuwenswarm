@@ -32,6 +32,50 @@ def is_http_chat_method(method: ReqMethod | None) -> bool:
 
 
 async def handle_http_chat(ctx: RequestContext) -> None:
+    """Bind in-turn tool delivery to this HTTP stream, never another caller."""
+    from jiuwenswarm.common.schema.agent import AgentResponseChunk
+    from jiuwenswarm.runtime.host_services import scoped_runtime_push_handler
+
+    request = ctx.request
+    active = True
+
+    async def push(message: dict) -> bool:
+        if (
+            not active
+            or not request.is_stream
+            or message.get("session_id") != request.session_id
+            or message.get("channel_id") != request.channel_id
+            or message.get("request_id") != request.request_id
+            or message.get("payload", {}).get("event_type") != "chat.file"
+        ):
+            return False
+        return await ctx.sink.send_chunk(
+            AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload=message["payload"],
+                metadata=message.get("metadata") or request.metadata,
+                is_complete=False,
+            ),
+            sequence=0,
+        )
+
+    try:
+        with scoped_runtime_push_handler(
+            {
+                "request_id": request.request_id,
+                "channel_id": request.channel_id,
+                "session_id": request.session_id,
+                "metadata": request.metadata,
+            },
+            push,
+        ):
+            await _handle_http_chat(ctx)
+    finally:
+        active = False
+
+
+async def _handle_http_chat(ctx: RequestContext) -> None:
     """先拦住归档或删除中的会话，再跑聊天前的三步，然后回包。"""
     request = ctx.request
     if await _reject_closed_session(ctx):

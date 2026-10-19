@@ -102,6 +102,8 @@ class SSESink:
         await self.close()
 
     async def send_chunk(self, chunk: AgentResponseChunk, *, sequence: int) -> bool:
+        if self._closed:
+            return False
         await self._emit(chunk_to_dict(chunk, sequence=sequence))
         if chunk.is_complete:
             await self.close()

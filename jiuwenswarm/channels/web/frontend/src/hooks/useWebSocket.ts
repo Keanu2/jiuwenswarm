@@ -5,6 +5,8 @@
  */
 
 import { readOutputOrder } from '../features/sessionOutput';
+import { isEnterprise } from '../edition';
+import { persistEnterpriseAttachments } from '../services/obsUpload';
 import { handleTaskInputReceipt, sendQueuedTaskInput, handleSessionOutputBoundary, shouldIgnoreSessionOutput } from '../features/sessionInput';
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -1673,6 +1675,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const persistMedia = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
+      if (isEnterprise()) {
+        return persistEnterpriseAttachments(request, content, sessionId, mediaItems, 'image');
+      }
       return request<PersistMediaResponse>(
         'media.persist',
         {
@@ -1699,6 +1704,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const persistDocuments = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
+      if (isEnterprise()) {
+        return persistEnterpriseAttachments(request, content, sessionId, mediaItems, 'document');
+      }
       return request<PersistMediaResponse>(
         'document.persist',
         {

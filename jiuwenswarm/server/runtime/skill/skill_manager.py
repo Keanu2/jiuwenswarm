@@ -4844,31 +4844,39 @@ class SkillManager:
                 ERROR_SKILL_DOWNLOAD_TOKEN_INVALID,
                 "download_token 无效、已过期或会话不匹配",
             )
+        from jiuwenswarm.edition import is_enterprise
+        from jiuwenswarm.server.runtime.tenant_context import TenantContext
 
-        file_path_raw = str(payload.get("path") or "").strip()
-        if not file_path_raw:
-            raise SkillRpcError(
-                ERROR_SKILL_DOWNLOAD_TOKEN_INVALID,
-                "download_token 未绑定有效文件路径",
-            )
-
-        src = Path(file_path_raw)
-        try:
-            src = src.resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise SkillRpcError(
-                ERROR_SKILL_DOWNLOAD_TOKEN_INVALID,
-                f"令牌指向的文件不存在: {file_path_raw}",
-            ) from exc
-
-        if not self._is_skill_package_file(src):
-            raise SkillRpcError(
-                ERROR_SKILL_DOWNLOAD_TOKEN_INVALID,
-                "令牌文件不是可识别的 .skill 或 Skill zip 包",
-            )
+        if is_enterprise() and (
+            not TenantContext.current_tenant_key()
+            or payload.get("tenant_key") != TenantContext.current_tenant_key()
+        ):
+            raise SkillRpcError(ERROR_SKILL_DOWNLOAD_TOKEN_INVALID, "download_token 租户不匹配")
 
         with tempfile.TemporaryDirectory(prefix="jiuwenswarm_import_token_") as tmpdir:
             tmp_path = Path(tmpdir)
+            if payload.get("kind") == "obs_asset_v1":
+                from jiuwenswarm.common.obs_files import AttachmentStore
+
+                src = tmp_path / payload["name"]
+                try:
+                    await asyncio.to_thread(AttachmentStore.from_env().download_file, payload, src)
+                except Exception as exc:
+                    raise SkillRpcError(
+                        ERROR_SKILL_DOWNLOAD_TOKEN_INVALID, "无法读取交付对象或文件校验失败"
+                    ) from exc
+            else:
+                file_path_raw = str(payload.get("path") or "").strip()
+                if not file_path_raw:
+                    raise SkillRpcError(ERROR_SKILL_DOWNLOAD_TOKEN_INVALID, "download_token 未绑定有效文件路径")
+                try:
+                    src = Path(file_path_raw).resolve(strict=True)
+                except (OSError, RuntimeError) as exc:
+                    raise SkillRpcError(
+                        ERROR_SKILL_DOWNLOAD_TOKEN_INVALID, f"令牌指向的文件不存在: {file_path_raw}"
+                    ) from exc
+            if not self._is_skill_package_file(src):
+                raise SkillRpcError(ERROR_SKILL_DOWNLOAD_TOKEN_INVALID, "令牌文件不是可识别的 .skill 或 Skill zip 包")
             try:
                 skill_dir = self._extract_skill_package_file(src, tmp_path)
             except SkillRpcError:

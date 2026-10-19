@@ -638,6 +638,7 @@ class WebChannel(BaseWsChannel):
         session_id: str | None = None,
         req_id: str = "",
         user_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """chat.send 上行文件处理（Phase 2：不再 Gateway 下载/落盘）。
 
@@ -659,7 +660,11 @@ class WebChannel(BaseWsChannel):
             return params
 
         ac = getattr(self, "agent_client", None)
+        from jiuwenswarm.edition import is_enterprise
+
         if ac is None:
+            if is_enterprise():
+                raise ValueError("AgentServer unavailable for attachment import")
             logger.warning("[WebChannel] 文件导入跳过：AgentServer 不可用")
             return params
 
@@ -683,14 +688,26 @@ class WebChannel(BaseWsChannel):
             user_id=user_id or None,
             channel_id=self.channel_id,
             label="file.import_url",
+            metadata=metadata,
         )
         if not ok:
+            if is_enterprise():
+                raise ValueError("Attachment import failed")
             logger.warning(
                 "[WebChannel] 文件导入失败，保留原 files: %s",
                 payload.get("error") or "forward failed",
             )
             return params
         imported = payload.get("files")
+        if is_enterprise():
+            if not isinstance(imported, list) or len(imported) != len(url_files):
+                raise ValueError("Invalid attachment import result")
+            records = iter(imported)
+            params["files"] = [
+                next(records) if isinstance(item, dict) and (item.get("url") or item.get("uri")) else item
+                for item in files
+            ]
+            return params
         if isinstance(imported, list):
             # 按原 files 顺序合并：导入成功项替换为带 path 的元数据
             imported_by_url = {
@@ -1675,12 +1692,20 @@ class WebChannel(BaseWsChannel):
                 self._ws_sessions[ws_id] = sessions
             sessions.add(session_id)
 
-        params = await self._process_files(
-            params,
-            session_id=session_id,
-            req_id=req_id if isinstance(req_id, str) else "",
-            user_id=self._connection_user_id(ws),
-        )
+        if method == "chat.send":
+            from jiuwenswarm.common.request_identity import apply_routing_metadata
+
+            try:
+                params = await self._process_files(
+                    params,
+                    session_id=session_id,
+                    req_id=req_id if isinstance(req_id, str) else "",
+                    user_id=self._connection_user_id(ws),
+                    metadata=apply_routing_metadata(None, getattr(ws, "_web_routing", None)),
+                )
+            except ValueError as exc:
+                await self.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+                return
 
         # ── V2: 用实际的 session_id / mode / agent_id 更新 ws 注册 ──
         _flat_query = {k: (v[0] if v else "") for k, v in query.items()}
