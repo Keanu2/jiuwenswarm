@@ -30,6 +30,7 @@ from typing import Any
 
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.common.request_identity import apply_routing_metadata
 from jiuwenswarm.gateway.routing.agent_client import (
     DuplicateRequestIdError,
     WebSocketAgentServerClient,
@@ -165,6 +166,10 @@ async def proxy_unary_request(
         is_stream=False,
         timestamp=time.time(),
         user_id=user_id or None,
+        metadata=(
+            apply_routing_metadata(None, getattr(ws, "_web_routing"))
+            if isinstance(getattr(ws, "_web_routing", None), dict) else None
+        ),
     )
     try:
         response = await send_agent_request_with_timeout(
@@ -232,6 +237,7 @@ async def fetch_agent_unary(
     channel_id: str,
     label: str = DEFAULT_PROXY_LABEL,
     timeout_seconds: float | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """向目标 AgentServer 发起一次 unary E2A 请求，返回 ``(ok, payload)``。
 
@@ -258,6 +264,7 @@ async def fetch_agent_unary(
             is_stream=False,
             timestamp=time.time(),
             user_id=user_id or None,
+            metadata=metadata,
         )
         try:
             response = await send_agent_request_with_timeout(

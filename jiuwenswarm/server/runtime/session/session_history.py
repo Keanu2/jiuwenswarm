@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import contextvars
 import re
 import tempfile
 import threading
@@ -25,7 +26,7 @@ from jiuwenswarm.common.session_message import SESSION_MESSAGE_ORIGIN
 logger = logging.getLogger(__name__)
 _FILE_LOCK = threading.Lock()
 _WRITE_QUEUE: queue.Queue[
-    tuple[str, dict[str, Any], str | None, Future[None] | None, int]
+    tuple[str, dict[str, Any], str | None, Future[None] | None, int, contextvars.Context | None]
 ] = queue.Queue(maxsize=20000)
 _QUEUE_ENQUEUE_LOCK = threading.Lock()
 _WORKER_STARTED = False
@@ -989,15 +990,17 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, item, subagent_id, receipt, generation = _WRITE_QUEUE.get()
+                sid, item, subagent_id, receipt, generation, context = _WRITE_QUEUE.get()
                 try:
                     if sid is None:
                         item.set()
                         continue
-                    from jiuwenswarm.server.runtime.session import lifecycle as lc
-                    with lc.resource_lock("session", sid):
-                        lc.write_guard(sid, generation)
-                        _write_item(sid, item, subagent_id=subagent_id)
+                    def write() -> None:
+                        from jiuwenswarm.server.runtime.session import lifecycle as lc
+                        with lc.resource_lock("session", sid):
+                            lc.write_guard(sid, generation)
+                            _write_item(sid, item, subagent_id=subagent_id)
+                    context.run(write)
                 except Exception as exc:  # noqa: BLE001
                     _settle_history_receipt(receipt, error=exc)
                     logger.warning("history 异步写入失败: %s", exc)
@@ -1016,7 +1019,7 @@ def flush_pending_writes(timeout: float = 10) -> bool:
     deadline = time.monotonic() + timeout
     barrier = threading.Event()
     try:
-        _WRITE_QUEUE.put((None, barrier, None, None, 0), timeout=timeout)
+        _WRITE_QUEUE.put((None, barrier, None, None, 0, None), timeout=timeout)
     except queue.Full:
         return False
     return barrier.wait(max(0, deadline - time.monotonic()))
@@ -1066,13 +1069,14 @@ def _enqueue_history_item(
     from jiuwenswarm.server.runtime.session import lifecycle as lc
     generation = lc.state("session", session_id).get("generation", 0)
     normalized_subagent_id = (subagent_id or "").strip() or None
+    context = contextvars.copy_context()
     with _QUEUE_ENQUEUE_LOCK:
         try:
-            _WRITE_QUEUE.put_nowait((session_id, item, normalized_subagent_id, receipt, generation))
+            _WRITE_QUEUE.put_nowait((session_id, item, normalized_subagent_id, receipt, generation, context))
         except queue.Full:
             # A synchronous disk-write fallback can overtake queued records.
             # Block only under backpressure so request boundaries remain FIFO.
-            _WRITE_QUEUE.put((session_id, item, normalized_subagent_id, receipt, generation))
+            _WRITE_QUEUE.put((session_id, item, normalized_subagent_id, receipt, generation, context))
 
 
 def append_history_record(
