@@ -34,9 +34,9 @@ def _open_uploads(root: Path, uploads: Path) -> int:
                 os.mkdir(name, mode=0o700, dir_fd=fd)
             except FileExistsError:
                 pass
-            child = os.open(name, flags, dir_fd=fd)
-            os.close(fd)
-            fd = child
+            parent_fd = fd
+            fd = os.open(name, flags, dir_fd=parent_fd)
+            os.close(parent_fd)
         return fd
     except BaseException:
         os.close(fd)

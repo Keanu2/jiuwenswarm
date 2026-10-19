@@ -54,7 +54,7 @@ import { openFileInDesktopBrowser } from '../../features/desktopBrowserFile';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
 import { FileIcon } from '../FileIcon';
 import { isEnterprise } from '../../edition';
-import { fileDownloadHead } from '../../services/fileDownload';
+import { fileDownloadHead, prepareFileDownload } from '../../services/fileDownload';
 import skillPackageIcon from '../../assets/skill.svg';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
@@ -1109,14 +1109,9 @@ function FileDownloadList({
 
   const handleDownload = async (file: FileDownloadItem, index: number) => {
     if (expiredSet.has(index) || !file.download_url) return;
-    if (isEnterprise()) {
-      try {
-        const response = await fileDownloadHead(file.download_url);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      } catch {
-        window.alert(t('artifacts.downloadFailed', { name: file.name }));
-        return;
-      }
+    if (isEnterprise() && !(await prepareFileDownload(file.download_url))) {
+      window.alert(t('artifacts.downloadFailed', { name: file.name }));
+      return;
     }
 
     const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => DesktopSaveApiResult } } }).pywebview?.api;

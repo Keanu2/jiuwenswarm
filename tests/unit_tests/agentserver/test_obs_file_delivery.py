@@ -22,7 +22,9 @@ from jiuwenswarm.common.obs_files import AttachmentStore, DOWNLOAD_TTL_SECONDS
 from jiuwenswarm.common.utils import build_tenant_key
 from jiuwenswarm.gateway.channel_manager.web.enterprise_files import (
     register_enterprise_file_routes,
+    serve_object_download,
 )
+from starlette.requests import Request
 from jiuwenswarm.server.runtime.tenant_context import TenantContext
 
 
@@ -318,3 +320,47 @@ async def test_missing_object_is_404(delivery):
         transport=httpx.ASGITransport(app=app), base_url="http://gateway"
     ) as client:
         assert (await client.get(delivery.info["download_url"])).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "missing", ["tenant_key", "bucket", "object_key", "size", "etag", "digest", "name"]
+)
+@pytest.mark.asyncio
+async def test_malformed_signed_claims_are_forbidden_before_sdk_access(
+    delivery, missing, monkeypatch
+):
+    payload = delivery.manager.validate_token(delivery.info["download_token"])
+    del payload[missing]
+    token = delivery.manager._sign_payload(payload)
+    store_factory = Mock(side_effect=AssertionError("malformed token reached OBS"))
+    monkeypatch.setattr(AttachmentStore, "from_env", store_factory)
+    response = await serve_object_download(
+        Request({"type": "http", "method": "GET", "headers": [], "query_string": b""}),
+        token,
+        delivery.identity,
+    )
+    assert response.status_code == 403
+    store_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gateway_releases_connection_when_stream_close_raises(
+    delivery, monkeypatch
+):
+    get_object = delivery.client.get_object
+
+    def response_with_failed_close(*args, **kwargs):
+        response = get_object(*args, **kwargs)
+        response.close = Mock(side_effect=OSError("close failed"))
+        return response
+
+    monkeypatch.setattr(delivery.client, "get_object", response_with_failed_close)
+    response = await serve_object_download(
+        Request({"type": "http", "method": "GET", "headers": [], "query_string": b""}),
+        delivery.info["download_token"],
+        delivery.identity,
+    )
+    with pytest.raises(OSError, match="close failed"):
+        async for _ in response.body_iterator:
+            pass
+    assert delivery.client.released

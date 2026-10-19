@@ -1,5 +1,6 @@
 import base64
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -39,7 +40,11 @@ async def test_upload_uses_verified_scope_and_sanitized_name(monkeypatch):
     ) as client:
         response = await client.post(
             "/file-api/upload-obs",
-            headers={"X-Group-Id": "untrusted", "X-Bot-Id": "untrusted", "X-User-Id": "untrusted"},
+            headers={
+                "X-Group-Id": "untrusted",
+                "X-Bot-Id": "untrusted",
+                "X-User-Id": "untrusted",
+            },
             json={
                 "filename": "../中文.txt",
                 "content_base64": base64.b64encode(b"hello").decode(),
@@ -78,3 +83,68 @@ def test_import_rejects_unconfigured_or_cross_scope_urls(url):
     store = AttachmentStore(None, "bucket", "http://obs")
     with pytest.raises(ValueError):
         store.read(url, "uploads/x/")
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ["own", "user", "group", "bot", "bucket", "origin", "download", "traversal"],
+)
+@pytest.mark.asyncio
+async def test_upload_cleanup_is_restricted_to_verified_temporary_scope(
+    monkeypatch, scope
+):
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def identity(request, call_next):
+        request.state.enterprise_identity = {
+            "group_id": "g",
+            "bot_id": "b",
+            "user_id": "u",
+        }
+        return await call_next(request)
+
+    sdk = Mock()
+    store = AttachmentStore(sdk, "bucket", "http://obs")
+    monkeypatch.setattr(AttachmentStore, "from_env", lambda: store)
+    prefix = object_prefix("g", "b", "u")
+    key = f"{prefix}{'a' * 32}/中文.txt"
+    url = f"http://obs/bucket/{key}?signature=test"
+    if scope in {"user", "group", "bot"}:
+        triple = {"group": "g", "bot": "b", "user": "u"}
+        triple[scope] = "other"
+        url = url.replace(
+            prefix, object_prefix(triple["group"], triple["bot"], triple["user"])
+        )
+    elif scope == "bucket":
+        url = url.replace("/bucket/", "/other/")
+    elif scope == "origin":
+        url = url.replace("http://obs/", "http://other/")
+    elif scope == "download":
+        url = url.replace("uploads/", "downloads/")
+    elif scope == "traversal":
+        url = url.replace("中文.txt", "%2e%2e/中文.txt")
+    register_enterprise_file_routes(app, SimpleNamespace())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="http://gateway"
+    ) as client:
+        response = await client.request(
+            "DELETE", "/file-api/upload-obs", json={"url": url}
+        )
+    assert response.status_code == (200 if scope == "own" else 400)
+    if scope == "own":
+        sdk.remove_object.assert_called_once_with("bucket", key)
+    else:
+        sdk.remove_object.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unwired_cleanup_fails_closed():
+    app = FastAPI()
+    register_enterprise_file_routes(app, SimpleNamespace())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="http://gateway"
+    ) as client:
+        assert (
+            await client.request("DELETE", "/file-api/upload-obs", json={})
+        ).status_code == 503

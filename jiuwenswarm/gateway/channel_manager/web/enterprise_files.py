@@ -42,7 +42,7 @@ async def serve_object_download(
     if (
         not payload
         or payload.get("kind") != OBJECT_ASSET_KIND
-        or payload["tenant_key"] != tenant
+        or payload.get("tenant_key") != tenant
     ):
         return JSONResponse({"error": "invalid_download_token"}, status_code=403)
     try:
@@ -103,6 +103,8 @@ async def serve_object_download(
             length=length,
             request_headers={"If-Match": f'"{info.etag}"'},
         )
+    except KeyError:
+        return JSONResponse({"error": "invalid_download_token"}, status_code=403)
     except S3Error as exc:
         status = 404 if exc.code in {"NoSuchKey", "NoSuchObject"} else 503
         return JSONResponse(
@@ -121,8 +123,10 @@ async def serve_object_download(
                 remaining -= len(chunk)
                 yield chunk
         finally:
-            upstream.close()
-            upstream.release_conn()
+            try:
+                upstream.close()
+            finally:
+                upstream.release_conn()
 
     return StreamingResponse(
         stream(), status_code=status, headers=headers, media_type=mime
@@ -175,6 +179,39 @@ def register_enterprise_file_routes(app: FastAPI, channel) -> None:
                 {"ok": False, "error": "object_store_unavailable"}, status_code=503
             )
         return JSONResponse({"ok": True, **result})
+
+    @app.delete("/file-api/upload-obs")
+    async def remove_upload(request: Request) -> JSONResponse:
+        identity = getattr(request.state, "enterprise_identity", None)
+        if not identity:
+            return JSONResponse(
+                {"ok": False, "error": "identity_not_wired"}, status_code=503
+            )
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 16384:
+                return JSONResponse(
+                    {"ok": False, "error": "invalid_upload"}, status_code=400
+                )
+        try:
+            payload = json.loads(body)
+            if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
+                raise ValueError("attachment URL required")
+            prefix = object_prefix(
+                identity["group_id"], identity["bot_id"], identity["user_id"]
+            )
+            store = AttachmentStore.from_env()
+            await asyncio.to_thread(store.remove_upload, payload["url"], prefix)
+        except (ValueError, TypeError):
+            return JSONResponse(
+                {"ok": False, "error": "invalid_upload"}, status_code=400
+            )
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "error": "object_store_unavailable"}, status_code=503
+            )
+        return JSONResponse({"ok": True})
 
     @app.api_route("/file-api/download", methods=["GET", "HEAD"])
     async def download(request: Request) -> Response:

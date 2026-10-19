@@ -234,3 +234,46 @@ async def test_signed_download_is_bound_to_tenant(app, monkeypatch, tmp_path):
             json={"token": token, "offset": 0, "limit": 512},
         )
         assert not denied.json()["ok"]
+
+
+@pytest.mark.parametrize(
+    "edition,tenant,token_tenant,allowed",
+    [
+        ("enterprise", None, None, False),
+        ("enterprise", "", "", False),
+        ("enterprise", "g::b::u", None, False),
+        ("enterprise", "g::b::u", "g::b::v", False),
+        ("enterprise", "g::b::u", "g::b::u", True),
+        ("personal", None, None, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_verified_download_requires_nonempty_enterprise_tenant(
+    monkeypatch, tmp_path, edition, tenant, token_tenant, allowed
+):
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.agents.harness.common.tools import web_file_download
+
+    path = tmp_path / "asset"
+    path.write_bytes(b"data")
+    payload = {
+        "kind": "verified_asset_v1",
+        "path": str(path),
+        "name": "asset",
+        "size": 4,
+    }
+    if token_tenant is not None:
+        payload["tenant_key"] = token_tenant
+    monkeypatch.setenv("JIUWENSWARM_EDITION", edition)
+    monkeypatch.setattr(TenantContext, "current_tenant_key", lambda: tenant)
+    monkeypatch.setattr(
+        web_file_download, "validate_file_download_token", lambda *args, **kw: payload
+    )
+    response = await WorkspaceFileAdapter()._handle_verified_download_chunk(
+        AgentRequest(
+            request_id="r", channel_id="web", session_id="s", params={"token": "signed"}
+        )
+    )
+    assert response.ok is allowed
+    if not allowed:
+        assert response.payload["code"] == "FORBIDDEN"

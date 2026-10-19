@@ -28,6 +28,7 @@ export async function persistEnterpriseAttachments(
     return { filename: item.filename, content_base64: data };
   });
   const imported: FileRecord[] = [];
+  const uploadedUrls: string[] = [];
   try {
     for (const file of prepared) {
       assertScope();
@@ -38,6 +39,7 @@ export async function persistEnterpriseAttachments(
       });
       const uploaded = (await response.json()) as { ok?: boolean; url?: string; error?: string; name?: string };
       if (!response.ok || !uploaded.ok || !uploaded.url) throw new Error(uploaded.error || 'Attachment upload failed');
+      uploadedUrls.push(uploaded.url);
       assertScope();
       const result = await request<{ files: FileRecord[] }>(
         'file.import_url',
@@ -68,5 +70,23 @@ export async function persistEnterpriseAttachments(
       );
     }
     throw error;
+  } finally {
+    // The OBS objects are transfer sources, not persisted chat attachments.
+    // Captured headers keep cleanup scoped even if the UI has since switched.
+    const cleanup = await Promise.allSettled(
+      uploadedUrls.map(async (url) => {
+        const response = await managerAuthenticatedFetch('/file-api/upload-obs', {
+          method: 'DELETE',
+          signal: AbortSignal.timeout(10_000),
+          headers: {
+            'Content-Type': 'application/json',
+            ...buildRuntimeIdentityHeaders(crypto.randomUUID(), {}, scope),
+          },
+          body: JSON.stringify({ url }),
+        });
+        if (!response.ok) throw new Error(`Attachment cleanup HTTP ${response.status}`);
+      }),
+    );
+    if (cleanup.some((result) => result.status === 'rejected')) console.warn('Temporary attachment cleanup failed');
   }
 }

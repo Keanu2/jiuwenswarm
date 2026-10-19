@@ -559,7 +559,8 @@ class WorkspaceFileAdapter(GatewayAdapter):
         from jiuwenswarm.edition import is_enterprise
         from jiuwenswarm.server.runtime.tenant_context import TenantContext
 
-        if is_enterprise() and payload.get("tenant_key") != TenantContext.current_tenant_key():
+        tenant_key = TenantContext.current_tenant_key()
+        if is_enterprise() and (not tenant_key or payload.get("tenant_key") != tenant_key):
             return build_error_response(request, "download context mismatch", code="FORBIDDEN")
 
         try:

@@ -99,10 +99,15 @@ class AttachmentStore:
         key = f"{prefix}{uuid.uuid4().hex}/{filename}"
         # Buckets and lifecycle policies are deployment configuration, not user operations.
         self.client.put_object(self.bucket, key, BytesIO(data), len(data))
-        return {
-            "url": self.client.presigned_get_object(
+        try:
+            url = self.client.presigned_get_object(
                 self.bucket, key, expires=timedelta(minutes=10)
-            ),
+            )
+        except BaseException:
+            self.client.remove_object(self.bucket, key)
+            raise
+        return {
+            "url": url,
             "name": filename,
             "size": len(data),
         }
@@ -115,6 +120,8 @@ class AttachmentStore:
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError("delivery source must be a regular file")
             size = info.st_size
+            if size > MAX_FILE_BYTES:
+                raise ValueError("file exceeds 50 MiB")
             checksum = hashlib.sha256()
             while chunk := source.read(1024 * 1024):
                 checksum.update(chunk)
@@ -139,8 +146,10 @@ class AttachmentStore:
             request_headers={"If-Match": f'"{payload["etag"]}"'},
         )
         digest, total = hashlib.sha256(), 0
+        created = False
         try:
             with destination.open("xb") as output:
+                created = True
                 while chunk := response.read(65536):
                     total += len(chunk)
                     if total > payload["size"]:
@@ -152,11 +161,17 @@ class AttachmentStore:
                 or f"sha256:{digest.hexdigest()}" != payload["digest"]
             ):
                 raise ValueError("download digest mismatch")
+        except BaseException:
+            if created:
+                destination.unlink(missing_ok=True)
+            raise
         finally:
-            response.close()
-            response.release_conn()
+            try:
+                response.close()
+            finally:
+                response.release_conn()
 
-    def read(self, url: str, prefix: str) -> bytes:
+    def _upload_key(self, url: str, prefix: str) -> str:
         parsed = urlsplit(url)
         if f"{parsed.scheme}://{parsed.netloc}" != self.origin or parsed.fragment:
             raise ValueError("attachment URL must use the configured OBS origin")
@@ -164,22 +179,42 @@ class AttachmentStore:
         if not parsed.path.startswith(path_prefix):
             raise ValueError("attachment URL must use the configured bucket")
         key = unquote(parsed.path[len(path_prefix) :])
-        if not key.startswith(prefix) or any(
-            part in {".", ".."} for part in key.split("/")
+        suffix = key.removeprefix(prefix).split("/")
+        if (
+            not key.startswith(prefix)
+            or len(suffix) != 2
+            or not re.fullmatch(r"[0-9a-f]{32}", suffix[0])
+            or not suffix[1]
+            or suffix[1] in {".", ".."}
+            or any(char in suffix[1] for char in "\\\0")
         ):
             raise ValueError("attachment does not belong to the current context")
+        return key
+
+    def remove_upload(self, url: str, prefix: str) -> None:
+        """Delete only a temporary upload belonging to the authenticated scope."""
+        self.client.remove_object(self.bucket, self._upload_key(url, prefix))
+
+    def read(self, url: str, prefix: str) -> bytes:
+        self._upload_key(url, prefix)
         # Use the signed URL so its expiry/signature is enforced by OBS. Never
         # follow redirects or reinterpret the URL as an unrestricted SDK key.
         transport = PoolManager(timeout=Timeout(connect=5, read=60), retries=False)
-        response = transport.request("GET", url, redirect=False, preload_content=False)
         try:
-            if response.status != 200:
-                raise ValueError("attachment URL rejected by OBS")
-            data = response.read(MAX_FILE_BYTES + 1)
-            if not data or len(data) > MAX_FILE_BYTES:
-                raise ValueError("file must contain 1..50 MiB")
-            return data
+            response = transport.request(
+                "GET", url, redirect=False, preload_content=False
+            )
+            try:
+                if response.status != 200:
+                    raise ValueError("attachment URL rejected by OBS")
+                data = response.read(MAX_FILE_BYTES + 1)
+                if not data or len(data) > MAX_FILE_BYTES:
+                    raise ValueError("file must contain 1..50 MiB")
+                return data
+            finally:
+                try:
+                    response.close()
+                finally:
+                    response.release_conn()
         finally:
-            response.close()
-            response.release_conn()
             transport.clear()
