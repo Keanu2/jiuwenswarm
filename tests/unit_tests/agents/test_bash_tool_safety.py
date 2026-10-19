@@ -26,13 +26,13 @@ def _reset_install_flag():
 
 
 def test_pre_execute_blocks_pkill_on_jiuwenswarm_tui() -> None:
-    err = _pre_execute_shell_command('pkill -f "jiuwenswarm-tui" 2>/dev/null')
+    err = _pre_execute_shell_command('pkill -f "jiuwenswarm-tui" 2>/dev/null', "bash")
     assert err is not None
     assert "rejected for safety" in err
 
 
 def test_pre_execute_allows_unrelated_ps() -> None:
-    err = _pre_execute_shell_command("ps aux | grep node | head -5")
+    err = _pre_execute_shell_command("ps aux | grep node | head -5", "bash")
     assert err is None
 
 
