@@ -846,6 +846,81 @@ async def test_command_mcp_discovery_distinguishes_failure_from_empty(server, fa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure,code", [
+    (TimeoutError(), "MCP_TIMEOUT"), (ConnectionError("offline"), "MCP_CONNECTION_FAILED"),
+    (RuntimeError("discovery failed"), "MCP_INTERNAL"), (None, None),
+])
+async def test_command_mcp_show_keeps_configuration_when_discovery_fails(server, fake_ws, monkeypatch, failure, code):
+    from openjiuwen.core.runner import Runner
+
+    entry = {"name": "offline-server", "enabled": True, "transport": "stdio", "command": "python"}
+    monkeypatch.setattr(agent_ws_server_module, "get_mcp_server_config", lambda _name: entry)
+    monkeypatch.setattr(Runner, "resource_mgr", SimpleNamespace(_resource_registry=None))
+
+    async def fetch(_entry):
+        if failure is not None:
+            raise failure
+        return []
+
+    monkeypatch.setattr(server, "_fetch_mcp_tools_from_config", fetch)
+    request = AgentRequest(request_id="show-result", channel_id="web", req_method=ReqMethod.COMMAND_MCP,
+                           params={"action": "show", "name": entry["name"]})
+    await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
+    response = fake_ws.sent[0]
+    assert response["ok"] is True
+    assert response["payload"]["type"] == "detail"
+    item = response["payload"]["item"]
+    assert {key: item[key] for key in entry} == entry
+    assert item["tool_count"] == (None if failure is not None else 0)
+    if code:
+        assert item["tool_count_error"]["code"] == code
+        assert item["tool_count_error"]["error"]
+    else:
+        assert "tool_count_error" not in item
+    assert entry == {"name": "offline-server", "enabled": True, "transport": "stdio", "command": "python"}
+
+
+@pytest.mark.asyncio
+async def test_command_mcp_show_all_does_not_probe_servers(server, fake_ws, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    entries = [
+        {"name": "offline-server", "enabled": True},
+        {"name": "healthy-server", "enabled": True},
+        {"name": "disabled-server", "enabled": False},
+    ]
+    monkeypatch.setattr(agent_ws_server_module, "get_mcp_servers", lambda: entries)
+    fetch = AsyncMock(side_effect=ConnectionError("offline"))
+    monkeypatch.setattr(server, "_fetch_mcp_tools_from_config", fetch)
+    request = AgentRequest(request_id="show-all", channel_id="web", req_method=ReqMethod.COMMAND_MCP,
+                           params={"action": "show"})
+    await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
+    assert fake_ws.sent == [{
+        "response_id": "show-all", "ok": True,
+        "payload": {"type": "list", "items": entries[:2]},
+    }]
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_command_mcp_show_preserves_cancellation(server, fake_ws, monkeypatch):
+    from openjiuwen.core.runner import Runner
+
+    monkeypatch.setattr(agent_ws_server_module, "get_mcp_server_config", lambda _name: {"enabled": True})
+    monkeypatch.setattr(Runner, "resource_mgr", SimpleNamespace(_resource_registry=None))
+
+    async def fetch(_entry):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(server, "_fetch_mcp_tools_from_config", fetch)
+    request = AgentRequest(request_id="show-cancel", channel_id="web", req_method=ReqMethod.COMMAND_MCP,
+                           params={"action": "show", "name": "cancelled-server"})
+    with pytest.raises(asyncio.CancelledError):
+        await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
+    assert not fake_ws.sent
+
+
+@pytest.mark.asyncio
 async def test_handle_command_mcp_add_triggers_reload(server, fake_ws, monkeypatch):
     monkeypatch.setattr(
         agent_ws_server_module,

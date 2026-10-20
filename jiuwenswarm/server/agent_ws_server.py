@@ -7141,7 +7141,7 @@ class AgentWebSocketServer:
                         raise KeyError(f"MCP server '{name}' not found")
                     masked = self._mask_sensitive_fields(item)
                     # Enrich with tool count
-                    tool_count = 0
+                    tool_count: int | None = 0
                     try:
                         from openjiuwen.core.runner import Runner
                         resource_registry = getattr(Runner.resource_mgr, "_resource_registry", None)
@@ -7165,8 +7165,31 @@ class AgentWebSocketServer:
                         core_logger.debug("[command.mcp] show tool_count from ToolMgr failed: %s", exc)
                     # If ToolMgr has no data, try temporary connection
                     if tool_count == 0 and bool(item.get("enabled", True)):
-                        tools = await self._fetch_mcp_tools_from_config(item)
-                        tool_count = len(tools)
+                        try:
+                            tools = await self._fetch_mcp_tools_from_config(item)
+                            tool_count = len(tools)
+                        except Exception as exc:
+                            # Configuration remains useful while a server is
+                            # offline. An unknown count must not look like an
+                            # actual empty tool list.
+                            tool_count = None
+                            if isinstance(exc, TimeoutError):
+                                code = "MCP_TIMEOUT"
+                            elif isinstance(exc, ConnectionError):
+                                code = "MCP_CONNECTION_FAILED"
+                            else:
+                                code = "MCP_INTERNAL"
+                            masked["tool_count_error"] = {
+                                "code": code,
+                                "error": str(exc) or (
+                                    "MCP tool discovery timed out" if code == "MCP_TIMEOUT"
+                                    else "MCP tool discovery failed"
+                                ),
+                            }
+                            core_logger.warning(
+                                "[command.mcp] show tool_count from temp connection failed: name=%r code=%s: %s",
+                                name, code, exc,
+                            )
                     masked["tool_count"] = tool_count
                     resp = AgentResponse(
                         request_id=request.request_id,
