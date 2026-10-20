@@ -293,9 +293,11 @@ def _clip_text(value: str, max_chars: int) -> str:
 #           legitimate agent scenario for name-killing "python*".
 # Known residuals (documented, not fixable by text matching): variable
 # indirection (``P=jiuwenswarm; pkill -f $P``), enumerate-then-PID-kill
-# (``Get-Process python | % { Stop-Process -Id $_.Id }``), encoded
-# execution. Deny-by-default allowlists (PermissionEngine rules) are the
-# real gate for those.
+# (``Get-Process python | % { Stop-Process -Id $_.Id }``), encoded payloads
+# (``powershell -enc ...``), interpreter sinks (``python -c ...``).
+# Launcher wraps (cmd /c, powershell -Command, bash -c) ARE unwrapped
+# (depth-capped) — see ``_unwrap_launcher``. Deny-by-default allowlists
+# (PermissionEngine rules) are the real gate for the rest.
 
 _KILL_FAMILY_BASES = frozenset({
     "pkill", "killall", "kill",  # POSIX (kill is also a PowerShell alias)
@@ -330,6 +332,52 @@ def _normalize_continuations(command: str, shell_type: str) -> str:
     """Join shell line-continuations so checks see what the shell executes."""
     pattern = _CONTINUATION_RES.get((shell_type or "").strip().lower())
     return pattern.sub("", command) if pattern is not None else command
+
+
+# Launchers whose payload is another shell command line: cmd /c, powershell
+# -Command, bash/sh -c. A whole-command launcher wrap hides the payload's
+# base command from segment analysis, so single-segment launcher commands
+# are unwrapped and re-checked with the inner shell (depth-capped).
+# Known residual: encoded payloads (powershell -enc / -EncodedCommand) and
+# interpreter sinks (python -c ...) are NOT unwrapped — those belong to
+# PermissionEngine's interpreter_sink rules.
+_LAUNCHER_FLAGS = {
+    "cmd": {"/c", "/k"},
+    "powershell": {"-command", "-c"},
+    "pwsh": {"-command", "-c"},
+    "bash": {"-c"},
+    "sh": {"-c"},
+}
+_LAUNCHER_INNER_SHELL = {"pwsh": "powershell"}
+
+
+def _unwrap_launcher(segment: str) -> tuple[str, str] | None:
+    """Unwrap one launcher layer; return (inner_command, inner_shell_type).
+
+    Quoted payload tokens get their quotes stripped; bare payloads are
+    rejoined with spaces (analysis view only — execution is untouched).
+    """
+    tokens = _segment_tokens(segment)
+    if not tokens:
+        return None
+    base = _segment_base_command(segment)
+    flags = _LAUNCHER_FLAGS.get(base)
+    if not flags:
+        return None
+    for index, token in enumerate(tokens[1:], 1):
+        lowered = token.lower()
+        if lowered in flags:
+            rest = [_strip_matching_quotes(t) for t in tokens[index + 1:]]
+            inner = " ".join(rest).strip()
+            if not inner:
+                return None
+            return inner, _LAUNCHER_INNER_SHELL.get(base, base)
+        if base == "cmd":
+            if not lowered.startswith("/"):
+                return None  # positional before /c: not a /c form
+        elif not token.startswith("-"):
+            return None  # positional before -c/-Command: not a payload form
+    return None
 
 
 def _self_identity_literals() -> tuple[str, ...]:
@@ -387,7 +435,7 @@ def _kill_segment_is_pid_precise(base: str, tokens: list[str]) -> bool:
     )
 
 
-def _check_command_safety(command: str, shell_type: str = "") -> str | None:
+def _check_command_safety(command: str, shell_type: str = "", *, _depth: int = 0) -> str | None:
     """Availability guardrail: block commands that would kill the Swarm runtime.
 
     Two rule families are evaluated per shell segment (see the comment above
@@ -396,9 +444,10 @@ def _check_command_safety(command: str, shell_type: str = "") -> str | None:
     ``^``); empty/unknown leaves the text as-is (legacy single-argument
     behavior). Both production call sites know the shell: ``_execute_command``
     enforces an explicit shell_type, and ``bash_tool_safety`` derives it from
-    the hooked tool.
+    the hooked tool. Whole-command launcher wraps (cmd /c, powershell
+    -Command, bash -c) are unwrapped and re-checked with the inner shell.
     """
-    if not command:
+    if not command or _depth > 3:
         return None
     text = _normalize_continuations(command, shell_type)
     # Legacy whole-text scan on the normalized text: keeps the pre-existing
@@ -408,6 +457,11 @@ def _check_command_safety(command: str, shell_type: str = "") -> str | None:
         if pattern.search(text):
             return message
     segments = _split_shell_segments(text)
+    if len(segments) == 1:
+        unwrapped = _unwrap_launcher(segments[0])
+        if unwrapped is not None:
+            inner, inner_shell = unwrapped
+            return _check_command_safety(inner, inner_shell, _depth=_depth + 1)
     parsed: list[tuple[str, str, list[str] | None]] = []
     enum_interpreter = False
     for segment in segments:
