@@ -116,6 +116,16 @@ def test_bash_named_tool_honors_explicit_cmd_shell():
     assert "echo a;b &&\ndir" in body
 
 
+def test_shell_prompt_uses_captured_workdir_without_changing_tool_arguments():
+    args = {"command": "chmod -R a-w relative.txt && echo done", "cwd": "ignored-model-cwd"}
+    original = dict(args)
+    _, body = build_permission_prompt("bash", args, "需要授权", {"workdir": "C:/审批目录"})
+    assert body.count("工作目录：") == 1
+    assert "C:/审批目录" in body
+    assert "ignored-model-cwd" not in body
+    assert args == original
+
+
 @pytest.mark.parametrize(
     ("tool", "title"),
     [

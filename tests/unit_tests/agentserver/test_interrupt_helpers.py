@@ -64,9 +64,11 @@ def test_shell_chain_is_listed_in_one_unchanged_approval_request():
     assert [option["value"] for option in question["options"]] == [option["value"] for option in options]
 
 
-def test_acp_shell_prompt_keeps_one_request_and_existing_option_ids(monkeypatch, tmp_path):
+@pytest.mark.parametrize("explicit_workdir", [False, True])
+def test_acp_shell_prompt_keeps_one_request_and_existing_option_ids(monkeypatch, tmp_path, explicit_workdir):
     from openjiuwen.harness.security.host import PermissionConfirmationRequest
     from openjiuwen.harness.security.models import PermissionLevel, PermissionResult
+    from openjiuwen.harness.security.permission_engine.approve import operation_grants
 
     from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
         TOOL_PERMISSION_CHANNEL_ID,
@@ -76,6 +78,8 @@ def test_acp_shell_prompt_keeps_one_request_and_existing_option_ids(monkeypatch,
 
     monkeypatch.setattr(utils, "get_config_file", lambda: tmp_path / "config.yaml")
     monkeypatch.setattr(utils, "get_workspace_dir", lambda: tmp_path)
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(operation_grants, "get_cwd", lambda: str(runtime_dir))
 
     sent = []
 
@@ -88,6 +92,9 @@ def test_acp_shell_prompt_keeps_one_request_and_existing_option_ids(monkeypatch,
     ))
     rail = build_permission_rail({"permissions": {"enabled": True}})
     args = {"command": "cd .. && dir", "shell_type": "cmd"}
+    if explicit_workdir:
+        args["workdir"] = str(tmp_path / "explicit")
+    original = dict(args)
     request = PermissionConfirmationRequest(
         ctx=SimpleNamespace(session=SimpleNamespace(session_id="acp-session")),
         tool_call=SimpleNamespace(id="original-call", name="mcp_exec_command", arguments=args),
@@ -109,6 +116,10 @@ def test_acp_shell_prompt_keeps_one_request_and_existing_option_ids(monkeypatch,
     assert params["toolCall"]["toolCallId"] == "original-call"
     assert "cd .. &&\ndir" in params["toolCall"]["content"][0]["content"]["text"]
     assert "需要确认目录访问" in params["toolCall"]["content"][0]["content"]["text"]
+    body = params["toolCall"]["content"][0]["content"]["text"]
+    expected = tmp_path / "explicit" if explicit_workdir else runtime_dir
+    assert body.count("工作目录：") == 1 and str(expected.resolve()) in body
+    assert args == original
     assert [option["optionId"] for option in params["options"]] == [
         "allow-once", "allow-session", "allow-always", "reject-once",
     ]
@@ -186,6 +197,37 @@ def test_core_permission_message_reaches_ws_with_complete_file_list(tmp_path):
     assert "命令始终按原始命令授权" in body
     assert question["tool_args"] == args and question["tool_call_id"] == call.id
     assert payloads[0]["request_id"] == "copy-approval"
+
+
+def test_ordinary_permission_keeps_captured_cwd_across_context_change(tmp_path, monkeypatch):
+    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+    from openjiuwen.harness.security.models import PermissionLevel, PermissionResult
+    from openjiuwen.harness.security.permission_engine.approve import operation_grants
+
+    initial_dir = tmp_path / "project"
+    later_dir = tmp_path / "later"
+    monkeypatch.setattr(operation_grants, "get_cwd", lambda: str(initial_dir))
+    args = {"command": "chmod -R a-w rel_out_action_008.txt && echo APPROVAL_ACT008 > rel_out_action_008.txt"}
+    call = SimpleNamespace(id="action-008", name="bash", arguments=args)
+    result = PermissionResult(PermissionLevel.ASK, matched_rule="tools.bash")
+    rail = PermissionInterruptRail(config={"enabled": True})
+    message = rail._build_message(call, result)
+    metadata = rail._build_interrupt_metadata(call, result)
+    monkeypatch.setattr(operation_grants, "get_cwd", lambda: str(later_dir))
+    payloads = convert_interactions_to_ask_user_questions([{
+        "id": "cwd-approval", "value": {
+            "tool_name": call.name, "tool_call_id": call.id,
+            "tool_args": args, "message": message, "metadata": metadata,
+        },
+    }])
+    question = payloads[0]["questions"][0]
+    assert payloads[0]["source"] == "permission_interrupt"
+    assert question["question"].count("工作目录：") == 1
+    assert str(initial_dir.resolve()) in question["question"]
+    assert str(later_dir.resolve()) not in question["question"]
+    assert question["tool_args"] == args and "workdir" not in args
+    assert question["tool_call_id"] == call.id
+    assert question["authorization_scopes"] == metadata["authorization_scopes"]
 
 
 def _evolution_interrupt(
