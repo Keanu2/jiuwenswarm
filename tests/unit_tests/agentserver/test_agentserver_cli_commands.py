@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 import time
 from types import SimpleNamespace
 
@@ -613,6 +614,235 @@ async def test_handle_command_mcp_list_tools_url_size(server, fake_ws, monkeypat
         "response_id": "req-mcp-url-size", "ok": True,
         "payload": {"type": "tools", "tools": [], "server_name": entry["name"]},
     }]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["connect", "list_tools", "disconnect", "healthy"])
+async def test_mcp_fetch_deadlines_and_lifecycle_owner(monkeypatch, stage):
+    import anyio
+    from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
+    from jiuwenswarm.common import mcp_call_timeout_patch as timeouts
+
+    monkeypatch.setattr(timeouts, "DISCONNECT_TIMEOUT", 0.03)
+    owner = asyncio.current_task()
+    calls = []
+
+    class FakeClient:
+        async def connect(self):
+            assert asyncio.current_task() is owner
+            calls.append("connect")
+            # A real transport keeps anyio scopes open across connect/list/
+            # disconnect; a healthy fetch must close them in the same Task.
+            self.scope = anyio.CancelScope()
+            self.scope.__enter__()
+            if stage == "connect":
+                await asyncio.Event().wait()
+            return True
+
+        async def list_tools(self):
+            assert asyncio.current_task() is owner
+            calls.append("list_tools")
+            if stage == "list_tools":
+                await asyncio.Event().wait()
+            return []
+
+        async def disconnect(self):
+            assert asyncio.current_task() is owner
+            calls.append("disconnect")
+            try:
+                if stage == "disconnect":
+                    await asyncio.Event().wait()
+            finally:
+                self.scope.__exit__(None, None, None)
+
+    configs = []
+
+    def create_client(config):
+        configs.append(config)
+        return FakeClient()
+
+    monkeypatch.setattr(ToolMgr, "_create_client", staticmethod(create_client))
+    entry = {"name": "deadline", "transport": "stdio", "command": "unused", "timeout_s": 0.03}
+    started = time.monotonic()
+    fetch = agent_ws_server_module.AgentWebSocketServer._fetch_mcp_tools_from_config
+    if stage in {"connect", "list_tools"}:
+        with pytest.raises(TimeoutError):
+            await fetch(entry)
+    else:
+        assert await fetch(entry) == []
+    assert time.monotonic() - started < 1.0
+    assert calls[-1] == "disconnect"
+    assert configs[0].params["timeout_s"] == 0.03
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True])
+async def test_slow_mcp_discovery_honors_explicit_server_budget(monkeypatch, configured):
+    from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
+    from jiuwenswarm.common import mcp_call_timeout_patch as timeouts
+
+    monkeypatch.setattr(timeouts, "DISCOVERY_TIMEOUT", 0.01)
+    calls = []
+    configs = []
+
+    class SlowClient:
+        async def connect(self):
+            calls.append("connect")
+            await asyncio.sleep(0.03)
+            return True
+
+        async def list_tools(self):
+            calls.append("list_tools")
+            await asyncio.sleep(0.03)
+            return []
+
+        async def disconnect(self):
+            calls.append("disconnect")
+
+    def create_client(config):
+        configs.append(config)
+        return SlowClient()
+
+    monkeypatch.setattr(ToolMgr, "_create_client", staticmethod(create_client))
+    entry = {"name": "slow-healthy", "transport": "stdio", "command": "unused"}
+    if configured:
+        entry["timeout_s"] = 0.3
+    fetch = agent_ws_server_module.AgentWebSocketServer._fetch_mcp_tools_from_config
+    if configured:
+        assert await fetch(entry) == []
+        assert calls == ["connect", "list_tools", "disconnect"]
+    else:
+        with pytest.raises(TimeoutError):
+            await fetch(entry)
+        assert calls == ["connect", "disconnect"]
+    assert configs[0].params["timeout_s"] == (0.3 if configured else 0.01)
+
+
+@pytest.mark.asyncio
+async def test_mcp_fetch_real_stdio_lifecycle():
+    """A real SDK transport must survive the new deadlines and close cleanly."""
+    script = (
+        "from mcp.server.fastmcp import FastMCP\n"
+        "server = FastMCP('discovery-regression')\n"
+        "@server.tool()\n"
+        "def echo(message: str) -> str:\n"
+        "    return message\n"
+        "server.run(transport='stdio')\n"
+    )
+    tools = await agent_ws_server_module.AgentWebSocketServer._fetch_mcp_tools_from_config({
+        "name": "real-stdio", "transport": "stdio", "command": sys.executable,
+        "args": ["-c", script], "timeout_s": 15,
+    })
+    assert [tool["name"] for tool in tools] == ["echo"]
+    assert tools[0]["parameters"]["properties"]["message"]["type"] == "string"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["healthy", "connect_timeout", "list_timeout", "cancel"])
+async def test_mcp_fetch_real_http_protocol_and_scopes(monkeypatch, outcome):
+    from functools import partial
+    import httpx
+    from mcp.client import streamable_http
+    from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
+    from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import StreamableHttpClient
+
+    apply_mcp_call_timeout_patch()
+
+    methods = []
+    stalled = outcome != "healthy"
+    list_started = asyncio.Event()
+    disconnects = []
+    original_disconnect = StreamableHttpClient.disconnect
+
+    async def slow_disconnect(client, **kwargs):
+        disconnects.append(asyncio.current_task())
+        if stalled:
+            # Cleanup crosses the discovery deadline; it must finish once,
+            # without cancellation from an overlapping wrapper deadline.
+            await asyncio.sleep(0.08)
+        return await original_disconnect(client, **kwargs)
+
+    monkeypatch.setattr(StreamableHttpClient, "disconnect", slow_disconnect)
+
+    async def respond(request):
+        if request.method == "GET":
+            return httpx.Response(405)
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        body = json.loads(request.content)
+        method = body["method"]
+        methods.append(method)
+        if "id" not in body:
+            return httpx.Response(202)
+        if method == "initialize":
+            if outcome == "connect_timeout":
+                await asyncio.Event().wait()
+            result = {"protocolVersion": body["params"]["protocolVersion"],
+                      "capabilities": {"tools": {}}, "serverInfo": {"name": "regression", "version": "1"}}
+        else:
+            assert method == "tools/list"
+            list_started.set()
+            if outcome in {"list_timeout", "cancel"}:
+                await asyncio.Event().wait()
+            result = {"tools": [{"name": "echo", "description": "Echo input",
+                                 "inputSchema": {"type": "object"}}]}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    def client_factory(**kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs)
+
+    # Keep the real MCP transport/session/task groups and replace only HTTP I/O.
+    monkeypatch.setattr(streamable_http, "streamablehttp_client", partial(
+        streamable_http.streamablehttp_client, httpx_client_factory=client_factory,
+    ))
+    entry = {"name": "real-http", "transport": "streamable-http",
+             "url": "http://mcp.invalid/mcp", "timeout_s": 0.05 if outcome.endswith("timeout") else 1.0}
+    fetch = agent_ws_server_module.AgentWebSocketServer._fetch_mcp_tools_from_config
+    before = asyncio.all_tasks()
+    started = time.monotonic()
+    owner = asyncio.current_task()
+    if outcome == "cancel":
+        owner = asyncio.create_task(fetch(entry))
+        await asyncio.wait_for(list_started.wait(), 1.0)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+    elif stalled:
+        with pytest.raises(TimeoutError):
+            await fetch(entry)
+    else:
+        assert [tool["name"] for tool in await fetch(entry)] == ["echo"]
+    if outcome != "connect_timeout":
+        assert "tools/list" in methods
+    assert disconnects == [owner]
+    assert time.monotonic() - started < 2.0
+    await asyncio.sleep(0)
+    assert not [task for task in asyncio.all_tasks() - before if not task.done()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,code", [
+    (TimeoutError(), "MCP_TIMEOUT"), (ConnectionError("offline"), "MCP_CONNECTION_FAILED"),
+    (RuntimeError("discovery failed"), "MCP_INTERNAL"), (None, None),
+])
+async def test_command_mcp_discovery_distinguishes_failure_from_empty(server, fake_ws, monkeypatch, failure, code):
+    monkeypatch.setattr(agent_ws_server_module, "get_mcp_server_config", lambda _name: {"enabled": True})
+
+    async def fetch(_entry):
+        if failure is not None:
+            raise failure
+        return []
+
+    monkeypatch.setattr(server, "_fetch_mcp_tools_from_config", fetch)
+    request = AgentRequest(request_id="discovery-result", channel_id="web", req_method=ReqMethod.COMMAND_MCP,
+                           params={"action": "list_tools", "name": "unused-discovery"})
+    await server.handle_command_mcp_for_test(fake_ws, request, asyncio.Lock())
+    response = fake_ws.sent[0]
+    assert response["ok"] is (failure is None)
+    if code:
+        assert response["payload"]["code"] == code
+    else:
+        assert response["payload"]["tools"] == []
 
 
 @pytest.mark.asyncio

@@ -551,6 +551,75 @@ async def _drain_interaction_output(stream) -> list[object]:
 
 
 @pytest.mark.asyncio
+async def test_real_persistent_worker_rebinds_request_permission_profiles(monkeypatch):
+    from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+    from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, InterruptResult
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
+
+    monkeypatch.setenv("CLAW_BEHAVIOR_SECURITY", "0")
+    stored = {"permissions": {"enabled": True, "package_builtin_rules": False, "tools": {"bash": "ask"}}}
+    monkeypatch.setattr("jiuwenswarm.common.config.get_config", lambda: stored)
+    permission = build_permission_rail(stored)
+    observed = asyncio.Queue()
+    request_task = asyncio.current_task()
+
+    class ProbeReactAgent:
+        async def register_callback(self, *args, **kwargs):
+            return None
+
+        async def invoke(self, effective, session, _streaming=False):
+            invocation = get_current_invocation_context()
+            call = ToolCall(id="profile-tool", type="function", name="bash",
+                            arguments='{"command":"profile-operation"}')
+            callback = SimpleNamespace(
+                session=session, extra={}, inputs=SimpleNamespace(tool_call=call, tool_name="bash", tool_args={}),
+            )
+            decision = await permission.resolve_interrupt(callback, call, None)
+            observed.put_nowait((decision, invocation, asyncio.current_task()))
+            return {"output": "permission observed", "result_type": "answer"}
+
+        async def write_invoke_result_to_stream(self, result, session):
+            return None
+
+    card = AgentCard(id="permission-profile-worker", name="permission-profile-worker")
+    agent = DeepAgent(card).configure(DeepAgentConfig(
+        card=card, enable_task_loop=True, completion_timeout=5.0,
+        auto_create_workspace=False, rails=[InvocationContextRail()],
+    ))
+    agent.set_react_agent(ProbeReactAgent())
+    await agent.ensure_initialized()
+    session = create_agent_session(session_id="permission-profile-session", card=card)
+    await session.pre_run(inputs={})
+    try:
+        # Start before any request/profile exists: worker context cannot rely
+        # on the request task's ContextVar snapshot.
+        await agent.start(session=session)
+        for index, profile in enumerate(("full_access", None, "default", "auto_approve", None)):
+            request = AgentRequest(
+                request_id=f"profile-turn-{index}", channel_id="xiaoyi", session_id="permission-profile-session",
+                metadata={"xiaoyi_permission_profile": profile} if profile else {}, params={"query": "check"},
+            )
+            invocation = build_invocation_context(request)
+            stream = await agent.attach_output()
+            await agent.send_input(SendInputRequest(
+                request_id=request.request_id, inputs=attach_invocation_context({"query": "check"}, invocation),
+            ))
+            decision, seen, worker = await asyncio.wait_for(observed.get(), 5.0)
+            assert seen == invocation and worker is not request_task
+            assert isinstance(decision, ApproveResult if profile in {"full_access", "auto_approve"} else InterruptResult)
+            await asyncio.wait_for(_drain_interaction_output(stream), 5.0)
+            assert stored["permissions"]["enabled"] is True
+            assert stored["permissions"]["tools"]["bash"] == "ask"
+    finally:
+        await agent.stop()
+        completion = agent.find_rail_by_name("TaskCompletionRail")
+        if completion is not None:
+            completion.uninit(agent)
+        await session.post_run()
+    assert get_current_invocation_context() is None
+
+
+@pytest.mark.asyncio
 async def test_real_deep_agent_second_turn_rebinds_invocation_context() -> None:
     """同一常驻会话的第二轮必须改绑到第二轮的 InvocationContext.
 

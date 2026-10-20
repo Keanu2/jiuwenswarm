@@ -4,7 +4,7 @@
 
 覆盖：
   - data part variables.clientVariables 解析（workspace 落 project_dir/cwd/trusted_dirs，
-    permission 落 config.yaml permissions 段并触发热重载回调）
+    permission 仅作用于本条消息，不写共享配置、不触发热重载）
   - 空消息守卫（仅 variables/events 的帧不触发任务运行）
   - chat.ask_user_question → 手机端审批提示渲染 + 待答复登记
   - 用户回复（文本约定 / PermissionReply 事件）→ interrupt resume 路由参数
@@ -17,6 +17,7 @@ import json
 import os
 import re
 import time
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -70,6 +71,7 @@ def _make_channel(captured: list, sent: list) -> XiaoyiChannel:
     ch._accumulated_texts = {}
     ch._send_locks = {}
     ch._reload_permissions_cb = None
+    ch._status_update_interval = 3600
     # beta3 新增状态（_handle_message_stream/_finalize 路径引用）
     ch._active_tasks = set()
     ch._latest_platform_tasks = {}
@@ -312,8 +314,9 @@ def test_approval_reply_vocabulary():
 async def test_message_stream_applies_workspace_and_permission(cfg_file, workspace):
     captured, sent = [], []
     ch = _make_channel(captured, sent)
+    original_permissions = cfgmod.load_yaml_round_trip(cfg_file)["permissions"]
     try:
-        # full_access：project_dir/cwd 下发、无 trusted_dirs、注入位置提示（非约束）、护栏关闭
+        # full_access：project_dir/cwd 下发、无 trusted_dirs、仅注入位置提示
         await ch._handle_message_stream(
             _build_stream_msg("帮我打个zip包", {"workspace": str(workspace), "permission": "full_access"})
         )
@@ -327,9 +330,9 @@ async def test_message_stream_applies_workspace_and_permission(cfg_file, workspa
         assert m.metadata["xiaoyi_task_id"] == "task-1"
         # beta3：session_id 取 params.sessionId（逻辑会话），chat_id 兜底同值
         assert m.session_id == "conv-1" and m.chat_id == "conv-1"
-        assert cfgmod.load_yaml_round_trip(cfg_file)["permissions"]["enabled"] is False
+        assert cfgmod.load_yaml_round_trip(cfg_file)["permissions"] == original_permissions
 
-        # default：trusted_dirs + 工作空间指令 + strict 护栏
+        # default：trusted_dirs + 工作空间约束指令，保持共享配置不变
         await ch._handle_message_stream(
             _build_stream_msg("再打一个", {"workspace": str(workspace), "permission": "default"}, task="task-2")
         )
@@ -337,9 +340,7 @@ async def test_message_stream_applies_workspace_and_permission(cfg_file, workspa
         assert m.params["trusted_dirs"] == [os.path.abspath(str(workspace))]
         assert m.params["query"].startswith("再打一个\n\n")
         assert "<claw_workspace>" in m.params["query"]
-        data = cfgmod.load_yaml_round_trip(cfg_file)
-        assert data["permissions"]["enabled"] is True
-        assert data["permissions"]["permission_mode"] == "strict"
+        assert cfgmod.load_yaml_round_trip(cfg_file)["permissions"] == original_permissions
 
         # 不携带 clientVariables：无工作空间 → 仅注入时间尾段（时间感知不丢）
         await ch._handle_message_stream(_build_stream_msg("普通消息", None, task="task-3"))
@@ -449,16 +450,85 @@ async def test_message_stream_download_without_workspace_omits_save_dir(
 
 
 @pytest.mark.asyncio
-async def test_permission_profile_triggers_reload_callback(cfg_file):
+@pytest.mark.parametrize("initial_enabled", [True, False])
+async def test_message_profiles_do_not_change_global_permissions_or_reload(cfg_file, initial_enabled):
     captured, sent = [], []
     ch = _make_channel(captured, sent)
     reloads = []
     ch._reload_permissions_cb = lambda: reloads.append(True) or asyncio.sleep(0)
+    cfg_file.write_text(f"permissions:\n  enabled: {str(initial_enabled).lower()}\n", encoding="utf-8")
+    original = cfgmod.load_yaml_round_trip(cfg_file)["permissions"]
     try:
-        await ch._handle_message_stream(_build_stream_msg("干活", {"permission": "full_access"}))
-        assert len(reloads) == 1  # 配置变更 → 触发热重载
-        await ch._handle_message_stream(_build_stream_msg("继续", {"permission": "full_access"}, task="task-2"))
-        assert len(reloads) == 1  # 配置无变更 → 不重复 reload
+        for i, profile in enumerate(("full_access", None, "default", "auto_approve", "unknown")):
+            # Distinct conversations must not change the shared policy either.
+            client_vars = {"permission": profile} if profile is not None else None
+            await ch._handle_message_stream(_build_stream_msg(
+                "继续", client_vars, conv=f"conv-{i}", task=f"task-{i}",
+            ))
+            assert cfgmod.load_yaml_round_trip(cfg_file)["permissions"] == original
+            assert reloads == []
+        assert len(captured) == 5
+    finally:
+        _cleanup_tasks(ch)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["bash", "read_inside", "read_outside"])
+async def test_message_profile_reaches_tool_engine_and_does_not_leak(cfg_file, workspace, monkeypatch, operation):
+    from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+    from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, InterruptResult
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        apply_permission_trusted_dirs, build_permission_rail,
+    )
+    from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
+        setup_permission_context, cleanup_permission_context,
+    )
+    from jiuwenswarm.agents.harness.common.channel_runtime_context import CURRENT_CHANNEL_ID
+
+    monkeypatch.setenv("CLAW_BEHAVIOR_SECURITY", "0")
+    baseline = {"enabled": True, "package_builtin_rules": False, "defaults": {"*": "allow"},
+                "tools": {"bash": "ask"},
+                "file_guard": {"enabled": True, "defaults": {"read": "ask", "write": "ask"}}}
+    cfg_file.write_text(yaml.safe_dump({"permissions": baseline}), encoding="utf-8")
+    monkeypatch.setattr(cfgmod, "get_config_file", lambda: cfg_file)
+    captured, sent = [], []
+    ch = _make_channel(captured, sent)
+    rail = build_permission_rail({"permissions": baseline})
+    try:
+        # Reuse the rail across turns, including a profile-free message and a
+        # different conversation after full_access. Both must recover ASK.
+        for index, profile in enumerate(("full_access", None, "default", "auto_approve", "default")):
+            await ch._handle_message_stream(_build_stream_msg(
+                "执行", {"workspace": str(workspace), **({"permission": profile} if profile else {})},
+                conv=f"profile-{index}", task=f"profile-task-{index}",
+            ))
+            message = captured[-1]
+            assert message.metadata.get("xiaoyi_permission_profile") == profile
+            args = ({"command": "echo profile-regression", "workdir": str(workspace)} if operation == "bash"
+                    else {"file_path": str((workspace if operation == "read_inside" else workspace.parent) / "example.txt")})
+            call = ToolCall(id=f"call-{index}", type="function", name="bash" if operation == "bash" else "read_file",
+                            arguments=json.dumps(args))
+            state = {}
+            ctx = SimpleNamespace(
+                session=SimpleNamespace(get_session_id=lambda: message.session_id, get_state=state.get,
+                                        update_state=state.update), extra={},
+                inputs=SimpleNamespace(tool_call=call, tool_name=call.name, tool_args=args),
+            )
+            token = setup_permission_context(message)
+            channel_token = CURRENT_CHANNEL_ID.set(message.channel_id)
+            try:
+                apply_permission_trusted_dirs(rail, message.params.get("trusted_dirs"), str(workspace))
+                decision = await rail.resolve_interrupt(ctx, call, None)
+                allowed = profile in {"full_access", "auto_approve"} or operation == "read_inside"
+                assert isinstance(decision, ApproveResult if allowed else InterruptResult), (profile, decision)
+                if not allowed:
+                    resumed = await rail.resolve_interrupt(ctx, call, {"approved": True, "auto_confirm": False})
+                    assert isinstance(resumed, ApproveResult)
+                    assert rail._engine.config["enabled"] is True
+            finally:
+                CURRENT_CHANNEL_ID.reset(channel_token)
+                cleanup_permission_context(token)
+            assert cfgmod.load_yaml_round_trip(cfg_file)["permissions"] == baseline
     finally:
         _cleanup_tasks(ch)
 
@@ -482,6 +552,7 @@ async def test_ask_user_question_prompt_and_resume(cfg_file, workspace):
             }],
         }
         ask.metadata = {
+            "xiaoyi_permission_profile": "default",
             "xiaoyi_session_id": "top-1",
             "xiaoyi_task_id": "task-2",
             "xiaoyi_conversation_id": "conv-1",
@@ -511,6 +582,7 @@ async def test_ask_user_question_prompt_and_resume(cfg_file, workspace):
         assert m.params["source"] == "permission_interrupt"
         assert m.params["query"] == "" and m.params["mode"] == "agent"
         assert m.params["task_id"] == "task-2"
+        assert m.metadata["xiaoyi_permission_profile"] == "default"
         assert m.session_id == "conv-1"
         assert "conv-1" not in ch._pending_approvals
         # 状态回执（msgDetail 内层 JSON 默认 \uXXXX 转义，需解析后比对）

@@ -26,6 +26,8 @@ The logging system categorizes logs by component type and stores them in differe
 | `permissions.log` | Permission-related logs |
 | `ws-dev.log` | Web service development mode logs |
 
+MCP configuration checks and key `command.mcp` logs, including `_fetch skipped` and connection/cleanup failures, use agent-core's common logger and default to `run/jiuwen.log` under the dated core log directory. No `tee` or `AGENT_LOG_PATH` is required. Explicit `logging.yaml` levels still apply: an `ERROR` threshold excludes `WARNING` records.
+
 ### 1.3 Log Content Types
 
 The logging system has two main content types:

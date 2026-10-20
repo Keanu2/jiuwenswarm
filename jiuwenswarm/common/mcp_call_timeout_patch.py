@@ -17,7 +17,8 @@ This patch is applied once at process startup (from
      ``anyio.fail_after``. On timeout we ``disconnect()`` so the dead session
      is torn down and the very next call fails fast (the stock client raises
      "Not connected" once ``self._session`` is None) instead of waiting out
-     the full timeout again.
+     the full timeout again. Teardown has a separate 5s deadline on the same
+     Task, using ``asyncio.timeout`` so it adds no anyio cancel scope.
 
      NB: must use ``anyio.fail_after`` (a cancel scope), *not*
      ``asyncio.wait_for``. The MCP SDK runs its streamable-http transport
@@ -36,6 +37,8 @@ whole function a no-op on repeat calls.
 """
 from __future__ import annotations
 
+import asyncio
+import math
 from typing import Any
 import anyio
 
@@ -48,8 +51,37 @@ _PATCHED = False
 _wrapped_methods: set[tuple[type, str]] = set()
 #: Fallback per-call timeout (seconds) when ``--timeout_s`` is not supplied.
 DEFAULT_CALL_TIMEOUT = 30.0
+DISCOVERY_TIMEOUT = 10.0
+DISCONNECT_TIMEOUT = 5.0
 
-__all__ = ["apply_mcp_call_timeout_patch", "DEFAULT_CALL_TIMEOUT"]
+__all__ = [
+    "apply_mcp_call_timeout_patch", "DEFAULT_CALL_TIMEOUT",
+    "disconnect_mcp_client", "resolve_mcp_timeout",
+]
+
+
+def resolve_mcp_timeout(value: Any, default: float = DEFAULT_CALL_TIMEOUT) -> float:
+    """Accept only finite positive timeout values from MCP configuration."""
+    if (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0):
+        return float(value)
+    return default
+
+
+async def disconnect_mcp_client(client: Any) -> None:
+    """Bound cleanup on the lifecycle's current task, without adding an anyio scope."""
+    try:
+        # disconnect may exit transport cancel scopes entered by connect. A new
+        # anyio scope or a separate Task would violate their ownership/order.
+        async with asyncio.timeout(DISCONNECT_TIMEOUT):
+            await client.disconnect()
+    except (Exception, asyncio.CancelledError) as exc:
+        logger.warning("[command.mcp] disconnect failed or exceeded %.1fs: %r", DISCONNECT_TIMEOUT, exc)
+        # Do not reuse a half-closed HTTP session after cleanup failed.
+        if hasattr(client, "_session"):
+            client._session = None
+        if isinstance(exc, asyncio.CancelledError):
+            raise
 
 
 def apply_mcp_call_timeout_patch(default_timeout: float = DEFAULT_CALL_TIMEOUT) -> None:
@@ -69,12 +101,9 @@ def apply_mcp_call_timeout_patch(default_timeout: float = DEFAULT_CALL_TIMEOUT) 
         # Explicit kwarg wins (currently never passed by invoke, but keeps the
         # signature honest); then the per-instance value stamped by (B); then
         # the module default.
-        if isinstance(explicit, (int, float)) and explicit > 0:
-            return float(explicit)
-        stamped = getattr(client, "_jws_call_timeout", None)
-        if isinstance(stamped, (int, float)) and stamped > 0:
-            return float(stamped)
-        return default_timeout
+        return resolve_mcp_timeout(
+            explicit, resolve_mcp_timeout(getattr(client, "_jws_call_timeout", None), default_timeout),
+        )
 
     def _wrap_with_timeout(cls: type, name: str) -> None:
         if (cls, name) in _wrapped_methods:
@@ -83,6 +112,10 @@ def apply_mcp_call_timeout_patch(default_timeout: float = DEFAULT_CALL_TIMEOUT) 
         orig = getattr(cls, name)
 
         async def wrapped(self, *args, **kwargs):
+            # Temporary discovery owns one deadline and one final disconnect.
+            # Do not start a second timer/cleanup at the same deadline.
+            if getattr(self, "_jws_discovery_managed", False) and name == "list_tools":
+                return await orig(self, *args, **kwargs)
             timeout = _resolve_timeout(self, kwargs.get("timeout"))
             try:
                 # anyio.fail_after (cancel scope) — NOT asyncio.wait_for: the
@@ -101,15 +134,7 @@ def apply_mcp_call_timeout_patch(default_timeout: float = DEFAULT_CALL_TIMEOUT) 
                 )
                 # Tear down the dead session so the next call fails fast rather
                 # than burning another full timeout window on a half-open conn.
-                try:
-                    await self.disconnect()
-                except Exception as exc:
-                    logger.warning(
-                        "[mcp-timeout] %s.%s disconnect after timeout also failed: %r",
-                        cls.__name__,
-                        name,
-                        exc,
-                    )
+                await disconnect_mcp_client(self)
                 raise
 
         setattr(cls, name, wrapped)

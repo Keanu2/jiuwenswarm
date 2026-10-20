@@ -1777,16 +1777,26 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             create_started_at = time.monotonic()
             from jiuwenswarm.common.stall_watchdog import stall_watchdog
 
-            async with stall_watchdog(f"create_instance sid={sid}"):
-                await adapter.create_instance(
-                    config,
-                    mode=self._session_instance_mode,
-                    sub_mode=self._session_instance_sub_mode,
-                )
-            instance_ready_at = time.monotonic()
+            try:
+                async with stall_watchdog(f"create_instance sid={sid}"):
+                    await adapter.create_instance(
+                        config,
+                        mode=self._session_instance_mode,
+                        sub_mode=self._session_instance_sub_mode,
+                    )
+                instance_ready_at = time.monotonic()
 
-            async with stall_watchdog(f"start_interaction sid={sid}", first_after_seconds=15.0):
-                await adapter.start_interaction(session_id=sid)
+                async with stall_watchdog(f"start_interaction sid={sid}", first_after_seconds=15.0):
+                    await adapter.start_interaction(session_id=sid)
+            except (Exception, asyncio.CancelledError):
+                # A preparation deadline can cancel before the child enters
+                # the cache; the normal session cleanup cannot find it yet.
+                try:
+                    async with asyncio.timeout(5.0):
+                        await adapter.cleanup()
+                except Exception:
+                    logger.warning("Session adapter initialization cleanup failed: session_id=%s", sid, exc_info=True)
+                raise
             interaction_ready_at = time.monotonic()
 
             self._session_adapters[sid] = adapter
@@ -5607,9 +5617,6 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 "(context_engine_config.enabled=false)"
             )
 
-        if self._is_xiaoyi_channel():
-            rail_infos = [info for info in rail_infos if info.attr_name != "_permission_rail"]
-
         # SkillEvolutionRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
         # 智能模式下关闭自演进，plan 模式下按配置启用
 
@@ -5789,6 +5796,15 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             )
             if self._permission_rail is not None:
                 logger.info("[JiuWenSwarmDeepAdapter] _permission_rail newly created on hot-reload")
+
+    async def _update_request_permission_rail(self, channel_id: str) -> None:
+        if channel_id not in {"xiaoyi", "a2a"} or self._permission_rail is not None:
+            return
+        # Existing rails refresh from the actual worker's invocation snapshot.
+        # A new request must not overwrite an ongoing round's engine eagerly.
+        self._update_permission_rail(get_config())
+        if self._permission_rail is not None:
+            await self._instance.register_rail(self._permission_rail)
 
     def _get_current_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any] | None = None
@@ -7517,6 +7533,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         # PermissionInterruptRail: per-request trusted_dirs/project_dir 注入，
         # 使这些子树的文件读写执行及目录内脚本直执行按 allow 处理。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
+        if bind_request and runtime_config.channel_id in {"xiaoyi", "a2a"}:
+            await self._update_request_permission_rail(runtime_config.channel_id)
         permission_rail = getattr(self, "_permission_rail", None)
         if permission_rail is not None and bind_request:
             try:

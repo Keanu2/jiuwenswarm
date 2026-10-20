@@ -2,6 +2,10 @@
 
 JiuwenSwarm supports connecting to external tool services via MCP (Model Context Protocol). MCP lets the Agent call tools provided by third-party services, extending its capabilities.
 
+Temporary `command.mcp` discovery shares one deadline across connection and listing, defaulting to 10 seconds when unconfigured. An explicit finite positive server `timeout_s` takes precedence, allowing longer budgets for slow startup. One final disconnect has a separate 5-second deadline, without overlapping timers or duplicate cleanup from the call patch. Timeouts return `ok=false / MCP_TIMEOUT`, connection failures return `MCP_CONNECTION_FAILED`, and healthy empty services return `ok=true` with an empty tool list. Ordinary HTTP tool calls retain their existing call budget and a 5-second cleanup deadline.
+
+Queueing, Agent creation, and `prepare_session` in the warm pool retain a 120-second total budget for normal cold startup, with up to 5 seconds for failure cleanup. Failures propagate to waiters, preventing dispatch on a cleaned instance. Timed-out background slots are requeued automatically without waiting for configuration `sync` and use a new session ID. This total budget does not eliminate 15/30-second stall diagnostics; stalls under slow services or load still require deployment regression testing.
+
 ---
 
 ## Two MCP Usage Scenarios

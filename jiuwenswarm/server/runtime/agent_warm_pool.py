@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 _PREWARM_ENABLED_ENV_KEY = "JIUWENSWARM_AGENT_PREWARM"
 _PREWARM_ON_VALUES = frozenset({"1", "true", "yes", "on"})
 _PREWARM_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+# Cold initialization includes sandbox/resource startup and may legitimately
+# exceed MCP discovery's default budget. Keep its existing overall allowance.
+_PREPARE_TIMEOUT_SECONDS = 120.0
+_PREPARE_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 def _prewarm_enabled_by_env() -> bool:
@@ -397,6 +401,8 @@ class AgentWarmPool:
             self._prepare(key, sid, revision, keep_as_slot=keep_as_slot),
             name=f"agent-prewarm-{sid}",
         )
+        # Observe background failures without changing await/shield semantics.
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         if keep_as_slot:
             self._tasks[key] = task
             self._task_revisions[key] = revision
@@ -503,6 +509,8 @@ class AgentWarmPool:
         pinned = False
         published = False
         cancelled = False
+        timed_out = False
+        preparation_error: Exception | None = None
         foreground_registered = False
         if keep_as_slot:
             self._write_marker(session_id, key)
@@ -514,7 +522,7 @@ class AgentWarmPool:
             semaphore = self._semaphore if keep_as_slot else self._foreground_semaphore
             if keep_as_slot:
                 await self._foreground_idle.wait()
-            async with semaphore:
+            async with asyncio.timeout(_PREPARE_TIMEOUT_SECONDS), semaphore:
                 async with self._initialization_lock:
                     if keep_as_slot:
                         await self._foreground_idle.wait()
@@ -591,15 +599,24 @@ class AgentWarmPool:
                 )
             raise
         except Exception as exc:
+            timed_out = isinstance(exc, TimeoutError)
+            preparation_error = (
+                TimeoutError(f"Agent preparation timed out after {_PREPARE_TIMEOUT_SECONDS:g}s")
+                if timed_out else exc
+            )
             logger.exception(
                 "Agent prewarm failed: key=%s session_id=%s", key, session_id
             )
             if agent is not None:
-                await self._dispose_runtime(
-                    agent, key.channel_id, session_id, pinned=pinned
-                )
+                try:
+                    async with asyncio.timeout(_PREPARE_CLEANUP_TIMEOUT_SECONDS):
+                        await self._dispose_runtime(
+                            agent, key.channel_id, session_id, pinned=pinned
+                        )
+                except Exception:
+                    logger.warning("Agent prewarm cleanup failed: session_id=%s", session_id, exc_info=True)
             async with self._lock:
-                self._failed[key] = str(exc)
+                self._failed[key] = str(preparation_error)
         finally:
             promoted = session_id in self._promoted_sessions
             if keep_as_slot and not published and not promoted:
@@ -610,10 +627,13 @@ class AgentWarmPool:
                     self._tasks.pop(key, None)
                     self._task_revisions.pop(key, None)
                     self._task_session_ids.pop(key, None)
-                if self._session_tasks.get(session_id) is current_task:
+                # Keep failed claimed tasks until wait_for_session consumes the
+                # exception, including callers arriving after task completion.
+                retain_failure = preparation_error is not None and (promoted or not keep_as_slot)
+                if self._session_tasks.get(session_id) is current_task and not retain_failure:
                     self._session_tasks.pop(session_id, None)
                 self._promoted_sessions.discard(session_id)
-                if cancelled and keep_as_slot:
+                if (cancelled or timed_out) and keep_as_slot:
                     fingerprint_matches = (
                         revision.config_fingerprint == self._revision.config_fingerprint
                     )
@@ -625,6 +645,8 @@ class AgentWarmPool:
                     self._schedule_background_pump_locked()
             if foreground_registered:
                 await self.end_foreground()
+        if preparation_error is not None:
+            raise preparation_error
 
     async def claim(self, key: WarmKey) -> WarmClaim:
         if not self._enabled or key.is_swarm:
@@ -682,6 +704,8 @@ class AgentWarmPool:
                 )
         finally:
             async with self._lock:
+                if task is not None and task.done() and self._session_tasks.get(str(session_id)) is task:
+                    self._session_tasks.pop(str(session_id), None)
                 pinned_agent = self._claimed_pins.pop(str(session_id), None)
             if pinned_agent is not None:
                 self._manager.unpin_agent(pinned_agent)
@@ -720,9 +744,8 @@ class AgentWarmPool:
 
     async def stats(self) -> dict[str, int]:
         async with self._lock:
-            warming_tasks = set(self._tasks.values()) | set(
-                self._session_tasks.values()
-            )
+            warming_tasks = {task for task in (*self._tasks.values(), *self._session_tasks.values())
+                             if not task.done()}
             return {
                 "target": len(self._desired),
                 "ready": len(self._slots),

@@ -3027,9 +3027,9 @@ class XiaoyiChannel(BaseChannel):
                 f"XiaoYi: clientVariables.permission 未识别，保持当前权限配置: "
                 f"{client_variables.get('permission')}"
             )
-        # 权限档位先落 config.yaml + 热重载（best-effort），再路由本消息，保证当轮生效
+        # 通过请求上下文应用当轮权限，不写共享 config.yaml 或触发全局重载。
         if permission_profile:
-            await self._apply_permission_profile(permission_profile)
+            metadata["xiaoyi_permission_profile"] = permission_profile
         # 工作空间按请求下发 project_dir/cwd（AgentServer 首回合锁定到会话）；受限档
         # 附带 trusted_dirs 与工作空间约束指令（与桌面端本地对话行为完全一致）
         if client_workspace:
@@ -3138,34 +3138,8 @@ class XiaoyiChannel(BaseChannel):
     # ==================== clientVariables 权限档位 + 审批桥接 ====================
 
     def set_reload_permissions_handler(self, cb: Callable[[], Any] | None) -> None:
-        """注入权限热重载回调（gateway 侧持有 AgentServer E2A 连接，由 app_gateway 装配）。"""
+        """兼容旧版 Gateway 装配接口；消息档位不再触发全局权限重载。"""
         self._reload_permissions_cb = cb
-
-    async def _apply_permission_profile(self, profile: str) -> None:
-        """把 clientVariables.permission 指定的权限档位落 config.yaml 并热重载（best-effort）。
-
-        配置无变更时跳过 reload；reload 失败不阻塞消息（配置已写盘，下一轮对话生效）。
-        """
-        try:
-            from jiuwenswarm.common.config import update_permission_profile_in_config
-
-            changed = await asyncio.to_thread(update_permission_profile_in_config, profile)
-        except Exception as e:
-            logger.warning(f"XiaoYi: 权限档位 {profile} 写配置失败: {e}")
-            return
-        if not changed:
-            return
-        cb = self._reload_permissions_cb
-        if cb is None:
-            logger.info(f"XiaoYi: 权限档位 {profile} 已写盘（未注入热重载回调，AgentServer 下次重载生效）")
-            return
-        try:
-            result = cb()
-            if inspect.isawaitable(result):
-                await asyncio.wait_for(result, timeout=15)
-            logger.info(f"XiaoYi: 权限档位已切换为 {profile} 并完成热重载")
-        except Exception as e:
-            logger.warning(f"XiaoYi: 权限热重载失败（配置已写盘，下一轮对话生效）: {e}")
 
     def _resolve_approval_reply(
         self,
@@ -3261,6 +3235,9 @@ class XiaoyiChannel(BaseChannel):
             "xiaoyi_device_id": device_id,
             "im_sender_user_id": agent_id,
         }
+        profile = normalize_permission_profile(pending.get("permission_profile"))
+        if profile is not None:
+            metadata["xiaoyi_permission_profile"] = profile
         resume_message = Message(
             id=message.get("id", ""),
             type="req",
@@ -3312,6 +3289,7 @@ class XiaoyiChannel(BaseChannel):
                 "source": source,
                 "task_id": task_id,
                 "created_at": time.time(),
+                "permission_profile": normalize_permission_profile(meta.get("xiaoyi_permission_profile")),
             }
         else:
             logger.warning("XiaoYi: ask_user_question 缺少 request_id/会话标识，无法登记待答复审批")

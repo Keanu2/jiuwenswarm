@@ -1350,7 +1350,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     assert ask_user_rail in fast_rails
 
 
-def test_deep_adapter_skips_interactive_and_permission_rails_for_xiaoyi(monkeypatch):
+def test_deep_adapter_skips_interactive_but_keeps_permission_rail_for_xiaoyi(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     class FakeHooksConfig:
@@ -1382,7 +1382,7 @@ def test_deep_adapter_skips_interactive_and_permission_rails_for_xiaoyi(monkeypa
     rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent")
 
     assert ask_user_rail not in rails
-    assert permission_rail not in rails
+    assert permission_rail in rails
 
 
 def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monkeypatch):

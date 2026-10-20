@@ -50,6 +50,12 @@ def build_invocation_context(request: AgentRequest) -> InvocationContext:
 
     trace = build_xiaoyi_trace_context(request)
     metadata = build_xiaoyi_invocation_extension(request)
+    if channel_id.lower() in {"xiaoyi", "a2a"}:
+        from jiuwenswarm.common.permission_profile import normalize_permission_profile
+
+        profile = normalize_permission_profile((request.metadata or {}).get("xiaoyi_permission_profile"))
+        if profile is not None:
+            metadata["xiaoyi_permission_profile"] = profile
     if trace is not None and TRACE_HEADER_EXPORTER_METADATA_KEY not in metadata:
         # 桌面/通用渠道：trace 已建立（客户端经 metadata.interaction_id 显式下发），
         # 但无 Xiaoyi 扩展、导出器名缺位——补登记 desktop 导出器。Team 边界

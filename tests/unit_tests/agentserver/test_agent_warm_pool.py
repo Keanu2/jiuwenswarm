@@ -361,6 +361,159 @@ async def test_failed_prepare_never_becomes_ready(isolated_pool) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cold_start_retains_budget_beyond_mcp_discovery(isolated_pool, monkeypatch):
+    from jiuwenswarm.common import mcp_call_timeout_patch as mcp_timeouts
+    from jiuwenswarm.server.runtime import agent_warm_pool as module
+
+    # Scale seconds to milliseconds while preserving the production budgets.
+    scale = 0.001
+    monkeypatch.setattr(module, "_PREPARE_TIMEOUT_SECONDS", module._PREPARE_TIMEOUT_SECONDS * scale)
+    discovery_budget = mcp_timeouts.DISCOVERY_TIMEOUT * scale
+
+    class ColdAgent(_FakeRootAgent):
+        async def prepare_session(self, *, session_id, **_kwargs):
+            await asyncio.sleep(discovery_budget * 2)
+            self.prepared.append(session_id)
+
+    agent = ColdAgent()
+    pool = isolated_pool(agent)
+
+    async def cold_get_agent(**_kwargs):
+        await asyncio.sleep(discovery_budget * 2)
+        return agent
+
+    monkeypatch.setattr(pool._manager, "get_agent", cold_get_agent)
+    key = pool.make_key(channel_id="web", project_id="default", project_dir="", work_mode="work")
+    try:
+        claim = await pool.claim(key)
+        await pool.wait_for_session(claim.session_id)
+        assert agent.prepared == [claim.session_id]
+        assert not agent.cleaned
+        assert not pool._failed
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["get_agent", "prepare_session", "cleanup"])
+async def test_prepare_deadline_releases_initialization_lock(isolated_pool, monkeypatch, stage):
+    from jiuwenswarm.server.runtime import agent_warm_pool as module
+
+    monkeypatch.setattr(module, "_PREPARE_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(module, "_PREPARE_CLEANUP_TIMEOUT_SECONDS", 0.03)
+    agent = _ControlledRootAgent()
+    pool = isolated_pool(agent)
+    if stage == "get_agent":
+        async def blocked_get_agent(**_kwargs):
+            await asyncio.Event().wait()
+        monkeypatch.setattr(pool._manager, "get_agent", blocked_get_agent)
+    elif stage == "cleanup":
+        async def blocked_cleanup(_sid):
+            await asyncio.Event().wait()
+        monkeypatch.setattr(agent, "cleanup_session_runtime", blocked_cleanup)
+    key = pool.make_key(channel_id="web", project_id="default", project_dir="", work_mode="work")
+    try:
+        with pytest.raises(TimeoutError, match="preparation timed out"):
+            await asyncio.wait_for(pool._prepare(key, "deadline-session", pool._revision, keep_as_slot=False), 1.0)
+        assert key in pool._failed
+        assert "timed out" in pool._failed[key]
+        assert not pool._slots
+        assert not pool._initialization_lock.locked()
+        assert pool._foreground_count == 0
+        if stage == "prepare_session":
+            assert agent.cancelled == ["deadline-session"]
+            assert agent.cleaned == ["deadline-session"]
+        # A subsequent healthy preparation must get past the shared lock.
+        healthy = _FakeRootAgent()
+        pool._manager.agent = healthy
+        monkeypatch.setattr(pool._manager, "get_agent", _FakeManager(healthy).get_agent)
+        await asyncio.wait_for(pool._prepare(key, "healthy-session", pool._revision, keep_as_slot=False), 1.0)
+        assert healthy.prepared == ["healthy-session"]
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_failed_prepare_stops_real_manager_dispatch(isolated_pool, monkeypatch, late, stream):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from jiuwenswarm.server.runtime import agent_warm_pool as module
+    from jiuwenswarm.server.runtime.agent_manager import AgentManager
+
+    monkeypatch.setattr(module, "_PREPARE_TIMEOUT_SECONDS", 0.03)
+    pool = isolated_pool(_ControlledRootAgent())
+    key = pool.make_key(channel_id="web", project_id="default", project_dir="", work_mode="work")
+    claim = await pool.claim(key)
+    manager = AgentManager.__new__(AgentManager)
+    manager.warm_pool = pool
+    manager.get_agent = AsyncMock()
+    try:
+        if late:
+            await _wait_until(lambda: pool._session_tasks[claim.session_id].done())
+        request = SimpleNamespace(session_id=claim.session_id, channel_id="web", params={})
+        with pytest.raises(TimeoutError, match="preparation timed out"):
+            if stream:
+                async for _ in manager.process_message_stream(request):
+                    pytest.fail("A failed preparation must not produce an agent result")
+            else:
+                await manager.process_message(request)
+        manager.get_agent.assert_not_awaited()
+        assert claim.session_id not in pool._session_tasks
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_background_slot_recovers_without_sync(isolated_pool, monkeypatch):
+    from jiuwenswarm.server.runtime import agent_warm_pool as module
+
+    monkeypatch.setattr(module, "_PREPARE_TIMEOUT_SECONDS", 0.03)
+
+    class FailOnce(_FakeRootAgent):
+        calls = 0
+
+        async def prepare_session(self, *, session_id, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.Event().wait()
+            self.prepared.append(session_id)
+
+    agent = FailOnce()
+    pool = isolated_pool(agent)
+    try:
+        await pool.sync(["web"], config={"model": "recovery"})
+        await _wait_until(lambda: bool(pool._slots))
+        assert agent.calls == 2
+        assert len(agent.cleaned) == 1
+        assert agent.prepared[0] != agent.cleaned[0]
+        assert not pool._failed
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_deadline_includes_shared_lock_wait(isolated_pool, monkeypatch):
+    from jiuwenswarm.server.runtime import agent_warm_pool as module
+
+    monkeypatch.setattr(module, "_PREPARE_TIMEOUT_SECONDS", 0.03)
+    pool = isolated_pool(_FakeRootAgent())
+    key = pool.make_key(channel_id="web", project_id="default", project_dir="", work_mode="work")
+    await pool._initialization_lock.acquire()
+    try:
+        claim = await pool.claim(key)
+        with pytest.raises(TimeoutError, match="preparation timed out"):
+            await asyncio.wait_for(pool.wait_for_session(claim.session_id), 1.0)
+        assert pool._manager.get_agent_calls == []
+        # The timed-out waiter must not release another task's lock.
+        assert pool._initialization_lock.locked()
+    finally:
+        pool._initialization_lock.release()
+        await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_claim_marker_survives_until_metadata_activation(isolated_pool) -> None:
     pool = isolated_pool(_FakeRootAgent())
     await pool.sync(["web"], config={"model": "ready"})

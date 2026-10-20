@@ -12,6 +12,8 @@
 手机端经 A2A data part 的 variables.clientVariables 携带：
   - workspace：工作空间路径（WorkspaceQuery 应答里的 path；兼容 {"name","path"} 对象）
   - permission：档位 id（default / full_access，兼容中文名与替我审批）
+
+小艺消息在请求上下文中应用档位，不持久化上述配置映射。
 """
 
 from __future__ import annotations
@@ -46,15 +48,35 @@ _PROFILE_ALIASES: dict[str, str] = {
 _NETWORK_TOOLS = ("mcp_free_search", "mcp_paid_search", "mcp_fetch_webpage")
 
 
+def current_permission_profile() -> Optional[str]:
+    """Prefer the invocation bound in the actual (possibly pre-existing) worker."""
+    from jiuwenswarm.common.invocation_context.runtime import get_current_invocation_context
+    from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import TOOL_PERMISSION_CONTEXT
+
+    invocation = get_current_invocation_context()
+    if invocation is not None:
+        if invocation.channel_id.strip().lower() in {"xiaoyi", "a2a"}:
+            return normalize_permission_profile(invocation.metadata.get("xiaoyi_permission_profile"))
+        return None
+    return getattr(TOOL_PERMISSION_CONTEXT.get(), "permission_profile", None)
+
+
 def resolve_permission_profile_rules(permissions: dict[str, Any]) -> dict[str, Any]:
-    """Resolve product rule actions before the desktop enables runtime checks.
+    """Apply request overrides and product actions to a detached snapshot.
 
     The stored enabled flag distinguishes full access from restricted profiles.
     Keep the input untouched so switching profiles cannot persist a resolved
     action. Invalid overrides retain the rule's base action.
     """
     resolved = deepcopy(permissions)
-    profile = "full_access" if permissions.get("enabled") is False else "default"
+    patch = permission_profile_config_patch(current_permission_profile())
+    if patch is not None:
+        resolved["enabled"] = patch["enabled"]
+        resolved["permission_mode"] = patch["permission_mode"]
+        resolved.setdefault("tools", {}).update(patch["tools"])
+        defaults = resolved.setdefault("file_guard", {}).setdefault("defaults", {})
+        defaults.update(read=patch["file_guard_rw"], write=patch["file_guard_rw"])
+    profile = "full_access" if resolved.get("enabled") is False else "default"
     rules = resolved.get("rules")
     if isinstance(rules, list):
         for rule in rules:
@@ -79,7 +101,7 @@ def normalize_permission_profile(raw: Any) -> Optional[str]:
     return _PROFILE_ALIASES.get(key) or _PROFILE_ALIASES.get(key.lower())
 
 
-def permission_profile_config_patch(profile: str) -> Optional[dict[str, Any]]:
+def permission_profile_config_patch(profile: Optional[str]) -> Optional[dict[str, Any]]:
     """档位 → config.yaml permissions 段补丁（键与桌面端 patchPermissionsForProfile 对齐）。
 
     返回 None 表示档位未识别（调用方不应写配置）。
