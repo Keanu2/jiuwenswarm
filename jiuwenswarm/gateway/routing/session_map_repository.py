@@ -1,8 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """SessionMap PersistentStore Repository (not under gateway/config).
 
-仅提供 Repository，不改变 ``session_map.py`` 的现网行为。
-``Session`` 在此自包含定义。
+企业版由 ``SessionMap`` 经 ``session_map_access`` 注入后调用，落库表
+``session_map``。``Session`` 在此自包含定义。
 """
 
 from __future__ import annotations

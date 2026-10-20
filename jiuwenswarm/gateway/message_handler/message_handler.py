@@ -383,7 +383,7 @@ class MessageHandler(ABC):
         # _forward_loop 用 None 做 key 重新 get_or_create_channel_state，sid 写进
         # "feishu:None" 而复用查 "feishu:oc_xxx"，永远对不上，每条消息都新建 session、丢上下文。
         # 走 SessionMap 用 identity_key(provider,chat_id,bot_id[,user_id]) 查找，不依赖
-        # msg.session_id，且落盘 session_map.json，顺带支持跨进程重启复用。
+        # msg.session_id；个人版落盘 session_map.json，企业版经存储屏蔽层写 DB 表。
         self._session_map_channel_types = frozenset({
             "feishu",
             "feishu_enterprise",
