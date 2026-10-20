@@ -37,6 +37,25 @@
     "builtinHint": "默认开启高危命令黑 / 灰名单。关闭后仍检查用户命令规则；文件和网络护栏不受影响。",
     "saved": "已保存，后续命令检查使用新配置。"
   },
+  "dataSafety": {
+    "title": "删除与备份",
+    "hint": "软删除打开后，达到数量的 shell 删除需要确认。自动备份在改写已有文件前留一份快照。",
+    "softDelete": "启用软删除",
+    "softDeleteHint": "删除进入回收站或归档目录。关闭后不做批量数量审批。",
+    "archiveDir": "归档目录",
+    "archivePlaceholder": "留空则使用工作区下的 .trash",
+    "threshold": "批量删除阈值",
+    "thresholdHint": "一次 shell 删除的文件数达到该值时弹出确认。0 表示不按数量审批。",
+    "backup": "启用自动备份",
+    "backupHint": "覆盖已有文件或可识别的 shell 写入之前，先复制一份。",
+    "backupDir": "备份目录",
+    "backupPlaceholder": "留空则使用工作区下的 .backup",
+    "quota": "备份配额（MiB）",
+    "quotaHint": "1 表示 1 MiB。0 表示不备份。全部备份共用这一上限。",
+    "saved": "已保存。批量删除审批下次工具调用生效；备份管理器已按新配置重建。",
+    "savedPending": "配置已写入。备份管理器没有装上，请看服务日志。",
+    "invalidNumber": "阈值和配额要填大于等于 0 的整数。"
+  },
   "fileSecurity": {
     "title": "文件安全护栏",
     "hint": "设置文件访问权限。此处独立保存；护栏还需开启权限管控总开关。",

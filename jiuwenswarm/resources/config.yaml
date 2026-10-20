@@ -1139,9 +1139,11 @@ permissions:
   # enabled 只接受真正的布尔 true。
   # 默认关闭。打开后本机和 jiuwenbox 里的删除改为回收站；放不进去则挪到同卷 archive_dir。
   # archive_dir 为空时使用 <workspace>/.trash。
+  # batch_delete_threshold：软删除打开后，一次 shell 删除达到该文件数则审批。0 表示不按数量审批。
   soft_delete:
     enabled: false
     archive_dir: ""
+    batch_delete_threshold: 100
 
   # Native 路径层（agent-core FileGuard）：defaults + workspace 绑定运行时 workspace_root
   # trusted_dirs（TUI 项目 cwd / /add-dir）由引擎运行时编译，不必写进 YAML。

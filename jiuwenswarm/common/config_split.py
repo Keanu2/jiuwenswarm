@@ -51,7 +51,12 @@ _EXTRACT_LOCK = threading.Lock()
 _SCALAR_PATHS: tuple[tuple[str, ...], ...] = (
     ("sandbox", "enabled"),
     ("permissions", "shell_guard", "builtin_rules_enabled"),
-    # soft_delete.enabled 不保留。升级跟模板走。
+    ("permissions", "soft_delete", "enabled"),
+    ("permissions", "soft_delete", "archive_dir"),
+    ("permissions", "soft_delete", "batch_delete_threshold"),
+    ("file_backup", "enabled"),
+    ("file_backup", "backup_dir"),
+    ("file_backup", "max_total_mb"),
 )
 
 # 小艺 PC/手机 HITL「永久记住」。按 id（路径条目按 path）upsert 回新模板 list。

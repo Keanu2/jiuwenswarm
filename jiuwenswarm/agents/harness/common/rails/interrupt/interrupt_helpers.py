@@ -653,12 +653,16 @@ def build_permission_rail(
             on_permission_evaluated=_behavior_evaluated if behavior_enabled else None,
         )
 
+        # 批量删除审批的前置开关每次判定时读当前配置，安全页保存后下一次工具调用即生效。
+        from jiuwenswarm.common.soft_delete_config import live_soft_delete_enabled
+
         permission_rail = PermissionInterruptRail(
             config=permission_config,
             tool_names=tool_names,
             llm=llm,
             model_name=model_name,
             host=host,
+            soft_delete_enabled=live_soft_delete_enabled,
         )
         setattr(
             permission_rail,

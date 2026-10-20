@@ -5783,7 +5783,12 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             bridge.update_config(config_base)
         permission_config = runtime_permission_config(config_base)
         if self._permission_rail is not None:
-            self._permission_rail.update_config(permission_config)
+            from jiuwenswarm.common.soft_delete_config import live_soft_delete_enabled
+
+            self._permission_rail.update_config(
+                permission_config,
+                soft_delete_enabled=live_soft_delete_enabled,
+            )
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
         elif permission_config.get("enabled", False):
             self._permission_rail = build_permission_rail(
@@ -6640,6 +6645,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
         self._config_cache = config_base.get("react", {}).copy()
+        self._install_file_soft_delete()
         return config_base
 
     async def _fan_out_reload_to_session_adapters(
