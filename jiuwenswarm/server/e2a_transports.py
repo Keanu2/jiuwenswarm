@@ -34,6 +34,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sys
 import threading
 from typing import IO, Any, Protocol, runtime_checkable
@@ -123,6 +124,67 @@ def verify_auth_frame(frame: Any, expected_token: str) -> bool:
     if not expected_token or not isinstance(token, str):
         return False
     return hmac.compare_digest(token.encode("utf-8"), expected_token.encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# 命名管道 E2A 的双向握手（2026-10-17，跨 SID 预创建抢占防护第二道）
+#
+# 旧协议客户端首帧直接携带 e2aToken：抢占者（异 SID 预创建同名管道实例）什么
+# 都不用做就能收到令牌明文，并可回注伪造 connection.ack/AgentResponse。
+# 新协议把「客户端先证明服务端持有令牌」前置：
+#   1. 客户端 → {"type":"auth-hello","challenge":<32B 随机 hex>}（不含任何秘密）
+#   2. 服务端 → {"type":"auth-proof","proof":HMAC_SHA256(e2aToken, "e2a-pipe-proof:"+challenge)}
+#   3. 客户端校验 proof（服务端不知令牌即无法伪造）通过后才发 {"type":"auth","token"}
+# 抢占者拿不到令牌、伪造不了 proof，握手即失败断管。与 PID→镜像白名单校验
+# （np_transport open_pipe server_images）叠加为双防线。
+# ---------------------------------------------------------------------------
+
+_E2A_PROOF_DOMAIN = "e2a-pipe-proof:"
+# challenge 形态约束：hex，32~128 字符（16~64 字节熵），防异常超长/注入
+_CHALLENGE_PATTERN = re.compile(r"^[0-9a-f]{32,128}$")
+
+
+def build_auth_hello_frame() -> tuple[dict[str, Any], str]:
+    """客户端握手第 1 帧；返回 (帧, challenge)——challenge 留作 proof 校验输入。"""
+    challenge = os.urandom(24).hex()
+    return {"type": "auth-hello", "challenge": challenge}, challenge
+
+
+def build_auth_proof_frame(expected_token: str, challenge: str) -> dict[str, Any]:
+    """服务端对 auth-hello 的应答：proof = HMAC(token, domain+challenge)。"""
+    proof = hmac.new(
+        expected_token.encode("utf-8"),
+        (_E2A_PROOF_DOMAIN + challenge).encode("utf-8"),
+        "sha256",
+    ).hexdigest()
+    return {"type": "auth-proof", "proof": proof}
+
+
+def extract_auth_hello_challenge(frame: Any) -> str | None:
+    """服务端解析 auth-hello 帧；非法形态（非本类型/challenge 不合规）返回 None。"""
+    if not isinstance(frame, dict) or frame.get("type") != "auth-hello":
+        return None
+    challenge = frame.get("challenge")
+    if not isinstance(challenge, str) or not _CHALLENGE_PATTERN.match(challenge):
+        return None
+    return challenge
+
+
+def verify_auth_proof_frame(frame: Any, expected_token: str, challenge: str) -> bool:
+    """客户端校验 auth-proof 帧（常量时间比对；令牌缺失一律拒绝）。"""
+    proof = (
+        frame.get("proof")
+        if isinstance(frame, dict) and frame.get("type") == "auth-proof"
+        else None
+    )
+    if not expected_token or not isinstance(proof, str):
+        return False
+    expected = hmac.new(
+        expected_token.encode("utf-8"),
+        (_E2A_PROOF_DOMAIN + challenge).encode("utf-8"),
+        "sha256",
+    ).hexdigest()
+    return hmac.compare_digest(proof.encode("utf-8"), expected.encode("utf-8"))
 
 
 class WsMessageTransport:

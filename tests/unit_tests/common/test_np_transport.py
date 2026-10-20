@@ -210,6 +210,143 @@ class TestPipeRoundtrip:
             await server.stop()
 
 
+def _real_self_image() -> str:
+    """当前进程真实镜像（venv launcher ≠ 镜像，须走 Win32 API 取）。"""
+    import win32api
+    import win32con
+    import win32process
+
+    handle = win32api.OpenProcess(
+        win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ, False, os.getpid()
+    )
+    try:
+        return win32process.GetModuleFileNameEx(handle, 0)
+    finally:
+        win32api.CloseHandle(handle)
+
+
+class TestPipeServerVerification:
+    """出站客户端的服务端身份校验（2026-10-17，跨 SID 预创建抢占防护 P0）。"""
+
+    @pytest.fixture(autouse=True)
+    def _reset_verifier_state(self, monkeypatch):
+        from jiuwenswarm.common import np_transport
+        import jiuwenswarm.common.secrets_bootstrap as secrets_mod
+
+        monkeypatch.setattr(np_transport, "_default_server_verifier", None)
+        monkeypatch.setattr(np_transport, "_configured_server_images", None)
+        monkeypatch.setattr(secrets_mod, "_SECRETS", {})
+        monkeypatch.setattr(secrets_mod, "_LOADED", False)
+        yield
+
+    @pytest.mark.asyncio
+    async def test_server_images_accept_self(self) -> None:
+        from jiuwenswarm.common.np_transport import open_pipe, serve_pipe
+
+        path = rf"\\.\pipe\claw-test-np-{os.getpid()}-srv-ok"
+
+        async def handler(stream) -> None:
+            frame = await stream.recv_frame()
+            await stream.send_frame({"ok": True, "got": frame})
+
+        server = await serve_pipe(path, handler)
+        try:
+            client = await open_pipe(path, timeout=5, server_images={_real_self_image()})
+            await client.send_frame({"ping": 1})
+            assert (await client.recv_frame())["ok"] is True
+            await client.close()
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_server_images_reject_foreign_no_bytes_sent(self) -> None:
+        """白名单不含服务端镜像 → fail-closed：连接被拒且服务端收不到任何字节。"""
+        from jiuwenswarm.common.np_transport import PipeError, open_pipe, serve_pipe
+
+        path = rf"\\.\pipe\claw-test-np-{os.getpid()}-srv-reject"
+        received: list = []
+
+        async def handler(stream) -> None:
+            # 抢占者视角：记录任何到达的字节（应永远为空）
+            try:
+                chunk = await stream.read(timeout=2)
+                received.append(chunk)
+            except Exception:
+                pass
+
+        server = await serve_pipe(path, handler)
+        try:
+            with pytest.raises(PipeError, match="身份校验"):
+                await open_pipe(path, timeout=5, server_images={r"C:\nonexistent\evil.exe"})
+            await asyncio.sleep(0.2)
+            # 客户端校验失败即断管：服务端最多读到空字节（EOF），绝无业务数据
+            assert [b for b in received if b] == []
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_default_verifier_uses_desktop_exe_secret(self, monkeypatch) -> None:
+        """默认白名单 = 密钥包 desktopExe；无密钥包时不校验（兼容旧形态）。"""
+        import jiuwenswarm.common.secrets_bootstrap as secrets_mod
+        from jiuwenswarm.common.np_transport import PipeError, open_pipe, serve_pipe
+
+        async def handler(stream) -> None:
+            frame = await stream.recv_frame()
+            await stream.send_frame({"ok": True})
+
+        # 1) 无密钥包：不校验，直接连通
+        path1 = rf"\\.\pipe\claw-test-np-{os.getpid()}-srv-nodef"
+        server1 = await serve_pipe(path1, handler)
+        try:
+            client = await open_pipe(path1, timeout=5)
+            await client.send_frame({"x": 1})
+            assert (await client.recv_frame())["ok"] is True
+            await client.close()
+        finally:
+            await server1.stop()
+
+        # 2) desktopExe = 本进程镜像：默认校验通过
+        monkeypatch.setattr(
+            secrets_mod, "_SECRETS", {"desktopExe": _real_self_image()}
+        )
+        path2 = rf"\\.\pipe\claw-test-np-{os.getpid()}-srv-defok"
+        server2 = await serve_pipe(path2, handler)
+        try:
+            client = await open_pipe(path2, timeout=5)
+            await client.send_frame({"x": 2})
+            assert (await client.recv_frame())["ok"] is True
+            await client.close()
+        finally:
+            await server2.stop()
+
+    @pytest.mark.asyncio
+    async def test_default_verifier_rejects_when_desktop_exe_mismatch(self, monkeypatch) -> None:
+        import jiuwenswarm.common.secrets_bootstrap as secrets_mod
+        from jiuwenswarm.common.np_transport import PipeError, open_pipe, serve_pipe
+
+        monkeypatch.setattr(
+            secrets_mod, "_SECRETS", {"desktopExe": r"C:\nonexistent\evil-desktop.exe"}
+        )
+        path = rf"\\.\pipe\claw-test-np-{os.getpid()}-srv-defreject"
+        received: list = []
+
+        async def handler(stream) -> None:
+            try:
+                chunk = await stream.read(timeout=2)
+                received.append(chunk)
+            except Exception:
+                pass
+
+        server = await serve_pipe(path, handler)
+        try:
+            with pytest.raises(PipeError, match="身份校验"):
+                await open_pipe(path, timeout=5)
+            await asyncio.sleep(0.2)
+            assert [b for b in received if b] == []
+        finally:
+            await server.stop()
+
+
 class TestNamedPipeHttpTransport:
     """HTTP/1.1 over 命名管道（对端用 serve_pipe 模拟桌面代理）。"""
 
