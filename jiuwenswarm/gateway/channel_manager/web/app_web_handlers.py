@@ -6245,6 +6245,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     _register_perm("permissions.approval_overrides.delete", _PermReq.PERMISSIONS_APPROVAL_OVERRIDES_DELETE)
     _register_perm("permissions.net_guard.get", _PermReq.PERMISSIONS_NET_GUARD_GET)
     _register_perm("permissions.net_guard.set", _PermReq.PERMISSIONS_NET_GUARD_SET)
+    _register_perm("permissions.soft_delete.get", _PermReq.PERMISSIONS_SOFT_DELETE_GET)
+    _register_perm("permissions.soft_delete.set", _PermReq.PERMISSIONS_SOFT_DELETE_SET)
+    _register_perm("file_backup.get", _PermReq.FILE_BACKUP_GET)
+    _register_perm("file_backup.set", _PermReq.FILE_BACKUP_SET)
 
     async def _memory_forbidden_get(ws, req_id, params, session_id):
         try:

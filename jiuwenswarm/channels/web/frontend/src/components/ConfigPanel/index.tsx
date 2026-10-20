@@ -19,6 +19,7 @@ import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
 import { FileSecurityEditor } from "./FileSecurityEditor";
 import { ShellSecurityEditor } from "./ShellSecurityEditor";
 import { NetGuardEditor } from "./NetGuardEditor";
+import { DataSafetyEditor } from "./DataSafetyEditor";
 import { ModelProviderIcon } from '../ModelProviderIcon';
 
 function MultiSelectDropdown({
@@ -4619,6 +4620,7 @@ export function ConfigPanel({
                   <FileSecurityEditor isConnected={isConnected} />
                   <ShellSecurityEditor isConnected={isConnected} />
                   <NetGuardEditor isConnected={isConnected} />
+                  <DataSafetyEditor isConnected={isConnected} />
                   {securityGroups.length === 0 ? (
                     <p className="text-sm text-text-muted px-1">{t("config.tabEmpty.security")}</p>
                   ) : (

@@ -223,6 +223,7 @@ async def _run(host: str, port: int) -> None:
     from jiuwenswarm.server.runtime.file_operation_history_patch import (
         configure_file_operation_history,
     )
+    from jiuwenswarm.server.runtime.file_backup_patch import configure_file_backup
 
     from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
         publish_host_exit_policy_from_config,
@@ -230,6 +231,7 @@ async def _run(host: str, port: int) -> None:
 
     full_cfg = get_config()
     configure_file_operation_history(full_cfg)
+    configure_file_backup(full_cfg)
     publish_host_exit_policy_from_config(full_cfg)
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 

@@ -32,6 +32,10 @@ _PERMISSIONS_CFG_METHODS: frozenset[ReqMethod] = frozenset(
         ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_DELETE,
         ReqMethod.PERMISSIONS_NET_GUARD_GET,
         ReqMethod.PERMISSIONS_NET_GUARD_SET,
+        ReqMethod.PERMISSIONS_SOFT_DELETE_GET,
+        ReqMethod.PERMISSIONS_SOFT_DELETE_SET,
+        ReqMethod.FILE_BACKUP_GET,
+        ReqMethod.FILE_BACKUP_SET,
         ReqMethod.SECURITY_CONFIG_GET,
         ReqMethod.SECURITY_CONFIG_INITIALIZE,
         ReqMethod.SECURITY_CONFIG_SETTINGS_UPDATE,
@@ -53,6 +57,8 @@ _PERMISSIONS_READ_ONLY_METHODS: frozenset[ReqMethod] = frozenset(
         ReqMethod.PERMISSIONS_RULES_GET,
         ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
         ReqMethod.PERMISSIONS_NET_GUARD_GET,
+        ReqMethod.PERMISSIONS_SOFT_DELETE_GET,
+        ReqMethod.FILE_BACKUP_GET,
     }
 )
 
@@ -251,6 +257,36 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
             persist_net_guard_section(patch)
             publish_host_exit_policy_from_config()
             return _ok(request, _net_guard_payload())
+
+        if m == ReqMethod.PERMISSIONS_SOFT_DELETE_GET:
+            from jiuwenswarm.common.soft_delete_config import get_soft_delete_config
+
+            return _ok(request, {"soft_delete": get_soft_delete_config()})
+
+        if m == ReqMethod.PERMISSIONS_SOFT_DELETE_SET:
+            from jiuwenswarm.common.soft_delete_config import update_soft_delete_config
+
+            return _ok(request, {"soft_delete": update_soft_delete_config(params.get("patch"))})
+
+        if m == ReqMethod.FILE_BACKUP_GET:
+            from jiuwenswarm.common.file_backup_config import get_file_backup_config
+
+            return _ok(request, {"file_backup": get_file_backup_config()})
+
+        if m == ReqMethod.FILE_BACKUP_SET:
+            from jiuwenswarm.common.file_backup_config import (
+                apply_file_backup_config,
+                update_file_backup_config,
+            )
+
+            section = update_file_backup_config(params.get("patch"))
+            applied = True
+            try:
+                apply_file_backup_config()
+            except Exception:
+                logger.warning("[file_backup.set] apply failed", exc_info=True)
+                applied = False
+            return _ok(request, {"file_backup": section, "applied": applied})
 
     except ValueError as e:
         return _err(request, str(e))

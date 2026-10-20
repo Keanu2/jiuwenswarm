@@ -366,6 +366,101 @@ def get_file_soft_delete_settings(
     return True, os.path.abspath(os.path.join(workspace, ".trash"))
 
 
+def get_batch_delete_guard_settings(
+    config: dict[str, Any] | None,
+) -> tuple[bool, int]:
+    """Return batch-delete approval settings ``(enabled, threshold)``.
+
+    Reads ``permissions.soft_delete.batch_delete_threshold``, next to
+    ``enabled``. Soft-delete must be on. A missing threshold defaults to 100;
+    ``0`` keeps soft-delete but turns the count-based approval off.
+    """
+    enabled, _ = get_file_soft_delete_settings(config)
+    if not enabled or not isinstance(config, dict):
+        return False, 0
+    permissions = config.get("permissions")
+    section = permissions.get("soft_delete") if isinstance(permissions, dict) else None
+    if not isinstance(section, dict) or "batch_delete_threshold" not in section:
+        return True, 100
+    raw_threshold = section.get("batch_delete_threshold")
+    try:
+        threshold = int(raw_threshold)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid permissions.soft_delete.batch_delete_threshold=%r; using default 100",
+            raw_threshold,
+        )
+        threshold = 100
+    return True, max(0, threshold)
+
+
+def get_file_backup_settings(
+    config: dict[str, Any] | None,
+    workspace_dir: str | None = None,
+) -> tuple[bool, str, int]:
+    """Return auto-backup settings ``(enabled, backup_dir, max_total_bytes)``.
+
+    Reads top-level ``file_backup`` (``enabled`` / ``backup_dir`` /
+    ``max_total_mb``). An empty ``backup_dir`` resolves to
+    ``<workspace>/.backup``. ``max_total_mb`` is mebibytes (1 = 1024×1024
+    bytes) and defaults to 500; ``0`` disables backup. The returned quota is
+    bytes for :class:`FileBackupManager`.
+    """
+    _MIB = 1024 * 1024
+    DEFAULT_MAX_MB = 500
+    if not isinstance(config, dict):
+        return False, "", 0
+    section = config.get("file_backup")
+    if section is None:
+        return False, "", 0
+    if not isinstance(section, dict):
+        logger.warning("Invalid file_backup=%r; leaving backup off", section)
+        return False, "", 0
+    enabled = section.get("enabled", False)
+    if not isinstance(enabled, bool):
+        logger.warning("Invalid file_backup.enabled=%r; leaving backup off", enabled)
+        return False, "", 0
+    if not enabled:
+        return False, "", 0
+
+    raw_max = section.get("max_total_mb", DEFAULT_MAX_MB)
+    if raw_max is None:
+        raw_max = DEFAULT_MAX_MB
+    if isinstance(raw_max, bool):
+        logger.warning("Invalid file_backup.max_total_mb=%r; using default", raw_max)
+        max_mb = DEFAULT_MAX_MB
+    else:
+        try:
+            max_mb = int(raw_max)
+        except (TypeError, ValueError):
+            logger.warning("Invalid file_backup.max_total_mb=%r; using default", raw_max)
+            max_mb = DEFAULT_MAX_MB
+    if max_mb < 0:
+        max_mb = 0
+    max_bytes = max_mb * _MIB
+
+    backup_dir = section.get("backup_dir", "")
+    if backup_dir is None or not isinstance(backup_dir, str):
+        backup_dir = ""
+    backup_dir = backup_dir.strip()
+    if backup_dir:
+        resolved_dir = os.path.abspath(os.path.expandvars(os.path.expanduser(backup_dir)))
+        return True, resolved_dir, max_bytes
+
+    workspace = (workspace_dir or "").strip()
+    if not workspace:
+        react = config.get("react")
+        if isinstance(react, dict):
+            raw_workspace = react.get("workspace_dir")
+            if isinstance(raw_workspace, str):
+                workspace = raw_workspace.strip()
+    if not workspace:
+        from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+        workspace = str(get_agent_workspace_dir())
+    return True, os.path.abspath(os.path.join(workspace, ".backup")), max_bytes
+
+
 def get_config_raw():
     """未解析环境变量的配置视图。只读 ``CONFIG_YAML_PATH``。"""
     user_file = Path(CONFIG_YAML_PATH)

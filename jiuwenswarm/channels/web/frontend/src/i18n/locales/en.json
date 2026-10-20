@@ -37,6 +37,25 @@
     "builtinHint": "High-risk block and approval rules are enabled by default. Turning them off preserves user command rules, file guards, and network guards.",
     "saved": "Saved. Subsequent command checks use the new configuration."
   },
+  "dataSafety": {
+    "title": "Delete and backup",
+    "hint": "With soft delete on, a shell delete that reaches the file count asks for confirmation. Auto backup snapshots an existing file before it is overwritten.",
+    "softDelete": "Enable soft delete",
+    "softDeleteHint": "Deletes go to the recycle bin or an archive directory. Batch-count approval stays off while this is off.",
+    "archiveDir": "Archive directory",
+    "archivePlaceholder": "Empty uses <workspace>/.trash",
+    "threshold": "Batch delete threshold",
+    "thresholdHint": "Ask when one shell call would delete at least this many files. 0 turns off count approval.",
+    "backup": "Enable auto backup",
+    "backupHint": "Copy an existing file before write_file, edit_file, or a recognized shell write.",
+    "backupDir": "Backup directory",
+    "backupPlaceholder": "Empty uses <workspace>/.backup",
+    "quota": "Backup quota (MiB)",
+    "quotaHint": "1 means 1 MiB. 0 turns backup off. All backups share this limit.",
+    "saved": "Saved. Batch-delete approval applies on the next tool call. The backup manager was rebuilt.",
+    "savedPending": "Settings were written. The backup manager was not installed. Check the server log.",
+    "invalidNumber": "Enter a whole number greater than or equal to 0 for the threshold and quota."
+  },
   "fileSecurity": {
     "title": "File security guard",
     "hint": "Configure file access. Save here separately; the main permission control must also be enabled.",
