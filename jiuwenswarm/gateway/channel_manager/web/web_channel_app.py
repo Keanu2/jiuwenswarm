@@ -150,8 +150,10 @@ def register_http_routes(app: FastAPI, channel: WebChannel) -> None:
             channel,
             enterprise=True,
         )
+        from jiuwenswarm.gateway.channel_manager.web.enterprise_files import register_enterprise_file_routes
         from jiuwenswarm.gateway.channel_manager.web.enterprise_access import EnterpriseAccessMiddleware
 
+        register_enterprise_file_routes(app, channel)
         app.add_middleware(
             EnterpriseAccessMiddleware,
             routes=[route for route in app.routes if route not in before_user_routes],

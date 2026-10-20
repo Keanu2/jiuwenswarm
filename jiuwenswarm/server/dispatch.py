@@ -242,6 +242,18 @@ HANDLERS: dict[ReqMethod, Handler] = {
     ReqMethod.PROJECT_PIN: handle_gateway_adapter,
     ReqMethod.PROJECT_REMOVE: handle_gateway_adapter,
     ReqMethod.PROJECT_RESTORE: handle_gateway_adapter,
+    # 文件 HTTP 与 WebSocket 复用同一个 WorkspaceFileAdapter。
+    ReqMethod.MEDIA_PERSIST: handle_gateway_adapter,
+    ReqMethod.MEDIA_DISCARD: handle_gateway_adapter,
+    ReqMethod.DOCUMENT_PERSIST: handle_gateway_adapter,
+    ReqMethod.DOCUMENT_FORMATS: handle_gateway_adapter,
+    ReqMethod.FILE_IMPORT_URL: handle_gateway_adapter,
+    ReqMethod.FILE_UPLOAD_CHUNK: handle_gateway_adapter,
+    ReqMethod.FILE_DOWNLOAD_VERIFIED_CHUNK: handle_gateway_adapter,
+    ReqMethod.WORKSPACE_TREE: handle_gateway_adapter,
+    ReqMethod.WORKSPACE_PREVIEW: handle_gateway_adapter,
+    ReqMethod.WORKSPACE_USAGE: handle_gateway_adapter,
+    ReqMethod.WORKSPACE_ENTRIES_DELETE: handle_gateway_adapter,
     # 语言配置在 AgentServer 的 ConfigAdapter。企业版 runtime 客户端会转发到这里。
     ReqMethod.LOCALE_GET_CONF: handle_gateway_adapter,
     ReqMethod.LOCALE_SET_CONF: handle_gateway_adapter,

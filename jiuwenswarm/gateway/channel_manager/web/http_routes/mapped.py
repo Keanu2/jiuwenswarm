@@ -738,6 +738,29 @@ _PROJECT_ROUTES: tuple[WebHttpMappedRoute, ...] = (
 
 WORKSPACE_FILE_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     WebHttpMappedRoute(
+        "POST", "/sessions/{session_id}/media", "media.persist", "files",
+        "保存会话图片", accept_body=True, bind_session_param=True,
+        path_to_param={"session_id": "session_id"},
+    ),
+    WebHttpMappedRoute(
+        "DELETE", "/sessions/{session_id}/media", "media.discard", "files",
+        "删除未发送附件", accept_body=True, bind_session_param=True,
+        path_to_param={"session_id": "session_id"},
+    ),
+    WebHttpMappedRoute(
+        "POST", "/sessions/{session_id}/documents", "document.persist", "files",
+        "保存会话文档", accept_body=True, bind_session_param=True,
+        path_to_param={"session_id": "session_id"},
+    ),
+    WebHttpMappedRoute(
+        "GET", "/documents/formats", "document.formats", "files", "读取禁止上传的格式",
+    ),
+    WebHttpMappedRoute(
+        "POST", "/sessions/{session_id}/files/import", "file.import_url", "files",
+        "导入对象存储附件", accept_body=True, bind_session_param=True,
+        path_to_param={"session_id": "session_id"},
+    ),
+    WebHttpMappedRoute(
         "GET", "/workspace/tree", "workspace.tree", "workspace",
         "列工作区目录（相对租户根；含 zone / deletable）",
         query_keys=("relative_path",) + _TENANT_QUERY,

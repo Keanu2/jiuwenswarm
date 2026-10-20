@@ -165,6 +165,10 @@ class ReqMethod(Enum):
     DOCUMENT_FORMATS = "document.formats"
     # chat.send 上行外部 url 文件导入（Phase 2：AgentServer 下载落盘注入目录，Gateway 不落盘）
     FILE_IMPORT_URL = "file.import_url"
+    WORKSPACE_TREE = "workspace.tree"
+    WORKSPACE_PREVIEW = "workspace.preview"
+    WORKSPACE_USAGE = "workspace.usage"
+    WORKSPACE_ENTRIES_DELETE = "workspace.entries.delete"
     # 分块上传：用于 AgentOS 多用户场景的大文件，避免单个 E2A WebSocket 帧超过限制。
     FILE_UPLOAD_CHUNK = "file.upload_chunk"
     # Smart Approval sealed assets: validate and read one bounded chunk in the

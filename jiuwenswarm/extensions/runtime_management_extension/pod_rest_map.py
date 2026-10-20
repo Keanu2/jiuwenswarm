@@ -26,6 +26,13 @@ _METHODS_WITHOUT_PARAM_SESSION_ID = frozenset({"session.create"})
 # method → (verb, path relative to /api/v1). 特殊 chat.* / history stream 在 assemble 里处理。
 # 键同时覆盖本仓 ReqMethod 与 Agent HTTP ROUTES 若有字符串漂移的别名。
 _ROUTE_ROWS: tuple[tuple[str, str, str], ...] = (
+    ("media.persist", "POST", "/sessions/{session_id}/media"),
+    ("media.discard", "DELETE", "/sessions/{session_id}/media"),
+    ("document.persist", "POST", "/sessions/{session_id}/documents"),
+    ("document.formats", "GET", "/documents/formats"),
+    ("file.import_url", "POST", "/sessions/{session_id}/files/import"),
+    ("file.upload_chunk", "POST", "/sessions/{session_id}/files/chunks"),
+    ("file.download_verified_chunk", "POST", "/sessions/{session_id}/files/download"),
     ("initialize", "POST", "/initialize"),
     ("session.list", "GET", "/sessions"),
     ("session.create", "POST", "/sessions"),

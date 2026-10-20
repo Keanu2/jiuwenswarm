@@ -3746,6 +3746,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload={"accepted": True, "session_id": session_id},
         )
 
+    def _file_proxy(req_method):
+        async def handler(ws, req_id, params, session_id, user_id=None):
+            from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+            await proxy_unary_request(
+                channel=channel, agent_client=_resolve(agent_client), ws=ws,
+                req_id=req_id, params=params, session_id=session_id, user_id=user_id,
+                req_method=req_method, label=req_method.value,
+            )
+        return handler
+
     async def _media_persist(ws, req_id, params, session_id, user_id=None):
         """浏览器上传媒体附件落盘（E2A 转发 AgentServer 注入目录 uploads）。
 
@@ -5230,6 +5241,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("commands.list", _commands_list)
 
     channel.register_method("chat.send", _chat_send)
+    from jiuwenswarm.common.schema.message import ReqMethod as _FileReq
+
+    for file_method in (
+        _FileReq.FILE_IMPORT_URL, _FileReq.WORKSPACE_TREE, _FileReq.WORKSPACE_PREVIEW,
+        _FileReq.WORKSPACE_USAGE, _FileReq.WORKSPACE_ENTRIES_DELETE,
+    ):
+        channel.register_method(file_method.value, _file_proxy(file_method))
     channel.register_method("media.persist", _media_persist)
     channel.register_method("media.discard", _media_discard)
     channel.register_method("document.persist", _document_persist)

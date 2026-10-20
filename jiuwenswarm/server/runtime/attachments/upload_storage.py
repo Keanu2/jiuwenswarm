@@ -78,7 +78,7 @@ def unique_upload_path(path: Path) -> Path:
     return path.with_name(f"{stem}-overflow{suffix}")
 
 
-def atomic_write_unique(target: Path, data: bytes) -> Path:
+def atomic_write_unique(target: Path, data: bytes, *, directory_fd: int | None = None) -> Path:
     """Write *data* beside *target* without overwriting an existing file.
 
     The create-and-open is atomic: ``os.open`` is called with
@@ -92,14 +92,28 @@ def atomic_write_unique(target: Path, data: bytes) -> Path:
     actually written.  After 999 name collisions (a pathological state)
     it raises ``FileExistsError`` rather than silently overwriting.
     """
-    target.parent.mkdir(parents=True, exist_ok=True)
+    from jiuwenswarm.edition import is_enterprise
+
+    if is_enterprise():
+        from jiuwenswarm.common.workspace.quota import (
+            check_workspace_write, is_workspace_quota_enabled, resolve_effective_quota,
+        )
+
+        if is_workspace_quota_enabled():
+            resolve_effective_quota(force_refresh=True)
+            check_workspace_write(additional_bytes=len(data))
+    if directory_fd is None:
+        target.parent.mkdir(parents=True, exist_ok=True)
     stem = target.stem
     suffix = target.suffix
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     for index in range(1000):
         candidate = target if index == 0 else target.with_name(f"{stem}-{index}{suffix}")
         try:
-            fd = os.open(candidate, flags, 0o644)
+            fd = os.open(
+                candidate.name if directory_fd is not None else candidate,
+                flags, 0o600 if directory_fd is not None else 0o644, dir_fd=directory_fd,
+            )
         except FileExistsError:
             continue
         try:
@@ -112,7 +126,7 @@ def atomic_write_unique(target: Path, data: bytes) -> Path:
                 f.write(data)
         except BaseException:
             try:
-                os.unlink(candidate)
+                os.unlink(candidate.name if directory_fd is not None else candidate, dir_fd=directory_fd)
             except OSError:
                 pass
             raise
