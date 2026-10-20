@@ -1,7 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""SessionMap Repository process entry (injection only).
+"""SessionMap Repository 进程入口。
 
-仅具备注入能力，不切换 ``session_map.py`` 的现网读写。
+企业版 Gateway 启动时注入；``SessionMap`` 发现已注入后走存储屏蔽层
+（DB 表 ``session_map``），未注入时仍读写 ``session_map.json``。
 """
 
 from __future__ import annotations
