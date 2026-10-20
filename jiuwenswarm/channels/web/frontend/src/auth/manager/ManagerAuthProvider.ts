@@ -61,7 +61,7 @@ export const managerAuthProvider: EnterpriseAuthProvider = {
     try {
       const result = await requestJson<
         ManagerResponse<{ manager_access?: boolean; is_platform_admin?: boolean }>
-      >('/manager-api/v1/authz/me');
+      >(resolveApiUrl('/manager-api/v1/authz/me'));
       if (result.code !== 200) return false;
       return Boolean(result.data?.manager_access || result.data?.is_platform_admin);
     } catch {
