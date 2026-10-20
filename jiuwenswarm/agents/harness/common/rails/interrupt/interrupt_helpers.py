@@ -278,7 +278,7 @@ def build_permission_rail(
         model_name: Model name for risk assessment
 
     Returns:
-        PermissionInterruptRail instance or None if disabled
+        PermissionInterruptRail instance, or None if disabled outside the desktop
     """
     from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
     from openjiuwen.harness.security.host import (
@@ -318,7 +318,9 @@ def build_permission_rail(
         permission_config.get("enabled", False)
     )
 
-    if not permission_config.get("enabled", False):
+    # A disabled desktop engine still protects immutable control-plane paths
+    # and reports its local ALLOW through on_permission_evaluated.
+    if not permission_config.get("enabled", False) and not behavior_enabled:
         logger.info("[InterruptHelpers] Permission system is disabled, returning None")
         return None
 
@@ -598,7 +600,6 @@ def build_permission_rail(
                     else runtime_config.get("defer_unmatched") is True
                 )
                 snapshot.update({
-                    "enabled": True,
                     "defer_unmatched": cloud_enabled,
                     "strict_tool_command_merge": cloud_enabled,
                 })

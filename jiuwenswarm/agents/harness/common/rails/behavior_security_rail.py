@@ -56,8 +56,8 @@ class BehaviorSecurityRail(DeepAgentRail):
         if local is not None:
             ctx.extra["behavior.local_permission"] = local
         ctx.extra["behavior.context_token"] = ACTIVE_BEHAVIOR.set((self.bridge, ctx, asyncio.get_running_loop()))
-        # Desktop full-access mode still uses PermissionInterruptRail. Its
-        # evaluated result drives report/authorize; never synthesize an ALLOW.
+        # The permission rail reports full-access ALLOW after checking immutable
+        # control-plane paths. Other profiles can still request cloud authorization.
 
     async def after_tool_call(self, ctx):
         ctx.extra["behavior.finished"] = True

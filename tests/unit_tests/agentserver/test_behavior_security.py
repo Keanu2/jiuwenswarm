@@ -107,7 +107,8 @@ async def test_skill_install_stays_ask_when_cloud_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_policy_revision_changes_event_identity_and_discards_old_reply():
+@pytest.mark.parametrize('change', ['fail_closed', 'full_access'])
+async def test_policy_revision_changes_event_identity_and_discards_old_reply(change):
     b, _ = bridge(decision='allow')
     ctx = context()
     rail = BehaviorSecurityRail(b)
@@ -124,7 +125,10 @@ async def test_policy_revision_changes_event_identity_and_discards_old_reply():
     pending = asyncio.create_task(b.decide(old_event, PermissionResult(PermissionLevel.UNDETERMINED)))
     await started.wait()
     changed = dict(b.config)
-    changed['security'] = {'fail_closed': {'enabled': True}}
+    if change == 'full_access':
+        changed['permissions'] = {**b.config['permissions'], 'enabled': False}
+    else:
+        changed['security'] = {'fail_closed': {'enabled': True}}
     b.update_config(changed)
     await rail.before_tool_call(ctx)
     assert raw_event(ctx, 'tool.before')['eventId'] != old_event['eventId']
@@ -204,8 +208,12 @@ async def test_install_confirmation_stops_before_write_and_resumes_once(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_output_inspection_waits_and_rejects_before_model_continues():
+@pytest.mark.parametrize('permission_enabled', [False, True])
+@pytest.mark.parametrize('cloud_enabled', [False, True])
+async def test_output_inspection_waits_and_rejects_before_model_continues(permission_enabled, cloud_enabled):
     b, events = bridge(decision='deny')
+    b.config['permissions']['enabled'] = permission_enabled
+    b.config['xiaoyi_work_security']['cloud_authorization']['enabled'] = cloud_enabled
     rail = BehaviorSecurityRail(b)
     ctx = context()
     await rail.before_tool_call(ctx)
@@ -482,10 +490,14 @@ async def test_permission_factory_uses_defaults_only_when_cloud_is_off(
         # The refreshed snapshot must preserve the switch as well as the initial config.
         assert permission._host.get_permissions_snapshot()['defer_unmatched'] is enabled
         assert permission._host.get_permissions_snapshot()['strict_tool_command_merge'] is enabled
-        assert permission._host.get_permissions_snapshot()['enabled'] is True
+        assert permission._host.get_permissions_snapshot()['enabled'] is permission_enabled
+        assert permission._engine.enabled is permission_enabled
         assert cfg['enabled'] is permission_enabled
         result = await permission.resolve_interrupt(ctx, ctx.inputs.tool_call, None)
-        if mode == 'authorize':
+        if not permission_enabled:
+            expected, mode, matched = 'allow', 'report', None
+            assert ctx.extra['behavior.local_permission'].reason == 'Permission system is disabled'
+        elif mode == 'authorize':
             expected = {'allow': 'allow', 'deny': 'deny', 'clarify': 'allow', 'unavailable': 'allow'}[cloud_reply]
         assert isinstance(result, {'allow': ApproveResult, 'deny': RejectResult, 'ask': InterruptResult}[expected])
         assert ctx.extra['behavior.local_permission'].matched_rule == matched
@@ -503,7 +515,7 @@ def test_full_access_outside_desktop_keeps_existing_behavior(monkeypatch):
     assert build_permission_rail({'permissions': {'enabled': False}}) is None
 
 
-def test_full_access_hot_reload_keeps_permission_checks(monkeypatch):
+def test_full_access_hot_reload_preserves_stored_mode(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
     monkeypatch.setenv('CLAW_BEHAVIOR_SECURITY', '1')
     monkeypatch.setenv('CLAW_SKILL_TOKEN', 'test-token')
@@ -517,7 +529,8 @@ def test_full_access_hot_reload_keeps_permission_checks(monkeypatch):
         config['permissions']['enabled'] = enabled
         JiuWenSwarmDeepAdapter._update_permission_rail(adapter, config)
         assert adapter._permission_rail is permission
-        assert permission._engine.config['enabled'] is True
+        assert permission._engine.enabled is enabled
+        assert permission._engine.config['enabled'] is enabled
         assert permission._engine.config['defer_unmatched'] is True
         assert permission._engine.config['strict_tool_command_merge'] is True
         assert config['permissions']['enabled'] is enabled
@@ -536,6 +549,7 @@ def test_strict_merge_is_owned_by_desktop_cloud_host(monkeypatch, desktop, cloud
            'xiaoyi_work_security': {'cloud_authorization': {'enabled': cloud}}}
     original = deepcopy(cfg)
     runtime = runtime_permission_config(cfg)
+    assert runtime['enabled'] is False
     assert runtime.get('strict_tool_command_merge') is expected
     if desktop:
         assert runtime['defer_unmatched'] is expected
@@ -549,7 +563,7 @@ async def test_cloud_hot_reload_survives_session_snapshot_refresh(monkeypatch, c
 
     monkeypatch.setenv('CLAW_BEHAVIOR_SECURITY', '1')
     monkeypatch.setenv('CLAW_SKILL_TOKEN', 'test-token')
-    stored = {'enabled': False, 'package_builtin_rules': False, 'tools': {'bash': 'allow'},
+    stored = {'enabled': True, 'package_builtin_rules': False, 'tools': {'bash': 'allow'},
               'strict_tool_command_merge': False, 'defer_unmatched': False}
     if composed:
         stored['composition'] = {'schema_version': 1, 'revision': 'test-policy', 'source_order': ['user']}
@@ -619,7 +633,7 @@ async def test_composed_snapshot_reads_live_cloud_switch_before_rail_reload(monk
 @pytest.mark.parametrize('tool_level,command,rules,remembered,reply,expected,mode', [
     ('allow', 'demo x', [], False, 'allow', 'allow', 'authorize'),
     ('allow', 'demo x', [], False, 'deny', 'deny', 'authorize'),
-    ('allow', 'demo x', [], False, 'unavailable', 'ask', 'authorize'),
+    ('allow', 'demo x', [], False, 'unavailable', 'allow', 'authorize'),
     ('allow', 'demo x', [('demo x', 'allow')], False, 'deny', 'allow', 'report'),
     ('ask', 'demo x', [('demo x', 'allow')], False, 'allow', 'ask', 'report'),
     ('deny', 'demo x', [('demo x', 'allow')], True, 'allow', 'deny', 'report'),
@@ -689,7 +703,9 @@ async def test_strict_merge_through_permission_rail_and_cloud_bridge(
 
 
 @pytest.mark.asyncio
-async def test_desktop_full_access_cannot_write_control_plane(monkeypatch, tmp_path):
+@pytest.mark.parametrize('cloud_enabled', [False, True])
+@pytest.mark.parametrize('target', ['config', 'skills'])
+async def test_desktop_full_access_cannot_write_control_plane(monkeypatch, tmp_path, cloud_enabled, target):
     from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
     from jiuwenswarm.common import utils
 
@@ -707,12 +723,108 @@ async def test_desktop_full_access_cannot_write_control_plane(monkeypatch, tmp_p
 
     rail = build_permission_rail({
         'permissions': {'enabled': False, 'package_builtin_rules': False},
-        'xiaoyi_work_security': {'cloud_authorization': {'enabled': False}},
+        'xiaoyi_work_security': {'cloud_authorization': {'enabled': cloud_enabled}},
     })
     assert rail is not None
+    assert rail._engine.enabled is False
     result = await rail._engine.check_permission(
         'write_file',
-        {'file_path': str(config_dir / 'config.yaml'), 'content': 'permissions:\n  enabled: false\n'},
+        {'file_path': str((config_dir / 'config.yaml') if target == 'config' else (skills_dir / 'SKILL.md')),
+         'content': 'test'},
     )
     assert result.permission == PermissionLevel.DENY
     assert result.matched_rule == 'immutable_control_plane'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('composed', [False, True])
+@pytest.mark.parametrize('hot_reload', [False, True])
+async def test_full_access_mode_switches_input_report_and_authorize(monkeypatch, composed, hot_reload):
+    from copy import deepcopy
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+    from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
+
+    monkeypatch.setenv('CLAW_BEHAVIOR_SECURITY', '1')
+    monkeypatch.setenv('CLAW_SKILL_TOKEN', 'test-token')
+    b, events = bridge(decision='deny')
+    stored = {'enabled': False, 'package_builtin_rules': False, 'tools': {'bash': 'allow'}}
+    if composed:
+        stored['composition'] = {'schema_version': 1, 'revision': 'test-policy', 'source_order': ['user']}
+    b.config['permissions'] = stored
+    monkeypatch.setattr('jiuwenswarm.common.config.get_config', lambda: b.config)
+    monkeypatch.setattr(
+        'jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist.get_permissions_with_session_overlay',
+        lambda **_: deepcopy(stored),
+    )
+    behavior = BehaviorSecurityRail(b)
+    adapter = SimpleNamespace(_permission_rail=None, _model=None, _cspl_sentinel_rail=behavior)
+    JiuWenSwarmDeepAdapter._update_permission_rail(adapter, b.config)
+    permission = adapter._permission_rail
+    assert permission is not None and permission._engine.enabled is False
+
+    try:
+        for index, enabled in enumerate((False, True, False, True)):
+            stored['enabled'] = enabled
+            if hot_reload:
+                JiuWenSwarmDeepAdapter._update_permission_rail(adapter, b.config)
+            assert adapter._permission_rail is permission
+            ctx = context()
+            ctx.inputs.tool_call = ToolCall(
+                id=f'mode-switch-{index}', type='function', name='bash', arguments='{"command":"demo x"}',
+            )
+            ctx.inputs.tool_name, ctx.inputs.tool_args = 'bash', {'command': 'demo x'}
+            await behavior.before_tool_call(ctx)
+            try:
+                result = await permission.resolve_interrupt(ctx, ctx.inputs.tool_call, None)
+                assert permission._engine.enabled is enabled
+                assert isinstance(result, RejectResult if enabled else ApproveResult)
+                await asyncio.gather(*b.tasks)
+                assert events[-1]['mode'] == ('authorize' if enabled else 'report')
+            finally:
+                await behavior.after_tool_call(ctx)
+        assert [event['mode'] for event in events] == ['report', 'authorize', 'report', 'authorize']
+    finally:
+        await b.close()
+
+
+@pytest.mark.asyncio
+async def test_full_access_input_does_not_wait_for_report_reject(monkeypatch):
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
+
+    monkeypatch.setenv('CLAW_BEHAVIOR_SECURITY', '1')
+    monkeypatch.setenv('CLAW_SKILL_TOKEN', 'test-token')
+    b, events = bridge(decision='deny')
+    b.config['permissions'] = {'enabled': False, 'package_builtin_rules': False, 'tools': {'bash': 'deny'}}
+    monkeypatch.setattr(
+        'jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist.get_permissions_with_session_overlay',
+        lambda **_: b.config['permissions'].copy(),
+    )
+    release = asyncio.Event()
+
+    async def delayed(event):
+        events.append(event)
+        await release.wait()
+        return {'decision': 'deny'}
+
+    b._send = delayed
+    behavior = BehaviorSecurityRail(b)
+    ctx = context()
+    ctx.inputs.tool_call = ToolCall(id='full-access-report', type='function', name='bash',
+                                   arguments='{"command":"demo x"}')
+    ctx.inputs.tool_name, ctx.inputs.tool_args = 'bash', {'command': 'demo x'}
+    await behavior.before_tool_call(ctx)
+    try:
+        permission = build_permission_rail(b.config)
+        result = await asyncio.wait_for(permission.resolve_interrupt(ctx, ctx.inputs.tool_call, None), 2)
+        assert isinstance(result, ApproveResult)
+        assert ctx.extra['behavior.local_permission'].permission == PermissionLevel.ALLOW
+        await asyncio.sleep(0)
+        assert len(events) == 1 and events[0]['mode'] == 'report'
+        assert b.tasks and all(not task.done() for task in b.tasks)
+        release.set()
+        await asyncio.gather(*b.tasks)
+        assert ctx.extra['behavior.local_permission'].permission == PermissionLevel.ALLOW
+    finally:
+        release.set()
+        await behavior.after_tool_call(ctx)
+        await b.close()

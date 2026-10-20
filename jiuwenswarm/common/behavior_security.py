@@ -38,16 +38,15 @@ def cloud_authorization_enabled(config: dict) -> bool:
 
 
 def runtime_permission_config(config: dict) -> dict:
-    """Keep desktop policy checks active even in the full-access UI mode.
+    """Apply desktop cloud policy without overriding the stored permission mode.
 
-    Only the runtime copy is changed; the stored permission mode and other
-    hosts retain their existing semantics.
+    Full access disables ordinary permission checks. The desktop still keeps
+    the rail for immutable control-plane protection and input reporting.
     """
     permissions = resolve_permission_profile_rules(config.get("permissions", {}))
     # Host-owned policy: persisted settings and session overlays cannot opt in.
     permissions.pop("strict_tool_command_merge", None)
     if desktop_security_active():
-        permissions["enabled"] = True
         cloud_enabled = cloud_authorization_enabled(config)
         permissions["defer_unmatched"] = cloud_enabled
         permissions["strict_tool_command_merge"] = cloud_enabled
@@ -101,6 +100,7 @@ class BehaviorSecurityBridge:
         composition = permissions.get("composition", {}) if isinstance(permissions, dict) else {}
         identity = (
             composition.get("revision") if isinstance(composition, dict) else None,
+            permissions.get("enabled", False),
             cloud_authorization_enabled(self.config),
             self.config.get("security", {}).get("fail_closed", {}).get("enabled") is True,
         )

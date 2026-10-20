@@ -47,7 +47,7 @@ _NETWORK_TOOLS = ("mcp_free_search", "mcp_paid_search", "mcp_fetch_webpage")
 
 
 def resolve_permission_profile_rules(permissions: dict[str, Any]) -> dict[str, Any]:
-    """Resolve product rule actions before the desktop enables runtime checks.
+    """Resolve product rule actions for the stored permission profile.
 
     The stored enabled flag distinguishes full access from restricted profiles.
     Keep the input untouched so switching profiles cannot persist a resolved
