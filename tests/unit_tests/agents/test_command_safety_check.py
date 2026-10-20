@@ -146,6 +146,53 @@ def test_enumerate_then_pid_kill_allowed_residual() -> None:
     assert _check_command_safety(command, "powershell") is None
 
 
+def test_cmd_wrapped_taskkill_blocked_via_powershell_tool() -> None:
+    # Launcher wrap: base command hides as "cmd".
+    assert (
+        _check_command_safety('cmd /c "taskkill /IM python.exe /F"', "powershell") is not None
+    )
+
+
+def test_cmd_wrapped_taskkill_unquoted_blocked() -> None:
+    assert _check_command_safety("cmd /c taskkill /IM python.exe /F", "cmd") is not None
+
+
+def test_powershell_command_wrapped_pipeline_blocked() -> None:
+    command = 'powershell -Command "Get-Process python | Stop-Process -Force"'
+    assert _check_command_safety(command, "powershell") is not None
+
+
+def test_bash_c_wrapped_name_kill_blocked() -> None:
+    assert _check_command_safety('bash -c "pkill python"', "bash") is not None
+
+
+def test_nested_double_wrap_blocked() -> None:
+    assert (
+        _check_command_safety(
+            'powershell -NoProfile -Command "cmd /c taskkill /IM jiuwenswarm.exe /F"',
+            "powershell",
+        )
+        is not None
+    )
+
+
+def test_launcher_benign_payloads_allowed() -> None:
+    assert _check_command_safety("cmd /c dir", "cmd") is None
+    assert _check_command_safety('bash -c "git status"', "bash") is None
+    assert (
+        _check_command_safety('powershell -Command "Get-Process chrome"', "powershell") is None
+    )
+
+
+def test_launcher_wrap_preserves_pid_exemption() -> None:
+    assert _check_command_safety('cmd /c "taskkill /PID 1234 /F"', "powershell") is None
+
+
+def test_encoded_payload_residual_allowed() -> None:
+    # Documented residual: -enc payloads are not decoded by a text guardrail.
+    assert _check_command_safety("powershell -enc U3RvcC1Qcm9jZXNz", "powershell") is None
+
+
 def test_cross_segment_mention_allowed() -> None:
     assert _check_command_safety("pkill foo; echo jiuwenswarm", "bash") is None
 
