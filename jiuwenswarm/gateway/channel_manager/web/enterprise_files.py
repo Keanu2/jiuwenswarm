@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Enterprise upload ingress; identity is validated by the shared access guard."""
+"""Enterprise file transport using the existing upstream routing identity."""
 
 from __future__ import annotations
 
@@ -20,7 +20,22 @@ from jiuwenswarm.common.obs_files import (
     object_prefix,
 )
 from jiuwenswarm.common.utils import build_tenant_key
+from jiuwenswarm.common.request_identity import normalize_routing_identity
 from jiuwenswarm.server.runtime.attachments.upload_storage import safe_upload_filename
+
+
+def file_routing_identity(request: Request, token_payload: dict | None = None) -> dict:
+    # Native download links carry a signed tenant rather than custom headers.
+    # This fallback selects the route only: OBS/AgentServer still validates the
+    # token and its tenant binding before exposing any file bytes.
+    parts = str((token_payload or {}).get("tenant_key") or "").split("::")
+    token_route = dict(zip(("group_id", "bot_id", "user_id"), parts)) if len(parts) == 3 else {}
+    return normalize_routing_identity(
+        {key: request.headers.get(f"x-{key.replace('_', '-')}")
+         for key in ("group_id", "bot_id", "user_id")},
+        request.query_params,
+        token_route,
+    )
 
 
 async def serve_object_download(
@@ -136,10 +151,10 @@ async def serve_object_download(
 def register_enterprise_file_routes(app: FastAPI, channel) -> None:
     @app.post("/file-api/upload-obs")
     async def upload(request: Request) -> JSONResponse:
-        identity = getattr(request.state, "enterprise_identity", None)
-        if not identity:
+        identity = file_routing_identity(request)
+        if not all(identity.get(key) for key in ("group_id", "bot_id", "user_id")):
             return JSONResponse(
-                {"ok": False, "error": "identity_not_wired"}, status_code=503
+                {"ok": False, "error": "routing_identity_required"}, status_code=400
             )
         # Bound the body before JSON/base64 decoding, including chunked requests.
         body = bytearray()
@@ -182,10 +197,10 @@ def register_enterprise_file_routes(app: FastAPI, channel) -> None:
 
     @app.delete("/file-api/upload-obs")
     async def remove_upload(request: Request) -> JSONResponse:
-        identity = getattr(request.state, "enterprise_identity", None)
-        if not identity:
+        identity = file_routing_identity(request)
+        if not all(identity.get(key) for key in ("group_id", "bot_id", "user_id")):
             return JSONResponse(
-                {"ok": False, "error": "identity_not_wired"}, status_code=503
+                {"ok": False, "error": "routing_identity_required"}, status_code=400
             )
         body = bytearray()
         async for chunk in request.stream():
@@ -220,15 +235,16 @@ def register_enterprise_file_routes(app: FastAPI, channel) -> None:
             serve_verified_download,
         )
 
-        identity = getattr(request.state, "enterprise_identity", None)
-        if not identity:
-            return JSONResponse({"error": "identity_not_wired"}, status_code=503)
         token = request.query_params.get("token", "")
-        payload = _decode_download_token_payload(token)
+        payload = _decode_download_token_payload(token) if len(token) <= 16384 else None
+        identity = file_routing_identity(request, payload)
+        if not all(identity.get(key) for key in ("group_id", "bot_id", "user_id")):
+            return JSONResponse({"error": "invalid_download_token"}, status_code=403)
         if payload and payload.get("kind") == OBJECT_ASSET_KIND:
             return await serve_object_download(request, token, identity)
         if not payload or payload.get("kind") != "verified_asset_v1":
             return JSONResponse({"error": "invalid_download_token"}, status_code=403)
         return await serve_verified_download(
-            request, channel, identity["user_id"], token, payload
+            request, channel, identity["user_id"], token, payload,
+            routing_identity=identity,
         )

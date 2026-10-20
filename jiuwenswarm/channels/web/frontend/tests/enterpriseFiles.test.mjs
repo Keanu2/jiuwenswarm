@@ -136,14 +136,25 @@ for (const status of [200, 401, 403, 404, 410, 405, 500, 502, 503]) {
   });
 }
 
-test('HEAD network failure permits GET only while platform credentials remain', async () => {
+test('HEAD network failure does not make native download depend on Identity credentials', async () => {
   setup();
   globalThis.fetch = async () => {
     throw new TypeError('network unavailable');
   };
   assert.equal(await prepareFileDownload('/file-api/download?token=signed'), true);
   localStorage.removeItem('openjiuwen_access_token');
+  assert.equal(await prepareFileDownload('/file-api/download?token=signed'), true);
+});
+
+test('download HEAD does not call Identity even on 401', async () => {
+  setup();
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(url);
+    return new Response(null, { status: 401 });
+  };
   assert.equal(await prepareFileDownload('/file-api/download?token=signed'), false);
+  assert.deepEqual(urls, ['/file-api/download?token=signed']);
 });
 
 test('persist failure cleans imported paths without sending chat', async () => {
@@ -180,7 +191,7 @@ test('context switch aborts before import and never cleans a different tenant', 
   assert.equal(calls, 0);
 });
 
-test('download authentication stays on the same-origin file endpoint', async () => {
+test('download HEAD never injects platform credentials into native links', async () => {
   setup();
   window.__JIUWENSWARM_EDITION__ = 'enterprise';
   Object.assign(window.location, { href: 'http://localhost/chat/', origin: 'http://localhost' });
@@ -191,5 +202,5 @@ test('download authentication stays on the same-origin file endpoint', async () 
   };
   await fileDownloadHead('/file-api/download?token=signed');
   await fileDownloadHead('http://untrusted.example/file-api/download');
-  assert.deepEqual(authorizations, ['Bearer token', null]);
+  assert.deepEqual(authorizations, [null, null]);
 });

@@ -304,9 +304,13 @@ def _inject_user_web_runtime_config(document: str) -> str:
     from jiuwenswarm.edition import is_enterprise
 
     edition = "enterprise" if is_enterprise() else "personal"
+    login_auth_simulate = (os.getenv("LOGIN_AUTH_SIMULATE") or "").strip().lower() or "true"
+    if login_auth_simulate not in {"true", "false"}:
+        raise ValueError("LOGIN_AUTH_SIMULATE must be true or false")
     return (
         document.replace("__JIUWENSWARM_EDITION_VALUE__", edition)
         .replace("__JIUWEN_WEB_TRANSPORT_VALUE__", _runtime_web_transport())
+        .replace("__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__", login_auth_simulate)
     )
 
 

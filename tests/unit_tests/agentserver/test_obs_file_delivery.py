@@ -241,11 +241,6 @@ async def test_gateway_reads_obs_without_agent_or_snapshot(delivery):
     delivery.source.unlink()
     app = FastAPI()
 
-    @app.middleware("http")
-    async def identity(request, call_next):
-        request.state.enterprise_identity = delivery.identity
-        return await call_next(request)
-
     # No AgentServer client: the test must fail if the download falls back to Runtime.
     register_enterprise_file_routes(app, SimpleNamespace())
     async with httpx.AsyncClient(
@@ -266,8 +261,9 @@ async def test_gateway_reads_obs_without_agent_or_snapshot(delivery):
         invalid = await client.get(url, headers={"Range": "bytes=999-"})
         assert invalid.status_code == 416
         assert (await client.get(url + "&session_id=another")).status_code == 403
-        delivery.identity["user_id"] = "other"
-        assert (await client.get(url)).status_code == 403
+        assert (await client.get(url, headers={"X-User-Id": "other"})).status_code == 403
+        assert (await client.get(url, headers={"X-Group-Id": "other"})).status_code == 403
+        assert (await client.get(url, headers={"X-Bot-Id": "other"})).status_code == 403
 
 
 @pytest.mark.parametrize(
@@ -291,11 +287,6 @@ async def test_invalid_or_changed_objects_fail_closed(delivery, change):
     token = delivery.manager._sign_payload(payload)
     app = FastAPI()
 
-    @app.middleware("http")
-    async def identity(request, call_next):
-        request.state.enterprise_identity = delivery.identity
-        return await call_next(request)
-
     register_enterprise_file_routes(app, SimpleNamespace())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://gateway"
@@ -309,11 +300,6 @@ async def test_invalid_or_changed_objects_fail_closed(delivery, change):
 async def test_missing_object_is_404(delivery):
     delivery.client.objects.clear()
     app = FastAPI()
-
-    @app.middleware("http")
-    async def identity(request, call_next):
-        request.state.enterprise_identity = delivery.identity
-        return await call_next(request)
 
     register_enterprise_file_routes(app, SimpleNamespace())
     async with httpx.AsyncClient(

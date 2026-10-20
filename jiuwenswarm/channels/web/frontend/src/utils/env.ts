@@ -10,6 +10,18 @@ function normalizeBase(input: string): string {
   return input.replace(/\/+$/, "");
 }
 
+export function getApiPrefix(): string {
+  return normalizeBase(import.meta.env?.VITE_API_PREFIX || '');
+}
+
+export function resolveApiUrl(path: string): string {
+  if (!path || /^(https?:|\/\/|data:|blob:)/i.test(path)) return path;
+  const prefix = getApiPrefix();
+  if (!prefix) return path;
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  return cleanPath === prefix || cleanPath.startsWith(`${prefix}/`) ? cleanPath : `${prefix}${cleanPath}`;
+}
+
 export function getApiBase(): string {
   const desktopApiBase = typeof window !== 'undefined' ? window.jiuwenDesktop?.apiBase : undefined;
   if (desktopApiBase) return normalizeBase(desktopApiBase);

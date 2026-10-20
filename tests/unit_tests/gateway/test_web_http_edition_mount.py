@@ -8,7 +8,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -165,19 +165,12 @@ def test_register_http_routes_enterprise_mounts_core(monkeypatch: pytest.MonkeyP
     share_jobs.register_share_job_routes = lambda app: None
     monkeypatch.setitem(sys.modules, share_jobs.__name__, share_jobs)
 
-    # This fixture checks route mounting only; admission/file behavior has its
-    # own tests against the real middleware and AgentServer adapter.
+    # File behavior has separate tests against the AgentServer adapter.
     files = ModuleType("jiuwenswarm.gateway.channel_manager.web.enterprise_files")
     files.register_enterprise_file_routes = lambda app, channel: None
     monkeypatch.setitem(sys.modules, files.__name__, files)
-    access = ModuleType("jiuwenswarm.gateway.channel_manager.web.enterprise_access")
-    class AccessMiddleware:
-        def __init__(self, app, **kwargs):
-            self.app = app
-        async def __call__(self, scope, receive, send):
-            await self.app(scope, receive, send)
-    access.EnterpriseAccessMiddleware = AccessMiddleware
-    monkeypatch.setitem(sys.modules, access.__name__, access)
+    monkeypatch.delenv("GATEWAY_IDENTITY_HTTP_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_MANAGER_HTTP_URL", raising=False)
 
     mapped = _load_module(
         "jiuwenswarm.gateway.channel_manager.web.http_routes.mapped",
@@ -198,6 +191,7 @@ def test_register_http_routes_enterprise_mounts_core(monkeypatch: pytest.MonkeyP
     app = FastAPI()
     from types import SimpleNamespace
     channel_app.register_http_routes(app, SimpleNamespace(config=SimpleNamespace(path="/ws")))
+    assert not app.user_middleware
     client = TestClient(app)
     assert client.get("/api/v1/health").status_code == 200
     catalog = client.get("/api/v1/catalog").json()
@@ -208,3 +202,12 @@ def test_register_http_routes_enterprise_mounts_core(monkeypatch: pytest.MonkeyP
     assert "/api/v1/chat/{session_id}/actions/steer" not in paths
     assert "/api/v1/workspace/download" not in paths
     assert "/api/sessions" not in paths
+
+    # These were blocked by the removed middleware before dispatch, even when
+    # the deployment deliberately omitted built-in Identity.
+    outbound = SimpleNamespace(wait_response=AsyncMock(return_value={"ok": True, "payload": {}}))
+    dispatch = AsyncMock(return_value=(outbound, "request", "session"))
+    monkeypatch.setattr(web_http, "dispatch_http_request", dispatch)
+    assert client.get("/api/v1/connection/status").status_code == 200
+    assert client.post("/api/v1/sessions", json={}).status_code == 201
+    assert [call.kwargs["method"] for call in dispatch.await_args_list] == ["connection.status", "session.create"]
