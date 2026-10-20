@@ -10,27 +10,37 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import nullcontext
+from contextlib import asynccontextmanager
 
 from jiuwenswarm.common.schema.agent import AgentResponse
-from jiuwenswarm.server.context import RequestContext
+from jiuwenswarm.server.context import RequestContext, bind_request_tenant
 
 logger = logging.getLogger(__name__)
 
 Handler = Callable[[RequestContext], Awaitable[None]]
 
 
-def _tenant_scope(ctx: RequestContext):
-    from jiuwenswarm.edition import is_enterprise
+@asynccontextmanager
+async def _request_tenant_scope(ctx: RequestContext):
+    """HTTP 入口：有 Runtime 则绑 Manager+TenantContext；否则仅绑 TenantContext."""
+    services = getattr(ctx, "services", None)
+    execution_runtime = getattr(services, "execution_runtime", None) if services else None
+    if callable(execution_runtime):
+        try:
+            runtime = execution_runtime()
+        except Exception:  # noqa: BLE001 — 测试假对象可能没有完整工具箱
+            runtime = None
+        if runtime is not None and hasattr(runtime, "resolve_manager"):
+            async with bind_request_tenant(ctx):
+                yield
+            return
 
-    if not is_enterprise():
-        return nullcontext()
     from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
     from jiuwenswarm.server.runtime.tenant_context import TenantContext
 
-    # Non-chat HTTP handlers do not enter AgentManager; use the same binding
-    # for sessions/history/adapters before any workspace getter is called.
-    return TenantContext.scoped(TenantAgentPool.extract_tenant_key(ctx.request))
+    # 无完整 Runtime 时仍按请求绑 TenantContext（企业盘路径 / 个人 key）。
+    with TenantContext.scoped(TenantAgentPool.extract_tenant_key(ctx.request)):
+        yield
 
 
 def _error_response(ctx: RequestContext, exc: BaseException) -> AgentResponse:
@@ -46,7 +56,7 @@ def _error_response(ctx: RequestContext, exc: BaseException) -> AgentResponse:
 async def invoke_unary(ctx: RequestContext, handler: Handler) -> None:
     """调用一次性回包。异常变成一条失败 JSON，取消仍向外抛。"""
     try:
-        with _tenant_scope(ctx):
+        async with _request_tenant_scope(ctx):
             await handler(ctx)
     except asyncio.CancelledError:
         raise
@@ -62,7 +72,7 @@ async def invoke_unary(ctx: RequestContext, handler: Handler) -> None:
 async def invoke_stream(ctx: RequestContext, handler: Handler) -> None:
     """调用流式回包。取消必须继续向外抛，不能吞掉。"""
     try:
-        with _tenant_scope(ctx):
+        async with _request_tenant_scope(ctx):
             await handler(ctx)
     except asyncio.CancelledError:
         logger.info(

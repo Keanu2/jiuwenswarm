@@ -13,7 +13,7 @@ import asyncio
 import inspect
 import logging
 import uuid
-from contextlib import aclosing, asynccontextmanager
+from contextlib import aclosing
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -318,7 +318,13 @@ class AgentRuntime:
         resource_lease: RuntimeResourceLease | None = None,
         team_execution_controller: object | None = None,
     ) -> None:
-        self._agent_manager = agent_manager or AgentManager()
+        from jiuwenswarm.common.utils import build_tenant_key
+
+        # Manager 只存在于池；Runtime 持有池，不再平行维护 self._agent_manager。
+        self._tenant_pool = TenantAgentPool.get_instance()
+        default_key = build_tenant_key()
+        seeded = agent_manager or AgentManager()
+        default_manager = self._tenant_pool.put_nowait(default_key, seeded)
         self._initializer = initializer or _initialize_runtime_dependencies
         self._initialize_extensions = initializer is None
         self._manage_runner = initializer is None
@@ -337,7 +343,7 @@ class AgentRuntime:
             participant_registry or RuntimeParticipantRegistry()
         )
         self._session_provisioner = RuntimeSessionProvisioner(
-            agent_manager=self._agent_manager,
+            agent_manager=default_manager,
             plan_controller=self._plan_controller,
             delete_lifecycle=session_delete_lifecycle,
             participant_registry=self._participant_registry,
@@ -378,43 +384,50 @@ class AgentRuntime:
         self.set_admission_controller(admission_controller)
 
     @property
+    def tenant_pool(self) -> TenantAgentPool:
+        return self._tenant_pool
+
+    @property
     def agent_manager(self) -> AgentManager:
-        """Return the AgentManager for the current request, or the default.
+        """默认租户 Manager（无请求 / Server 别名兼容）.
 
-        Under multi-tenant mode :meth:`_tenant_request_scope` binds the tenant's
-        Manager on a task-local ContextVar so concurrent requests never race on
-        the instance field ``_agent_manager``.
+        有请求的热路径应使用 :meth:`resolve_manager` 得到的局部引用，
+        不要依赖本属性做多租户切换。
         """
-        from jiuwenswarm.runtime.context import get_request_agent_manager
+        from jiuwenswarm.common.utils import build_tenant_key
 
-        return get_request_agent_manager() or self._agent_manager
+        manager = self._tenant_pool.get_manager_nowait(build_tenant_key())
+        if manager is None:
+            raise RuntimeStateError(
+                "default tenant AgentManager is missing; "
+                "AgentRuntime.__init__ must put the default slot"
+            )
+        return manager
 
-    @asynccontextmanager
-    async def _tenant_request_scope(self, request: AgentRequest):
-        """Bind TenantContext and the tenant's AgentManager (task-local)."""
-        from jiuwenswarm.runtime.context import (
-            bind_request_agent_manager,
-            reset_request_agent_manager,
-        )
-        from jiuwenswarm.server.runtime.tenant_context import TenantContext
+    async def resolve_manager(
+        self, request: AgentRequest | None = None
+    ) -> AgentManager:
+        """按请求从池取 Manager；无请求或个人版则返回默认租户槽.
 
-        pool = TenantAgentPool.get_instance()
-        tenant_key = pool.extract_tenant_key(request)
-        ctx = TenantContext.bind(tenant_key)
-        manager_token = None
-        try:
-            # 默认租户已在 start() 登记；此处统一按 key 取/建。
-            # 不修改 self._agent_manager，避免并发请求互相覆盖。
-            manager = await pool.get_agent_manager(tenant_key)
-            manager_token = bind_request_agent_manager(manager)
-            try:
-                yield manager
-            finally:
-                await pool._agent_wrappers.touch_if_same(tenant_key, manager)
-        finally:
-            if manager_token is not None:
-                reset_request_agent_manager(manager_token)
-            ctx.reset()
+        个人版进程内单 Manager：``extract_tenant_key`` / 池键均收敛到默认槽。
+        """
+        if request is None:
+            return self.agent_manager
+        tenant_key = self._tenant_pool.extract_tenant_key(request)
+        return await self._tenant_pool.get_agent_manager(tenant_key)
+
+    async def _get_request_manager(self, request: AgentRequest) -> AgentManager:
+        """取本请求对应的 Manager：优先执行切片上已绑定的，否则按请求从池解析.
+
+        深层方法用此接口，避免把 ``manager`` 层层当入参传递。
+        cancel / 跨 Task 清理仍应直接 :meth:`resolve_manager`。
+        """
+        from jiuwenswarm.runtime.context import get_current_agent_manager
+
+        bound = get_current_agent_manager()
+        if bound is not None:
+            return bound
+        return await self.resolve_manager(request)
 
     @property
     def plan_controller(self) -> PlanModeController:
@@ -459,8 +472,11 @@ class AgentRuntime:
             for execution in snapshot.executions
         ):
             return True
-        checker = getattr(self.agent_manager, "has_active_goal", None)
-        return bool(callable(checker) and checker(snapshot.channel_id, session_id))
+        for manager in self._tenant_pool.iter_agent_managers_nowait():
+            checker = getattr(manager, "has_active_goal", None)
+            if callable(checker) and checker(snapshot.channel_id, session_id):
+                return True
+        return False
 
     async def _mark_pending_interaction(self, event: RuntimeEvent) -> None:
         if event.event_type != "chat.ask_user_question":
@@ -535,14 +551,8 @@ class AgentRuntime:
                     await self._initializer()
                 if self._initialize_extensions:
                     await self._ensure_extensions()
-                # 默认租户：把启动时的 Manager 登记进池，请求路径统一 get_agent_manager
-                from jiuwenswarm.common.utils import build_tenant_key
-
-                pool = TenantAgentPool.get_instance()
-                self._agent_manager = await pool.adopt_manager(
-                    build_tenant_key(), self._agent_manager
-                )
-                self._session_provisioner._agent_manager = self._agent_manager
+                # 默认 Manager 已在 __init__ 同步 put 进池并交给 Provisioner；
+                # 有请求时 Provisioner 经 get_current_agent_manager() 覆盖。
                 self._started = True
             except BaseException as start_error:
                 try:
@@ -748,6 +758,7 @@ class AgentRuntime:
         *,
         channel_id: str,
         session_id: str | None = None,
+        request: AgentRequest | None = None,
     ) -> str:
         """Allocate a Runtime session id or retain an explicit persisted id."""
         self._require_started()
@@ -774,7 +785,8 @@ class AgentRuntime:
                     # another Channel, and never register it under the caller's
                     # in-memory ownership before this check.
                     raise SessionCatalogError("session not found", code="NOT_FOUND")
-        resolved_session_id = await self.agent_manager.create_session(
+        manager = await self.resolve_manager(request)
+        resolved_session_id = await manager.create_session(
             channel_id=channel_id,
             session_id=requested or None,
         )
@@ -870,16 +882,6 @@ class AgentRuntime:
             raise ValueError(f"target session is not Work/Code Normal: {target_id}")
         if source.user_id != target.user_id:
             raise PermissionError("source and target sessions have different owners")
-        if not self._owns_session(target.session_id):
-            await self.agent_manager.create_session(
-                channel_id=target.channel_id,
-                session_id=target.session_id,
-            )
-            await self._register_session(
-                session_id=target.session_id,
-                channel_id=target.channel_id,
-            )
-
         from jiuwenswarm.common.schema.agent import AgentRequest
 
         message_request_id = str(request_id or "").strip() or uuid.uuid4().hex
@@ -901,16 +903,40 @@ class AgentRuntime:
             metadata={"source_session_id": source.session_id},
             user_id=target.user_id,
         )
+        if not self._owns_session(target.session_id):
+            manager = await self.resolve_manager(request)
+            await manager.create_session(
+                channel_id=target.channel_id,
+                session_id=target.session_id,
+            )
+            await self._register_session(
+                session_id=target.session_id,
+                channel_id=target.channel_id,
+            )
+
+        async def _run_session_message() -> list[RuntimeEvent]:
+            async with self._tenant_pool.tenant_scope(request) as manager:
+                from jiuwenswarm.runtime.context import (
+                    reset_runtime_context,
+                    set_runtime_context,
+                )
+
+                token = set_runtime_context(self, manager)
+                try:
+                    return await self._invoke_started(
+                        request,
+                        trigger_hook=True,
+                        on_control_event=None,
+                        agent_execution=None,
+                    )
+                finally:
+                    reset_runtime_context(token)
+
         return self._session_coordinator.submit_unary(
             target.session_id,
             message_request_id,
             SessionWorkKind.SESSION_MESSAGE,
-            lambda: self._invoke_started(
-                request,
-                trigger_hook=True,
-                on_control_event=None,
-                agent_execution=None,
-            ),
+            _run_session_message,
             suspension_key=self._waiting_control_id,
         )
 
@@ -1109,7 +1135,7 @@ class AgentRuntime:
                 agent_definition_fingerprint=agent_execution.fingerprint,
             )
         return await prepare_chat_turn(
-            self.agent_manager,
+            await self._get_request_manager(request),
             request,
             channel_id,
             **prepare_kwargs,
@@ -1136,8 +1162,9 @@ class AgentRuntime:
             raise RuntimeStateError("runtime is already closed")
         from jiuwenswarm.runtime.request import cancel_request
 
+        manager = await self.resolve_manager(request)
         response = await cancel_request(
-            self.agent_manager,
+            manager,
             request,
             allow_create=allow_create,
         )
@@ -1177,10 +1204,12 @@ class AgentRuntime:
         if self._closed:
             raise RuntimeStateError("runtime is already closed")
         excluded = None if exclude_session_ids is None else set(exclude_session_ids)
-        await self.agent_manager.cancel_all_inflight_work(
-            reason=reason,
-            exclude_session_ids=excluded,
-        )
+        # 断连扫池内全部 Manager，避免只打到默认租户。
+        for manager in self._tenant_pool.iter_agent_managers_nowait():
+            await manager.cancel_all_inflight_work(
+                reason=reason,
+                exclude_session_ids=excluded,
+            )
 
     async def cancel_all_team_stream_tasks(
         self,
@@ -1373,8 +1402,8 @@ class AgentRuntime:
             set_runtime_context,
         )
 
-        async with self._tenant_request_scope(request):
-            token = set_runtime_context(self, self.agent_manager)
+        async with self._tenant_pool.tenant_scope(request) as manager:
+            token = set_runtime_context(self, manager)
             try:
                 work_kind = self.session_work_kind(request)
                 if work_kind is not None:
@@ -1414,6 +1443,7 @@ class AgentRuntime:
     ) -> list[RuntimeEvent]:
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        manager = await self._get_request_manager(request)
         if trigger_hook:
             await self._trigger_before_chat_request_hook(request)
         channel_id = request.channel_id or "default"
@@ -1450,7 +1480,7 @@ class AgentRuntime:
                     )
                 )
             if foreground:
-                await self.agent_manager.begin_foreground_chat()
+                await manager.begin_foreground_chat()
                 foreground_started = True
             if admitted and self._admission_controller is not None:
                 await self._admission_controller.begin_user(
@@ -1546,7 +1576,7 @@ class AgentRuntime:
                         admission_error = exc
                 if foreground_started:
                     try:
-                        await self.agent_manager.end_foreground_chat()
+                        await manager.end_foreground_chat()
                     except BaseException as exc:
                         end_error = exc
                 if activity_execution_started:
@@ -1692,12 +1722,17 @@ class AgentRuntime:
                 on_control_event=on_control_event,
                 _agent_execution=self._agent_execution_owner(request),
             )
-        async with aclosing(self._stream_with_runtime_context(stream)) as events:
+        async with aclosing(
+            self._stream_with_runtime_context(stream, request=request)
+        ) as events:
             async for event in events:
                 yield event
 
     async def _stream_with_runtime_context(
-        self, stream: AsyncIterator[RuntimeEvent]
+        self,
+        stream: AsyncIterator[RuntimeEvent],
+        *,
+        request: AgentRequest,
     ) -> AsyncIterator[RuntimeEvent]:
         """Bind only execution slices, never the caller's yield boundary."""
         from jiuwenswarm.runtime.context import (
@@ -1705,9 +1740,10 @@ class AgentRuntime:
             set_runtime_context,
         )
 
+        bound = await self._get_request_manager(request)
         try:
             while True:
-                token = set_runtime_context(self, self.agent_manager)
+                token = set_runtime_context(self, bound)
                 try:
                     event = await anext(stream)
                 except StopAsyncIteration:
@@ -1716,7 +1752,7 @@ class AgentRuntime:
                     reset_runtime_context(token)
                 yield event
         finally:
-            token = set_runtime_context(self, self.agent_manager)
+            token = set_runtime_context(self, bound)
             try:
                 close_stream = getattr(stream, "aclose", None)
                 if callable(close_stream):
@@ -1749,7 +1785,8 @@ class AgentRuntime:
             set_runtime_context,
         )
 
-        token = set_runtime_context(self, self.agent_manager)
+        manager = await self.resolve_manager(request)
+        token = set_runtime_context(self, manager)
         try:
             deadline = asyncio.timeout(timeout_seconds)
             timeout_error = (
@@ -1786,9 +1823,10 @@ class AgentRuntime:
         """Execute one request and yield the shared Runtime event stream."""
         await self.start()
 
-        async with self._tenant_request_scope(request):
+        async with self._tenant_pool.tenant_scope(request) as manager:
             async for event in self._stream_under_tenant(
                 request,
+                manager=manager,
                 trigger_hook=trigger_hook,
                 on_control_event=on_control_event,
                 background=background,
@@ -1801,13 +1839,14 @@ class AgentRuntime:
         self,
         request: AgentRequest,
         *,
+        manager: AgentManager,
         trigger_hook: bool = True,
         on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None = None,
         background: bool = False,
         on_agent_ready: Callable[[Any], Any] | None = None,
         _agent_execution: RuntimeAgentExecution | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
-        """Inner stream body (runs while tenant context/Manager are bound)."""
+        """Inner stream body；``manager`` 仅用于本层 set_runtime_context."""
         from jiuwenswarm.runtime.context import (
             reset_runtime_context,
             set_runtime_context,
@@ -1877,7 +1916,9 @@ class AgentRuntime:
                 stream = self._session_coordinator.stream_session_input(
                     request.session_id,
                     request.request_id,
-                    lambda owner_channel: self._stream_session_input_started(request, owner_channel),
+                    lambda owner_channel: self._stream_session_input_started(
+                        request, owner_channel,
+                    ),
                     idle_input,
                     suspension_key=self._waiting_control_id,
                     expected_execution_id=request.params.get("expected_execution_id"),
@@ -1914,7 +1955,7 @@ class AgentRuntime:
                 # resetting such a token there raises ValueError.  Each
                 # execution slice still runs with the Runtime context, and
                 # child tasks created by the agent inherit it normally.
-                token = set_runtime_context(self, self.agent_manager)
+                token = set_runtime_context(self, manager)
                 try:
                     event = await anext(stream)
                 except StopAsyncIteration:
@@ -1937,7 +1978,7 @@ class AgentRuntime:
                     event.payload["execution_id"] = execution_id
                 yield event
         finally:
-            token = set_runtime_context(self, self.agent_manager)
+            token = set_runtime_context(self, manager)
             try:
                 await stream.aclose()
             finally:
@@ -1955,6 +1996,7 @@ class AgentRuntime:
     ) -> AsyncIterator[RuntimeEvent]:
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        manager = await self._get_request_manager(request)
         if trigger_hook:
             await self._trigger_before_chat_request_hook(request)
         channel_id = request.channel_id or "default"
@@ -2006,7 +2048,7 @@ class AgentRuntime:
                     )
                 )
             if foreground:
-                await self.agent_manager.begin_foreground_chat()
+                await manager.begin_foreground_chat()
                 foreground_started = True
             if admitted and self._admission_controller is not None:
                 await self._admission_controller.begin_user(
@@ -2153,7 +2195,7 @@ class AgentRuntime:
                         admission_error = exc
                 if foreground_started:
                     try:
-                        await self.agent_manager.end_foreground_chat()
+                        await manager.end_foreground_chat()
                     except BaseException as exc:
                         end_error = exc
                 if activity_execution_started:
@@ -2222,13 +2264,16 @@ class AgentRuntime:
             )
 
     async def _stream_session_input_started(
-        self, request: AgentRequest, owner_channel: str,
+        self,
+        request: AgentRequest,
+        owner_channel: str,
     ) -> AsyncIterator[RuntimeEvent]:
         """Borrow the actual owner; an ingress channel is not an Agent identity."""
         from jiuwenswarm.runtime.events import RuntimeEvent
         from jiuwenswarm.runtime.session_input import SessionInputRejectedError
 
-        lookup = getattr(self.agent_manager, "get_agent_for_session_nowait", None)
+        manager = await self._get_request_manager(request)
+        lookup = getattr(manager, "get_agent_for_session_nowait", None)
         agent = lookup(owner_channel, request.session_id) if callable(lookup) else None
         if agent is None:
             raise SessionInputRejectedError(f"session has no active agent: {request.session_id}")
@@ -2303,12 +2348,13 @@ class AgentRuntime:
         """Inject control input without opening another Session work turn."""
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        manager = await self._get_request_manager(request)
         channel_id = request.channel_id or "default"
         await self._clear_pending_interaction(
             request.session_id or "default",
             self._control_request_id(request),
         )
-        lookup = getattr(self.agent_manager, "get_agent_for_session_nowait", None)
+        lookup = getattr(manager, "get_agent_for_session_nowait", None)
         agent = (
             lookup(channel_id, request.session_id or "") if callable(lookup) else None
         )
@@ -2369,12 +2415,13 @@ class AgentRuntime:
         """Deliver to the active Agent while forwarding each observation."""
         from jiuwenswarm.runtime.events import RuntimeEvent
 
+        manager = await self._get_request_manager(request)
         channel_id = request.channel_id or "default"
         await self._clear_pending_interaction(
             request.session_id or "default",
             self._control_request_id(request),
         )
-        lookup = getattr(self.agent_manager, "get_agent_for_session_nowait", None)
+        lookup = getattr(manager, "get_agent_for_session_nowait", None)
         agent = lookup(channel_id, request.session_id or "") if callable(lookup) else None
         if agent is None:
             raise RuntimeError(f"session has no active agent: {request.session_id or 'default'}")
@@ -2404,6 +2451,7 @@ class AgentRuntime:
         channel_id: str,
         session_id: str,
         reset_plan_state: bool = True,
+        request: AgentRequest | None = None,
     ) -> bool:
         """Release in-memory resources owned by one Runtime session.
 
@@ -2424,10 +2472,21 @@ class AgentRuntime:
             result = await self._session_coordinator.close_session(session_id)
             if result.timed_out:
                 raise SessionCloseTimeoutError(session_id, result.timed_out)
-        cleaned = await self.agent_manager.cleanup_session_runtime(
-            channel_id=channel_id,
-            session_id=session_id,
-        )
+        if request is not None:
+            managers = [await self.resolve_manager(request)]
+        else:
+            # 无请求时扫池，避免 delete 等路径漏掉非默认租户。
+            managers = self._tenant_pool.iter_agent_managers_nowait() or [
+                self.agent_manager
+            ]
+        cleaned = False
+        for manager in managers:
+            cleaned = bool(
+                await manager.cleanup_session_runtime(
+                    channel_id=channel_id,
+                    session_id=session_id,
+                )
+            ) or cleaned
         await self._forget_agent_execution_owner(
             channel_id=channel_id,
             session_id=session_id,
@@ -2543,17 +2602,19 @@ class AgentRuntime:
         they do for a Heartbeat.  Returns False when no Agent owns the Session;
         a release that raises leaves the caller its ordinary busy fallback.
         """
-        manager = self.agent_manager
-        release = getattr(manager, "release_subagent_runtime_for_session", None)
-        if not callable(release):
-            return False
-        return bool(
-            await release(
-                channel_id=channel_id or None,
-                session_id=session_id,
-                reason=reason,
-            )
-        )
+        released = False
+        for manager in self._tenant_pool.iter_agent_managers_nowait():
+            release = getattr(manager, "release_subagent_runtime_for_session", None)
+            if not callable(release):
+                continue
+            released = bool(
+                await release(
+                    channel_id=channel_id or None,
+                    session_id=session_id,
+                    reason=reason,
+                )
+            ) or released
+        return released
 
     def is_subagent_finishing(
         self, session_id: str, *, channel_id: str = ""
@@ -2566,11 +2627,13 @@ class AgentRuntime:
         retry shortly instead of telling the user to stop a Session that has
         already been stopped.
         """
-        manager = self.agent_manager
-        probe = getattr(manager, "session_has_live_subagents", None)
-        if not callable(probe):
-            return False
-        return bool(probe(channel_id=channel_id or None, session_id=session_id))
+        for manager in self._tenant_pool.iter_agent_managers_nowait():
+            probe = getattr(manager, "session_has_live_subagents", None)
+            if callable(probe) and probe(
+                channel_id=channel_id or None, session_id=session_id
+            ):
+                return True
+        return False
 
     @staticmethod
     def is_team_round_finishing(session_id: str) -> bool:
@@ -2588,7 +2651,11 @@ class AgentRuntime:
         return team_round_finishing_after_flow(session_id)
 
     async def stop_session_for_archive(
-        self, *, channel_id: str, session_id: str
+        self,
+        *,
+        channel_id: str,
+        session_id: str,
+        request: AgentRequest | None = None,
     ) -> None:
         """Drain runtime writers for deletion; archive now only checks state."""
         from jiuwenswarm.server.runtime.session.lifecycle import (
@@ -2606,18 +2673,22 @@ class AgentRuntime:
         )
         if closed.timed_out:
             raise LifecycleError("STOP_TIMEOUT", "runtime executions have not stopped")
-        await self.agent_manager.release_subagent_runtime_for_session(
+        manager = await self.resolve_manager(request)
+        await manager.release_subagent_runtime_for_session(
             channel_id=channel_id,
             session_id=session_id,
             reason="session_archived",
         )
         # Join the outer response producers directly; idle adapter caches are
         # removed by cleanup below and never require a polling delay.
-        await self.agent_manager.cancel_session_tasks(
+        await manager.cancel_session_tasks(
             channel_id=channel_id, session_id=session_id
         )
         await self.cleanup_session(
-            channel_id=channel_id, session_id=session_id, reset_plan_state=False
+            channel_id=channel_id,
+            session_id=session_id,
+            reset_plan_state=False,
+            request=request,
         )
         release_runtime(session_id)
 
@@ -2698,9 +2769,9 @@ class AgentRuntime:
         channel_id: str,
         session_id: str,
     ) -> None:
-        await self.agent_manager.release_subagent_runtime_for_session(
-            channel_id=channel_id or None,
-            session_id=session_id,
+        await self.stop_subagent_runtimes(
+            session_id,
+            channel_id=channel_id,
             reason="session_deleted",
         )
         await self.cleanup_session(
@@ -2744,7 +2815,8 @@ class AgentRuntime:
             self._activity_executions.clear()
             self._participant_registry.clear_targets()
             try:
-                await self.agent_manager.cancel_all_inflight_work("[runtime close] ")
+                for manager in self._tenant_pool.iter_agent_managers_nowait():
+                    await manager.cancel_all_inflight_work("[runtime close] ")
             except (
                 BaseException
             ) as exc:  # preserve cancellation until cleanup completes
@@ -2764,14 +2836,9 @@ class AgentRuntime:
                     except BaseException as exc:
                         cleanup_errors.append(exc)
             self._stateless_agents.clear()
-            # 默认 Manager 在 start() 已 adopt 进池，与池内条目为同一对象。
-            # 有池时只走 pool.cleanup()，避免对默认 Manager 重复 cleanup。
+            # Manager 只在池内；统一走 pool.cleanup()。
             try:
-                pool = TenantAgentPool.peek_instance()
-                if pool is not None:
-                    await pool.cleanup()
-                else:
-                    await self.agent_manager.cleanup()
+                await self._tenant_pool.cleanup()
             except BaseException as exc:
                 cleanup_errors.append(exc)
             async with self._agent_execution_owner_lock:
@@ -3276,18 +3343,30 @@ class AgentRuntime:
         return str(params.get("action") or "get").strip().lower() == "get"
 
     async def _get_stateless_agent(self, channel_id: str) -> Any:
-        cached = self.agent_manager.get_agent_nowait(
+        """取无状态路径用的 agent：查本请求 Manager 缓存，fallback 按租户分桶.
+
+        调用方须在 ``tenant_scope`` + ``set_runtime_context`` 内，这样
+        ``get_current_agent_manager`` 指向正确租户，而不是默认槽。
+        """
+        from jiuwenswarm.common.utils import build_tenant_key
+        from jiuwenswarm.runtime.context import get_current_agent_manager
+        from jiuwenswarm.server.runtime.tenant_context import TenantContext
+
+        manager = get_current_agent_manager() or self.agent_manager
+        cached = manager.get_agent_nowait(
             channel_id=channel_id,
             mode="agent",
         )
         if cached is not None:
             return cached
-        agent = self._stateless_agents.get(channel_id)
+        tenant_key = TenantContext.current_tenant_key() or build_tenant_key()
+        cache_key = f"{tenant_key}::{channel_id}"
+        agent = self._stateless_agents.get(cache_key)
         if agent is None:
             from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
             agent = JiuWenSwarm()
-            self._stateless_agents[channel_id] = agent
+            self._stateless_agents[cache_key] = agent
         return agent
 
     async def _ensure_extensions(self) -> None:

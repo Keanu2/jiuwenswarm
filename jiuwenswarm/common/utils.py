@@ -3174,7 +3174,8 @@ def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Multi-tenant workspace paths (tenant_key = group_id::bot_id::user_id)
+# Multi-tenant workspace paths
+# tenant_key = md5("{group_id}::{bot_id}::{user_id}")，避免路径/日志直接暴露身份字段
 # ---------------------------------------------------------------------------
 
 _TENANT_KEY_SEP = "::"
@@ -3190,14 +3191,19 @@ def build_tenant_key(
     bot_id: str | None = None,
     user_id: str | None = None,
 ) -> str:
-    """Compose ``tenant_key = "{group_id}::{bot_id}::{user_id}"``."""
-    return _TENANT_KEY_SEP.join(
+    """Compose a stable opaque ``tenant_key``.
+
+    先归一三元组并按 ``group_id::bot_id::user_id`` 拼接，再做 MD5 hex，
+    用作池缓存键与企业版 ``workspace_{tenant_key}`` 目录名，避免明文落盘/打日志。
+    """
+    raw = _TENANT_KEY_SEP.join(
         (
             normalize_tenant_key_part(group_id),
             normalize_tenant_key_part(bot_id),
             normalize_tenant_key_part(user_id),
         )
     )
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 def get_agent_workspace_relative_dir() -> Path:

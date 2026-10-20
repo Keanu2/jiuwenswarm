@@ -68,7 +68,7 @@ from jiuwenswarm.server.app_services import (
     parse_sandbox_host_port,
     resolve_adapter,
 )
-from jiuwenswarm.server.context import build_ws_request_context
+from jiuwenswarm.server.context import bind_request_tenant, build_ws_request_context
 from jiuwenswarm.server.dispatch import try_dispatch
 from jiuwenswarm.server.middleware.chat import (
     ensure_auto_team_binding,
@@ -1962,7 +1962,8 @@ class AgentWebSocketServer:
                 await self._handle_asset_publish(ws, request, send_lock)
                 return
             if request.req_method in _PERSONAL_CONTEXT_REQ_METHODS:
-                manager = getattr(self, "_agent_manager", None)
+                runtime = self._execution_runtime()
+                manager = await runtime.resolve_manager(request)
                 runtime_callback = getattr(
                     manager, "set_personal_context_runtime_enabled", None
                 )
@@ -1980,9 +1981,14 @@ class AgentWebSocketServer:
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
                 metadata = dict(request.metadata or {})
                 ws_caps = self._get_ws_acp_client_capabilities(ws)
+                if not ws_caps:
+                    acp_manager = await self._execution_runtime().resolve_manager(
+                        request
+                    )
+                    ws_caps = acp_manager.get_client_capabilities("acp")
                 metadata.setdefault(
                     "acp_client_capabilities",
-                    ws_caps or self._agent_manager.get_client_capabilities("acp"),
+                    ws_caps,
                 )
                 request.metadata = metadata
 
@@ -2065,10 +2071,11 @@ class AgentWebSocketServer:
             from jiuwenswarm.server.handlers import _default as chat_default
 
             chat_ctx = build_ws_request_context(self, ws, request, send_lock)
-            if request.is_stream:
-                await chat_default.handle_stream(chat_ctx)
-            else:
-                await chat_default.handle_unary(chat_ctx)
+            async with bind_request_tenant(chat_ctx):
+                if request.is_stream:
+                    await chat_default.handle_stream(chat_ctx)
+                else:
+                    await chat_default.handle_unary(chat_ctx)
         except asyncio.CancelledError:
             # 流式任务被 interrupt 取消，正常退出无需报错
             logger.info(
@@ -2165,6 +2172,7 @@ class AgentWebSocketServer:
             cleaned = await self._execution_runtime().cleanup_session(
                 channel_id=channel_id,
                 session_id=session_id,
+                request=request,
             )
             logger.info(
                 "[AgentWebSocketServer] client disconnect session runtime cleanup: "
@@ -2289,32 +2297,50 @@ class AgentWebSocketServer:
         action = str(params.get("action") or "get").strip().lower()
         return action == "get"
 
-    async def _get_stateless_agent(self, channel_id: str) -> Any:
+    async def _get_stateless_agent(
+        self, channel_id: str, *, request: AgentRequest | None = None
+    ) -> Any:
         """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
 
-        优先用 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait 命中即返回，
-        不命中返回 None，绝不创建）；都没缓存时复用（或首次构造）本 server 上按
-        channel 缓存的轻量 JiuWenSwarm()（**不调 create_instance**，_adapter 保持
-        None）——其 process_message 内部对 skills/skilldev/plugins/symphony 的无状态
-        短路会在 _ensure_adapter 之前 return，碰不到 adapter。真正的 adapter 重建
-        留给 chat.send。
+        优先用本请求租户 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait
+        命中即返回，不命中返回 None，绝不创建）；都没缓存时复用（或首次构造）本
+        server 上按 ``tenant_key::channel`` 缓存的轻量 JiuWenSwarm()（**不调
+        create_instance**，_adapter 保持 None）——其 process_message 内部对
+        skills/skilldev/plugins/symphony 的无状态短路会在 _ensure_adapter 之前
+        return，碰不到 adapter。真正的 adapter 重建留给 chat.send。
 
-        相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent 模式
-        adapter 重建，治标不治本），此处彻底解耦。Fallback 必须按 channel 复用，
-        否则每次 cache miss 新建 SkillManager，SkillNet install/install_status 会
-        落到不同实例并误报「安装会话已过期」。
+        相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent
+        模式 adapter 重建，治标不治本），此处彻底解耦。Fallback 必须按租户+channel
+        复用，否则每次 cache miss 新建 SkillManager，SkillNet install/install_status
+        会落到不同实例并误报「安装会话已过期」；按 tenant 分桶同时避免跨租户共用
+        同一 SkillManager。
         """
-        cached = self._agent_manager.get_agent_nowait(
+        from jiuwenswarm.common.utils import build_tenant_key
+        from jiuwenswarm.server.runtime.tenant_context import TenantContext
+
+        if request is not None:
+            manager = await self._execution_runtime().resolve_manager(request)
+        else:
+            from jiuwenswarm.runtime.context import get_current_agent_manager
+
+            manager = get_current_agent_manager() or self._agent_manager
+        cached = manager.get_agent_nowait(
             channel_id=channel_id, mode="agent"
         )
         if cached is not None:
             return cached
-        agent = self._stateless_fallback_agents.get(channel_id)
+        tenant_key = TenantContext.current_tenant_key() or build_tenant_key()
+        if request is not None and TenantContext.current_tenant_key() is None:
+            pool = getattr(self._execution_runtime(), "_tenant_pool", None)
+            if pool is not None:
+                tenant_key = pool.extract_tenant_key(request)
+        cache_key = f"{tenant_key}::{channel_id}"
+        agent = self._stateless_fallback_agents.get(cache_key)
         if agent is not None:
             return agent
         from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
         agent = JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
-        self._stateless_fallback_agents[channel_id] = agent
+        self._stateless_fallback_agents[cache_key] = agent
         return agent
 
     async def _prepare_code_mode_chat_turn(
@@ -2325,8 +2351,9 @@ class AgentWebSocketServer:
         sync_metadata: bool = True,
     ) -> tuple[str, str | None, Any]:
         """Compatibility wrapper around transport-independent Runtime setup."""
+        manager = await self._execution_runtime().resolve_manager(request)
         return await prepare_chat_turn(
-            self._agent_manager,
+            manager,
             request,
             channel_id,
             sync_metadata=sync_metadata,
@@ -2751,7 +2778,9 @@ class AgentWebSocketServer:
             # Resume persisted idle Sessions through the public lifecycle API.
             await runtime.start()
             await runtime.create_or_resume_session(
-                channel_id=channel_id, session_id=record.target_session_id,
+                channel_id=channel_id,
+                session_id=record.target_session_id,
+                request=request,
             )
         runtime_stream = runtime.stream(
             request,
@@ -4085,14 +4114,25 @@ class AgentWebSocketServer:
         config_payload: dict[str, Any] | None = None,
         reload_options: dict[str, Any] | None = None,
     ) -> bool:
-        """Apply a ConfigAdapter save to the agents in this process."""
-        return await reload_runtime_after_config_save(
-            self._agent_manager,
-            updated_keys,
-            env_updates=env_updates,
-            config_payload=config_payload,
-            reload_options=reload_options,
-        )
+        """Apply a ConfigAdapter save to agents in every cached tenant Manager."""
+        runtime = getattr(self, "_runtime", None)
+        pool = getattr(runtime, "_tenant_pool", None) if runtime is not None else None
+        managers = (
+            pool.iter_agent_managers_nowait()
+            if pool is not None
+            else []
+        ) or [self._agent_manager]
+        ok = True
+        for manager in managers:
+            applied = await reload_runtime_after_config_save(
+                manager,
+                updated_keys,
+                env_updates=env_updates,
+                config_payload=config_payload,
+                reload_options=reload_options,
+            )
+            ok = bool(applied) and ok
+        return ok
 
     async def send_push(self, msg) -> bool:
         """AgentServer 主动向 Gateway 推送消息。
@@ -4143,7 +4183,14 @@ class AgentWebSocketServer:
         return self._agent_manager.get_agent_nowait()
 
     def get_agent_manager(self) -> AgentManager:
-        """获取 AgentManager 实例."""
+        """默认租户 Manager（兼容别名）.
+
+        有请求的热路径经 ``AgentRuntime.resolve_manager`` / 局部变量取租户
+        Manager；本方法仅暴露池内默认槽，供启动与无请求路径使用。
+        """
+        runtime = getattr(self, "_runtime", None)
+        if runtime is not None:
+            return runtime.agent_manager
         return self._agent_manager
 
     def get_runtime(self) -> AgentRuntime:

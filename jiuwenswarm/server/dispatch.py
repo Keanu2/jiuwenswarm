@@ -271,5 +271,8 @@ async def try_dispatch(ctx: RequestContext) -> bool:
     handler = HANDLERS.get(ctx.request.req_method) if ctx.request.req_method else None
     if handler is None:
         return False
-    await handler(ctx)
+    from jiuwenswarm.server.context import bind_request_tenant
+
+    async with bind_request_tenant(ctx):
+        await handler(ctx)
     return True
