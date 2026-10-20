@@ -343,14 +343,38 @@ class WebSocketAgentServerClient(AgentServerClient):
         logger.info("[WebSocketAgentServerClient] 消息接收任务已启动")
 
     async def _open_pipe_connection(self, pipe_path: str) -> _PipeWsAdapter:
-        """桌面形态建连：open_pipe → auth 首帧（e2aToken，服务端校验失败即断管）。"""
+        """桌面形态建连：open_pipe → 双向握手（auth-hello/proof）→ auth 首帧。
+
+        2026-10-17 跨 SID 预创建抢占防护（《SID管道漏洞分析报告》P0）：
+        1. server_images 限定服务端镜像为本 jiuwen 运行时（gateway 与 agent 同 exe）
+           ——open_pipe 在发出任何字节前经 GetNamedPipeServerProcessId 校验对端；
+        2. auth-hello/proof 挑战握手——服务端必须证明持有 e2aToken（HMAC 应答），
+           通过前绝不发送 token 本体；抢占者既伪造不了 proof 也收不到令牌。
+        """
+        import sys
+
         from jiuwenswarm.common.np_transport import open_pipe
         from jiuwenswarm.common.secrets_bootstrap import get_secret
-        from jiuwenswarm.server.e2a_transports import PipeMessageTransport
+        from jiuwenswarm.server.e2a_transports import (
+            PipeMessageTransport,
+            build_auth_hello_frame,
+            verify_auth_proof_frame,
+        )
 
-        stream = await open_pipe(pipe_path, timeout=10.0)
+        stream = await open_pipe(
+            pipe_path,
+            timeout=10.0,
+            server_images={sys.executable, sys._base_executable},
+        )
         try:
             token = str(get_secret("e2aToken", "") or "")
+            hello, challenge = build_auth_hello_frame()
+            await stream.send_frame(hello)
+            proof_frame = await stream.recv_frame(timeout=10.0)
+            if not verify_auth_proof_frame(proof_frame, token, challenge):
+                raise RuntimeError(
+                    "E2A 管道服务端 proof 校验失败（疑似管道被抢占），已断开"
+                )
             await stream.send_frame({"type": "auth", "token": token})
         except Exception:
             await stream.close()

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,7 +13,7 @@ from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult
 from openjiuwen.harness.security import PermissionLevel, PermissionResult
 from jiuwenswarm.common.behavior_security import (
-    BehaviorSecurityBridge, check_agent_skill_install, cloud_authorization_enabled, raw_event,
+    PENDING_OUTPUT, BehaviorSecurityBridge, check_agent_skill_install, cloud_authorization_enabled, raw_event,
 )
 from jiuwenswarm.agents.harness.common.rails.behavior_security_rail import (
     BehaviorSecurityRail,
@@ -71,7 +72,7 @@ async def test_explicit_rules_report_without_cloud_wait(level):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('decision,expected', [('allow', PermissionLevel.ALLOW), ('deny', PermissionLevel.DENY),
-    ('clarify', PermissionLevel.ALLOW), ('unavailable', PermissionLevel.ALLOW)])
+    ('clarify', PermissionLevel.ASK), ('unavailable', PermissionLevel.ALLOW)])
 async def test_unknown_one_waited_request_and_no_second_report(decision, expected):
     b, events = bridge(decision=decision)
     event = raw_event(context(), 'tool.before')
@@ -97,12 +98,38 @@ async def test_cloud_unavailable_respects_total_fail_closed_switch(fail_closed, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('decision,expected', [('allow', PermissionLevel.ALLOW), ('deny', PermissionLevel.DENY),
+    ('clarify', PermissionLevel.ASK), ('unavailable', PermissionLevel.ASK)])
+async def test_decide_authoritative_always_waits_for_cloud(decision, expected):
+    """安装审核权威口径：不看本地裁决，一律 authorize 同步等云端；unavailable/clarify 转 ASK。"""
+    b, events = bridge(decision=decision)
+    event = raw_event(context(), 'skill.before_install')
+    for _ in range(2):
+        result = await b.decide_authoritative(event)
+        assert result.permission == expected
+    assert len(events) == 1
+    assert events[0]['mode'] == 'authorize'
+    await b.close()
+
+
+@pytest.mark.asyncio
 async def test_skill_install_stays_ask_when_cloud_unavailable():
     b, _ = bridge(decision='unavailable')
     result = await b.decide(
         raw_event(context(), 'skill.before_install'), PermissionResult(PermissionLevel.UNDETERMINED),
     )
     assert result.permission == PermissionLevel.ASK
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_decide_authoritative_unavailable_fail_open_allows():
+    """skill_install_fail_open: true 时云端不可用静默放行（缺省 false 转用户确认）。"""
+    b, events = bridge(decision='unavailable')
+    b.config['xiaoyi_work_security']['cloud_authorization']['skill_install_fail_open'] = True
+    result = await b.decide_authoritative(raw_event(context(), 'skill.before_install'))
+    assert result.permission == PermissionLevel.ALLOW
+    assert events[0]['mode'] == 'authorize'
     await b.close()
 
 
@@ -132,6 +159,57 @@ async def test_policy_revision_changes_event_identity_and_discards_old_reply():
     assert (await pending).permission == PermissionLevel.DENY
     assert not b.decisions
     await b.close()
+
+
+@pytest.mark.asyncio
+async def test_install_gate_cloud_deny_blocks_despite_local_allow(tmp_path):
+    """云端权威化回归：发起工具本地已 ALLOW 时，云端 REJECT 仍阻断安装（此前只 report 无人消费）。"""
+    b, events = bridge(decision='deny')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    ctx.extra['behavior.local_permission'] = PermissionResult(PermissionLevel.ALLOW)
+    staged = tmp_path / 'staged'
+    staged.mkdir()
+    (staged / 'SKILL.md').write_text('skill content')
+    dest = tmp_path / 'installed'
+    dest.mkdir()
+    old = dest / 'SKILL.md'
+    old.write_text('original')
+    await rail.before_tool_call(ctx)
+    with pytest.raises(PermissionError, match='已拒绝安装'):
+        await check_agent_skill_install(staged, dest, 'example', 'download')
+    assert old.read_text() == 'original'
+    assert events[0]['stage'] == 'skill.before_install'
+    assert events[0]['mode'] == 'authorize'
+    await rail.after_tool_call(ctx)
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_install_gate_download_url_passthrough(tmp_path):
+    """来源下载地址透传进事件 skill.downloadUrl（云端回拉全量包审核）；缺省不出现该键。"""
+    b, events = bridge(decision='allow')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    staged = tmp_path / 'staged'
+    staged.mkdir()
+    (staged / 'SKILL.md').write_text('skill content')
+    dest = tmp_path / 'installed'
+    await rail.before_tool_call(ctx)
+    await check_agent_skill_install(staged, dest, 'example', 'clawhub',
+                                    download_url='https://clawhub.ai/api/v1/download?slug=example')
+    assert events[0]['skill']['downloadUrl'] == 'https://clawhub.ai/api/v1/download?slug=example'
+    await rail.after_tool_call(ctx)
+    await b.close()
+
+    b2, events2 = bridge(decision='allow')
+    rail2 = BehaviorSecurityRail(b2)
+    ctx2 = context()
+    await rail2.before_tool_call(ctx2)
+    await check_agent_skill_install(staged, dest, 'example', 'builtin')
+    assert 'downloadUrl' not in events2[0]['skill']
+    await rail2.after_tool_call(ctx2)
+    await b2.close()
 
 
 @pytest.mark.parametrize('enabled,expected', [
@@ -205,6 +283,7 @@ async def test_install_confirmation_stops_before_write_and_resumes_once(tmp_path
 
 @pytest.mark.asyncio
 async def test_output_inspection_waits_and_rejects_before_model_continues():
+    """deny：输出被替换为安全指令模板（原输出不进模型视野），默认不再强制收尾。"""
     b, events = bridge(decision='deny')
     rail = BehaviorSecurityRail(b)
     ctx = context()
@@ -214,7 +293,24 @@ async def test_output_inspection_waits_and_rejects_before_model_continues():
     ctx.inputs.execution_started = True
     await rail.after_tool_call(ctx)
     assert len(events) == 1 and events[0]['stage'] == 'tool.after' and events[0]['mode'] == 'inspect'
-    assert ctx.inputs.tool_result == OUTPUT_BLOCK_MESSAGE
+    assert isinstance(ctx.inputs.tool_result, str)
+    assert ctx.inputs.tool_result.startswith('[安全风控]')
+    assert 'security_notice' in ctx.inputs.tool_result
+    assert events[0]['eventId'] in ctx.inputs.tool_result
+    assert ctx.force_finish_requests == []
+
+
+@pytest.mark.asyncio
+async def test_output_inspection_deny_force_finish_legacy_fallback():
+    """tool_output_force_finish: true 回退旧语义：屏蔽文案 + request_force_finish。"""
+    b, _ = bridge(decision='deny')
+    b.config['xiaoyi_work_security']['cloud_authorization']['tool_output_force_finish'] = True
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    ctx.inputs.tool_result = {'result': 'ok'}
+    ctx.inputs.execution_started = True
+    await rail.after_tool_call(ctx)
+    assert ctx.inputs.tool_result.startswith('[安全风控]')
     assert ctx.force_finish_requests == [{
         'output': OUTPUT_BLOCK_MESSAGE,
         'result_type': 'answer',
@@ -222,20 +318,88 @@ async def test_output_inspection_waits_and_rejects_before_model_continues():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('decision,blocked', [
-    ('allow', False), ('deny', True), ('unavailable', False),
+@pytest.mark.parametrize('decision,expected_kind', [
+    ('allow', 'unchanged'), ('deny', 'blocked'), ('unavailable', 'unchanged'), ('clarify', 'clarified'),
 ])
-async def test_output_inspection_blocks_only_explicit_reject(decision, blocked):
+async def test_output_inspection_blocks_only_explicit_reject(decision, expected_kind):
     b, events = bridge(decision=decision)
     rail = BehaviorSecurityRail(b)
     ctx = context()
     await rail.before_tool_call(ctx)
     ctx.inputs.tool_result = {'result': 'ok'}
+    ctx.inputs.tool_msg = SimpleNamespace(content='原始输出内容')
     ctx.inputs.execution_started = True
+    if expected_kind == 'clarified':
+        # clarify（2026-10-18 二次迭代）：输出暂存 + 打断点弹确定性确认卡——
+        # 用户确认前输出不进模型上下文（替代旧的「放行+模型自觉 ask_user」后缀方案）
+        with pytest.raises(AbortError) as exc_info:
+            await rail.after_tool_call(ctx)
+        request = exc_info.value.cause.request
+        assert '疑似风险' in request.message
+        assert 'call-1' in str(exc_info.value.cause.tool_call.id)
+        assert ctx.session.get_state(f'{PENDING_OUTPUT}:call-1') == events[0]['eventId']
+        stashed = b.output_stash.get(events[0]['eventId'])
+        assert stashed is not None and stashed.tool_msg.content == '原始输出内容'
+        return
     await rail.after_tool_call(ctx)
     assert events[0]['mode'] == 'inspect'
-    assert bool(ctx.force_finish_requests) is blocked
-    assert ctx.inputs.tool_result == (OUTPUT_BLOCK_MESSAGE if blocked else {'result': 'ok'})
+    assert ctx.force_finish_requests == []
+    if expected_kind == 'blocked':
+        assert ctx.inputs.tool_result.startswith('[安全风控]')
+        assert '原始输出内容' not in ctx.inputs.tool_result
+        assert ctx.inputs.tool_msg.content == ctx.inputs.tool_result
+    else:
+        assert ctx.inputs.tool_result == {'result': 'ok'}
+        assert ctx.inputs.tool_msg.content == '原始输出内容'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('approved', [True, False])
+async def test_output_clarify_resume_restores_or_masks_without_rerun(approved):
+    """确认卡续跑：批准→暂存输出原样拼回（带采纳尾注）；拒绝→屏蔽指令。均 _skip_tool 不重执行。"""
+    b, events = bridge(decision='clarify')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = '机密输出原文'
+    ctx.inputs.tool_msg = SimpleNamespace(content='机密输出原文')
+    ctx.inputs.execution_started = True
+    with pytest.raises(AbortError):
+        await rail.after_tool_call(ctx)
+    event_id = events[0]['eventId']
+
+    resumed = context(ctx.session)
+    resumed.inputs.tool_name = 'bash'
+    resumed.extra[RESUME_USER_INPUT_KEY] = {'approved': approved, 'feedback': '' if approved else '别用这个'}
+    await rail.before_tool_call(resumed)
+    assert resumed.extra.get('_skip_tool') is True
+    assert ctx.session.get_state(f'{PENDING_OUTPUT}:call-1') is None
+    assert b.output_stash.get(event_id) is None
+    if approved:
+        assert '机密输出原文' in resumed.inputs.tool_result
+        assert '用户确认采纳' in resumed.inputs.tool_result
+        assert resumed.inputs.tool_msg.content == resumed.inputs.tool_result
+    else:
+        assert '机密输出原文' not in resumed.inputs.tool_result
+        assert resumed.inputs.tool_result.startswith('[安全风控]')
+        assert '别用这个' in resumed.inputs.tool_result
+        assert resumed.inputs.tool_msg.content == resumed.inputs.tool_result
+    # after_tool_call 对跳过的调用不再送审（execution_started=False）
+    await rail.after_tool_call(resumed)
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_output_clarify_stale_marker_without_user_input_falls_through():
+    """陈旧待确认标记（中断后未恢复直接新轮）：清掉标记，工具按正常流程走。"""
+    b, _ = bridge(decision='allow')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    ctx.session.update_state({f'{PENDING_OUTPUT}:call-1': 'stale-event'})
+    await rail.before_tool_call(ctx)
+    assert ctx.session.get_state(f'{PENDING_OUTPUT}:call-1') is None
+    assert '_skip_tool' not in ctx.extra
+    assert ctx.extra.get('behavior.context_token') is not None
 
 
 @pytest.mark.asyncio
@@ -257,8 +421,9 @@ async def test_inspect_exceptions_fail_open(reply):
     b._send = send
     ctx = context()
     ctx.inputs.tool_result = {'result': 'ok'}
-    result = await b.inspect(raw_event(ctx, 'tool.after'))
-    assert result.permission == PermissionLevel.ALLOW
+    outcome = await b.inspect(raw_event(ctx, 'tool.after'))
+    assert outcome.result.permission == PermissionLevel.ALLOW
+    assert outcome.verdict == 'allow'
     assert len(calls) == 1
     await b.close()
 
@@ -277,9 +442,10 @@ async def test_inspect_reject_on_one_chunk_blocks_whole_output():
     b._send = send
     ctx = context()
     ctx.inputs.tool_result = {'content': 'A' * 7000 + 'MIDDLE' + 'B' * 7000}
-    result = await b.inspect(raw_event(ctx, 'tool.after'))
-    assert result.permission == PermissionLevel.DENY
-    assert result.reason == 'blocked'
+    outcome = await b.inspect(raw_event(ctx, 'tool.after'))
+    assert outcome.result.permission == PermissionLevel.DENY
+    assert outcome.verdict == 'deny'
+    assert outcome.reason == 'blocked'
     await b.close()
 
 
@@ -288,8 +454,8 @@ async def test_large_output_is_fully_chunked_for_inspection():
     b, events = bridge(decision='allow')
     ctx = context()
     ctx.inputs.tool_result = {'content': 'A' * 7000 + 'MIDDLE_MARKER' + 'B' * 7000}
-    result = await b.inspect(raw_event(ctx, 'tool.after'))
-    assert result.permission == PermissionLevel.ALLOW
+    outcome = await b.inspect(raw_event(ctx, 'tool.after'))
+    assert outcome.result.permission == PermissionLevel.ALLOW
     assert len(events) >= 3
     assert all(event['mode'] == 'inspect' for event in events)
     assert all(len(event['tool']['result']['content']) <= 5500 for event in events)
@@ -301,8 +467,8 @@ async def test_oversized_output_fails_open_without_partial_scan():
     b, events = bridge(decision='deny')
     ctx = context()
     ctx.inputs.tool_result = {'content': 'A' * (65 * 1024)}
-    result = await b.inspect(raw_event(ctx, 'tool.after'))
-    assert result.permission == PermissionLevel.ALLOW
+    outcome = await b.inspect(raw_event(ctx, 'tool.after'))
+    assert outcome.result.permission == PermissionLevel.ALLOW
     assert events == []
 
 
@@ -312,6 +478,155 @@ async def test_cancelled_cloud_request_propagates():
     b._send = AsyncMock(side_effect=asyncio.CancelledError)
     with pytest.raises(asyncio.CancelledError):
         await b.decide(raw_event(context(), 'tool.before'), PermissionResult(PermissionLevel.UNDETERMINED))
+
+
+# ---------------------------------------------------------------------------
+# 风控三态 UI（2026-10-18）：指令模板 / CLARIFY 分支 / security_notice 豁免 / 本地安装闸口
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_decide_deny_reason_carries_security_notice_instruction():
+    """toolInput deny：reason=指令模板（notice_id=eventId，引导模型调 security_notice 补写横幅）。"""
+    b, _ = bridge(decision='deny')
+    ctx = context()
+    event = raw_event(ctx, 'tool.before')
+    result = await b.decide(event, PermissionResult(PermissionLevel.UNDETERMINED))
+    assert result.permission == PermissionLevel.DENY
+    assert result.reason.startswith('[安全风控]')
+    assert event['eventId'] in result.reason
+    assert 'security_notice' in result.reason
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_deny_instruction_carries_labels_not_raw_remind():
+    """防自我命中回归（2026-10-18 二次迭代）：指令带风险类别 labels，
+    绝不带 remind 原文（劣质 remind 含命中特征，进入模型上下文会被滑窗二次 REJECT 清屏）。"""
+    b, _ = bridge()
+    b._send = AsyncMock(return_value={
+        'decision': 'deny', 'reason': 'qc: 命中恶意特征[tcpclient]', 'labels': ['恶意代码'],
+    })
+    event = raw_event(context(), 'tool.before')
+    result = await b.decide(event, PermissionResult(PermissionLevel.UNDETERMINED))
+    assert result.permission == PermissionLevel.DENY
+    assert '恶意代码' in result.reason
+    assert 'tcpclient' not in result.reason
+    assert '命中恶意特征' not in result.reason
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_decide_clarify_asks_with_remind():
+    """toolInput clarify → ASK（转用户审批卡），reason 带云端 remind。"""
+    b, _ = bridge()
+    b._send = AsyncMock(return_value={'decision': 'clarify', 'reason': '疑似敏感操作'})
+    result = await b.decide(raw_event(context(), 'tool.before'), PermissionResult(PermissionLevel.UNDETERMINED))
+    assert result.permission == PermissionLevel.ASK
+    assert '疑似敏感操作' in result.reason
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_decide_authoritative_deny_carries_skill_install_instruction():
+    """skill 安装 deny：reason=安装拒绝指令模板（含技能名/风险类别 labels/notice_id，
+    不带 remind 原文）。"""
+    b, _ = bridge()
+    b._send = AsyncMock(return_value={
+        'decision': 'deny', 'reason': '发现恶意行为[tcpclient]', 'labels': ['恶意软件'],
+    })
+    event = raw_event(context(), 'skill.before_install')
+    event['skill'] = {'name': 'evil-skill', 'source': 'local-import', 'stagedPath': '/tmp/x', 'destination': '/tmp/y'}
+    result = await b.decide_authoritative(event)
+    assert result.permission == PermissionLevel.DENY
+    assert result.reason.startswith('[安全风控]')
+    assert 'evil-skill' in result.reason
+    assert '恶意软件' in result.reason
+    assert 'tcpclient' not in result.reason
+    assert event['eventId'] in result.reason
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_decide_authoritative_clarify_asks_with_remind():
+    """skill 安装 clarify → ASK（复用安装确认打断点），reason 带云端 remind。"""
+    b, _ = bridge()
+    b._send = AsyncMock(return_value={'decision': 'clarify', 'reason': '疑似收集个人信息'})
+    result = await b.decide_authoritative(raw_event(context(), 'skill.before_install'))
+    assert result.permission == PermissionLevel.ASK
+    assert '疑似收集个人信息' in result.reason
+    await b.close()
+
+
+@pytest.mark.asyncio
+async def test_security_notice_tool_is_exempt_from_evaluation_and_inspection():
+    """安全提示工具：权限评估本地放行且不上报；after_tool_call 不送审（防递归/防审批弹窗）。"""
+    b, events = bridge(decision='deny')
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    ctx.inputs.tool_call = ToolCall(id='call-sn', type='function', name='security_notice', arguments='{}')
+    ctx.inputs.tool_name = 'security_notice'
+    await rail.before_tool_call(ctx)
+    request = SimpleNamespace(ctx=ctx, result=PermissionResult(PermissionLevel.UNDETERMINED))
+    result = await b.on_permission_evaluated(request)
+    assert result.permission == PermissionLevel.ALLOW
+    assert events == []
+    ctx.inputs.tool_result = 'ok'
+    ctx.inputs.execution_started = True
+    await rail.after_tool_call(ctx)
+    assert events == []
+    await b.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('decision', ['allow', 'deny'])
+async def test_install_skill_local_source_gates_before_copy(tmp_path, decision):
+    """install_skill source='local'：落盘前过云端权威闸口（source=local-import），
+    deny 阻断且 skills 目录无残留。"""
+    from jiuwenswarm.agents.harness.common.tools.skill_toolkits import SkillToolkit
+    from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+    staged = tmp_path / 'staged' / 'demo-skill'
+    staged.mkdir(parents=True)
+    (staged / 'SKILL.md').write_text(
+        '---\nname: demo-skill\ndescription: Synthetic local install test.\n---\n# demo\n',
+        encoding='utf-8',
+    )
+    manager = SkillManager(workspace_dir=str(tmp_path / 'workspace'))
+    toolkit = SkillToolkit(manager)
+    b, events = bridge(decision=decision)
+    rail = BehaviorSecurityRail(b)
+    ctx = context()
+    await rail.before_tool_call(ctx)
+    result = await toolkit.install_skill(identifier=str(staged), source='local')
+    dest = manager._skills_dir / 'demo-skill'
+    assert result['success'] is (decision == 'allow')
+    assert dest.exists() is (decision == 'allow')
+    assert len(events) == 1
+    assert events[0]['stage'] == 'skill.before_install'
+    assert events[0]['mode'] == 'authorize'
+    assert events[0]['skill']['source'] == 'local-import'
+    if decision == 'allow':
+        assert (dest / 'SKILL.md').read_bytes() == (staged / 'SKILL.md').read_bytes()
+    await rail.after_tool_call(ctx)
+    await b.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['relative', 'missing', 'no_skill_md'])
+async def test_install_local_rejects_invalid_sources(tmp_path, kind):
+    """本地安装入口参数校验：相对路径/不存在目录/无 SKILL.md 一律拒绝（不触发闸口）。"""
+    from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+    manager = SkillManager(workspace_dir=str(tmp_path / 'workspace'))
+    if kind == 'relative':
+        path = 'some/relative/path'
+    elif kind == 'missing':
+        path = str(tmp_path / 'not-exist')
+    else:
+        empty = tmp_path / 'empty'
+        empty.mkdir()
+        path = str(empty)
+    result = await manager.handle_skills_install_local({'path': path})
+    assert result['success'] is False
 
 
 @pytest.mark.asyncio
@@ -486,7 +801,7 @@ async def test_permission_factory_uses_defaults_only_when_cloud_is_off(
         assert cfg['enabled'] is permission_enabled
         result = await permission.resolve_interrupt(ctx, ctx.inputs.tool_call, None)
         if mode == 'authorize':
-            expected = {'allow': 'allow', 'deny': 'deny', 'clarify': 'allow', 'unavailable': 'allow'}[cloud_reply]
+            expected = {'allow': 'allow', 'deny': 'deny', 'clarify': 'ask', 'unavailable': 'allow'}[cloud_reply]
         assert isinstance(result, {'allow': ApproveResult, 'deny': RejectResult, 'ask': InterruptResult}[expected])
         assert ctx.extra['behavior.local_permission'].matched_rule == matched
         await asyncio.gather(*b.tasks)

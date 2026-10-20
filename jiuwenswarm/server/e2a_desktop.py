@@ -35,7 +35,9 @@ from jiuwenswarm.common.secrets_bootstrap import get_secret
 from jiuwenswarm.server.e2a_transports import (
     PipeMessageTransport,
     StdioMessageTransport,
+    build_auth_proof_frame,
     e2a_stdio_mode_enabled,
+    extract_auth_hello_challenge,
     redirect_stdout_to_stderr,
     verify_auth_frame,
 )
@@ -180,21 +182,37 @@ class DesktopE2aChannels:
         logger.info("[E2A][desktop] agent-e2a 命名管道 server 已启动: %s", pipe_path)
 
     async def _handle_pipe_connection(self, stream: Any) -> None:
-        """管道连接处理：首帧 auth（e2aToken）→ 通过后进入公共连接内核。
+        """管道连接处理：auth-hello → proof 应答 → auth 首帧 → 公共连接内核。
 
+        2026-10-17 起首帧必须是 auth-hello（跨 SID 预创建抢占防护）：先由本方
+        用 e2aToken 对客户端挑战做 HMAC 应答（证明服务端身份），再收 auth 帧。
+        旧版「首帧直接带 token」不再接受——抢占者什么也不用做就能白捡令牌。
         鉴权失败/首帧异常即返回（``PipeServer`` 兜底关管）。连接级异常只影响
         本连接，不波及 stdio 通道与其他管道连接。
         """
         from jiuwenswarm.common.np_transport import FrameCodecError, PipeError
 
         try:
+            expected = str(get_secret("e2aToken", "") or "")
             try:
                 first = await stream.recv_frame(timeout=_PIPE_AUTH_TIMEOUT_SECONDS)
             except (FrameCodecError, PipeError) as exc:
                 logger.info("[E2A][desktop] 管道连接首帧读取失败，断开: %s", exc)
                 return
-            expected = str(get_secret("e2aToken", "") or "")
-            if not verify_auth_frame(first, expected):
+            challenge = extract_auth_hello_challenge(first)
+            if challenge is None:
+                logger.warning(
+                    "[E2A][desktop] 管道连接首帧非 auth-hello（旧版直发 token 形态"
+                    "已不再接受），断开"
+                )
+                return
+            await stream.send_frame(build_auth_proof_frame(expected, challenge))
+            try:
+                second = await stream.recv_frame(timeout=_PIPE_AUTH_TIMEOUT_SECONDS)
+            except (FrameCodecError, PipeError) as exc:
+                logger.info("[E2A][desktop] 管道连接 auth 帧读取失败，断开: %s", exc)
+                return
+            if not verify_auth_frame(second, expected):
                 logger.warning("[E2A][desktop] 管道连接 auth 校验失败，断开")
                 return
             await self._run_connection(

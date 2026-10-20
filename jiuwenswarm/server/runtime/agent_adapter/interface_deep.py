@@ -6054,20 +6054,78 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                     "[JiuWenSwarmDeepAdapter] xiaoyi phone tools registration failed: %s", exc
                 )
 
-        # SkillToolkit (uninstall_skill) disabled — tool no longer exposed to LLM.
-        # try:
-        #     skill_toolkit = SkillToolkit(manager=self._skill_manager)
-        #     skill_tool_names: list[str] = []
-        #     for tool in skill_toolkit.get_tools():
-        #         self._register_shared_tool(tool)
-        #         tool_cards.append(tool.card)
-        #         skill_tool_names.append(tool.card.name)
-        #     logger.info(
-        #         "[JiuWenSwarmDeepAdapter] SkillToolkit registered: tools=%s",
-        #         skill_tool_names,
-        #     )
-        # except Exception as exc:
-        #     logger.warning("[JiuWenSwarmDeepAdapter] skill tools registration failed: %s", exc)
+        # SkillToolkit（2026-10-18 风控三态 UI 恢复注册，设计见 claw_desktop
+        # docs/risk-notice-ui-design-2026-10-18.md）：仅暴露 install_skill，且桌面卡片
+        # 只留 local/builtin 两个来源——对话内安装（用户 zip 解压到 staged 目录后
+        # source='local'）走 check_agent_skill_install 云端权威闸口（带会话上下文的
+        # 三态横幅 + CLARIFY 确认 + 指纹复核），替代无会话上下文的落盘守卫链路；
+        # 网络来源（skillnet/clawhub/teamskillshub）与 search_skill/uninstall_skill
+        # 维持不下发（环境禁网下载、产品决策不变）。
+        try:
+            from openjiuwen.core.foundation.tool import LocalFunction
+
+            skill_toolkit = SkillToolkit(manager=self._skill_manager)
+            install_skill_card = ToolCard(
+                id="install_skill",
+                name="install_skill",
+                description=(
+                    "Install a skill from a local directory or the builtin catalog. "
+                    "When the user provides a skill package (e.g. a zip file) in the "
+                    "conversation, extract it to a staging directory first, inspect the "
+                    "extracted SKILL.md, then call this tool with source='local' and "
+                    "identifier=<staging directory absolute path>. Use source='builtin' "
+                    "with identifier=<skill name> for builtin skills. "
+                    "The install passes a cloud security review before taking effect; "
+                    "if the result is rejected or asks for user confirmation, follow the "
+                    "returned instruction."
+                ),
+                input_params={
+                    "type": "object",
+                    "properties": {
+                        "identifier": {
+                            "type": "string",
+                            "description": (
+                                "source='local': absolute path of the extracted skill "
+                                "directory (containing SKILL.md); source='builtin': "
+                                "builtin skill name."
+                            ),
+                        },
+                        "source": {
+                            "type": "string",
+                            "enum": ["local", "builtin"],
+                            "description": (
+                                "'local' installs from a local extracted skill directory; "
+                                "'builtin' installs a locally available builtin skill."
+                            ),
+                        },
+                        "timeout_sec": {
+                            "type": "integer",
+                            "description": "Installation timeout in seconds.",
+                            "default": 60,
+                        },
+                    },
+                    "required": ["identifier", "source"],
+                },
+            )
+            self._register_shared_tool(LocalFunction(card=install_skill_card, func=skill_toolkit.install_skill))
+            tool_cards.append(install_skill_card)
+            logger.info("[JiuWenSwarmDeepAdapter] SkillToolkit registered: tools=['install_skill(local,builtin)']")
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] skill tools registration failed: %s", exc)
+
+        # security_notice（2026-10-18 风控三态 UI）：模型收到 [安全风控] 指令时回调桌面
+        # 补写安全横幅第二行（融合话术）；桌面校验登记簿后原位更新。行为安全链路豁免
+        # 该工具的上报/送审/审批（见 common/behavior_security.py）。
+        try:
+            from jiuwenswarm.agents.harness.common.tools.security_notice_tool import (
+                get_security_notice_tool,
+            )
+
+            security_notice_tool = get_security_notice_tool()
+            self._register_shared_tool(security_notice_tool)
+            tool_cards.append(security_notice_tool.card)
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] security_notice tool registration failed: %s", exc)
 
         if is_skill_retrieval_enabled():
             try:
