@@ -4,6 +4,8 @@ This document explains how JiuwenSwarm **tool call permissions** (`allow` / `ask
 
 The main configuration file is typically `~/.jiuwenswarm/config/config.yaml`; you can override this via the `JIUWENSWARM_CONFIG_DIR` environment variable (consistent with [Configuration](Configuration.md)).
 
+Xiaoyi A2A `clientVariables.permission` travels in the request permission context and applies `default`, `auto_approve`, or `full_access` to a copy of each tool-permission snapshot. It does not write shared `config.yaml` or trigger a global reload. The Xiaoyi channel installs the local `PermissionRail`; initial checks and post-approval checks read the current request profile. Later messages without a profile use the shared configuration again. Desktop behavior security retains its host-owned checks. Global settings changed by older versions must be explicitly restored; upgrading does not infer or overwrite the user's current settings.
+
 `mcp_exec_command` is an AgentServer command tool routed through its bound `SysOperation.shell()`. Register it with `get_mcp_tools(sys_operation=operation, agent_id=agent_id)`; multi-session sub-agents resolve that instance from their `sys_operation_id`. An unbound tool returns an error instead of launching a host process. Sandbox mode reuses the existing connector CLI, `excluded_commands`, and `fallback_on_failure` routing and passes the explicit `bash / sh / powershell / cmd` selection. Background requests use the same operation; unsupported providers return an error without tool-local host execution. Callers must still install permission rails; binding the execution route does not automatically enable FileGuard.
 
 ---

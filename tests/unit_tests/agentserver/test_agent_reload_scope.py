@@ -780,6 +780,29 @@ async def test_deep_adapter_new_session_applies_pending_reload(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["create_instance", "start_interaction"])
+async def test_cancelled_session_initialization_cleans_uncached_child(monkeypatch, stage):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    parent = JiuWenSwarmDeepAdapter()
+
+    async def stalled(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    child = SimpleNamespace(
+        create_instance=AsyncMock(), start_interaction=AsyncMock(), cleanup=AsyncMock(),
+    )
+    setattr(child, stage, stalled)
+    monkeypatch.setattr(parent, "_new_session_scoped_adapter", lambda _sid: child)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.03):
+            await parent._get_or_create_session_adapter("cancelled-init")
+    child.cleanup.assert_awaited_once()
+    assert "cancelled-init" not in parent._session_adapters
+    assert not parent._session_adapter_locks["cancelled-init"].locked()
+
+
+@pytest.mark.asyncio
 async def test_deep_adapter_new_session_skips_reload_when_no_pending(monkeypatch):
     """Without a pending global reload, creating a new session adapter does not reload."""
     from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module

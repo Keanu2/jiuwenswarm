@@ -44,6 +44,86 @@ def context(session=None):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["xiaoyi", "a2a"])
+async def test_request_profile_enables_missing_rail_without_changing_disabled_global_policy(monkeypatch, channel):
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+    from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
+        setup_permission_context, cleanup_permission_context,
+    )
+
+    monkeypatch.setenv("CLAW_BEHAVIOR_SECURITY", "0")
+    stored = {"permissions": {"enabled": False, "package_builtin_rules": False}}
+    monkeypatch.setattr(interface_deep, "get_config", lambda: stored)
+    monkeypatch.setattr("jiuwenswarm.common.config.get_config", lambda: stored)
+    adapter = interface_deep.JiuWenSwarmDeepAdapter.__new__(interface_deep.JiuWenSwarmDeepAdapter)
+    adapter._permission_rail = None
+    adapter._model = None
+    adapter._instance = SimpleNamespace(register_rail=AsyncMock())
+    request = SimpleNamespace(channel_id=channel, metadata={"xiaoyi_permission_profile": "default"})
+    token = setup_permission_context(request)
+    try:
+        await adapter._update_request_permission_rail(channel)
+        assert adapter._permission_rail._engine.config["enabled"] is True
+        adapter._instance.register_rail.assert_awaited_once_with(adapter._permission_rail)
+    finally:
+        cleanup_permission_context(token)
+    await adapter._update_request_permission_rail(channel)
+    assert adapter._permission_rail._host.get_permissions_snapshot()["enabled"] is False
+    assert stored["permissions"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_request_profiles_are_task_local_and_web_cannot_reuse_xiaoyi_override(monkeypatch):
+    from jiuwenswarm.common.behavior_security import runtime_permission_config
+    from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
+        setup_permission_context, cleanup_permission_context,
+    )
+    from openjiuwen.harness.security.core import PermissionEngine
+
+    monkeypatch.setenv("CLAW_BEHAVIOR_SECURITY", "0")
+    stored = {"permissions": {"enabled": True, "package_builtin_rules": False, "tools": {"bash": "ask"}}}
+
+    async def evaluate(channel, profile):
+        token = setup_permission_context(SimpleNamespace(channel_id=channel, metadata={"xiaoyi_permission_profile": profile}))
+        try:
+            await asyncio.sleep(0)
+            engine = PermissionEngine(config=runtime_permission_config(stored))
+            result = await engine.check_permission("bash", {"command": "profile-operation"})
+            return result.permission
+        finally:
+            cleanup_permission_context(token)
+
+    results = await asyncio.gather(evaluate("xiaoyi", "full_access"), evaluate("a2a", "default"),
+                                   evaluate("web", "full_access"), evaluate("xiaoyi", "auto_approve"))
+    assert results == [PermissionLevel.ALLOW, PermissionLevel.ASK, PermissionLevel.ASK, PermissionLevel.ALLOW]
+    assert stored["permissions"]["enabled"] is True
+    assert stored["permissions"]["tools"]["bash"] == "ask"
+
+
+@pytest.mark.asyncio
+async def test_full_access_request_keeps_desktop_security_denials(monkeypatch):
+    from jiuwenswarm.common.behavior_security import runtime_permission_config
+    from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
+        setup_permission_context, cleanup_permission_context,
+    )
+    from openjiuwen.harness.security.core import PermissionEngine
+
+    monkeypatch.setenv("CLAW_BEHAVIOR_SECURITY", "1")
+    monkeypatch.setenv("CLAW_SKILL_TOKEN", "test-token")
+    stored = {"permissions": {"enabled": True, "package_builtin_rules": False,
+                               "tools": {"bash": "ask", "blocked_tool": "deny"}}}
+    token = setup_permission_context(SimpleNamespace(channel_id="xiaoyi", metadata={"xiaoyi_permission_profile": "full_access"}))
+    try:
+        engine = PermissionEngine(config=runtime_permission_config(stored))
+        assert engine.config["enabled"] is True
+        assert (await engine.check_permission("blocked_tool", {})).permission == PermissionLevel.DENY
+        assert (await engine.check_permission("bash", {"command": "profile-operation"})).permission == PermissionLevel.ALLOW
+    finally:
+        cleanup_permission_context(token)
+    assert stored["permissions"]["tools"]["bash"] == "ask"
+
+
 def bridge(enabled=True, decision='allow'):
     events = []
     async def handler(request):

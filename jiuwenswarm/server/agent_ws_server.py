@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 from weakref import WeakValueDictionary
 
-from openjiuwen.core.common.logging import server_logger
+from openjiuwen.core.common.logging import logger as core_logger, server_logger
 
 if TYPE_CHECKING:
     from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
@@ -6990,11 +6990,14 @@ class AgentWebSocketServer:
         """Create a temporary MCP connection from config entry and list tools."""
         from openjiuwen.core.foundation.tool import McpServerConfig
         from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
+        from jiuwenswarm.common.mcp_call_timeout_patch import (
+            DISCOVERY_TIMEOUT, disconnect_mcp_client, resolve_mcp_timeout,
+        )
 
         name = str(entry.get("name", "")).strip()
         transport = str(entry.get("transport", "")).strip().lower()
         if not name or transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
-            logger.warning("[command.mcp] _fetch skipped: name=%r transport=%r", name, transport)
+            core_logger.warning("[command.mcp] _fetch skipped: name=%r transport=%r", name, transport)
             return []
 
         # Build McpServerConfig same as interface_deep._build_mcp_server_config
@@ -7002,7 +7005,7 @@ class AgentWebSocketServer:
         if transport == "stdio":
             command = str(entry.get("command", "")).strip()
             if not command:
-                logger.warning("[command.mcp] _fetch skipped: no command for stdio")
+                core_logger.warning("[command.mcp] _fetch skipped: no command for stdio")
                 return []
             params: dict[str, Any] = {"command": command}
             if isinstance(entry.get("args"), list):
@@ -7016,13 +7019,13 @@ class AgentWebSocketServer:
         else:
             url = str(entry.get("url", "")).strip()
             if not url:
-                logger.warning("[command.mcp] _fetch skipped: no url for sse")
+                core_logger.warning("[command.mcp] _fetch skipped: no url for sse")
                 return []
             from jiuwenswarm.common.mcp_config import mcp_endpoint_blocked_reason
 
             blocked = mcp_endpoint_blocked_reason(url)
             if blocked:
-                logger.warning("[command.mcp] _fetch skipped: %s", blocked)
+                core_logger.warning("[command.mcp] _fetch skipped: %s", blocked)
                 return []
             payload["server_path"] = url
             params = {}
@@ -7031,13 +7034,19 @@ class AgentWebSocketServer:
             if params:
                 payload["params"] = params
 
+        timeout_s = resolve_mcp_timeout(entry.get("timeout_s"), DISCOVERY_TIMEOUT)
+        payload.setdefault("params", {})["timeout_s"] = timeout_s
         cfg = McpServerConfig(**payload)
         client = ToolMgr._create_client(cfg)
+        client._jws_discovery_managed = True
         try:
-            connected = await client.connect()
-            if not connected:
-                return []
-            cards = await client.list_tools()
+            # Keep connect/list/disconnect on the same Task. The deadline also
+            # covers clients used before the adapter's timeout patch is applied.
+            async with asyncio.timeout(timeout_s):
+                connected = await client.connect()
+                if not connected:
+                    raise ConnectionError(f"MCP server {name!r} connection failed")
+                cards = await client.list_tools()
             tools_info = []
             for card in (cards or []):
                 params_schema = card.input_params if hasattr(card, "input_params") else {}
@@ -7052,10 +7061,7 @@ class AgentWebSocketServer:
                 })
             return tools_info
         finally:
-            try:
-                await client.disconnect()
-            except Exception as exc:
-                logger.warning("[command.mcp] _fetch disconnect failed: %s", exc)
+            await disconnect_mcp_client(client)
 
     @staticmethod
     def _normalize_mcp_payload(
@@ -7135,7 +7141,7 @@ class AgentWebSocketServer:
                         raise KeyError(f"MCP server '{name}' not found")
                     masked = self._mask_sensitive_fields(item)
                     # Enrich with tool count
-                    tool_count = 0
+                    tool_count: int | None = 0
                     try:
                         from openjiuwen.core.runner import Runner
                         resource_registry = getattr(Runner.resource_mgr, "_resource_registry", None)
@@ -7156,14 +7162,34 @@ class AgentWebSocketServer:
                                             _seen.add(_n)
                                             tool_count += 1
                     except Exception as exc:
-                        logger.debug("[command.mcp] show tool_count from ToolMgr failed: %s", exc)
+                        core_logger.debug("[command.mcp] show tool_count from ToolMgr failed: %s", exc)
                     # If ToolMgr has no data, try temporary connection
                     if tool_count == 0 and bool(item.get("enabled", True)):
                         try:
                             tools = await self._fetch_mcp_tools_from_config(item)
                             tool_count = len(tools)
                         except Exception as exc:
-                            logger.warning("[command.mcp] show tool_count from temp connection failed: %s", exc)
+                            # Configuration remains useful while a server is
+                            # offline. An unknown count must not look like an
+                            # actual empty tool list.
+                            tool_count = None
+                            if isinstance(exc, TimeoutError):
+                                code = "MCP_TIMEOUT"
+                            elif isinstance(exc, ConnectionError):
+                                code = "MCP_CONNECTION_FAILED"
+                            else:
+                                code = "MCP_INTERNAL"
+                            masked["tool_count_error"] = {
+                                "code": code,
+                                "error": str(exc) or (
+                                    "MCP tool discovery timed out" if code == "MCP_TIMEOUT"
+                                    else "MCP tool discovery failed"
+                                ),
+                            }
+                            core_logger.warning(
+                                "[command.mcp] show tool_count from temp connection failed: name=%r code=%s: %s",
+                                name, code, exc,
+                            )
                     masked["tool_count"] = tool_count
                     resp = AgentResponse(
                         request_id=request.request_id,
@@ -7204,7 +7230,7 @@ class AgentWebSocketServer:
                     if _need_pre_check:
                         check_ok, check_msg = await self._pre_check_mcp_server(server_payload)
                         if not check_ok:
-                            logger.warning("[command.mcp] add pre-check failed: %s", check_msg)
+                            core_logger.warning("[command.mcp] add pre-check failed: %s", check_msg)
                             resp = AgentResponse(
                                 request_id=request.request_id,
                                 channel_id=request.channel_id,
@@ -7217,7 +7243,7 @@ class AgentWebSocketServer:
                             )
                             pre_check_failed = True
                         else:
-                            logger.info("[command.mcp] add pre-check ok: %s", check_msg)
+                            core_logger.info("[command.mcp] add pre-check ok: %s", check_msg)
 
                 if not pre_check_failed:
                     # 对于 update，先读旧配置，判断是否真有变化
@@ -7234,7 +7260,7 @@ class AgentWebSocketServer:
                     if not created and old_item is not None:
                         config_changed = (dict(old_item) != dict(server_payload))
                         if not config_changed:
-                            logger.info(
+                            core_logger.info(
                                 "[command.mcp] add/update skipped reload: '%s' config unchanged", name
                             )
 
@@ -7244,7 +7270,7 @@ class AgentWebSocketServer:
                         except Exception as reload_exc:  # noqa: BLE001
                             applied = False
                             error_message = str(reload_exc)
-                            logger.warning("[command.mcp] reload after add failed: %s", reload_exc)
+                            core_logger.warning("[command.mcp] reload after add failed: %s", reload_exc)
 
                     resp_payload: dict[str, Any] = {
                         "type": "added" if created else "updated",
@@ -7283,7 +7309,7 @@ class AgentWebSocketServer:
                 # 只有 enabled 状态真的改变才需要 reload；无法判断旧状态时保守 reload。
                 config_changed = (old_enabled is None) or (old_enabled != enabled)
                 if not config_changed:
-                    logger.info(
+                    core_logger.info(
                         "[command.mcp] %s skipped reload: '%s' already %s",
                         action, name, "enabled" if enabled else "disabled",
                     )
@@ -7296,7 +7322,7 @@ class AgentWebSocketServer:
                     except Exception as reload_exc:  # noqa: BLE001
                         applied = False
                         error_message = str(reload_exc)
-                        logger.warning("[command.mcp] reload after %s failed: %s", action, reload_exc)
+                        core_logger.warning("[command.mcp] reload after %s failed: %s", action, reload_exc)
 
                 payload = {
                     "type": "enabled" if enabled else "disabled",
@@ -7326,7 +7352,7 @@ class AgentWebSocketServer:
                 except Exception as reload_exc:  # noqa: BLE001
                     applied = False
                     error_message = str(reload_exc)
-                    logger.warning("[command.mcp] reload after remove failed: %s", reload_exc)
+                    core_logger.warning("[command.mcp] reload after remove failed: %s", reload_exc)
                 payload = {
                     "type": "removed",
                     "name": name,
@@ -7351,7 +7377,7 @@ class AgentWebSocketServer:
                 except Exception as reload_exc:  # noqa: BLE001
                     applied = False
                     error_message = str(reload_exc)
-                    logger.warning("[command.mcp] reload after update failed: %s", reload_exc)
+                    core_logger.warning("[command.mcp] reload after update failed: %s", reload_exc)
                 payload = {
                     "type": "updated",
                     "name": normalized["name"],
@@ -7403,15 +7429,12 @@ class AgentWebSocketServer:
                                         "server_name": name,
                                     })
                 except Exception as exc:
-                    logger.debug("[command.mcp] list_tools from ToolMgr failed: %s", exc)
+                    core_logger.debug("[command.mcp] list_tools from ToolMgr failed: %s", exc)
                 # 2) If no tools found, try temporary MCP connection from config
                 if not tools_info:
-                    try:
-                        config_entry = get_mcp_server_config(name)
-                        if config_entry and bool(config_entry.get("enabled", True)):
-                            tools_info = await self._fetch_mcp_tools_from_config(config_entry)
-                    except Exception as exc:
-                        logger.warning("[command.mcp] list_tools from temp connection failed: %s", exc)
+                    config_entry = get_mcp_server_config(name)
+                    if config_entry and bool(config_entry.get("enabled", True)):
+                        tools_info = await self._fetch_mcp_tools_from_config(config_entry)
                 resp = AgentResponse(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -7435,8 +7458,20 @@ class AgentWebSocketServer:
                 ok=False,
                 payload={"error": str(exc), "code": "MCP_BAD_REQUEST"},
             )
+        except TimeoutError:
+            core_logger.exception("[command.mcp] discovery timed out")
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id, ok=False,
+                payload={"error": "MCP tool discovery timed out", "code": "MCP_TIMEOUT"},
+            )
+        except ConnectionError as exc:
+            core_logger.exception("[command.mcp] connection failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id, ok=False,
+                payload={"error": str(exc), "code": "MCP_CONNECTION_FAILED"},
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("[AgentWebSocketServer] command.mcp failed: %s", exc)
+            core_logger.exception("[command.mcp] failed: %s", exc)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

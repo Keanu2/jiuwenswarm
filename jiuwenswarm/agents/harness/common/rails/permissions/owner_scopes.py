@@ -37,6 +37,7 @@ class PermissionContext:
     enable_memory: bool = True
     avatar_principal_name: str = ""
     avatar_mode: bool = False  # 用于判断是否为群聊消息，与 React 模式的 is_group_chat 对应
+    permission_profile: str | None = None
 
     @property
     def scene(self) -> str:
@@ -61,21 +62,29 @@ TOOL_PERMISSION_CONTEXT: contextvars.ContextVar[PermissionContext | None] = cont
 def setup_permission_context(request: Any) -> contextvars.Token | None:
     """从 request.metadata 构造 PermissionContext 并设置 ContextVar。
 
-    metadata 无 avatar_mode 时：
-    - 如果 enable_memory=False，仍需设置上下文（用于禁用记忆）
-    - 否则返回 None（原有行为不受影响）
+    同时绑定小艺/A2A 的当轮档位。无档位、avatar 或记忆约束时清空继承的
+    上下文；结束请求后由 cleanup_permission_context 恢复。
     """
     meta = getattr(request, "metadata", None) or {}
+    from jiuwenswarm.common.permission_profile import normalize_permission_profile
+
+    channel_id = getattr(request, "channel_id", "") or ""
+    profile = (
+        normalize_permission_profile(meta.get("xiaoyi_permission_profile"))
+        if channel_id.strip().lower() in {"xiaoyi", "a2a"} else None
+    )
     avatar_mode = bool(meta.get("avatar_mode", False))
     if not avatar_mode:
-        if meta.get("enable_memory") is False:
+        if meta.get("enable_memory") is False or profile is not None:
             perm_ctx = PermissionContext(
-                channel_id=getattr(request, "channel_id", "") or "",
-                enable_memory=False,
+                channel_id=channel_id,
+                enable_memory=meta.get("enable_memory", True),
                 avatar_mode=False,
+                permission_profile=profile,
             )
             return TOOL_PERMISSION_CONTEXT.set(perm_ctx)
-        return None
+        # Clear an inherited request profile in a newly dispatched task too.
+        return TOOL_PERMISSION_CONTEXT.set(None)
     perm_ctx = PermissionContext(
         channel_id=getattr(request, "channel_id", "") or "",
         group_digital_avatar=bool(meta.get("group_digital_avatar")),
@@ -84,6 +93,7 @@ def setup_permission_context(request: Any) -> contextvars.Token | None:
         enable_memory=meta.get("enable_memory", True),
         avatar_principal_name=str(meta.get("avatar_principal_name", "")),
         avatar_mode=avatar_mode,
+        permission_profile=profile,
     )
     return TOOL_PERMISSION_CONTEXT.set(perm_ctx)
 
