@@ -52,7 +52,7 @@ _COMPACT_POWERSHELL_DESCRIPTION = {
 }
 
 
-def _pre_execute_shell_command(command: str) -> str | None:
+def _pre_execute_shell_command(command: str, shell_type: str) -> str | None:
     """Return an error string when *command* must not run; else None."""
     from openjiuwen.core.sys_operation.shell_process_registry import (
         resolve_shell_session_id,
@@ -64,7 +64,7 @@ def _pre_execute_shell_command(command: str) -> str | None:
         _enforce_tui_spawn_budget,
     )
 
-    blocked = _check_command_safety(command)
+    blocked = _check_command_safety(command, shell_type)
     if blocked:
         return f"[ERROR]: command rejected for safety ({blocked})."
     worktree_block = _check_worktree_path_safety(command)
@@ -164,7 +164,7 @@ def _wrap_invoke(
             mismatch = _shell_mismatch(tool_name, parsed.command)
             if mismatch:
                 return ToolOutput(success=False, error=mismatch)
-            err = _pre_execute_shell_command(parsed.command)
+            err = _pre_execute_shell_command(parsed.command, tool_name)
             if err:
                 return ToolOutput(success=False, error=err)
         routed_inputs = dict(inputs)
@@ -190,7 +190,7 @@ def _wrap_stream(
             if mismatch:
                 yield ToolOutput(success=False, error=mismatch)
                 return
-            err = _pre_execute_shell_command(parsed.command)
+            err = _pre_execute_shell_command(parsed.command, tool_name)
             if err:
                 yield ToolOutput(success=False, error=err)
                 return

@@ -12,6 +12,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Literal, Sequence
@@ -275,10 +276,190 @@ def _clip_text(value: str, max_chars: int) -> str:
     return f"{value[:max_chars]}\n...[truncated]"
 
 
-def _check_command_safety(command: str) -> str | None:
+# 防自杀护栏判定
+# Scope: availability guardrail that prevents the agent from killing the
+# jiuwenswarm runtime itself. Generic command-risk policy is owned by
+# agent-core PermissionEngine; the rules below only cover self-kill forms.
+#
+# Two rule families, evaluated per shell segment (pipe/&&/||/;/newline
+# split, quote-aware — see ``_split_shell_segments``):
+#   Rule 1: kill primitive + self-identity literal (jiuwenswarm/jiuwenclaw,
+#           sys.executable path / onedir exe basename).
+#   Rule 2: name/wildcard-based kill of the host python interpreter (the
+#           runtime itself IS a python process). PID-precise kills are
+#           exempted — ``Stop-Process -Id <n>``, ``kill <n>``,
+#           ``taskkill /PID <n>`` — because members legitimately stop
+#           processes they spawned (they know the PID), while there is no
+#           legitimate agent scenario for name-killing "python*".
+# Known residuals (documented, not fixable by text matching): variable
+# indirection (``P=jiuwenswarm; pkill -f $P``), enumerate-then-PID-kill
+# (``Get-Process python | % { Stop-Process -Id $_.Id }``), encoded
+# execution. Deny-by-default allowlists (PermissionEngine rules) are the
+# real gate for those.
+
+_KILL_FAMILY_BASES = frozenset({
+    "pkill", "killall", "kill",  # POSIX (kill is also a PowerShell alias)
+    "stop-process", "spps",  # PowerShell
+    "taskkill",  # cmd
+})
+_PS_PROCESS_ENUM_BASES = frozenset({"get-process", "gps"})
+
+# Host interpreter image names: python/python3/python3.x/pythonw(.exe),
+# optionally wildcarded (python*, *python*). Deliberately NOT a substring
+# match, so "my-python-server" or "pythonserver" do not match.
+_HOST_INTERPRETER_NAME_RE = re.compile(
+    r"^\*?python[\d.]*w?(?:\.exe)?\*?$", re.IGNORECASE
+)
+
+_KILL_PID_FLAG_RE = re.compile(r"^(?:-+id|/pid)$", re.IGNORECASE)
+_JOB_SPEC_RE = re.compile(r"%\d+$")
+
+# Line-continuation sequences per shell: bash/sh join "\<LF>", powershell
+# joins "`<LF>", cmd joins "^<LF>". Quote-context is intentionally not
+# tracked here: a literal continuation sequence inside quotes is an
+# accepted false-positive trade-off for a guardrail (contrived in practice).
+_CONTINUATION_RES = {
+    "bash": re.compile(r"\\\r?\n"),
+    "sh": re.compile(r"\\\r?\n"),
+    "powershell": re.compile(r"`\r?\n"),
+    "cmd": re.compile(r"\^\r?\n"),
+}
+
+
+def _normalize_continuations(command: str, shell_type: str) -> str:
+    """Join shell line-continuations so checks see what the shell executes."""
+    pattern = _CONTINUATION_RES.get((shell_type or "").strip().lower())
+    return pattern.sub("", command) if pattern is not None else command
+
+
+def _self_identity_literals() -> tuple[str, ...]:
+    """Literals identifying the runtime itself: product names + own exe."""
+    literals = {"jiuwenswarm", "jiuwenclaw"}
+    exe = (sys.executable or "").strip().lower()
+    if exe:
+        literals.add(exe)
+        base = os.path.basename(exe)
+        if base.endswith(".exe"):
+            base = base[:-4]
+        # "python*" basenames are covered by Rule 2 instead; only add a
+        # distinctive exe name (e.g. the onedir "jiuwenswarm" binary).
+        if base and not base.startswith("python"):
+            literals.add(base)
+    return tuple(sorted(literals))
+
+
+def _segment_tokens(segment: str) -> list[str] | None:
+    """shlex tokens of one segment; None when the segment fails to parse."""
+    try:
+        return shlex.split(segment, posix=False)
+    except ValueError:
+        return None
+
+
+def _segment_has_interpreter_name(tokens: list[str]) -> bool:
+    for token in tokens[1:]:
+        if _HOST_INTERPRETER_NAME_RE.match(_strip_matching_quotes(token)):
+            return True
+    return False
+
+
+def _segment_enumerates_interpreter(base: str, tokens: list[str]) -> bool:
+    """Get-Process python* style enumeration of the host interpreter."""
+    return base in _PS_PROCESS_ENUM_BASES and _segment_has_interpreter_name(tokens)
+
+
+def _kill_segment_is_pid_precise(base: str, tokens: list[str]) -> bool:
+    """Whether a kill-family segment targets PIDs (precise) vs names."""
+    if base in {"pkill", "killall"}:
+        return False  # always name/pattern-based
+    if base == "taskkill":
+        return any(t.lower() == "/pid" for t in tokens)
+    # kill / stop-process / spps: explicit -Id/-PID flag (value may be a
+    # variable — intentionally treated as precise, see residual note), or
+    # every positional arg numeric / a job spec (bash ``kill 1234`` /
+    # ``kill %1``).
+    if any(_KILL_PID_FLAG_RE.match(t) for t in tokens):
+        return True
+    positionals = [t for t in tokens[1:] if not t.startswith("-")]
+    return bool(positionals) and all(
+        _strip_matching_quotes(t).lstrip("+-").isdigit() or _JOB_SPEC_RE.match(t)
+        for t in positionals
+    )
+
+
+def _check_command_safety(command: str, shell_type: str = "") -> str | None:
+    """Availability guardrail: block commands that would kill the Swarm runtime.
+
+    Two rule families are evaluated per shell segment (see the comment above
+    ``_KILL_FAMILY_BASES``). ``shell_type`` selects the line-continuation
+    form to join before checking (bash ``\\``, powershell `` ` ``, cmd
+    ``^``); empty/unknown leaves the text as-is (legacy single-argument
+    behavior). Both production call sites know the shell: ``_execute_command``
+    enforces an explicit shell_type, and ``bash_tool_safety`` derives it from
+    the hooked tool.
+    """
+    if not command:
+        return None
+    text = _normalize_continuations(command, shell_type)
+    # Legacy whole-text scan on the normalized text: keeps the pre-existing
+    # patterns (incl. the cross-segment `| xargs kill` rule) as a floor that
+    # segment parsing must never fall below.
     for pattern, message in _DANGEROUS_COMMAND_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(text):
             return message
+    segments = _split_shell_segments(text)
+    parsed: list[tuple[str, str, list[str] | None]] = []
+    enum_interpreter = False
+    for segment in segments:
+        base = _segment_base_command(segment)
+        tokens = _segment_tokens(segment) if base else None
+        parsed.append((segment, base, tokens))
+        if tokens and _segment_enumerates_interpreter(base, tokens):
+            enum_interpreter = True
+    self_literals = _self_identity_literals()
+    for segment, base, tokens in parsed:
+        if tokens is None:
+            # Unparseable segment (unbalanced quotes etc.): fall back to the
+            # legacy regexes on this segment only.
+            for pattern, message in _DANGEROUS_COMMAND_PATTERNS:
+                if pattern.search(segment):
+                    return message
+            continue
+        if base == "wmic":
+            lowered_tokens = [t.lower() for t in tokens]
+            if (
+                    "process" in lowered_tokens
+                    and "delete" in lowered_tokens
+                    and "processid" not in segment.lower()
+                    and _segment_has_interpreter_name(tokens)
+            ):
+                return (
+                    "blocked pattern: wmic name-based kill of host python "
+                    "interpreter (use PID-precise kill for own spawned processes)"
+                )
+            continue
+        if base not in _KILL_FAMILY_BASES:
+            continue
+        lowered_segment = segment.lower()
+        # Rule 1: kill primitive + self-identity literal.
+        for literal in self_literals:
+            if literal and literal in lowered_segment:
+                return (
+                    f"blocked pattern: {base} targeting jiuwenswarm runtime "
+                    "(self-kill guard)"
+                )
+        if _kill_segment_is_pid_precise(base, tokens):
+            # PID-precise kills are exempt: members legitimately stop
+            # processes they spawned (they know the PID).
+            continue
+        # Rule 2: name/wildcard kill of the host python interpreter — the
+        # runtime itself IS a python process, so name-killing "python*" can
+        # hit the host. There is no legitimate agent scenario for it.
+        if _segment_has_interpreter_name(tokens) or enum_interpreter:
+            return (
+                f"blocked pattern: {base} name/wildcard kill of host python "
+                "interpreter (use PID-precise kill for own spawned processes)"
+            )
     return None
 
 
@@ -903,7 +1084,7 @@ async def _execute_command(
     if operation is None:
         return "[ERROR]: mcp_exec_command requires the agent's SysOperation binding; command was not executed."
 
-    blocked_reason = _check_command_safety(command)
+    blocked_reason = _check_command_safety(command, requested_shell_type)
     if blocked_reason:
         return f"[ERROR]: command rejected for safety ({blocked_reason})."
 
