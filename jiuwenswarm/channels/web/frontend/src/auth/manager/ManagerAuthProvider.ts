@@ -87,6 +87,7 @@ export const managerAuthProvider: EnterpriseAuthProvider = {
       try {
         await fetch(resolveApiUrl('/idp/v1/auth/logout'), {
           method: 'POST',
+          credentials: 'include',
           headers: {
             ...(getManagerAccessToken()
               ? { Authorization: `Bearer ${getManagerAccessToken()}` }

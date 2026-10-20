@@ -1,3 +1,5 @@
+import { resolveApiUrl } from '../../utils/env';
+
 const ACCESS_KEY = 'openjiuwen_access_token';
 const REFRESH_KEY = 'openjiuwen_refresh_token';
 
@@ -49,6 +51,9 @@ export function clearManagerTokens(): void {
     localStorage.removeItem(ACCESS_KEY);
     localStorage.removeItem(REFRESH_KEY);
   }
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.removeItem('jiuwenclaw_active_cluster');
+  }
   syncAccessCookie(null);
 }
 
@@ -77,7 +82,8 @@ function withCurrentAccessToken(init: RequestInit, accessToken: string | null): 
   const headers = new Headers(init.headers);
   if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
   else headers.delete('Authorization');
-  return { ...init, headers };
+  syncAccessCookie(accessToken);
+  return { ...init, headers, credentials: 'include' };
 }
 
 function isTokenBundle(value: unknown): value is TokenBundle {
@@ -96,8 +102,9 @@ async function performRefresh(): Promise<boolean> {
   const accessBeforeRefresh = getManagerAccessToken();
   if (!refreshToken) return false;
   try {
-    const response = await fetch('/idp/v1/auth/refresh', {
+    const response = await fetch(resolveApiUrl('/idp/v1/auth/refresh'), {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
