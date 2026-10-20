@@ -1,5 +1,4 @@
 import type { MediaItem } from '../types';
-import { managerAuthenticatedFetch } from './managerSession';
 import { buildRuntimeIdentityHeaders, getRuntimeScope } from './runtimeScope';
 
 type FileRecord = { path: string; filename: string; mime_type: string; size_bytes: number };
@@ -32,7 +31,7 @@ export async function persistEnterpriseAttachments(
   try {
     for (const file of prepared) {
       assertScope();
-      const response = await managerAuthenticatedFetch('/file-api/upload-obs', {
+      const response = await fetch('/file-api/upload-obs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...buildRuntimeIdentityHeaders(crypto.randomUUID(), {}, scope) },
         body: JSON.stringify(file),
@@ -75,7 +74,7 @@ export async function persistEnterpriseAttachments(
     // Captured headers keep cleanup scoped even if the UI has since switched.
     const cleanup = await Promise.allSettled(
       uploadedUrls.map(async (url) => {
-        const response = await managerAuthenticatedFetch('/file-api/upload-obs', {
+        const response = await fetch('/file-api/upload-obs', {
           method: 'DELETE',
           signal: AbortSignal.timeout(10_000),
           headers: {

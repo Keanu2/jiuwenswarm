@@ -13,17 +13,9 @@ from jiuwenswarm.gateway.channel_manager.web.enterprise_files import (
 
 
 @pytest.mark.asyncio
-async def test_upload_uses_verified_scope_and_sanitized_name(monkeypatch):
+async def test_upload_uses_routing_scope_without_identity_service(monkeypatch):
     app = FastAPI()
-
-    @app.middleware("http")
-    async def verified(request, call_next):
-        request.state.enterprise_identity = {
-            "group_id": "g",
-            "bot_id": "b",
-            "user_id": "u",
-        }
-        return await call_next(request)
+    monkeypatch.delenv("GATEWAY_IDENTITY_HTTP_URL", raising=False)
 
     captured = []
 
@@ -41,9 +33,9 @@ async def test_upload_uses_verified_scope_and_sanitized_name(monkeypatch):
         response = await client.post(
             "/file-api/upload-obs",
             headers={
-                "X-Group-Id": "untrusted",
-                "X-Bot-Id": "untrusted",
-                "X-User-Id": "untrusted",
+                "X-Group-Id": "g",
+                "X-Bot-Id": "b",
+                "X-User-Id": "u",
             },
             json={
                 "filename": "../中文.txt",
@@ -59,13 +51,13 @@ async def test_upload_uses_verified_scope_and_sanitized_name(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unwired_upload_fails_closed():
+async def test_upload_requires_routing_identity():
     app = FastAPI()
     register_enterprise_file_routes(app, SimpleNamespace())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://gateway"
     ) as client:
-        assert (await client.post("/file-api/upload-obs", json={})).status_code == 503
+        assert (await client.post("/file-api/upload-obs", json={})).status_code == 400
 
 
 @pytest.mark.parametrize(
@@ -90,19 +82,10 @@ def test_import_rejects_unconfigured_or_cross_scope_urls(url):
     ["own", "user", "group", "bot", "bucket", "origin", "download", "traversal"],
 )
 @pytest.mark.asyncio
-async def test_upload_cleanup_is_restricted_to_verified_temporary_scope(
+async def test_upload_cleanup_is_restricted_to_routed_temporary_scope(
     monkeypatch, scope
 ):
     app = FastAPI()
-
-    @app.middleware("http")
-    async def identity(request, call_next):
-        request.state.enterprise_identity = {
-            "group_id": "g",
-            "bot_id": "b",
-            "user_id": "u",
-        }
-        return await call_next(request)
 
     sdk = Mock()
     store = AttachmentStore(sdk, "bucket", "http://obs")
@@ -129,7 +112,8 @@ async def test_upload_cleanup_is_restricted_to_verified_temporary_scope(
         transport=httpx.ASGITransport(app), base_url="http://gateway"
     ) as client:
         response = await client.request(
-            "DELETE", "/file-api/upload-obs", json={"url": url}
+            "DELETE", "/file-api/upload-obs", json={"url": url},
+            headers={"X-Group-Id": "g", "X-Bot-Id": "b", "X-User-Id": "u"},
         )
     assert response.status_code == (200 if scope == "own" else 400)
     if scope == "own":
@@ -139,7 +123,7 @@ async def test_upload_cleanup_is_restricted_to_verified_temporary_scope(
 
 
 @pytest.mark.asyncio
-async def test_unwired_cleanup_fails_closed():
+async def test_cleanup_requires_routing_identity():
     app = FastAPI()
     register_enterprise_file_routes(app, SimpleNamespace())
     async with httpx.AsyncClient(
@@ -147,4 +131,4 @@ async def test_unwired_cleanup_fails_closed():
     ) as client:
         assert (
             await client.request("DELETE", "/file-api/upload-obs", json={})
-        ).status_code == 503
+        ).status_code == 400

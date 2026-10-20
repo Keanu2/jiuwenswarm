@@ -16,7 +16,8 @@ import { buildRuntimeIdentityHeaders } from './runtimeScope';
 import { createSessionEventGate } from './sessionEventGate';
 import { PauseBufferHook, PAUSABLE_STREAM_EVENTS } from './webClient';
 
-import { hasManagerSessionCredentials, managerAccessToken, managerAuthenticatedFetch } from './managerSession';
+import { hasManagerSessionCredentials, getManagerAccessToken, managerAuthenticatedFetch } from '../auth/manager/authSession';
+import { isLoginAuthSimulateEnabled } from '../auth/config';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -1051,14 +1052,14 @@ export class WebHttpClient {
   }
 
   private authenticatedFetch(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
-    if (isEnterprise() && hasManagerSessionCredentials()) {
+    if (isEnterprise() && !isLoginAuthSimulateEnabled() && hasManagerSessionCredentials()) {
       // 保留外部透传的 Authorization；只有 Manager 自己的 token 才走刷新包装器。
       // 该分支仅在部署通过 REQUEST_EXT_FIELDS 启用 Authorization 透传时触达
       // （宿主 token 经 ext.Authorization 进入请求头）；出厂空注册表下走不到，
       // 属部署契约休眠路径，勿当死代码删除。
       const headers = new Headers(init.headers);
       const authorization = headers.get('Authorization');
-      const accessToken = managerAccessToken();
+      const accessToken = getManagerAccessToken();
       if (authorization && authorization !== (accessToken ? `Bearer ${accessToken}` : null)) {
         return fetch(input, init);
       }

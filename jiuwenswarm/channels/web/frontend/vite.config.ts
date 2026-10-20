@@ -1441,6 +1441,7 @@ export default defineConfig({
     dedupe: ['react', 'react-dom'],
     alias: {
       '@': path.resolve(__dirname, './src'),
+      'virtual:login-auth-simulate-provider': path.resolve(__dirname, './src/auth/simulate/available.ts'),
       'lucide-react': path.resolve(__dirname, './node_modules/lucide-react'),
       react: path.resolve(__dirname, './node_modules/react'),
       'react-dom': path.resolve(__dirname, './node_modules/react-dom'),

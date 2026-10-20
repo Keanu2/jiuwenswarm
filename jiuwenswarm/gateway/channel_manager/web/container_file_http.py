@@ -468,6 +468,7 @@ def _decode_verified_chunk(
 
 async def serve_verified_download(
     request: Request, channel: Any, uid: str, token: str, token_payload: dict[str, Any],
+    *, routing_identity: dict[str, str] | None = None,
 ) -> Response:
     """Stream the existing signed, sealed asset over any AgentServer transport."""
     from jiuwenswarm.common.schema.message import ReqMethod
@@ -494,7 +495,7 @@ async def serve_verified_download(
             agent_client=agent_client,
             req_method=ReqMethod.FILE_DOWNLOAD_VERIFIED_CHUNK,
             params={"token": token, "offset": offset, "limit": limit},
-            metadata=apply_routing_metadata(None, getattr(request.state, "enterprise_identity", None)),
+            metadata=apply_routing_metadata(None, routing_identity),
             session_id=session_id_value,
             user_id=uid,
             channel_id=channel.channel_id,

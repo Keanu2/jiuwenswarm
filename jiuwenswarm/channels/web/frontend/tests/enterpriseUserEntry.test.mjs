@@ -21,14 +21,16 @@ await build({
   jsx: 'automatic',
   external: ['react', 'react/jsx-runtime', 'react-i18next'],
   define: { 'import.meta.env': '{}' },
+  alias: { 'virtual:login-auth-simulate-provider': './src/auth/simulate/available.ts' },
   outfile: 'node_modules/.cache/enterprise/userEntry.mjs',
 });
 const { EnterpriseEntry, useEnterpriseContext } = await import('../node_modules/.cache/enterprise/userEntry.mjs');
 const context = { user_id: 'u', group_id: 'g', bot_id: 'b', jiuwenclaw_id: 'cluster' };
 
-async function render(backend, run, enterprise = true) {
+async function render(backend, run, enterprise = true, simulate = false) {
   const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost/chat/new?user_id=forged' });
   dom.window.__JIUWENSWARM_EDITION__ = enterprise ? 'enterprise' : 'personal';
+  dom.window.__JIUWEN_LOGIN_AUTH_SIMULATE__ = String(simulate);
   Object.assign(globalThis, {
     window: dom.window,
     document: dom.window.document,
@@ -90,7 +92,7 @@ test('Identity outage does not turn URL identity into a logged-in user', async (
     () => {
       assert.equal(document.querySelector('[data-testid="probe"]'), null);
       assert.ok(document.querySelector('[data-testid="enterprise-entry-retry"]'));
-      assert.equal(document.querySelector('[data-testid="enterprise-entry-login"]').getAttribute('href'), '/auth');
+      assert.ok(document.querySelector('[data-testid="enterprise-entry-login"]'));
     },
   );
 });
@@ -115,5 +117,18 @@ test('personal edition renders without Identity or Manager calls', async () => {
       assert.equal(calls.length, 0);
     },
     false,
+  );
+});
+
+test('dev-stable simulated enterprise login needs neither Identity nor Manager', async () => {
+  await render(
+    () => { throw new Error('unexpected authentication dependency'); },
+    (calls) => {
+      const value = JSON.parse(document.querySelector('[data-testid="probe"]').textContent);
+      assert.equal(value.selected.user_id, 'forged');
+      assert.equal(calls.length, 0);
+    },
+    true,
+    true,
   );
 });

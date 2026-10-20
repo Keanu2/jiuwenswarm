@@ -1,29 +1,19 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { isEnterprise } from './edition';
+import { isLoginAuthSimulateEnabled } from './auth/config';
+import { resolveEnterpriseAuthProvider } from './auth/providerRegistry';
+import { EnterpriseAuthError, type EnterpriseAuthProvider } from './auth/types';
 import {
   agentContextKey,
   EnterpriseContext,
   type EnterpriseAgentContext,
   type EnterpriseContextSnapshot,
   type EnterpriseContextValue,
-  type EnterpriseUser,
 } from './services/enterpriseContext';
 import { parseRuntimeScope, setRuntimeScope } from './services/runtimeScope';
-import { logoutManagerSession, managerAuthenticatedFetch, managerLoginPath } from './services/managerSession';
 
 const CLUSTER_KEY = 'jiuwenclaw_active_cluster';
-
-type ManagerBody<T> = { code?: number; message?: string; data?: T };
-
-async function readManager<T>(url: string, init: RequestInit = {}): Promise<ManagerBody<T>> {
-  const response = await managerAuthenticatedFetch(url, init);
-  const body = (await response.json().catch(() => ({}))) as ManagerBody<T> & { detail?: string };
-  if (!response.ok || (body.code != null && body.code !== 200)) {
-    throw new Error(body.message || body.detail || `HTTP ${response.status}`);
-  }
-  return body;
-}
 
 function normalizeContext(raw: Partial<EnterpriseAgentContext> | null | undefined): EnterpriseAgentContext | null {
   const botId = String(raw?.bot_id || '').trim();
@@ -76,20 +66,21 @@ function applyScope(selected: EnterpriseAgentContext): void {
   });
 }
 
-async function ensureActiveCluster(jiuwenclawId: string): Promise<void> {
+async function ensureActiveCluster(provider: EnterpriseAuthProvider, jiuwenclawId: string): Promise<void> {
   const next = jiuwenclawId.trim();
-  if (!next) return;
-  await readManager('/manager-api/v1/user-console/active-cluster', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jiuwenclaw_id: next }),
-  });
+  if (!next || !provider.setActiveCluster) return;
+  await provider.setActiveCluster(next);
   sessionStorage.setItem(CLUSTER_KEY, next);
 }
 
 export function EnterpriseEntry({ children }: { children: ReactNode }) {
   const { t } = useTranslation();
   const enterprise = isEnterprise();
+  const simulateLogin = enterprise && isLoginAuthSimulateEnabled();
+  const provider = useMemo(
+    () => enterprise ? resolveEnterpriseAuthProvider(simulateLogin) : null,
+    [enterprise, simulateLogin],
+  );
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>(enterprise ? 'loading' : 'ready');
   const [error, setError] = useState('');
   const [context, setContext] = useState<EnterpriseContextSnapshot | null>(null);
@@ -98,15 +89,19 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
   const [managerAccess, setManagerAccess] = useState(false);
 
   const logout = useCallback(() => {
-    void logoutManagerSession();
-  }, []);
+    if (provider) void provider.logout();
+  }, [provider]);
 
   const switchToManager = useCallback(() => {
     window.location.href = '/manager';
   }, []);
 
   useEffect(() => {
-    if (!enterprise) return;
+    if (!enterprise || !provider) return;
+    if (!provider.isAuthenticated()) {
+      provider.redirectToLogin();
+      return;
+    }
     let cancelled = false;
     const bootstrap = async () => {
       try {
@@ -116,25 +111,18 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
           sessionStorage.getItem(CLUSTER_KEY) ||
           '';
         const debug = new URLSearchParams(window.location.search).get('debug_context') === '1';
-        // Identity returns UserOut directly; Manager uses a code/data envelope.
-        const meResponse = await managerAuthenticatedFetch('/idp/v1/auth/me');
-        if (!meResponse.ok) throw new Error(`Identity HTTP ${meResponse.status}`);
-        const user = (await meResponse.json()) as EnterpriseUser;
+        const user = await provider.getCurrentUser();
         if (!user.user_id) throw new Error(t('enterpriseEntry.invalidIdentity'));
         try {
-          const access = await readManager<{ manager_access?: boolean; is_platform_admin?: boolean }>(
-            '/manager-api/v1/authz/me',
-          );
+          const canManage = provider.getManagerAccess ? await provider.getManagerAccess() : false;
           if (!cancelled) {
-            setManagerAccess(Boolean(access.data?.manager_access || access.data?.is_platform_admin));
+            setManagerAccess(canManage);
           }
         } catch {
           if (!cancelled) setManagerAccess(false);
         }
-        const listed = await readManager<{ contexts?: Partial<EnterpriseAgentContext>[] }>(
-          '/manager-api/v1/user-console/agent-contexts',
-        );
-        const contexts = (listed.data?.contexts ?? [])
+        const listed = await provider.listAgentContexts();
+        const contexts = listed
           .map((item) => normalizeContext(item))
           .filter((item): item is EnterpriseAgentContext => item !== null);
         if (cancelled) return;
@@ -155,7 +143,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
           });
         }
         if (!selected) throw new Error(t('enterpriseEntry.noContext'));
-        await ensureActiveCluster(selected.jiuwenclaw_id);
+        await ensureActiveCluster(provider, selected.jiuwenclaw_id);
         if (cancelled) return;
         applyScope(selected);
         window.history.replaceState(
@@ -167,6 +155,10 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
         setPhase('ready');
       } catch (bootstrapError) {
         if (cancelled) return;
+        if (bootstrapError instanceof EnterpriseAuthError && bootstrapError.status === 401) {
+          provider.redirectToLogin();
+          return;
+        }
         setError(bootstrapError instanceof Error ? bootstrapError.message : t('enterpriseEntry.loadFailed'));
         setPhase('error');
       }
@@ -175,10 +167,10 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [enterprise, t]);
+  }, [enterprise, provider, t]);
 
   const contextValue = useMemo<EnterpriseContextValue | null>(() => {
-    if (!context) return null;
+    if (!context || !provider) return null;
     return {
       ...context,
       managerAccess,
@@ -190,7 +182,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
         if (!selected || agentContextKey(selected) === agentContextKey(context.selected)) return;
         setContextSwitching(true);
         setContextError('');
-        void ensureActiveCluster(selected.jiuwenclaw_id)
+        void ensureActiveCluster(provider, selected.jiuwenclaw_id)
           .then(() => {
             window.location.replace(contextUrl(selected, false));
           })
@@ -221,7 +213,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
           agent_name: botId,
           group_name: groupId,
         };
-        void ensureActiveCluster(jiuwenclawId)
+        void ensureActiveCluster(provider, jiuwenclawId)
           .then(() => {
             window.location.replace(contextUrl(selected, true));
           })
@@ -233,7 +225,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
       onSwitchToManager: switchToManager,
       onLogout: logout,
     };
-  }, [context, contextError, contextSwitching, logout, managerAccess, switchToManager, t]);
+  }, [context, contextError, contextSwitching, logout, managerAccess, provider, switchToManager, t]);
 
   if (!enterprise) return <>{children}</>;
   if (phase === 'ready' && contextValue) {
@@ -262,9 +254,9 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
             <button data-testid="enterprise-entry-retry" onClick={() => window.location.reload()}>
               {t('enterpriseEntry.retry')}
             </button>
-            <a data-testid="enterprise-entry-login" href={managerLoginPath()}>
+            <button data-testid="enterprise-entry-login" onClick={() => provider?.redirectToLogin()}>
               {t('enterpriseEntry.login')}
-            </a>
+            </button>
           </>
         )}
       </div>

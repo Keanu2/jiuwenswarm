@@ -10,6 +10,8 @@ interface ImportMetaEnv {
   readonly VITE_GATEWAY_HTTP_BASE?: string;
   readonly VITE_WEB_HTTP_BASE?: string;
   readonly VITE_JIUWENSWARM_EDITION?: string;
+  readonly VITE_LOGIN_AUTH_SIMULATE?: string;
+  readonly VITE_API_PREFIX?: string;
 }
 
 interface ImportMeta {
@@ -26,6 +28,8 @@ type DesktopBlobSaveStartResult = DesktopSaveResult & {
 };
 
 interface Window {
+  __JIUWEN_LOGIN_AUTH_SIMULATE__?: string;
+  __JIUWEN_LOGIN_ENTRY_URL__?: string;
   __JIUWEN_WEB_TRANSPORT__?: string;
   __JIUWENSWARM_EDITION__?: string;
   /** Set by desktop_app.py after the webview page loads. */
@@ -65,4 +69,8 @@ interface Window {
   };
   /** Durable ingest hook invoked by desktop_app.py run_js on native file drops. */
   __JIUWEN_INGEST_LOCAL_FILES__?: (detail: unknown) => void;
+}
+
+declare module 'virtual:login-auth-simulate-provider' {
+  export const simulatedAuthProvider: import('./auth/types').EnterpriseAuthProvider | null;
 }
