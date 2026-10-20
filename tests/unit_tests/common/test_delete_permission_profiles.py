@@ -44,14 +44,12 @@ async def test_ordinary_deletion_profile_matrix(product_config, cloud_enabled, e
         tool, {"command": command},
     )
     expected = "ask" if enabled else "allow"
-    if cloud_enabled and not enabled:
-        # Full-access command ALLOW still needs an applicable tool ALLOW.
-        expected = {
-            "bash": "allow", "mcp_exec_command": "allow", "create_terminal": "ask",
-            "powershell": "undetermined", "core.powershell": "undetermined",
-        }[tool]
     assert result.permission.value == expected, result.matched_rule
-    assert "shell_delete_files" in result.matched_rule
+    if enabled:
+        assert "shell_delete_files" in result.matched_rule
+    else:
+        assert result.matched_rule is None
+        assert result.reason == "Permission system is disabled"
 
 
 @pytest.mark.asyncio
@@ -68,13 +66,16 @@ async def test_ordinary_deletion_profile_matrix(product_config, cloud_enabled, e
     "del /s /q C:\\*", "erase/s/q C:\\*.*",
     "rd/s/q C:\\", "rmdir/s/q C:\\", "rd/q/s C:\\",
 ])
-async def test_root_deletion_still_asks(product_config, enabled, tool, command):
+async def test_root_deletion_respects_permission_mode(product_config, enabled, tool, command):
     product_config["permissions"]["enabled"] = enabled
     result = await PermissionEngine(runtime_permission_config(product_config)).check_permission(
         tool, {"command": command},
     )
-    assert result.permission.value == "ask", result.matched_rule
-    assert "builtin" in result.matched_rule
+    assert result.permission.value == ("ask" if enabled else "allow"), result.matched_rule
+    if enabled:
+        assert "builtin" in result.matched_rule
+    else:
+        assert result.matched_rule is None
 
 
 @pytest.mark.asyncio
@@ -90,8 +91,9 @@ async def test_delete_rule_does_not_match_longer_command_names(product_config, c
 
 
 @pytest.mark.asyncio
-async def test_full_access_does_not_override_path_deny(product_config, tmp_path):
-    product_config["permissions"]["enabled"] = False
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_ordinary_path_deny_respects_permission_mode(product_config, tmp_path, enabled):
+    product_config["permissions"]["enabled"] = enabled
     product_config["permissions"]["file_guard"] = {
         "enabled": True, "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
         "paths": [{"path": tmp_path.as_posix(), "match": "prefix", "write": "deny"}],
@@ -100,20 +102,21 @@ async def test_full_access_does_not_override_path_deny(product_config, tmp_path)
     result = await PermissionEngine(runtime_permission_config(product_config), workspace_root=tmp_path).check_permission(
         "powershell", {"command": f'Remove-Item "{target}"'},
     )
-    assert result.permission.value == "deny", result.matched_rule
+    assert result.permission.value == ("deny" if enabled else "allow"), result.matched_rule
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["ask", "deny"])
-async def test_full_access_delete_does_not_allow_other_compound_operations(product_config, action):
-    product_config["permissions"]["enabled"] = False
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_compound_operation_rules_respect_permission_mode(product_config, action, enabled):
+    product_config["permissions"]["enabled"] = enabled
     product_config["permissions"]["rules"].append({
         "tools": ["shell"], "pattern": "other-command *", "action": action,
     })
     result = await PermissionEngine(runtime_permission_config(product_config)).check_permission(
         "powershell", {"command": "rm a.txt; other-command x"},
     )
-    assert result.permission.value == action, result.matched_rule
+    assert result.permission.value == (action if enabled else "allow"), result.matched_rule
 
 
 def test_resolving_rules_preserves_input_and_other_rules():
@@ -149,12 +152,11 @@ async def test_existing_rail_snapshot_and_reload_follow_profile(product_config, 
         original = deepcopy(product_config)
         JiuWenSwarmDeepAdapter._update_permission_rail(adapter, product_config)
         expected = "ask" if enabled else "allow"
-        if cloud_enabled and not enabled:
-            expected = "undetermined"  # The shipped template has no powershell tool ALLOW.
         for cfg in (rail._engine.config, rail._host.get_permissions_snapshot()):
             engine = PermissionEngine(cfg)
+            assert engine.enabled is enabled
             result = await engine.check_permission("powershell", {"command": "Remove-Item ./a.txt"})
             assert result.permission.value == expected, result.matched_rule
             root = await engine.check_permission("powershell", {"command": "rm -rf C:"})
-            assert root.permission.value == "ask", root.matched_rule
+            assert root.permission.value == expected, root.matched_rule
         assert product_config == original

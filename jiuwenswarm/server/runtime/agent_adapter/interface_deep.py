@@ -5767,7 +5767,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        from jiuwenswarm.common.behavior_security import runtime_permission_config
+        from jiuwenswarm.common.behavior_security import desktop_security_active, runtime_permission_config
 
         config_base = config_base or {}
         behavior_rail = getattr(self, "_cspl_sentinel_rail", None)
@@ -5778,7 +5778,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
-        elif permission_config.get("enabled", False):
+        elif permission_config.get("enabled", False) or desktop_security_active():
             self._permission_rail = build_permission_rail(
                 config=config_base,
                 llm=self._model,
