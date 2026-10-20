@@ -2,8 +2,8 @@
 
 """多租户 AgentManager 池，按 ``tenant_key`` 缓存实例.
 
-``tenant_key = "{group_id}::{bot_id}::{user_id}"``。缺省字段补
-``\"default\"``，个人版在三元组缺失时仍可兼容为单一逻辑租户。
+``tenant_key = md5("{group_id}::{bot_id}::{user_id}")``（见 ``build_tenant_key``）。
+缺省字段补 ``\"default\"``，个人版在三元组缺失时仍可兼容为单一逻辑租户。
 """
 
 from __future__ import annotations
@@ -108,9 +108,26 @@ class TenantAgentPool:
         """归一化三元组字段：空则回落 default."""
         return normalize_tenant_key_part(value, default=default)
 
+    @staticmethod
+    def _pool_key(tenant_key: str | None = None) -> str:
+        """池缓存键：个人版永远收敛到默认槽；企业版才按租户区分.
+
+        个人版进程内只保留一个 AgentManager，避免 user_id / IM 三元组把内存
+        状态拆开，同时落盘仍共用 ``~/.jiuwenswarm``。
+        """
+        if not is_enterprise():
+            return build_tenant_key()
+        key = str(tenant_key).strip() if tenant_key is not None else ""
+        return key or build_tenant_key()
+
     @classmethod
     def extract_tenant_key(cls, request: Any) -> str:
-        """从请求三元组拼出 tenant_key（有则用、无则 default）."""
+        """从请求三元组拼出 tenant_key（有则用、无则 default）.
+
+        个人版忽略请求身份，固定返回默认 ``build_tenant_key()``，保证单 Manager。
+        """
+        if not is_enterprise():
+            return build_tenant_key()
         group_id, bot_id, user_id = cls.extract_triple(request)
         return build_tenant_key(group_id, bot_id, user_id)
 
@@ -184,10 +201,10 @@ class TenantAgentPool:
     ) -> AgentManager:
         """若槽位为空，将已有 Manager 登记到 ``tenant_key``（不覆盖）.
 
-        供 ``AgentRuntime.start`` 登记启动时的默认租户 Manager，
-        避免请求路径再 ``new`` 一份与 Runtime 脱节。
+        供启动路径兼容；新路径优先 :meth:`put_nowait` 在 ``AgentRuntime.__init__``
+        同步登记默认租户。个人版始终落到默认槽。
         """
-        key = str(tenant_key).strip() or build_tenant_key()
+        key = self._pool_key(tenant_key)
         lock = self._get_lock(key)
         async with lock:
             cached = await self._agent_wrappers.get(key)
@@ -196,14 +213,32 @@ class TenantAgentPool:
             await self._agent_wrappers.put(key, manager)
             return manager
 
+    def put_nowait(
+        self, tenant_key: str | None, manager: AgentManager
+    ) -> AgentManager:
+        """同步登记 Manager（``__init__`` / 尚不能 await 的路径）.
+
+        若该 key 已有实例则返回已有实例，不覆盖。个人版始终落到默认槽。
+        """
+        key = self._pool_key(tenant_key)
+        cached = self._agent_wrappers.get_nowait(key)
+        # 接受 duck-typed Manager（单测 fake），不强制 isinstance(AgentManager)。
+        if cached is not None:
+            return cached
+        self._agent_wrappers.put_nowait(key, manager)
+        return manager
+
+    def get_manager_nowait(
+        self, tenant_key: str | None = None
+    ) -> AgentManager | None:
+        """同步读取已有 Manager，不创建. 个人版始终读默认槽."""
+        key = self._pool_key(tenant_key)
+        cached = self._agent_wrappers.get_nowait(key)
+        return cached if cached is not None else None
+
     async def get_agent_manager(self, tenant_key: str | None = None) -> AgentManager:
-        """获取指定租户的 AgentManager（不存在则懒创建）."""
-        key = (
-            str(tenant_key).strip()
-            if tenant_key is not None and str(tenant_key).strip()
-            else build_tenant_key()
-        )
-        return await self._ensure_agent_manager(key)
+        """获取指定租户的 AgentManager（不存在则懒创建）. 个人版始终默认槽."""
+        return await self._ensure_agent_manager(self._pool_key(tenant_key))
 
     async def get_cached_agent_manager(
         self, tenant_key: str | None = None
@@ -211,13 +246,9 @@ class TenantAgentPool:
         """异步读取已有 Manager，不自动创建.
 
         控制面 handler 与缓存同 loop，须 await；不可在同 loop 上同步 future.result。
+        个人版始终读默认槽。
         """
-        key = (
-            str(tenant_key).strip()
-            if tenant_key is not None and str(tenant_key).strip()
-            else build_tenant_key()
-        )
-        return await self._agent_wrappers.get(key)
+        return await self._agent_wrappers.get(self._pool_key(tenant_key))
 
     @asynccontextmanager
     async def tenant_scope(self, request: Any):
@@ -309,12 +340,14 @@ class TenantAgentPool:
         logger.info("[TenantAgentPool] Cleaning up...")
         # 用 snapshot（不过滤过期、不删条目），避免 keys()/get() 在 TTL 下
         # 先丢掉过期项导致跳过 manager.cleanup()。
+        # 接受 duck-typed Manager（单测 fake），不强制 isinstance。
         managers = self._agent_wrappers.snapshot_values_nowait()
         for manager in managers:
-            if not isinstance(manager, AgentManager):
+            cleanup = getattr(manager, "cleanup", None)
+            if not callable(cleanup):
                 continue
             try:
-                await manager.cleanup()
+                await cleanup()
             except Exception as e:
                 logger.warning(
                     "[TenantAgentPool] AgentManager cleanup failed: %s",
@@ -327,8 +360,7 @@ class TenantAgentPool:
 
     def iter_agent_managers_nowait(self) -> list[AgentManager]:
         """同步快照当前缓存中的 AgentManager（不创建新实例）."""
-        values = self._agent_wrappers.snapshot_values_nowait()
-        return [v for v in values if isinstance(v, AgentManager)]
+        return list(self._agent_wrappers.snapshot_values_nowait())
 
     async def get_agent_count(self) -> int:
         """当前活跃的 AgentManager 实例数量."""

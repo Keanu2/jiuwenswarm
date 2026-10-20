@@ -25,10 +25,13 @@ async def test_http_handler_scope_is_bound_and_restored(monkeypatch, tmp_path, i
     ctx = SimpleNamespace(request=request, sink=AsyncMock())
 
     async def handler(_ctx):
-        expected = utils.build_tenant_key("g", "b", "u") if edition == "enterprise" else "outer"
-        assert TenantContext.current_tenant_key() == expected
+        # 企业按请求身份绑 tenant_key；个人版固定默认槽，避免多 Manager。
         if edition == "enterprise":
+            expected = utils.build_tenant_key("g", "b", "u")
+            assert TenantContext.current_tenant_key() == expected
             assert utils.get_agent_sessions_dir().is_relative_to(tmp_path)
+        else:
+            assert TenantContext.current_tenant_key() == utils.build_tenant_key()
 
     with TenantContext.scoped("outer"):
         await invoke(ctx, handler)

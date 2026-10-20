@@ -63,6 +63,7 @@ async def handle_chat_cancel(ctx: RequestContext) -> None:
             await services.execution_runtime().stop_session_for_archive(
                 channel_id=request.channel_id or "default",
                 session_id=request.session_id or "default",
+                request=request,
             )
             response = AgentResponse(
                 request_id=request.request_id,

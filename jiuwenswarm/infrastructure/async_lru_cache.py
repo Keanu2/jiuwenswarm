@@ -105,6 +105,26 @@ class AsyncLRUCache:
             values.append(entry[0])
         return values
 
+    def get_nowait(self, key: Hashable) -> Any | None:
+        """Sync read for callers that cannot await (best-effort, no async lock)."""
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        if not isinstance(entry, tuple) or len(entry) < 2:
+            return None
+        value, timestamp = entry
+        if self._is_expired(timestamp):
+            return None
+        return value
+
+    def put_nowait(self, key: Hashable, value: Any) -> None:
+        """Sync write for ``__init__`` / early boot (best-effort, no async lock)."""
+        if key in self._cache:
+            self._cache.pop(key)
+        elif self._max_size is not None and len(self._cache) >= self._max_size:
+            self._cache.popitem(last=False)
+        self._cache[key] = (value, time.time())
+
     async def keys(self) -> list[Hashable]:
         async with self._lock:
             if self._ttl is not None:
