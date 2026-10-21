@@ -648,6 +648,10 @@ class CronSchedulerService:
         job = self._jobs.get(job_id) or await self._store.get_job(job_id)
         if job is None:
             raise KeyError("job not found")
+        # 开关关闭也放行（对齐 openclaw isJobDue 的 force 语义：设备 run-now
+        # 硬编码 mode=force，开关只管到点自动触发，手动执行是用户显式覆盖）。
+        # 前提是 state 带 manual=True 且事件层据此放行，否则事件会被 enabled
+        # 拦截、状态永不推进，留下 ts=0 的幽灵历史条目（真机 bug 实证）。
         now = datetime.now(tz=ZoneInfo(job.timezone))
         push_dt = now
         wake_dt = now
@@ -664,6 +668,11 @@ class CronSchedulerService:
             job_id=job.id,
             wake_at_iso=wake_dt.isoformat(),
             push_at_iso=push_dt.isoformat(),
+            # 创建即补 started_at：queryTimeList 以它为 ts 源，缺省会落成
+            # ts=0 的 "unknown" 日期坏条目（A4 家族根因）
+            started_at=push_dt.timestamp(),
+            # 手动触发标记：事件层的 enabled 拦截据此放行
+            manual=True,
             job_name=job.name,
             targets=job.targets,
             session_id=job.session_id,
@@ -961,8 +970,12 @@ class CronSchedulerService:
                 chat_type=state.chat_type,
             )
             logger.info("[Cron] push_update using rebuilt job from state job_id=%s run_id=%s", ev.job_id, ev.run_id)
-        # push_update 是对已触发任务的补发，即使单次任务已过期也必须放行，否则真正结果永远发不出去
-        if not job.enabled and ev.kind != "push_update":
+        # push_update 是对已触发任务的补发，即使单次任务已过期也必须放行，否则真正结果永远发不出去；
+        # 手动 run-now（state.manual）同样放行——对齐 openclaw isJobDue 的 force 语义
+        # （xy_channel 对设备 run-now 硬编码 mode=force，开关只管到点自动触发）。
+        # 非手动的 wake/push 对关闭任务仍旧拦截。
+        state = self._runs.get(ev.run_id)
+        if not job.enabled and ev.kind != "push_update" and not (state is not None and state.manual):
             return
 
         if ev.kind == "wake":

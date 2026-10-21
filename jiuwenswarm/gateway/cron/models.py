@@ -608,6 +608,9 @@ class CronRunState:
     wake_at_iso: str
     push_at_iso: str
     status: str = "pending"  # pending|running|succeeded|failed
+    # 手动 run-now 触发标记：对齐 openclaw isJobDue 的 force 语义——开关只管
+    # 到点自动触发，手动立即执行是用户显式覆盖，即使任务 enabled=False 也放行
+    manual: bool = False
     placeholder_sent: bool = False
     pushed_final: bool = False
     started_at: float | None = None

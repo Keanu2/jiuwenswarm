@@ -759,6 +759,12 @@ class CronController:
         runs = getattr(self._scheduler, "_runs", None)
         if runs:
             for state in runs.values():
+                # 无 started_at 的 state 不外发：ts=0 的条目会把设备历史页的
+                # 日期分组弄脏成 "unknown"（真机 bug 实证）。正常路径已由
+                # trigger_run_now_info 创建即补 started_at 兜住，这里防御
+                # 其他可能的创建点。
+                if not state.started_at:
+                    continue
                 jid = state.job_id
                 if jid not in next_run_cache:
                     next_run_cache[jid] = self._compute_next_run_ms(jid, job=jobs_map.get(jid))
