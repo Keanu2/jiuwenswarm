@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
@@ -678,6 +678,51 @@ class CronController:
 
         return entries
 
+    @staticmethod
+    def _group_entries_by_date(
+        all_entries: list[dict[str, Any]],
+        jobs_map: dict[str, CronJob],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """按日期（YYYY-MM-DD）分组执行记录，供 queryTimeList 消费。
+
+        分组时域用**任务自身 timezone**（与调度侧 ZoneInfo(job.timezone) 同源；
+        任务已删除时退化系统本地时区，最终兜底 UTC）。曾用 UTC 分组，会把
+        UTC+8 用户 00:00~08:00 的执行归进前一天（真机实锤：10-21 07:00 的
+        执行显示在 10-20 分组里）。ts 无效的条目归入 "unknown"（协议允许），
+        running 态条目不外发。
+        """
+        by_date: dict[str, list[dict[str, Any]]] = {}
+        for entry in all_entries:
+            ts = entry.get("ts", 0)
+            if ts > 0:
+                dt = datetime.fromtimestamp(ts / 1000, tz=CronController._run_group_tz(entry, jobs_map))
+                date_key = dt.strftime("%Y-%m-%d")
+            else:
+                date_key = "unknown"
+            if entry.get("status") != "running":
+                by_date.setdefault(date_key, []).append(entry)
+        # Sort entries within each date by ts ascending
+        for entries in by_date.values():
+            entries.sort(key=lambda e: e.get("ts", 0))
+        return by_date
+
+    @staticmethod
+    def _run_group_tz(entry: dict[str, Any], jobs_map: dict[str, CronJob]) -> tzinfo:
+        """执行记录日期分组的时区：任务自带 timezone → 系统本地 → UTC。
+
+        设备端历史页按"用户本地日"分组；曾用 UTC 分组，会把 UTC+8 用户
+        00:00~08:00 的执行归进前一天（真机实锤：10-21 07:00 的执行显示在
+        10-20 分组里）。任务 timezone 为必填字段（创建时 validate 校验），
+        只有任务被删除（map 查不到）或时区名异常时才走兜底链。
+        """
+        job = jobs_map.get(str(entry.get("jobId") or ""))
+        if job is not None and str(job.timezone or "").strip():
+            try:
+                return ZoneInfo(str(job.timezone))
+            except Exception:
+                pass
+        return datetime.now().astimezone().tzinfo or timezone.utc
+
     async def query_time_list(self) -> list[dict[str, list[dict[str, Any]]]]:
         """Return run history grouped by date (A2A ``queryTimeList``).
 
@@ -752,21 +797,9 @@ class CronController:
             if not is_dup:
                 all_entries.append(fe)
 
-        # Group by date (YYYY-MM-DD) based on ts
-        by_date: dict[str, list[dict[str, Any]]] = {}
-        for entry in all_entries:
-            ts = entry.get("ts", 0)
-            if ts > 0:
-                dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-                date_key = dt.strftime("%Y-%m-%d")
-            else:
-                date_key = "unknown"
-            if entry.get("status") != "running":
-                by_date.setdefault(date_key, []).append(entry)
-
-        # Sort entries within each date by ts ascending
-        for entries in by_date.values():
-            entries.sort(key=lambda e: e.get("ts", 0))
+        # Group by date (YYYY-MM-DD) in the job's timezone (see _group_entries_by_date —
+        # 曾用 UTC 分组把 UTC+8 用户 00:00~08:00 的执行归进前一天，真机实锤)。
+        by_date = self._group_entries_by_date(all_entries, jobs_map)
 
         # Per protocol doc: ans is an array of single-key objects
         # e.g. [{"2026-06-01": [...]}, {"2026-06-02": [...]}]
