@@ -8,6 +8,17 @@ import { I18nextProvider } from 'react-i18next';
 import { JSDOM } from 'jsdom';
 import { createServer } from 'vite';
 
+// Runtime edition/transport selection reads the browser environment during imports.
+const moduleDom = new JSDOM('<!doctype html>', { url: 'http://localhost/' });
+const moduleGlobals = new Map();
+for (const [name, value] of Object.entries({
+  window: moduleDom.window,
+  document: moduleDom.window.document,
+})) {
+  moduleGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+  Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+}
+
 // Use the production transform for the provider catalog's import.meta.glob and assets.
 const vite = await createServer({
   configFile: false,
@@ -29,6 +40,11 @@ try {
   ]);
 } finally {
   await vite.close();
+  for (const [name, descriptor] of moduleGlobals) {
+    if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+    else delete globalThis[name];
+  }
+  moduleDom.window.close();
 }
 const [
   { default: ModelPicker },
@@ -82,6 +98,11 @@ async function withFixture(run, language = 'en') {
     // 组件里会 new CustomEvent（如 requestLogin 派发的 jiuwen:auth-required），
     // 不挂到全局的话那句直接 ReferenceError
     CustomEvent: dom.window.CustomEvent,
+    MutationObserver: dom.window.MutationObserver,
+    ResizeObserver: class {
+      observe() {}
+      disconnect() {}
+    },
     IS_REACT_ACT_ENVIRONMENT: true,
   })) {
     previousGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -93,7 +114,7 @@ async function withFixture(run, language = 'en') {
   // 预置成「状态已查过、活动没开」：否则组件挂载时会真的去查登录状态，测试环境里
   // 没有后端，查询失败会起一条最长 60 秒的退避重试，整个测试文件被拖到一分半钟。
   // 需要活动开着的用例在 run 里自己改。
-  useAuthStore.setState({ initialized: true, enabled: false, islogin: false });
+  useAuthStore.setState({ initialized: true, enabled: false, campaignState: 'off', islogin: false });
   const i18n = i18next.createInstance();
   await i18n.init({ lng: language, resources, initImmediate: false, showSupportNotice: false });
   const root = createRoot(document.getElementById('root'));
@@ -140,6 +161,20 @@ function cronDrawer(overrides = {}) {
   });
 }
 
+test('enterprise chat model stays visible but cannot open its menu or show a dropdown arrow', async () => {
+  await withFixture(async ({ mount, click, byId }) => {
+    window.__JIUWENSWARM_EDITION__ = 'enterprise';
+    await mount(createElement(ChatModelSelector));
+    const trigger = byId('chat-panel-model-selector-trigger');
+    assert.equal(trigger.disabled, true);
+    assert.match(trigger.textContent, /Configured A/);
+    assert.equal(trigger.querySelector('.chat-mode-select__chevron'), null);
+    await click(trigger);
+    assert.equal(byId('chat-panel-model-selector-menu'), null);
+    assert.equal(useSessionStore.getState().getRuntime(sessionId).selectedModelName, 'configured-a');
+  });
+});
+
 test('chat and scheduled tasks show identical grouped options, excluding secondary connections', async () => {
   await withFixture(async ({ mount, click, byId }) => {
     await mount(createElement(ChatModelSelector), cronDrawer());
@@ -163,7 +198,7 @@ test('chat and scheduled tasks show identical grouped options, excluding seconda
 test('限时免费模型：没登录拿到之前，这一栏只放一个「获取」入口', async () => {
   await withFixture(async ({ mount, click, byId }) => {
     // 活动在跑但还没登录：免费模型一个都没有
-    useAuthStore.setState({ enabled: true, initialized: true, islogin: false });
+    useAuthStore.setState({ enabled: true, initialized: true, campaignState: 'active', islogin: false });
     useSessionStore.getState().setAvailableModels(
       catalog.filter((model) => model.is_free !== true),
       'configured-a',

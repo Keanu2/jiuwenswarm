@@ -7,6 +7,8 @@ import App from './App.tsx'
 import { EnterpriseEntry } from './EnterpriseEntry.tsx'
 import { ShareImageExportRunner } from './features/shareImageExport'
 import { openSourceSettingsPageDefinition } from './features/settings/registry/openSourceDefinition'
+import { enterpriseSettingsPageDefinition } from './features/settings/registry/enterpriseDefinition';
+import { isEnterprise } from './edition';
 import type { SettingsRequest } from './features/settings/services/settingsContract'
 import { dispatchA2UIAction } from './features/a2ui/actionBridge';
 import { installDesktopLocalFilesBridge } from './features/workspace/localFilePicker';
@@ -65,7 +67,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     ) : (
       <EnterpriseEntry>
         <App
-          settingsPageDefinition={openSourceSettingsPageDefinition}
+          settingsPageDefinition={isEnterprise() ? enterpriseSettingsPageDefinition : openSourceSettingsPageDefinition}
           resolveSettingsRequest={resolveOpenSourceSettingsRequest}
         />
       </EnterpriseEntry>

@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 're
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, CircleAlert, Code2, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { isEnterprise } from '../../edition';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
@@ -639,6 +640,7 @@ export function ConversationSidebar({
   onToggleCollapse,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
+  const enterprise = isEnterprise();
   const { tooltip: conversationsTooltip, handlers: conversationsTooltipHandlers } = useAdaptiveTooltip();
   const { tooltip: newProjectTooltip, handlers: newProjectTooltipHandlers } = useAdaptiveTooltip({ align: 'left' });
   const runtimes = useChatStore((state) => state.runtimes);
@@ -1053,7 +1055,7 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
     );
   }
 
-  const hasPinnedSection = pinnedProjects.length > 0 || orderedPinnedSessions.length > 0;
+  const hasPinnedSection = (!enterprise && pinnedProjects.length > 0) || orderedPinnedSessions.length > 0;
 
   const showOverlay = floating && !collapsed;
 
@@ -1152,7 +1154,7 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
                   projectMenu: Boolean(project && !isDefaultProject(project)),
                 });
               })}
-              {pinnedProjects.map((project) => renderProject(project))}
+              {!enterprise && pinnedProjects.map((project) => renderProject(project))}
             </div>
           </div>
         ) : null}
@@ -1163,49 +1165,51 @@ function renderSession(session: Session, options: { nested?: boolean; projectMen
             </div>
           </div>
         ) : null}
-        <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef} data-testid="multi-session-project-add-group">
-          <div className="conversation-sidebar__section-heading" data-testid="multi-session-project-add-heading">
-            <span className="conversation-sidebar__label" data-testid="multi-session-project-add-label">{t('multiSession.project.projects')}</span>
-            <div className="conversation-sidebar__section-actions">
-            <button
-              type="button"
-              className="conversation-sidebar__section-action"
-              onClick={() => {
-                setProjectAddMenuOpen((open) => !open);
-              }}
-              aria-label={t('multiSession.project.newProject')}
-              aria-haspopup="menu"
-              aria-expanded={projectAddMenuOpen}
-              data-tooltip={t('multiSession.project.newProject')}
-              data-testid="multi-session-new-project-button"
-              {...newProjectTooltipHandlers}
-            >
-              <PlusIcon aria-hidden />
-            </button>
+        {!enterprise && (
+          <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef} data-testid="multi-session-project-add-group">
+            <div className="conversation-sidebar__section-heading" data-testid="multi-session-project-add-heading">
+              <span className="conversation-sidebar__label" data-testid="multi-session-project-add-label">{t('multiSession.project.projects')}</span>
+              <div className="conversation-sidebar__section-actions">
+              <button
+                type="button"
+                className="conversation-sidebar__section-action"
+                onClick={() => {
+                  setProjectAddMenuOpen((open) => !open);
+                }}
+                aria-label={t('multiSession.project.newProject')}
+                aria-haspopup="menu"
+                aria-expanded={projectAddMenuOpen}
+                data-tooltip={t('multiSession.project.newProject')}
+                data-testid="multi-session-new-project-button"
+                {...newProjectTooltipHandlers}
+              >
+                <PlusIcon aria-hidden />
+              </button>
+              </div>
+            </div>
+            {projectAddMenuOpen ? (
+              <ProjectAddMenu
+                onCreateBlank={() => {
+                  setProjectAddMenuOpen(false);
+                  setProjectCreateMode('blank');
+                  setPathDialogError(null);
+                  setPathDialogInitial(null);
+                  setPathDialogOpen(true);
+                }}
+                onSelectExisting={() => {
+                  setProjectAddMenuOpen(false);
+                  void handleSelectExistingProjectDirectory();
+                }}
+              />
+            ) : null}
+            <div className="conversation-sidebar__group-list" data-testid="multi-session-project-add-list">
+              {regularProjects.length === 0 ? (
+                <div className="conversation-sidebar__empty" data-testid="multi-session-project-add-empty">{t('multiSession.project.noProjects')}</div>
+              ) : null}
+              {regularProjects.map((project) => renderProject(project))}
             </div>
           </div>
-          {projectAddMenuOpen ? (
-            <ProjectAddMenu
-              onCreateBlank={() => {
-                setProjectAddMenuOpen(false);
-                setProjectCreateMode('blank');
-                setPathDialogError(null);
-                setPathDialogInitial(null);
-                setPathDialogOpen(true);
-              }}
-              onSelectExisting={() => {
-                setProjectAddMenuOpen(false);
-                void handleSelectExistingProjectDirectory();
-              }}
-            />
-          ) : null}
-          <div className="conversation-sidebar__group-list" data-testid="multi-session-project-add-list">
-            {regularProjects.length === 0 ? (
-              <div className="conversation-sidebar__empty" data-testid="multi-session-project-add-empty">{t('multiSession.project.noProjects')}</div>
-            ) : null}
-            {regularProjects.map((project) => renderProject(project))}
-          </div>
-        </div>
+        )}
         <div className="conversation-sidebar__group conversation-sidebar__group--conversations" data-testid="multi-session-conversations-group">
           <div className="conversation-sidebar__section-heading" data-testid="multi-session-conversations-heading">
             <span className="conversation-sidebar__label" data-testid="multi-session-conversations-label">{t('multiSession.conversations')}</span>
