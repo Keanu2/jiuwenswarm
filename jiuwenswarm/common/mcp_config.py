@@ -132,6 +132,12 @@ def build_mcp_server_config(
     if transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
         return None
 
+    # Normalize 'http' to 'streamable-http' — openjiuwen core's MCP client
+    # registry does not recognize 'http' as a valid client type. This matches
+    # the reference pattern in registry._normalize_transport.
+    if transport == "http":
+        transport = "streamable-http"
+
     payload: dict[str, Any] = {
         "server_name": name,
         "client_type": transport,

@@ -8740,6 +8740,12 @@ class AgentWebSocketServer:
         if transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
             raise ValueError("transport must be one of stdio|sse|http")
 
+        # Normalize 'http' to 'streamable-http' — openjiuwen core's MCP client
+        # registry does not recognize 'http' as a valid client type. This matches
+        # the reference pattern in registry._normalize_transport.
+        if transport == "http":
+            transport = "streamable-http"
+
         payload: dict[str, Any] = {
             "name": name,
             "enabled": bool(merged.get("enabled", True)),
