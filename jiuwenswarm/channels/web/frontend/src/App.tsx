@@ -3685,7 +3685,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         onNewSession={handleNewSession}
         showNewSession={false}
         hiddenNavItems={hiddenNavItems}
-        applicationPlugins={visibleApplicationPlugins}
+        applicationPlugins={isEnterprise() ? [] : visibleApplicationPlugins}
       />
 
       {modelSetupGuideStep !== null ? (
@@ -3974,6 +3974,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
           <div className="app-section">
             <SettingsPage
               definition={settingsPageDefinition}
+              appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : undefined}
               isConnected={isConnected}
               connectionState={connectionState}
               request={settingsRequest}

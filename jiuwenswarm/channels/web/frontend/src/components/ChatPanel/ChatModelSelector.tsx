@@ -2,6 +2,7 @@ import { requestSettingsModule } from '../../features/settings/settingsNavigatio
 import { useChatStore } from '../../stores/chatStore';
 import { resolveChatModelSelection, useSessionStore } from '../../stores/sessionStore';
 import ModelPicker from '../ModelPicker';
+import { isEnterprise } from '../../edition';
 
 function openModelSettings(): void {
   requestSettingsModule('models');
@@ -26,8 +27,8 @@ export default function ChatModelSelector({ disabled = false }: { disabled?: boo
       onChange={(modelName) => {
         if (activeSessionId) setSelectedModelName(activeSessionId, modelName);
       }}
-      disabled={disabled}
-      onAddModel={openModelSettings}
+      disabled={disabled || isEnterprise()}
+      onAddModel={isEnterprise() ? undefined : openModelSettings}
     />
   );
 }
