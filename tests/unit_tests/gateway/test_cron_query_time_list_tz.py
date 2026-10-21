@@ -45,10 +45,13 @@ def test_group_utc_job_stays_on_utc_date() -> None:
 
 
 def test_deleted_job_falls_back_to_system_local_tz() -> None:
-    # 任务已删除（jobs_map 查不到）→ 系统本地时区分组，不炸、不落 unknown
+    # 任务已删除（jobs_map 查不到）→ 系统本地时区分组，不炸、不落 unknown。
+    # 期望值取 _TS_MS 在系统本地时区下的日期（与实现同一 tz 解析路径），
+    # 不依赖测试运行日期（原写法 datetime.now() 的日期在其他日子跑必挂）。
+    tz = datetime.now().astimezone().tzinfo
+    expect = datetime.fromtimestamp(_TS_MS / 1000, tz=tz).strftime("%Y-%m-%d")
     by_date = CronController._group_entries_by_date([_entry("gone", _TS_MS)], {})
     dates = [d for d in by_date if d != "unknown"]
-    expect = datetime.now().astimezone().strftime("%Y-%m-%d")
     assert dates == [expect], by_date
 
 
