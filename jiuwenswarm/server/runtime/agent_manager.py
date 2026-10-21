@@ -14,6 +14,7 @@ from typing import Any, TYPE_CHECKING
 from weakref import WeakValueDictionary
 
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
+
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
 from jiuwenswarm.edition import is_enterprise
@@ -679,6 +680,10 @@ class AgentManager:
                 setter(self._personal_context_runtime_enabled)
             await agent.create_instance(
                 config,
+                # 传原始 manager 模式（含 'team'）：_ensure_adapter 的严格校验按
+                # resolve_adapter_mode 映射后的**实现**比较（team 与 agent 同为
+                # DeepAdapter → 放行），且 adapter 保留业务模式标签供无参重建复用
+                # （上游 !8472 preserve adapter identity 的设计）。
                 mode=mode_key,
                 sub_mode=sub_mode_key or None,
                 config_base=self._latest_config_base,
