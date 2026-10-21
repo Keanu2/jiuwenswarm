@@ -337,6 +337,10 @@ async def lifespan(_application: FastAPI):
                 raise
             # 启动时差集清理: 清掉历史 apply 过但当前 policy 不再包含的路径上的残留 ACE,
             # 避免配置变更 (路径从 allow_read 移除) 后旧 ACE 残留导致配置不生效
+            from jiuwenbox.server.shared_paths import prepare_shared_tool_acl, shared_tool_paths
+
+            # Service-owned tool grants outlive sessions.
+            _shared_tools, _ = shared_tool_paths()
             try:
                 _stale_sid = win_setup.get_sandbox_user_sid()
                 _stale_policy_paths: list[str] = []
@@ -344,9 +348,16 @@ async def lifespan(_application: FastAPI):
                 _stale_policy_paths += list(_root_policy.windows.filesystem.deny_read or [])
                 _stale_policy_paths += list(_root_policy.windows.filesystem.allow_write or [])
                 _stale_policy_paths += list(_root_policy.windows.filesystem.deny_write or [])
-                win_setup.revoke_stale_acl(_stale_policy_paths, workspace="", sandbox_user_sid=_stale_sid)
+                _stale_policy_paths += win_setup.collect_preinstall_paths(_root_policy)
+                _stale_policy_paths += _shared_tools
+                win_setup.revoke_stale_acl(
+                    _stale_policy_paths, workspace="", sandbox_user_sid=_stale_sid,
+                    preserve_roots=_shared_tools,
+                )
             except Exception:  # noqa: BLE001
                 logger.debug("启动差集清理失败 (非致命)", exc_info=True)
+            # Complete before accepting sessions, never on their create path.
+            await asyncio.to_thread(prepare_shared_tool_acl, _root_policy)
             # 启动出站代理 (egress 规则取根 policy 的 windows.network; 基底+副本已合并).
             try:
                 root_policy = policy_reader.load_policy()

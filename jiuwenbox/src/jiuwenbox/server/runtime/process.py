@@ -64,6 +64,7 @@ from jiuwenbox.server.runtime.base import (
 )
 from jiuwenbox.server.workspace import SANDBOX_WORKSPACE, WIN_SANDBOX_WORKSPACE_ROOT
 from jiuwenbox.server.environment import inherited_environment
+from jiuwenbox.server.shared_paths import shared_tool_paths
 from jiuwenbox.supervisor import cgroup as cgroup_module
 from jiuwenbox.supervisor import network as network_module
 from jiuwenbox.supervisor.bwrap import BwrapConfig
@@ -3192,11 +3193,16 @@ class ProcessRuntime(RuntimeAdapter):
             if _ro and _ro not in deny_write_paths:
                 deny_write_paths.append(_ro)
         bundled_python = (os.environ.get("JIUWENBOX_BUNDLED_PYTHON") or "").strip()
-        if bundled_python:
-            allow_read_paths.append(bundled_python)
         venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
-        if venv_dir:
-            allow_write_paths.append(venv_dir)
+        # Prepared by service startup, used only as
+        # exclusions here. Shared grants never enter a session revoke list.
+        shared_tools, writable_tools = shared_tool_paths()
+        allow_read_paths.extend(shared_tools)
+        allow_write_paths.extend(writable_tools)
+
+        def _shared_path(path: str) -> bool:
+            candidate = Path(os.path.expandvars(path)).resolve()
+            return any(candidate.is_relative_to(root) for root in shared_tools)
         # 业务产物路径 (read_write / bind_mounts): rw 才进 allow_write;
         # WRITE ACE 不含 FILE_READ_DATA, rw 路径同时进 allow_read.
         # mode=ro (如 config.yaml) 只授读. 不授权 claw-desktop 等父目录.
@@ -3301,6 +3307,15 @@ class ProcessRuntime(RuntimeAdapter):
         # 给真实 SID 也 grant Allow Read, 否则 runner 读不了 venv python.
         def _apply_acl():
             sandbox_user_sid = win_setup.get_sandbox_user_sid()
+            _preinstalled = win_setup.get_preinstalled_read_paths()
+            filesystem_policy = {
+                "allow_read": allow_read_paths, "allow_write": allow_write_paths,
+                "deny_read": deny_read_paths, "deny_write": deny_write_paths,
+            }
+            traverse_policy = {
+                **filesystem_policy,
+                "allow_read": [*allow_read_paths, *shared_tools, *_preinstalled],
+            }
             # runner python 在宿主 AppData 下时, 必须给 jbx-sandbox 父目录 traverse,
             # 否则 CreateProcessWithLogonW WinError 5.
             _runner_py = (
@@ -3313,7 +3328,10 @@ class ProcessRuntime(RuntimeAdapter):
                     sandbox_id, _runner_py,
                 )
                 try:
-                    win_acl.grant_parent_traverse(_runner_py, sandbox_user_sid)
+                    win_acl.grant_parent_traverse(
+                        _runner_py, sandbox_user_sid,
+                        filesystem_policy=traverse_policy,
+                    )
                 except Exception:  # noqa: BLE001
                     logger.warning(
                         "[SandboxWin] %s grant_parent_traverse 失败 python=%s",
@@ -3321,11 +3339,10 @@ class ProcessRuntime(RuntimeAdapter):
                     )
                 logger.info("[SandboxWin] %s grant_parent_traverse done", sandbox_id)
             # Preinstalled read-only tool paths need no runtime DACL mutation.
-            _preinstalled = win_setup.get_preinstalled_read_paths()
-            _all_acl_paths = list(dict.fromkeys(
+            _all_acl_paths = [p for p in dict.fromkeys(
                 [p for p in allow_read_paths if os.path.expandvars(p).rstrip("\\/").lower() not in _preinstalled]
                 + deny_read_paths + allow_write_paths + deny_write_paths
-            ))
+            ) if not _shared_path(p)]
             win_setup.ensure_acl_policy_paths_authorized(
                 _all_acl_paths,
                 proxy_port_start=policy.windows.proxy.port_range_start,
@@ -3334,6 +3351,8 @@ class ProcessRuntime(RuntimeAdapter):
                 allow_elevation=False,
             )
             _t_acl0 = time.perf_counter()
+            # XIAOYI_WORK_ADAPTER: desktop data-tree discovery/RW compensation
+            # and its _under_desktop exclusions must leave the public component.
             desktop_data_dir = win_acl.resolve_desktop_data_dir()
 
             def _under_desktop(p: str) -> bool:
@@ -3350,14 +3369,8 @@ class ProcessRuntime(RuntimeAdapter):
             # 按目录走访授权 (每个 skill 子目录打 RW ACE; node_modules 只改自身不扫内部).
             # 不对整棵 workspace 做 SetNamedSecurityInfo 全树传播: 扫到受保护文件会
             # WinError 5 导致整段失败, 所有 skill 都拿不到写权限.
-            _acl_write = [p for p in allow_write_paths if not _under_desktop(p)]
-            _acl_read = [p for p in allow_read_paths if not _under_desktop(p)]
-            filesystem_policy = {
-                "allow_read": allow_read_paths,
-                "allow_write": allow_write_paths,
-                "deny_read": deny_read_paths,
-                "deny_write": deny_write_paths,
-            }
+            _acl_write = [p for p in allow_write_paths if not _under_desktop(p) and not _shared_path(p)]
+            _acl_read = [p for p in allow_read_paths if not _under_desktop(p) and not _shared_path(p)]
             acl_paths = win_acl.apply_sandbox_acl(
                 workspace,
                 _acl_write,
@@ -3366,6 +3379,7 @@ class ProcessRuntime(RuntimeAdapter):
                 deny_read=deny_read_paths,
                 sandbox_user_sid=sandbox_user_sid,
                 preinstalled_read_paths=_preinstalled,
+                preserve_roots=shared_tools,
                 bounded_roots=[p for p in (
                     [workspace]
                     + list(policy.filesystem_policy.read_write or [])
@@ -3380,6 +3394,7 @@ class ProcessRuntime(RuntimeAdapter):
                         sandbox_user_sid=sandbox_user_sid,
                         preserve_write_roots=allow_write_paths,
                         filesystem_policy=filesystem_policy,
+                        preserve_read_roots=shared_tools,
                     )
                     if _desktop_acl:
                         acl_paths = list(acl_paths or []) + _desktop_acl
@@ -3394,6 +3409,7 @@ class ProcessRuntime(RuntimeAdapter):
                     _traverse_targets.append(desktop_data_dir)
                 _traverse_targets.append(workspace)
                 _traverse_targets.extend(allow_write_paths)
+                _traverse_targets.extend(shared_tools)
                 _seen_traverse: set[str] = set()
                 for _tp in _traverse_targets:
                     if not _tp:
@@ -3404,16 +3420,17 @@ class ProcessRuntime(RuntimeAdapter):
                     _seen_traverse.add(_tk)
                     try:
                         win_acl.grant_parent_traverse(
-                            _tp, sandbox_user_sid, filesystem_policy=filesystem_policy,
+                            _tp, sandbox_user_sid, filesystem_policy=traverse_policy,
                         )
                         win_acl.grant_parent_traverse(
-                            _tp, win_acl.get_synthetic_write_sid(), filesystem_policy=filesystem_policy,
+                            _tp, win_acl.get_synthetic_write_sid(), filesystem_policy=traverse_policy,
                         )
                     except Exception:  # noqa: BLE001
                         logger.warning(
                             "[SandboxWin] %s grant_parent_traverse 失败 path=%s",
                             sandbox_id, _tp, exc_info=True,
                         )
+            acl_paths = [p for p in acl_paths or [] if not _shared_path(p)]
             _t_acl1 = time.perf_counter()
             # apply_sandbox_acl 整体耗时打点
             logger.info(
@@ -3695,7 +3712,10 @@ class ProcessRuntime(RuntimeAdapter):
         if acl_paths:
             try:
                 await self._run_windows_acl(
-                    lambda: win_acl.revoke_sandbox_acl(acl_paths, sandbox_user_sid=sandbox_user_sid),
+                    lambda: win_acl.revoke_sandbox_acl(
+                        acl_paths, sandbox_user_sid=sandbox_user_sid,
+                        preserve_roots=shared_tool_paths()[0],
+                    ),
                     sandbox_id=sandbox_id,
                 )
             except Exception:  # noqa: BLE001

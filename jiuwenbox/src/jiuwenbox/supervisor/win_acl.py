@@ -200,6 +200,11 @@ def _expand_fs_path(raw: str) -> Path:
 def resolve_desktop_data_dir() -> str:
     """桌面数据目录 (claw-desktop), 供 ACL / traverse 共用.
 
+    XIAOYI_WORK_ADAPTER: existing product directory conventions; remove with
+    their desktop ACL/traversal callers when extracting the public component.
+    New shared roots use the explicit host contract documented in
+    docs/沙箱公共目录与环境变量配置.md.
+
     顺序: ``JIUWENBOX_DESKTOP_DATA_DIR`` → ``JIUWENSWARM_DATA_DIR`` 的父目录
     若名为 claw-desktop → 已存在的 ``%APPDATA%\\claw-desktop``.
     """
@@ -959,8 +964,13 @@ def apply_desktop_data_rw(
     preserve_write_roots: list[str] | None = None,
     *,
     filesystem_policy: dict | None = None,
+    preserve_read_roots: list[str] | None = None,
 ) -> list[str]:
     """给桌面 dataDir 补读写权限, 同时保留本次 YAML 的显式文件规则.
+
+    XIAOYI_WORK_ADAPTER: product data-tree layout and automatic RW grants.
+    Includes preserve_read_roots added for managed tools; this whole adapter
+    must stay outside the public component, unlike the generic ACL primitives.
 
     授 Allow Write+Execute+Delete+Read. 含 agent workspace / skills 等
     allow_write 子树也会走访并改成 RW (不再跳过): 旧版曾对这些子树打只读
@@ -993,6 +1003,12 @@ def apply_desktop_data_rw(
     sid_objs = [_resolve_sid(one) if isinstance(one, str) else one for one in sids]
     sid_keys = {_sid_dedup_key(one) for one in sid_objs}
     rights = _DESKTOP_DATA_RW_RIGHTS
+    tool_keys = _compile_acl_rules(preserve_read_roots)
+
+    def _is_tool(path: Path) -> bool:
+        key = os.path.normcase(str(path.resolve()))
+        return any(_acl_rule_covers(rule, key) for rule in tool_keys)
+
     applied: list[str] = []
     preserve_keys: list[str] = []
     for raw in preserve_write_roots or []:
@@ -1034,6 +1050,8 @@ def apply_desktop_data_rw(
         return _rebuild_acl_with_order(None, kept + new_allow)
 
     def _grant_here(path: Path) -> None:
+        if _is_tool(path):
+            return
         win32security, _, _ = _ensure_pywin32()
         sd = win32security.GetFileSecurity(
             str(path), win32security.DACL_SECURITY_INFORMATION,
@@ -1044,6 +1062,8 @@ def apply_desktop_data_rw(
         _write_file_dacl(str(path), acl, protect=True, sd=sd)
 
     def _grant_tree(path: Path) -> None:
+        if _is_tool(path):
+            return
         win32security, _, _ = _ensure_pywin32()
         sd = win32security.GetNamedSecurityInfo(
             str(path),
@@ -1064,6 +1084,8 @@ def apply_desktop_data_rw(
     def _subtree_dirty(path: Path) -> bool:
         """子树是否含日志/体量目录. 碰到第一个即返回, 不进入这些目录."""
         key = os.path.normcase(str(path.resolve()))
+        if any(rule.startswith(key.rstrip(os.sep) + os.sep) for rule in tool_keys):
+            return True  # Never propagate a broad RW ACE across an RX tool root.
         for paths in (filesystem_policy or {}).values():
             for raw in paths:
                 rule = os.path.normcase(str(_expand_fs_path(raw)))
@@ -1079,6 +1101,8 @@ def apply_desktop_data_rw(
         return False
 
     def _visit(path: Path) -> None:
+        if _is_tool(path):
+            return
         if not path.exists():
             return
         try:
@@ -1255,11 +1279,14 @@ _ACL_SLOW_OBJECT_SECONDS = 1.0
 _ACL_MAX_FAILURE_LOGS = 20
 
 
-def _walk_acl_objects(root: str):
+def _walk_acl_objects(root: str, *, preserve_roots: list[str] | None = None, strict: bool = False):
     """Visit existing objects once, without following Windows reparse points."""
     pending = [root]
+    preserved = _compile_acl_rules(preserve_roots)
     while pending:
         path = pending.pop()
+        if any(_acl_rule_covers(rule, os.path.normcase(os.path.abspath(path))) for rule in preserved):
+            continue
         try:
             stat = os.stat(path, follow_symlinks=False)
             if os.path.islink(path) or getattr(stat, "st_file_attributes", 0) & 0x400:
@@ -1272,6 +1299,8 @@ def _walk_acl_objects(root: str):
             # node_modules / caches may delete entries while we walk them.
             continue
         except OSError as exc:
+            if strict:
+                raise
             # A sandbox-owned child can deny FILE_LIST_DIRECTORY. Skipping it
             # keeps sibling ACL work; aborting would roll back the whole root.
             logger.warning("[ACL] skip unlistable path=%s reason=%s", path, exc)
@@ -1302,7 +1331,10 @@ def _acl_entries(acl) -> "list[tuple[int, int, int, str]] | None":
     return entries
 
 
-def _apply_bounded_acl(root: str, sid_objs: list, policy: dict) -> list[str]:
+def _apply_bounded_acl(
+    root: str, sid_objs: list, policy: dict, *, read_only_tool: bool = False, strict: bool = False,
+    preserve_roots: list[str] | None = None,
+) -> list[str]:
     """Apply final policy per object; never ask Windows to propagate a whole tree.
 
     Objects that need a Deny ACE fail closed; Allow-only objects degrade with a
@@ -1322,7 +1354,7 @@ def _apply_bounded_acl(root: str, sid_objs: list, policy: dict) -> list[str]:
     if _is_acl_forbidden_path(walk_root):
         raise ValueError(f"Refusing sandbox ACL on protected path: {walk_root}")
     logger.info("[ACL] tree start path=%s", walk_root)
-    for path in _walk_acl_objects(walk_root):
+    for path in _walk_acl_objects(walk_root, strict=strict, preserve_roots=preserve_roots):
         visited += 1
         if visited % _ACL_PROGRESS_EVERY == 0:
             logger.info(
@@ -1342,6 +1374,11 @@ def _apply_bounded_acl(root: str, sid_objs: list, policy: dict) -> list[str]:
             matches += [(len(rule), True) for rule in deny[axis] if _acl_rule_covers(rule, key)]
             if matches and max(matches)[1]:
                 denied |= mask
+        if read_only_tool:
+            # Host-managed executable code is never writable by sandbox tools.
+            # Keep YAML read denials, including those on an ancestor directory.
+            rights = const.ALLOW_READ_EXECUTE_RIGHTS
+            denied |= const.DENY_WRITE_RIGHTS
         try:
             flags = const.RECURSIVE_ACE_FLAGS if os.path.isdir(path) else 0
             aces = []
@@ -1363,7 +1400,7 @@ def _apply_bounded_acl(root: str, sid_objs: list, policy: dict) -> list[str]:
         except FileNotFoundError:
             continue
         except Exception as exc:  # noqa: BLE001 - Deny objects re-raise below
-            if denied:
+            if denied or strict:
                 raise
             failed += 1
             if failed <= _ACL_MAX_FAILURE_LOGS:
@@ -1380,6 +1417,50 @@ def _apply_bounded_acl(root: str, sid_objs: list, policy: dict) -> list[str]:
     return [root] if visited else []
 
 
+def apply_tool_acl(
+    roots: list[str], sandbox_user_sid: str | None, filesystem_policy: dict,
+    *, writable_roots: list[str] | None = None,
+    strict: bool = False,
+) -> list[str]:
+    """Apply tool ACLs, including protected DACLs; no junctions.
+
+    Roots are RX unless explicitly selected as writable in both writable_roots
+    and filesystem_policy. Rebuild old ACEs so prior write denials are removed.
+
+    Repair existing objects as well as the directory itself, including objects
+    whose protected DACLs do not inherit a newly granted parent ACE.
+
+    This is an explicit-root ACL primitive. Product path discovery belongs to
+    the host; see docs/沙箱公共目录与环境变量配置.md.
+    """
+    if not roots:
+        return []
+    _require_windows()
+    sids = [get_synthetic_write_sid()]
+    if sandbox_user_sid:
+        sids.append(sandbox_user_sid)
+    sid_objs = [_resolve_sid(sid) for sid in sids]
+    writable = {os.path.normcase(os.path.abspath(p)) for p in writable_roots or []}
+    applied: list[str] = []
+    # A common dependency root already covers its nested venvs. Walking only
+    # writable outer roots also prevents a child RX grant undoing inherited RWX.
+    tool_roots = list(dict.fromkeys(roots))
+    keys = {root: os.path.normcase(os.path.abspath(root)) for root in tool_roots}
+    tool_roots = [root for root in tool_roots if not any(
+        keys[parent] in writable and keys[root] != keys[parent]
+        and keys[root].startswith(keys[parent].rstrip(os.sep) + os.sep)
+        for parent in tool_roots
+    )]
+    # Retain an explicitly writable child below an RX parent; apply it last.
+    for root in sorted(tool_roots, key=lambda path: len(keys[path])):
+        applied.extend(_apply_bounded_acl(
+            root, sid_objs, filesystem_policy,
+            read_only_tool=os.path.normcase(os.path.abspath(root)) not in writable,
+            strict=strict,
+        ))
+    return applied
+
+
 def apply_sandbox_acl(
     workspace: str,
     allow_write: list[str],
@@ -1391,6 +1472,7 @@ def apply_sandbox_acl(
     sandbox_user_sid: str | None = None,
     preinstalled_read_paths: "set[str] | None" = None,
     bounded_roots: list[str] | None = None,
+    preserve_roots: list[str] | None = None,
 ) -> list[str]:
     """对沙箱工作区施加文件 ACL (写控制 allow-only + 读控制 deny-then-allow).
 
@@ -1423,8 +1505,16 @@ def apply_sandbox_acl(
         key = os.path.normcase(os.path.abspath(os.path.expandvars(path)))
         return any(key == os.path.normcase(root) or key.startswith(os.path.normcase(root) + os.sep) for root in roots)
 
-    write_targets = list(allow_write) or [workspace]
-    read_targets = allow_read or [workspace]
+    preserved = _compile_acl_rules(preserve_roots)
+
+    def _preserved(path: str) -> bool:
+        key = os.path.normcase(os.path.abspath(os.path.expandvars(path)))
+        return any(_acl_rule_covers(rule, key) for rule in preserved)
+
+    write_targets = [p for p in (list(allow_write) or [workspace]) if not _preserved(p)]
+    read_targets = [p for p in (allow_read or [workspace]) if not _preserved(p)]
+    deny_write = [p for p in deny_write if not _preserved(p)]
+    deny_read = [p for p in deny_read or [] if not _preserved(p)]
     bounded_policy = {
         "allow_write": write_targets, "allow_read": read_targets,
         "deny_write": deny_write, "deny_read": deny_read,
@@ -1436,9 +1526,9 @@ def apply_sandbox_acl(
                 os.makedirs(expanded, exist_ok=True)
     for root in roots:
         try:
-            applied.extend(_apply_bounded_acl(root, purge_sids, bounded_policy))
+            applied.extend(_apply_bounded_acl(root, purge_sids, bounded_policy, preserve_roots=preserve_roots))
         except Exception:
-            revoke_sandbox_acl(roots, sandbox_user_sid=sandbox_user_sid)
+            revoke_sandbox_acl(roots, sandbox_user_sid=sandbox_user_sid, preserve_roots=preserve_roots)
             raise
     write_targets = [p for p in write_targets if not _bounded(p)]
     read_targets = [p for p in read_targets if not _bounded(p)]
@@ -1737,6 +1827,7 @@ def apply_sandbox_acl(
 def revoke_sandbox_acl(
     paths: list[str] | str,
     sandbox_user_sid: str | None = None,
+    *, preserve_roots: list[str] | None = None, strict: bool = False,
 ) -> None:
     """撤销沙箱施加的所有 ACE (合成 SID + 真实 jbx-sandbox SID).
 
@@ -1769,7 +1860,7 @@ def revoke_sandbox_acl(
             logger.warning("拒绝改盘符根/Users 的 DACL (revoke): %s", p)
             continue
         try:
-            for target in _walk_acl_objects(p):
+            for target in _walk_acl_objects(p, preserve_roots=preserve_roots, strict=strict):
                 key = os.path.normcase(os.path.abspath(target))
                 if key in seen:
                     continue
@@ -1779,11 +1870,15 @@ def revoke_sandbox_acl(
                         target, target_sids, propagate=False, check_forbidden=False,
                     )
                 except Exception:  # noqa: BLE001 - 单对象失败不放弃整棵树
+                    if strict:
+                        raise
                     logger.debug("revoke 单个对象失败: %s", target, exc_info=True)
                     continue
                 if removed > 0:
                     cleaned += 1
                     logger.debug("revoke: 清理 %s 上 %d 个 ACE", target, removed)
         except Exception:  # noqa: BLE001 - ACL 清理是 best-effort
+            if strict:
+                raise
             logger.debug("revoke 单个路径失败: %s", p, exc_info=True)
     logger.info("撤销沙箱 ACL 完成: 清理根路径数=%d", cleaned)

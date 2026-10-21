@@ -18,6 +18,7 @@ from jiuwenbox.bundled_configs import base_policy_path
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import SecurityPolicy
 from jiuwenbox.server.policy_engine import PolicyEngine, read_policy_text
+from jiuwenbox.server.shared_paths import configured_shared_paths, configured_tool_paths
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -39,6 +40,22 @@ def _resolve_tool_paths(policy: SecurityPolicy) -> SecurityPolicy:
 
     非 win32 直接返回原 policy (tool_paths 仅 Windows 用).
     """
+    configured_paths = configured_shared_paths()
+    if configured_paths:
+        fs_policy = policy.filesystem_policy
+        read_write = list(dict.fromkeys([*fs_policy.read_write, *configured_paths]))
+        update = {"read_write": read_write}
+        if sys.platform != "win32":
+            from jiuwenbox.models.policy import BindMount
+
+            # Existing explicit mounts/RO policy retain their precedence.
+            existing = {mount.sandbox_path for mount in fs_policy.bind_mounts}
+            update["bind_mounts"] = [
+                *(BindMount(host_path=p, sandbox_path=p, mode="rw") for p in configured_paths if p not in existing),
+                *fs_policy.bind_mounts,
+            ]
+            update["read_write"] = [p for p in read_write if p not in fs_policy.read_only]
+        policy = policy.model_copy(update={"filesystem_policy": fs_policy.model_copy(update=update)})
     if sys.platform != "win32":
         return policy
     try:
@@ -85,11 +102,13 @@ def _resolve_tool_paths(policy: SecurityPolicy) -> SecurityPolicy:
                         filled["bash_path"] = str(ancestor / "usr" / "bin" / "bash.exe")
                     break
 
-    if not filled:
+    tool_roots, _ = configured_tool_paths()
+    preinstall = list(dict.fromkeys([*fs.read_acl_preinstall, *tool_roots, *configured_paths]))
+    if not filled and preinstall == fs.read_acl_preinstall:
         return policy
     # 用 model_copy 更新 (SecurityPolicy/ToolPaths 是 pydantic model, 不可变约束下用 copy).
     new_tp = tp.model_copy(update=filled)
-    new_fs = fs.model_copy(update={"tool_paths": new_tp})
+    new_fs = fs.model_copy(update={"tool_paths": new_tp, "read_acl_preinstall": preinstall})
     new_windows = policy.windows.model_copy(update={"filesystem": new_fs})
     logger.info(
         "tool_paths 自动检测填充: %s (python_dir=via runner Python or sys.executable, git_dir=via PATH)",

@@ -325,6 +325,7 @@ class JiuwenBoxRunner:
         self._spawned_policy_fingerprint: Optional[str] = None
         self._spawned_limits: tuple[int, int] | None = None
         self._spawned_env_allowlist: tuple[str, ...] | None = None
+        self._spawned_path_allowlist: tuple[str, ...] | None = None
         # Policy-only reloads omit extra_env. Keep bootstrap-injected runner
         # Python/venv/skills paths across stop+spawn and failed-start retries.
         self._startup_extra_env: dict[str, str] = {}
@@ -494,10 +495,13 @@ class JiuwenBoxRunner:
 
             # internal 模式: agent-server 自管 jbx 生命周期. 上游保证 port 是 (a) 之前拉起的同 host:port 或 (b) 空闲端口.
             # 决策: 进程 alive 且 host/port/policy_path+内容指纹全匹配 → 复用; 指纹变 → 重 spawn; 否则停旧 spawn 新.
-            from jiuwenswarm.common.config import get_sandbox_env_allowlist, get_sandbox_runtime
+            from jiuwenswarm.common.config import (
+                get_sandbox_env_allowlist, get_sandbox_path_allowlist, get_sandbox_runtime,
+            )
 
             sandbox_limits = get_sandbox_runtime()["limits"]
             desired_env_allowlist = tuple(get_sandbox_env_allowlist())
+            desired_path_allowlist = tuple(get_sandbox_path_allowlist())
             desired_limits = (
                 sandbox_limits["max_file_mb"],
                 sandbox_limits["exec_timeout_seconds"],
@@ -513,6 +517,7 @@ class JiuwenBoxRunner:
                 and self._spawned_policy_fingerprint == new_fp
                 and self._spawned_limits == desired_limits
                 and self._spawned_env_allowlist == desired_env_allowlist
+                and self._spawned_path_allowlist == desired_path_allowlist
             )
             if owned_match:
                 if await self.health_check(host, port):
@@ -600,6 +605,7 @@ class JiuwenBoxRunner:
             # Retain explicit bootstrap overrides on policy-only reloads.
             env.update(self._startup_extra_env)
             env["JIUWENBOX_ENV_ALLOWLIST"] = json.dumps(desired_env_allowlist)
+            env["JIUWENBOX_PATH_ALLOWLIST"] = json.dumps(desired_path_allowlist)
             # The public sandbox config intentionally exposes only these two
             # business limits. Box-server validates and enforces them again.
             env["JIUWENBOX_MAX_FILE_MB"] = str(sandbox_limits["max_file_mb"])
@@ -663,6 +669,7 @@ class JiuwenBoxRunner:
                 self._spawned_policy_fingerprint = new_fp
                 self._spawned_limits = desired_limits
                 self._spawned_env_allowlist = desired_env_allowlist
+                self._spawned_path_allowlist = desired_path_allowlist
                 # 同步退出兜底: 即便没走 stop() 也尽可能 terminate 子进程
                 self._register_atexit_once()
                 # 后台持续 drain stdout/stderr, 防止管道堆积阻塞子进程; 同时
