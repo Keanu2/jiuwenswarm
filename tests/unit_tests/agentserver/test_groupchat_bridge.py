@@ -18,14 +18,19 @@ import pytest
 from jiuwenswarm.agents.harness.team.groupchat.bridge import (
     BRIDGE_SUBSCRIBER_ID,
     CHANNEL_ID,
+    EMPTY_ANSWER_NOTICE,
+    REPLY_CHUNK_CHARS,
     SESSION_PREFIX,
     SYSTEM_FRAMED_NOTE,
+    TIMEOUT_NOTICE,
+    TURN_ERROR_NOTICE,
     GroupChatBridge,
     build_reply_client_msg_id,
     message_text,
     render_prompt,
     session_id_for_group,
     should_trigger,
+    split_reply,
 )
 
 ME = "u_agent"
@@ -173,6 +178,85 @@ def test_session_id_is_stable_and_prefixed() -> None:
 
 def test_channel_id_is_not_a_browser_channel() -> None:
     assert CHANNEL_ID == "groupchat"
+
+
+# ── over-long replies are chunked, not rejected ──────────────────────────────
+
+
+def test_split_reply_passes_short_text_through_untouched() -> None:
+    assert split_reply("short") == ["short"]
+    assert split_reply("") == [""]
+
+
+def test_split_reply_breaks_at_newlines_and_loses_nothing() -> None:
+    line = "x" * 100 + "\n"
+    text = line * 200  # 20200 chars, a newline every 101
+    parts = split_reply(text)
+    assert all(len(part) <= REPLY_CHUNK_CHARS for part in parts)
+    # Reassembly is lossless, so reassembled code still runs.
+    assert "".join(parts) == text
+    # Breaks happen at line seams, not mid-line.
+    assert all(part.endswith("\n") for part in parts[:-1])
+
+
+def test_split_reply_hard_cuts_a_line_longer_than_the_limit() -> None:
+    text = "y" * (REPLY_CHUNK_CHARS * 2 + 7)
+    parts = split_reply(text)
+    assert [len(part) for part in parts] == [
+        REPLY_CHUNK_CHARS,
+        REPLY_CHUNK_CHARS,
+        7,
+    ]
+    assert "".join(parts) == text
+
+
+def test_split_reply_stays_under_the_relay_cap() -> None:
+    from jiuwenswarm.agents.harness.team.groupchat.config import MAX_MESSAGE_CHARS
+
+    text = "\n".join(f"line {i}" for i in range(4000))  # ~34k chars
+    assert all(len(part) <= MAX_MESSAGE_CHARS for part in split_reply(text))
+
+
+@pytest.mark.anyio
+async def test_over_long_answer_is_posted_in_chunked_parts() -> None:
+    """A whole-file answer must reach the room, not die as an internal error.
+
+    Regression: an answer past the client's 16000-char cap used to raise in
+    ``_post_reply`` and surface as TURN_ERROR_NOTICE (seen live with a
+    "write an HTML gomoku game" task).
+    """
+    sent: list[dict] = []
+
+    async def sender(**kwargs):  # noqa: ANN003
+        sent.append(kwargs)
+
+    answer = "\n".join(f"line {i}" for i in range(1000))  # ~8.9k chars
+    long_answer = answer + "\n" + answer  # ~17.8k → two chunks
+
+    async def runner(**kwargs):  # noqa: ANN003
+        return long_answer
+
+    bridge = _make_bridge(runner=runner, sender=sender)
+    try:
+        await bridge.start()
+        await bridge._on_frame(
+            {"group_id": 3, "frame": "message", "message": {"seq": 9, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
+        )
+        for _ in range(50):
+            if sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(sent) == 2
+        base = build_reply_client_msg_id(3, 9)
+        # One idempotency key per part; both thread under the trigger.
+        assert [item["client_msg_id"] for item in sent] == [f"{base}-p0", f"{base}-p1"]
+        assert all(item["reply_to"] == 9 for item in sent)
+        assert all(not item.get("mentions") for item in sent)
+        # The room can reassemble the answer without losing a character.
+        assert "".join(item["text"] for item in sent) == long_answer
+    finally:
+        await bridge.stop()
 
 
 # ── subscription hubs are per credential ─────────────────────────────────────
@@ -451,36 +535,357 @@ async def test_deleted_group_detaches_and_releases_the_session() -> None:
 
 
 @pytest.mark.anyio
-async def test_empty_answer_posts_nothing() -> None:
+async def test_empty_answer_posts_a_notice_not_silence() -> None:
+    """A blank turn must still tell the room it ran — silence reads as ignored."""
     sent: list[dict] = []
 
-    bridge = _make_bridge(runner=_async_return("   "), sender=lambda **kw: sent.append(kw))
+    async def sender(**kwargs):  # noqa: ANN003
+        sent.append(kwargs)
+
+    bridge = _make_bridge(runner=_async_return("   "), sender=sender)
     try:
         await bridge.start()
         await bridge._on_frame(
             {"group_id": 3, "frame": "message", "message": {"seq": 1, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
         )
-        await asyncio.sleep(0.05)
-        assert sent == []
+        for _ in range(50):
+            if sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(sent) == 1
+        assert sent[0]["text"] == EMPTY_ANSWER_NOTICE
+        assert sent[0]["reply_to"] == 1
+        assert sent[0]["client_msg_id"] == build_reply_client_msg_id(3, 1)
+        assert not sent[0].get("mentions")
     finally:
         await bridge.stop()
 
 
 @pytest.mark.anyio
-async def test_failing_turn_does_not_kill_the_bridge() -> None:
+async def test_failing_turn_posts_a_notice_and_does_not_kill_the_bridge() -> None:
+    sent: list[dict] = []
+
+    async def sender(**kwargs):  # noqa: ANN003
+        sent.append(kwargs)
+
     async def runner(**kwargs):  # noqa: ANN003
         raise RuntimeError("boom")
 
-    bridge = _make_bridge(runner=runner, sender=_async_return(None))
+    bridge = _make_bridge(runner=runner, sender=sender)
     try:
         await bridge.start()
         await bridge._on_frame(
             {"group_id": 3, "frame": "message", "message": {"seq": 1, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
         )
-        await asyncio.sleep(0.05)
-        # The group is still watched and no longer marked inflight, so a later
-        # mention can still be served.
-        state = bridge._groups[3]
-        assert state.inflight is False
+        for _ in range(50):
+            if sent:
+                break
+            await asyncio.sleep(0.01)
+
+        # The room hears the failure instead of silence…
+        assert len(sent) == 1
+        assert sent[0]["text"] == TURN_ERROR_NOTICE
+        assert sent[0]["reply_to"] == 1
+        # …and the group is no longer marked inflight, so a later mention
+        # can still be served.
+        assert bridge._groups[3].inflight is False
     finally:
         await bridge.stop()
+
+
+@pytest.mark.anyio
+async def test_timed_out_turn_posts_a_notice_with_the_limit() -> None:
+    """A turn that outlives turn_timeout must say so — naming the actual limit."""
+    sent: list[dict] = []
+
+    async def sender(**kwargs):  # noqa: ANN003
+        sent.append(kwargs)
+
+    async def runner(**kwargs):  # noqa: ANN003
+        await asyncio.sleep(30)  # far past the configured timeout
+        return "too late"
+
+    config_base = {
+        "groupchat": {
+            "enabled": True,
+            "base_url": "http://relay.test",
+            "api_key": "human",
+            "agent": {"enabled": True, "api_key": "agent"},
+            "reply": {"max_context_messages": 5, "timeout_seconds": 0.05},
+        }
+    }
+    bridge = _make_bridge(config_base=config_base, runner=runner, sender=sender)
+    try:
+        await bridge.start()
+        await bridge._on_frame(
+            {"group_id": 3, "frame": "message", "message": {"seq": 4, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
+        )
+        for _ in range(200):
+            if sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(sent) == 1
+        assert sent[0]["text"] == TIMEOUT_NOTICE.format(timeout="0.05")
+        assert sent[0]["reply_to"] == 4
+        assert bridge._groups[3].inflight is False
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.anyio
+async def test_notice_post_failure_does_not_break_the_bridge() -> None:
+    """The outcome notice is best effort: a dead relay must not crash a turn."""
+    sent: list[dict] = []
+    runner_calls: list[int] = []
+
+    async def flaky_sender(**kwargs):  # noqa: ANN003
+        raise RuntimeError("relay down")
+
+    async def working_sender(**kwargs):  # noqa: ANN003
+        sent.append(kwargs)
+
+    async def runner(**kwargs):  # noqa: ANN003
+        runner_calls.append(1)
+        if len(runner_calls) == 1:
+            raise RuntimeError("boom")
+        return "second answer"
+
+    bridge = _make_bridge(runner=runner, sender=flaky_sender)
+    try:
+        await bridge.start()
+        # First turn fails, and even its notice cannot be posted.
+        await bridge._on_frame(
+            {"group_id": 3, "frame": "message", "message": {"seq": 1, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
+        )
+        for _ in range(50):
+            if runner_calls:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        assert bridge._groups[3].inflight is False
+
+        # The bridge survives: a later mention over a healthy relay is answered.
+        bridge._sender = working_sender
+        await bridge._on_frame(
+            {"group_id": 3, "frame": "message", "message": {"seq": 2, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
+        )
+        for _ in range(50):
+            if len(runner_calls) >= 2 and sent:
+                break
+            await asyncio.sleep(0.01)
+        assert [item["text"] for item in sent] == ["second answer"]
+    finally:
+        await bridge.stop()
+
+
+# ── turn progress pushes ─────────────────────────────────────────────────────
+
+
+def _phases(events: list) -> list:
+    return [event["step"]["phase"] for event in events]
+
+
+@pytest.mark.anyio
+async def test_mention_emits_progress_steps_in_order() -> None:
+    """One turn → started, tool steps, reasoning, answering (once), done."""
+    events: list[dict] = []
+
+    async def emitter(payload):  # noqa: ANN001
+        events.append(dict(payload))
+
+    async def runner(**kwargs):  # noqa: ANN003
+        on_event = kwargs.get("on_event")
+        assert on_event is not None, "runner must receive the progress forwarder"
+        await on_event({"event_type": "chat.tool_call", "tool_call": {"name": "web_search", "arguments": {"query": "q"}}})
+        await on_event({"event_type": "chat.tool_result", "tool_name": "web_search", "status": "completed", "summary": "found"})
+        await on_event({"event_type": "chat.reasoning", "content": "thinking…"})
+        await on_event({"event_type": "chat.delta", "content": "an"})
+        await on_event({"event_type": "chat.delta", "content": "swer"})  # second delta → no step
+        await on_event({"event_type": "chat.usage_metadata"})  # unmapped → no step
+        return "the answer"
+
+    bridge = _make_bridge(runner=runner, sender=_async_return(None), progress_emitter=emitter)
+    try:
+        await bridge.start()
+        await bridge._on_frame(
+            {"group_id": 3, "frame": "message", "message": {"seq": 9, "sender_id": "u_h", "kind": "text", "mentions": [ME], "payload": {"text": "go"}}}
+        )
+        for _ in range(50):
+            if events and events[-1]["step"]["phase"] == "done":
+                break
+            await asyncio.sleep(0.01)
+
+        assert _phases(events) == [
+            "started", "tool_call", "tool_result", "reasoning", "answering", "done",
+        ]
+        header, tool_call, answering, done = events[0], events[1], events[4], events[5]
+        assert header["group_id"] == 3
+        assert header["request_id"] == "groupchat-3-9"
+        assert header["trigger_seq"] == 9
+        assert header["sender_id"] == ME
+        assert header["state"] == "running"
+        assert tool_call["step"]["tool"] == "web_search"
+        assert "q" in tool_call["step"]["detail"]
+        assert answering["step"]["phase"] == "answering"
+        assert done["state"] == "done"
+        assert done["step"]["phase"] == "done"
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.anyio
+async def test_second_mention_while_running_emits_a_busy_step() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    events: list[dict] = []
+
+    async def emitter(payload):  # noqa: ANN001
+        events.append(dict(payload))
+
+    async def runner(**kwargs):  # noqa: ANN003
+        started.set()
+        await release.wait()
+        return "answer"
+
+    bridge = _make_bridge(runner=runner, sender=_async_return(None), progress_emitter=emitter)
+    try:
+        await bridge.start()
+        message = {"sender_id": "u_h", "kind": "text", "mentions": [ME], "payload": {"text": "a"}}
+        await bridge._on_frame({"group_id": 3, "frame": "message", "message": {**message, "seq": 1}})
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        await bridge._on_frame({"group_id": 3, "frame": "message", "message": {**message, "seq": 2}})
+        release.set()
+        for _ in range(50):
+            if events and events[-1]["step"]["phase"] == "done":
+                break
+            await asyncio.sleep(0.01)
+
+        busy = [event for event in events if event["step"]["phase"] == "busy"]
+        assert len(busy) == 1
+        assert busy[0]["step"]["detail"] == "seq=2"
+    finally:
+        release.set()
+        await bridge.stop()
+
+
+@pytest.mark.anyio
+async def test_turn_outcomes_map_to_terminal_progress_phases() -> None:
+    """Empty answer → done, failure → error, timeout → timeout."""
+    async def run_one(runner, expected_phase: str) -> list[dict]:  # noqa: ANN001
+        events: list[dict] = []
+
+        async def emitter(payload):  # noqa: ANN001
+            events.append(dict(payload))
+
+        config_base = {
+            "groupchat": {
+                "enabled": True,
+                "base_url": "http://relay.test",
+                "api_key": "human",
+                "agent": {"enabled": True, "api_key": "agent"},
+                "reply": {"max_context_messages": 5, "timeout_seconds": 0.05},
+            }
+        }
+        bridge = _make_bridge(
+            config_base=config_base, runner=runner, sender=_async_return(None), progress_emitter=emitter
+        )
+        try:
+            await bridge.start()
+            await bridge._on_frame(
+                {"group_id": 3, "frame": "message", "message": {"seq": 1, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
+            )
+            for _ in range(200):
+                if events and events[-1]["step"]["phase"] == expected_phase:
+                    break
+                await asyncio.sleep(0.01)
+            assert events, "at least the started step must be pushed"
+            return events
+        finally:
+            await bridge.stop()
+
+    async def sleep_runner(**kwargs):  # noqa: ANN003
+        await asyncio.sleep(30)
+        return "too late"
+
+    events = await run_one(_async_return("   "), "done")
+    assert events[-1]["state"] == "done"
+
+    async def failing_runner(**kwargs):  # noqa: ANN003
+        raise RuntimeError("boom")
+
+    events = await run_one(failing_runner, "error")
+    assert events[-1]["state"] == "error"
+
+    events = await run_one(sleep_runner, "timeout")
+    assert events[-1]["state"] == "timeout"
+
+
+@pytest.mark.anyio
+async def test_progress_push_failure_never_breaks_the_turn() -> None:
+    sent: list[dict] = []
+
+    async def broken_emitter(payload):  # noqa: ANN001
+        raise RuntimeError("push channel down")
+
+    async def sender(**kwargs):  # noqa: ANN003
+        sent.append(kwargs)
+
+    async def runner(**kwargs):  # noqa: ANN003
+        on_event = kwargs.get("on_event")
+        await on_event({"event_type": "chat.tool_call", "tool_call": {"name": "t"}})
+        return "still answered"
+
+    bridge = _make_bridge(runner=runner, sender=sender, progress_emitter=broken_emitter)
+    try:
+        await bridge.start()
+        await bridge._on_frame(
+            {"group_id": 3, "frame": "message", "message": {"seq": 1, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
+        )
+        for _ in range(50):
+            if sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert sent and sent[0]["text"] == "still answered"
+        assert bridge._groups[3].inflight is False
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.anyio
+async def test_progress_snapshot_mid_turn_and_after() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def runner(**kwargs):  # noqa: ANN003
+        on_event = kwargs.get("on_event")
+        await on_event({"event_type": "chat.tool_call", "tool_call": {"name": "t"}})
+        await on_event({"event_type": "chat.reasoning", "content": "half-thought"})
+        started.set()
+        await release.wait()
+        return "answer"
+
+    bridge = _make_bridge(runner=runner, sender=_async_return(None))
+    try:
+        await bridge.start()
+        assert bridge.progress_snapshot(3) is None  # no turn yet
+
+        await bridge._on_frame(
+            {"group_id": 3, "frame": "message", "message": {"seq": 5, "sender_id": "u_h", "kind": "text", "mentions": [ME]}}
+        )
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        snapshot = bridge.progress_snapshot(3)
+        assert snapshot is not None
+        assert snapshot["request_id"] == "groupchat-3-5"
+        assert snapshot["state"] == "running"
+        assert [step["phase"] for step in snapshot["steps"]] == ["started", "tool_call"]
+        assert snapshot["reasoning"] == "half-thought"
+    finally:
+        release.set()
+        await bridge.stop()
+    # After the turn the snapshot is gone, even without its done push.
+    assert bridge.progress_snapshot(3) is None

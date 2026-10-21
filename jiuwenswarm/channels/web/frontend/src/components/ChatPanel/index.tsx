@@ -27,6 +27,8 @@ import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { InteractionSlot } from '../InteractionSlot';
 import { GoalBar } from '../GoalBar';
+import { TaskContinuationToggle } from './TaskContinuationToggle';
+import { TaskHandoverButton } from './TaskHandoverButton';
 import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
@@ -109,6 +111,8 @@ interface ChatPanelProps {
   onClearGoal?: (sessionId: string) => void;
   /** 目标 active 但当前无处理中任务时，消息入队后主动排空一次，见 InputArea.tsx 对应调用点 */
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
+  /** 会话交接为跨设备任务成功后回调（App 刷新列表并切到任务聊天视图） */
+  onTaskHandedOver?: (taskId: number) => void;
 }
 
 // 邀请指令只对 human_agent 成员存在（见 upsertHumanShareCommandFromEvent 的
@@ -759,6 +763,7 @@ export function ChatPanel({
   onResumeGoal,
   onClearGoal,
   onDrainTaskQueueIfIdle,
+  onTaskHandedOver,
 }: ChatPanelProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -1367,6 +1372,7 @@ export function ChatPanel({
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
+                <TaskContinuationToggle />
                 <InputArea
                   ref={inputAreaRef}
                   onSubmit={handleSendMessage}
@@ -1409,6 +1415,10 @@ export function ChatPanel({
               onClearGoal={onClearGoal}
             />
           )}
+          <TaskContinuationToggle />
+          {/* 会话内交接：把这段对话导出成 relay 任务，换设备接续。运行中点击会先自动
+              停掉本轮再导出（组件内处理），所以这里不再按 isProcessing 禁用按钮。 */}
+          <TaskHandoverButton sessionId={activeSessionId ?? ''} sessionTitle={sessionTitle ?? ''} onCancel={onCancel} onHandedOver={onTaskHandedOver} />
           <InputArea
             ref={inputAreaRef}
             onSubmit={handleSendMessage}

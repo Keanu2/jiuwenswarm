@@ -640,6 +640,26 @@ class TestGetAllSessionsMetadata:
         assert total == 2
         assert {s["session_id"] for s in sessions} == {"sess_a", "sess_b"}
 
+    @staticmethod
+    def test_excludes_task_sessions(sessions_dir):
+        """跨设备任务的回合会话（task_{id}）同样不进会话列表。
+
+        TaskBridge 在该会话里跑 agent turn，prompt 嵌着任务的接续日志；
+        任务内容在「跨设备任务」面板里看，不属于用户的普通会话。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_all_sessions_metadata,
+        )
+
+        init_session_metadata(session_id="sess_a")
+        init_session_metadata(session_id="task_7", channel_id="tasks")
+        init_session_metadata(session_id="sess_b")
+
+        sessions, total = get_all_sessions_metadata(limit=20)
+        assert total == 2
+        assert {s["session_id"] for s in sessions} == {"sess_a", "sess_b"}
+
 
 # ===========================================================================
 # _read_metadata 容错
@@ -2128,6 +2148,113 @@ class TestSetSessionPinnedQueuedWriteRace:
         assert data["model"] == "old-queued-write"
         assert data["pinned"] is True
         assert data["pin_order"] == 1
+
+
+class TestSetSessionHandoverMarker:
+    """set_session_handover_marker：交接标记的写入语义。
+
+    场景:AgentServer 在 task.handover 成功后写标记,Gateway 的
+    ``collect_all_sessions_metadata``(强制读盘)消费——返回前必须落盘;
+    且不刷新 last_message_at(交接不是消息,不腐蚀排序时间)。
+    """
+
+    @staticmethod
+    def test_marker_lands_on_disk_before_return(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            set_session_handover_marker,
+        )
+
+        init_session_metadata(session_id="s_ho", title="交接前会话")
+        before = _read_json(sessions_dir / "s_ho" / "metadata.json")
+        last_message_at_before = before["last_message_at"]
+
+        result = set_session_handover_marker("s_ho", 42)
+        # 不调 _drain_queue():验证返回前已落盘
+        assert result is not None
+        assert result["handover_task_id"] == 42
+        assert isinstance(result["handover_at"], float)
+
+        data = _read_json(sessions_dir / "s_ho" / "metadata.json")
+        assert data["handover_task_id"] == 42, "交接标记未在返回前同步落盘"
+        assert isinstance(data["handover_at"], float)
+        assert data["title"] == "交接前会话"
+        # 交接不是消息:不刷新 last_message_at
+        assert data["last_message_at"] == last_message_at_before
+
+    @staticmethod
+    def test_marker_preserves_pin_fields(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            set_session_handover_marker,
+            set_session_pinned,
+        )
+
+        init_session_metadata(session_id="s_ho_pin")
+        set_session_pinned("s_ho_pin", True)  # Gateway 拥有的字段
+
+        set_session_handover_marker("s_ho_pin", 7)
+
+        data = _read_json(sessions_dir / "s_ho_pin" / "metadata.json")
+        assert data["handover_task_id"] == 7
+        assert data["pinned"] is True, "交接标记写入覆盖了 pinned 状态"
+        assert data["pin_order"] >= 1
+
+    @staticmethod
+    def test_marker_missing_session_returns_none(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import set_session_handover_marker
+
+        # 不隐式创建会话目录
+        assert set_session_handover_marker("s_missing", 42) is None
+        assert not (sessions_dir / "s_missing").exists()
+
+    @staticmethod
+    def test_marker_invalid_task_id_is_noop(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            set_session_handover_marker,
+        )
+
+        init_session_metadata(session_id="s_ho_bad")
+        assert set_session_handover_marker("s_ho_bad", 0) is None
+        data = _read_json(sessions_dir / "s_ho_bad" / "metadata.json")
+        assert "handover_task_id" not in data
+
+    @staticmethod
+    def test_subsequent_update_preserves_marker(sessions_dir):
+        """标记写入后,常规异步更新(消息轮次)不能丢 handover_task_id。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            set_session_handover_marker,
+            update_session_metadata,
+        )
+
+        init_session_metadata(session_id="s_ho_keep")
+        set_session_handover_marker("s_ho_keep", 99)
+
+        # 模拟后续消息轮次(默认异步写、读缓存)
+        update_session_metadata(session_id="s_ho_keep", increment_message_count=True)
+        _drain_queue()
+
+        data = _read_json(sessions_dir / "s_ho_keep" / "metadata.json")
+        assert data["handover_task_id"] == 99
+        assert data["handover_at"] is not None
+        assert data["message_count"] == 1
+
+    @staticmethod
+    def test_marker_overwrites_previous(sessions_dir):
+        """重试交接(再建一个任务)时,标记指向最新任务。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            set_session_handover_marker,
+        )
+
+        init_session_metadata(session_id="s_ho_twice")
+        set_session_handover_marker("s_ho_twice", 1)
+        set_session_handover_marker("s_ho_twice", 2)
+
+        data = _read_json(sessions_dir / "s_ho_twice" / "metadata.json")
+        assert data["handover_task_id"] == 2
 
 
 # ===========================================================================

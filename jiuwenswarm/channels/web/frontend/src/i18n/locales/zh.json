@@ -356,7 +356,71 @@
     "removeMention": "点击移除该提及",
     "mentionHint": "被 @ 的成员会收到定向通知；@ 到 Agent 会让它执行你的指令。",
     "mentionUnresolved": "未匹配到成员：{{names}}。这条消息不会通知它们。",
-    "mentionedBadge": "已提及"
+    "mentionedBadge": "已提及",
+    "progress": {
+      "working": "{{name}} 正在处理…",
+      "elapsed": "已用时 {{seconds}} 秒",
+      "started": "已开始处理",
+      "toolCall": "正在调用 {{tool}}",
+      "toolDone": "{{tool}} 完成",
+      "toolFailed": "{{tool}} 失败",
+      "answering": "正在生成回答…",
+      "busy": "处理中收到新的 @，已忽略",
+      "stepsCount": "共 {{count}} 个步骤",
+      "reasoningToggle": "思考过程"
+    }
+  },
+  "taskRelay": {
+    "untitled": "任务 {{id}}",
+    "taskId": "任务 #{{id}}",
+    "noMessages": "暂无消息",
+    "takeOver": "接管",
+    "takeOverDone": "已接管任务 #{{id}}，可在本机继续",
+    "suspend": "挂起",
+    "complete": "标记完成",
+    "heldHere": "本机持有",
+    "heldByMyDevice": "我的其他设备持有",
+    "heldElsewhere": "其他设备持有",
+    "holderNone": "无人持有",
+    "notHeldHere": "该任务未由本机持有：接管后才能在这里继续对话。",
+    "terminated": "任务已结束（完成 / 失败 / 取消），只读。",
+    "toolCall": "工具调用",
+    "toolThinking": "思考",
+    "toolArguments": "参数",
+    "toolResult": "结果",
+    "toolExpand": "展开详情",
+    "toolCollapse": "收起",
+    "toolArtifactHint": "该文件在交接时经 registry 中转存档，点击下载",
+    "messagePlaceholder": "输入消息，Enter 发送 / Shift+Enter 换行",
+    "send": "发送",
+    "sending": "发送中...",
+    "awaitingReply": "Agent 正在处理...",
+    "states": {
+      "pending": "待处理",
+      "working": "进行中",
+      "input_required": "待补充",
+      "completed": "已完成",
+      "failed": "失败",
+      "canceled": "已取消"
+    },
+    "errors": {
+      "load": "任务列表加载失败",
+      "action": "操作失败，请稍后重试",
+      "not_configured": "任务接续服务未配置（tasks.base_url / tasks.api_key）",
+      "unavailable": "任务接续服务不可达，请确认 relay 已启动",
+      "task_not_found": "任务不存在",
+      "task_fence_stale": "任务已被其他设备接管，请刷新后重试",
+      "task_not_held": "本机未持有该任务（或租约已过期），请先接管",
+      "task_state_invalid": "任务状态不允许该操作",
+      "task_payload_required": "消息内容不能为空",
+      "task_message_too_large": "消息内容过长",
+      "task_rate_limited": "发送过于频繁，请稍后再试",
+      "task_title_too_long": "任务标题过长",
+      "LIST_FAILED": "任务列表加载失败",
+      "CREATE_FAILED": "创建任务失败",
+      "ACQUIRE_FAILED": "接管任务失败",
+      "RELEASE_FAILED": "释放任务失败"
+    }
   },
   "statusBar": {
     "evolving": "正在检测是否需要技能演进...",
@@ -396,6 +460,19 @@
     "modeAutoHarness": "自优化模式",
     "modeAutoHarnessDesc": "自动分析并优化目标仓库",
     "recording": "正在录音...（松开按钮自动发送）",
+    "taskContinuation": {
+      "title": "跨设备接续",
+      "hint": "开启后可换设备继续任务",
+      "unconfigured": "服务未配置：请在 config.yaml 的 tasks 段填写 base_url 与 api_key",
+      "toggleFailed": "开关切换失败，请稍后重试"
+    },
+    "taskHandover": {
+      "button": "交接为跨设备任务",
+      "busy": "交接中...",
+      "success": "已交接为跨设备任务 #{{id}}，可在左侧「跨设备任务」继续",
+      "failed": "交接失败，请稍后重试",
+      "turnStopFailed": "本轮未能及时停止，请稍后重试"
+    },
     "waitingTasks": "等待任务",
     "messageQueue": "消息队列",
     "waitingTasksCount": "等待任务 ({{count}})",
@@ -2589,6 +2666,10 @@
       "unread": "已完成未读",
       "error": "任务异常",
       "read": "已完成已读"
+    },
+    "taskEntry": {
+      "crossDevice": "跨设备",
+      "backToList": "返回"
     },
     "project": {
       "projects": "项目",

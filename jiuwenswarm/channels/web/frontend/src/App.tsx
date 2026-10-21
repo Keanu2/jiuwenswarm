@@ -11,6 +11,7 @@ import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
 import { ProjectsPanel } from './components/ProjectsPanel';
+import { TaskChatView } from './components/TaskChatView';
 import { SessionsPanel } from './components/SessionsPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
@@ -55,6 +56,7 @@ import {
   usePlanStore,
   useWorkspaceStore,
   useCronStore,
+  useTaskRelayStore,
 } from './stores';
 import { useChatRoute } from './multi-session/routing/useChatRoute';
 import { ConversationSidebar, type NewConversationOptions } from './multi-session/sidebar/ConversationSidebar';
@@ -328,6 +330,8 @@ function AppContent() {
   });
 
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
+  // 聊天主视图当前打开的 relay 跨设备任务（TaskChatView）；null = 普通会话视图。
+  const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
@@ -1751,53 +1755,51 @@ function AppContent() {
     setComposerFocusNonce((nonce) => nonce + 1);
   }, []);
 
-  const enterNewConversation = useCallback((targetMode: AgentMode = mode, options: NewConversationOptions = {}) => {
-    const currentSessionId = sessionIdRef.current;
-    const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
-    newConversationPreviousSessionRef.current =
-      currentSessionId && currentSessionId !== NEW_CONVERSATION_ID
-        ? {
-          sessionId: currentSessionId,
-          mode: currentRuntime?.mode ?? mode,
-        }
-        : null;
-    // 新建会话固定使用配置的默认模型，不继承当前会话手动切换过的模型；
-    // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
-    const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
-    const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
-    const projectDir = resolveNewConversationProjectDir(
-      options.preserveProject,
-      options.project?.project_dir,
-      selectedProject?.project_dir,
-    );
-    disposeInFlightHistoryHandles(
-      currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
-    );
-    setHistoryLoadingMore(false);
-    resetNewConversationRuntime({ mode: targetMode, selectedModelName, projectDir });
-    if (options.initialInputValue) {
-      useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, options.initialInputValue);
-    }
-    if (options.preserveProject) {
-      preserveSelectedProjectOnChatNewRef.current = true;
-      newConversationProjectRef.current = selectedProject
-        ? {
-          project_id: selectedProject.project_id,
-          project_dir: selectedProject.project_dir,
-        }
-        : null;
-    } else {
-      newConversationProjectRef.current = null;
-      setSelectedProject(null);
-    }
-    sessionIdRef.current = NEW_CONVERSATION_ID;
-    setSessionId(NEW_CONVERSATION_ID);
-    setCurrentSession(null);
-    setTeamAreaExpanded(false);
-    navigate({ kind: 'chat-new' });
-    setActiveNav('chat');
-    requestComposerFocus();
-  }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setSelectedProject, setTeamAreaExpanded]);
+  const enterNewConversation = useCallback(
+    (targetMode: AgentMode = mode, options: NewConversationOptions = {}) => {
+      const currentSessionId = sessionIdRef.current;
+      const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
+      newConversationPreviousSessionRef.current =
+        currentSessionId && currentSessionId !== NEW_CONVERSATION_ID
+          ? {
+              sessionId: currentSessionId,
+              mode: currentRuntime?.mode ?? mode,
+            }
+          : null;
+      // 新建会话固定使用配置的默认模型，不继承当前会话手动切换过的模型；
+      // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
+      const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
+      const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
+      const projectDir = resolveNewConversationProjectDir(options.preserveProject, options.project?.project_dir, selectedProject?.project_dir);
+      disposeInFlightHistoryHandles(currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined);
+      setHistoryLoadingMore(false);
+      resetNewConversationRuntime({ mode: targetMode, selectedModelName, projectDir });
+      if (options.initialInputValue) {
+        useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, options.initialInputValue);
+      }
+      if (options.preserveProject) {
+        preserveSelectedProjectOnChatNewRef.current = true;
+        newConversationProjectRef.current = selectedProject
+          ? {
+              project_id: selectedProject.project_id,
+              project_dir: selectedProject.project_dir,
+            }
+          : null;
+      } else {
+        newConversationProjectRef.current = null;
+        setSelectedProject(null);
+      }
+      sessionIdRef.current = NEW_CONVERSATION_ID;
+      setSessionId(NEW_CONVERSATION_ID);
+      setCurrentSession(null);
+      setTeamAreaExpanded(false);
+      setActiveTaskId(null);
+      navigate({ kind: 'chat-new' });
+      setActiveNav('chat');
+      requestComposerFocus();
+    },
+    [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setActiveTaskId, setCurrentSession, setSelectedProject, setTeamAreaExpanded],
+  );
 
   const handleNewSession = useCallback(async (options?: NewConversationOptions) => {
     enterNewConversation(mode, options);
@@ -2196,10 +2198,44 @@ function AppContent() {
     [performSessionRestore],
   );
 
-  const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
-    if (target === 'new') { enterNewConversation(mode, options); return; }
-    void handleRestoreSession(target.session_id, target.mode, target);
-  }, [enterNewConversation, handleRestoreSession, mode]);
+  const requestSessionNavigation = useCallback(
+    (target: Session | 'new', options?: NewConversationOptions) => {
+      // 回到普通会话视图：无论此前是否停在 TaskChatView。
+      setActiveTaskId(null);
+      if (target === 'new') {
+        enterNewConversation(mode, options);
+        return;
+      }
+      void handleRestoreSession(target.session_id, target.mode, target);
+    },
+    [enterNewConversation, handleRestoreSession, mode, setActiveTaskId],
+  );
+
+  // 从侧边栏打开 relay 跨设备任务：TaskChatView 顶替 ChatPanel 的位置。
+  const requestTaskNavigation = useCallback((taskId: number) => {
+    setActiveTaskId(taskId);
+    setActiveNav('chat');
+  }, []);
+
+  // 交接成功：relay 任务已建、会话标记已落盘——刷新两份列表（任务 + 会话的
+  // handover_task_id）后直接切到该任务的聊天视图；停留旧会话继续输入会造成
+  // 本地/relay 两处分叉。
+  const handleTaskHandedOver = useCallback(
+    (taskId: number) => {
+      void useTaskRelayStore.getState().refresh();
+      const currentSessionId = sessionIdRef.current;
+      if (currentSessionId && currentSessionId !== NEW_CONVERSATION_ID) {
+        const sessionState = useSessionStore.getState();
+        const session =
+          sessionState.currentSession?.session_id === currentSessionId
+            ? sessionState.currentSession
+            : sessionState.sessions.find(item => item.session_id === currentSessionId);
+        if (session) void useWorkspaceStore.getState().refreshSessionWorkspace(session);
+      }
+      requestTaskNavigation(taskId);
+    },
+    [requestTaskNavigation],
+  );
 
   const handleTeamSessionsDeleted = useCallback(async (sessionIds: string[]) => {
     const deletedSessionIds = new Set(sessionIds);
@@ -2412,7 +2448,8 @@ function AppContent() {
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
-  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound;
+  // TaskChatView 打开期间不渲染 ToolPanel/分割线（任务视图自带完整布局）。
+  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound && activeTaskId == null;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
@@ -2471,15 +2508,17 @@ function AppContent() {
           <>
             <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
               <ConversationSidebar
-                activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
-                onNew={(options) => requestSessionNavigation('new', options)}
+                activeSessionId={activeTaskId == null && sessionId !== NEW_CONVERSATION_ID ? sessionId : null}
+                activeTaskId={activeTaskId}
+                onSelectTask={task => requestTaskNavigation(task.task_id)}
+                onNew={options => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
                 onOpenCron={() => handleNavigate('cron')}
                 isCronActive={false}
               />
               <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
-                {showConversationNotFound && (
+                {showConversationNotFound && activeTaskId == null && (
                   <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
                     <h1 className="text-lg font-semibold text-text" data-testid="app-conversation-not-found-title">{t('multiSession.notFound.title')}</h1>
                     <div className="flex gap-2">
@@ -2489,43 +2528,48 @@ function AppContent() {
                     </div>
                   </div>
                 )}
-                {/* Chat Panel - 在展开时可拖拽调整宽度 */}
+                {/* Chat Panel - 在展开时可拖拽调整宽度（跨设备任务打开时换成 TaskChatView） */}
                 <div
-                  className={`${showConversationNotFound ? 'hidden' : 'flex'} chat-layout__surface p-3 pt-0 flex-col min-w-0 min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
+                  className={`${showConversationNotFound && activeTaskId == null ? 'hidden' : 'flex'} chat-layout__surface p-3 pt-0 flex-col min-w-0 min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
                   style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
                   data-testid="app-chat-surface"
                 >
                   <div className={`flex-1 min-h-0`}>
-                    <ChatPanel
-                      onSendMessage={handleSendMessage}
-                      onPersistMedia={handlePersistMedia}
-                      onPersistDocuments={handlePersistDocuments}
-                      onInterrupt={handleInterrupt}
-                      onCancel={handleCancel}
-                      onSwitchMode={handleSwitchMode}
-                      isProcessing={isProcessing}
-                      onUserAnswer={handleUserAnswer}
-                      onExportShare={handleExportShare}
-                      isExportingShare={isExportingShare}
-                      canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (!isProcessing || isPaused))}
-                      sessionTitle={sessionTitle}
-                      sessionProjectName={sessionProjectName}
-                      sessionProject={sessionProject}
-                      teamAreaExpanded={isTeamAreaExpanded}
-                      autoFocusKey={composerFocusKey}
-                      onNavigateToSkills={() => handleNavigate('skills')}
-                      onToggleTeamArea={handleToggleDetailPanel}
-                      onOpenCodeReview={handleOpenCodeReview}
-                      permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
-                      onSavePermission={savePermissionSilent}
-                      historyPager={chatHistoryPager}
-                      isHistoryRestoring={isRestoringHistorySession}
-                      onSetGoal={setGoalObjective}
-                      onPauseGoal={pauseGoal}
-                      onResumeGoal={resumeGoal}
-                      onClearGoal={handleClearGoal}
-                      onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
-                    />
+                    {activeTaskId != null ? (
+                      <TaskChatView taskId={activeTaskId} onClose={() => setActiveTaskId(null)} />
+                    ) : (
+                      <ChatPanel
+                        onSendMessage={handleSendMessage}
+                        onPersistMedia={handlePersistMedia}
+                        onPersistDocuments={handlePersistDocuments}
+                        onInterrupt={handleInterrupt}
+                        onCancel={handleCancel}
+                        onSwitchMode={handleSwitchMode}
+                        isProcessing={isProcessing}
+                        onUserAnswer={handleUserAnswer}
+                        onExportShare={handleExportShare}
+                        isExportingShare={isExportingShare}
+                        canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (!isProcessing || isPaused))}
+                        sessionTitle={sessionTitle}
+                        sessionProjectName={sessionProjectName}
+                        sessionProject={sessionProject}
+                        teamAreaExpanded={isTeamAreaExpanded}
+                        autoFocusKey={composerFocusKey}
+                        onNavigateToSkills={() => handleNavigate('skills')}
+                        onToggleTeamArea={handleToggleDetailPanel}
+                        onOpenCodeReview={handleOpenCodeReview}
+                        permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
+                        onSavePermission={savePermissionSilent}
+                        historyPager={chatHistoryPager}
+                        isHistoryRestoring={isRestoringHistorySession}
+                        onSetGoal={setGoalObjective}
+                        onPauseGoal={pauseGoal}
+                        onResumeGoal={resumeGoal}
+                        onClearGoal={handleClearGoal}
+                        onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
+                        onTaskHandedOver={handleTaskHandedOver}
+                      />
+                    )}
                   </div>
                 </div>
 
@@ -2547,7 +2591,7 @@ function AppContent() {
                 )}
 
                 {/* Tool Panel / Expanded Team Panel */}
-                {(toolPanelHasContent || isRestoringTeamHistory) && !showConversationNotFound && (
+                {(toolPanelHasContent || isRestoringTeamHistory) && !showConversationNotFound && activeTaskId == null && (
                   <ToolPanel
                     sessionId={sessionId}
                     project={sessionProject}
@@ -2601,7 +2645,9 @@ function AppContent() {
               // 停留在定时任务时，项目/会话列表不应该还显示"选中"效果——定时任务和它们是同一级的
               // 互斥选中关系，传 null 让列表里的选中态清空（沿用"新建会话时传 null"的既有语义）
               activeSessionId={null}
-              onNew={(options) => requestSessionNavigation('new', options)}
+              activeTaskId={null}
+              onSelectTask={task => requestTaskNavigation(task.task_id)}
+              onNew={options => requestSessionNavigation('new', options)}
               onSelect={requestSessionNavigation}
               onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
               onOpenCron={() => handleNavigate('cron')}

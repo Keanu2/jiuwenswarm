@@ -73,6 +73,30 @@ class ReqMethod(Enum):
     TEAM_MESSAGE_ACK = "team.message.ack"
     TEAM_MESSAGE_SUBSCRIBE = "team.message.subscribe"
     TEAM_MESSAGE_UNSUBSCRIBE = "team.message.unsubscribe"
+    # 拉取某个群当前进行中 Agent turn 的过程快照（面板打开/刷新后恢复进度卡片）。
+    TEAM_GROUP_PROGRESS_GET = "team.group.progress.get"
+
+    # 个人多设备任务接续（relay tasks data plane）。用户在同一 principal 下，
+    # 用 API Key 标识设备，跨设备接续一个 Agent 任务。
+    TASK_CREATE = "task.create"
+    TASK_LIST = "task.list"
+    TASK_GET = "task.get"
+    TASK_UPDATE = "task.update"
+    TASK_RETIRE = "task.retire"
+    TASK_ACQUIRE = "task.acquire"
+    TASK_RELEASE = "task.release"
+    TASK_RENEW = "task.renew"
+    TASK_CHECKPOINT = "task.checkpoint"
+    TASK_MESSAGE_SEND = "task.message.send"
+    TASK_MESSAGE_LIST = "task.message.list"
+    TASK_MESSAGE_ACK = "task.message.ack"
+    TASK_WHOAMI = "task.whoami"
+    TASK_STATUS = "task.status"
+    TASK_LOCAL_STATUS = "task.local_status"
+    TASK_SET_ENABLED = "task.set_enabled"
+    TASK_MESSAGE_SUBSCRIBE = "task.message.subscribe"
+    TASK_MESSAGE_UNSUBSCRIBE = "task.message.unsubscribe"
+    TASK_HANDOVER = "task.handover"
 
     PATH_GET = "path.get"
     PATH_SET = "path.set"
@@ -299,6 +323,13 @@ class EventType(Enum):
     # 任何会话：项目面板是全局的，所以按 group_id 广播给所有 web 连接，由前端过滤。
     TEAM_GROUP_MESSAGE = "team.group.message"
     TEAM_GROUP_STATE = "team.group.state"
+    # Agent turn 过程实时提示（@ 群聊 Agent 后的工具调用/思考/生成状态）。
+    # 与上两个同组广播模型：不绑定会话，按 group_id 广播，前端过滤当前群。
+    TEAM_GROUP_PROGRESS = "team.group.progress"
+    # 个人跨设备任务接续的实时下行，同上一组的广播模型：任务面板是全局的，
+    # 按 task_id 广播给所有 web 连接，由前端过滤出当前打开的任务。
+    TASK_MESSAGE = "task.message"
+    TASK_STATE = "task.state"
     WORKFLOW_UPDATED = "workflow.updated"
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"

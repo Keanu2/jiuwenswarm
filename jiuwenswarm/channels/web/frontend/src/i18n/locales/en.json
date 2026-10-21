@@ -356,7 +356,71 @@
     "removeMention": "Click to remove this mention",
     "mentionHint": "Mentioned members get a targeted notification; mentioning an agent makes it act on your message.",
     "mentionUnresolved": "No member matches: {{names}}. They will not be notified.",
-    "mentionedBadge": "Mentioned"
+    "mentionedBadge": "Mentioned",
+    "progress": {
+      "working": "{{name}} is working…",
+      "elapsed": "{{seconds}}s elapsed",
+      "started": "Started",
+      "toolCall": "Calling {{tool}}",
+      "toolDone": "{{tool}} finished",
+      "toolFailed": "{{tool}} failed",
+      "answering": "Writing the answer…",
+      "busy": "A new @ arrived mid-turn; ignored",
+      "stepsCount": "{{count}} steps",
+      "reasoningToggle": "Thinking"
+    }
+  },
+  "taskRelay": {
+    "untitled": "Task {{id}}",
+    "taskId": "Task #{{id}}",
+    "noMessages": "No messages yet",
+    "takeOver": "Take Over",
+    "takeOverDone": "Task #{{id}} taken over — continue it on this device",
+    "suspend": "Suspend",
+    "complete": "Mark Done",
+    "heldHere": "Held on this device",
+    "heldByMyDevice": "Held on another of my devices",
+    "heldElsewhere": "Held elsewhere",
+    "holderNone": "Not held",
+    "notHeldHere": "This task is not held on this device: take it over to continue the conversation here.",
+    "terminated": "The task has ended (completed / failed / canceled); read-only.",
+    "toolCall": "Tool call",
+    "toolThinking": "Thinking",
+    "toolArguments": "Arguments",
+    "toolResult": "Result",
+    "toolExpand": "Show details",
+    "toolCollapse": "Collapse",
+    "toolArtifactHint": "Archived through the registry at handover; click to download",
+    "messagePlaceholder": "Type a message, Enter to send / Shift+Enter for a newline",
+    "send": "Send",
+    "sending": "Sending...",
+    "awaitingReply": "The agent is working...",
+    "states": {
+      "pending": "Pending",
+      "working": "Working",
+      "input_required": "Input needed",
+      "completed": "Completed",
+      "failed": "Failed",
+      "canceled": "Canceled"
+    },
+    "errors": {
+      "load": "Failed to load the task list",
+      "action": "The action failed; try again later",
+      "not_configured": "The task service is not configured (tasks.base_url / tasks.api_key)",
+      "unavailable": "The task service is unreachable; make sure the relay is running",
+      "task_not_found": "Task not found",
+      "task_fence_stale": "The task was taken over by another device; refresh and retry",
+      "task_not_held": "This device does not hold the task (or the lease expired); take it over first",
+      "task_state_invalid": "The task's state does not allow this action",
+      "task_payload_required": "The message is empty",
+      "task_message_too_large": "The message is too long",
+      "task_rate_limited": "Sending too fast; try again shortly",
+      "task_title_too_long": "The task title is too long",
+      "LIST_FAILED": "Failed to load the task list",
+      "CREATE_FAILED": "Failed to create the task",
+      "ACQUIRE_FAILED": "Failed to take over the task",
+      "RELEASE_FAILED": "Failed to release the task"
+    }
   },
   "statusBar": {
     "evolving": "Checking whether skill evolution is needed...",
@@ -396,6 +460,19 @@
     "modeAutoHarness": "Auto-Harness Mode",
     "modeAutoHarnessDesc": "Automatically analyze and optimize target repository",
     "recording": "Recording... (release to send)",
+    "taskContinuation": {
+      "title": "Cross-device continuation",
+      "hint": "Enable to continue tasks on another device",
+      "unconfigured": "Service not configured: set tasks.base_url and tasks.api_key in config.yaml",
+      "toggleFailed": "Failed to toggle, please retry"
+    },
+    "taskHandover": {
+      "button": "Hand over as a cross-device task",
+      "busy": "Handing over...",
+      "success": "Handed over as task #{{id}} — continue it under \"Cross-Device Tasks\" on the left",
+      "failed": "Hand over failed, please retry",
+      "turnStopFailed": "The running turn did not stop in time, please retry"
+    },
     "waitingTasks": "Waiting tasks",
     "waitingTasksCount": "Waiting tasks ({{count}})",
     "removeTask": "Remove task",
@@ -2585,6 +2662,10 @@
       "unread": "Completed unread",
       "error": "Execution error",
       "read": "Completed read"
+    },
+    "taskEntry": {
+      "crossDevice": "Cross-device",
+      "backToList": "Back"
     },
     "project": {
       "projects": "Projects",

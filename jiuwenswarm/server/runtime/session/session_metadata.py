@@ -70,7 +70,15 @@ _HEARTBEAT_SESSION_PREFIX = "heartbeat_"
 # 它的 prompt 里嵌着该群最近的完整对话（含其他成员的发言），所以一旦出现在
 # 会话列表里，点开就等于把整个群聊暴露在普通聊天界面。同样不参与列表展示。
 _GROUPCHAT_SESSION_PREFIX = "groupchat_"
-_HIDDEN_SESSION_PREFIXES = (_HEARTBEAT_SESSION_PREFIX, _GROUPCHAT_SESSION_PREFIX)
+# 跨设备任务的 Agent 回合会话：一个任务一个（task_{task_id}），由 TaskBridge
+# 写入，prompt 里嵌着该任务的接续日志。与群聊同理由：不属用户普通会话，
+# 不参与列表展示，任务内容在「跨设备任务」面板里看。
+_TASK_SESSION_PREFIX = "task_"
+_HIDDEN_SESSION_PREFIXES = (
+    _HEARTBEAT_SESSION_PREFIX,
+    _GROUPCHAT_SESSION_PREFIX,
+    _TASK_SESSION_PREFIX,
+)
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
 # user_id 白名单: 仅允许字母数字及 _-, 拒绝路径遍历字符
 _SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -683,6 +691,8 @@ def update_session_metadata(
     last_user_message_at: float | None = None,
     pinned: bool | None = None,
     pin_order: int | None = None,
+    handover_task_id: int | None = None,
+    handover_at: float | None = None,
     touch_last_message_at: bool = True,
     cache_bust: bool = False,
     sync: bool = False,
@@ -699,6 +709,9 @@ def update_session_metadata(
 
     pinned / pin_order 语义：覆盖式，由 session.pin handler 传入；
     未传(None)时不修改。紧凑重编号由 handler 层统一完成。
+
+    handover_task_id / handover_at 语义：覆盖式，由 task.handover 成功后经
+    set_session_handover_marker 写入；未传(None)时不修改。
 
     touch_last_message_at：是否刷新 ``last_message_at`` 为当前时刻。默认 ``True``
     (消息追加等场景)。纯状态更新(如 ``set_session_pinned`` 的置顶/重编号)应传
@@ -788,6 +801,13 @@ def update_session_metadata(
             metadata["pinned"] = bool(pinned)
         if pin_order is not None:
             metadata["pin_order"] = int(pin_order)
+        # handover_task_id / handover_at：覆盖式——由 task.handover 成功后经
+        # set_session_handover_marker 写入；标记会话已交接到 relay 任务，
+        # 供前端把侧边栏会话条目替换为跨设备任务条目。未传(None)不修改。
+        if handover_task_id is not None:
+            metadata["handover_task_id"] = int(handover_task_id)
+        if handover_at is not None:
+            metadata["handover_at"] = handover_at
         # project_dir：首次锁定——仅当当前值为空时写入，后续不覆盖
         if project_dir and not metadata.get("project_dir"):
             metadata["project_dir"] = project_dir
@@ -1095,6 +1115,43 @@ def set_session_pinned(session_id: str, pinned: bool) -> tuple[bool, int] | None
             new_orders[sid] = idx
 
         return pinned, new_orders.get(session_id, 0)
+
+
+def set_session_handover_marker(session_id: str, task_id: int) -> dict[str, Any] | None:
+    """标记会话已通过 task.handover 交接到 relay 任务（写入 ``handover_task_id``）。
+
+    交接成功后由 AgentServer 的 ``_handle_task_handover`` 调用；前端据此把侧边栏
+    的会话条目替换为对应的跨设备任务条目（任务消失/未启用 tasks 时条目自动回归）。
+
+    写入语义（照 ``set_session_pinned`` 先例）：
+      - ``touch_last_message_at=False``：交接不是消息，不腐蚀排序时间；
+      - ``cache_bust=True`` + ``sync_write=True``：跨进程敏感写入——AgentServer
+        写入、Gateway 的 ``collect_all_sessions_metadata``（强制读盘）消费，
+        返回前必须落盘；
+      - ``preserve_pin_fields``：不覆盖 Gateway 拥有的 pinned/pin_order。
+
+    Args:
+        session_id: 目标会话 ID。
+        task_id: 交接产生的 relay 任务 ID（>0）。
+
+    Returns:
+        更新后的完整 metadata；会话不存在（metadata 缺失）时返回 ``None``
+        （不隐式创建会话）。
+    """
+    if not task_id or int(task_id) <= 0:
+        return None
+    meta = _read_metadata(session_id, cache_bust=True)
+    if not meta:
+        return None
+    update_session_metadata(
+        session_id=session_id,
+        handover_task_id=int(task_id),
+        handover_at=_current_timestamp(),
+        touch_last_message_at=False,
+        cache_bust=True,
+        sync_write=True,
+    )
+    return _read_metadata(session_id)
 
 
 def increment_session_round_count(session_id: str) -> int:

@@ -819,10 +819,15 @@ class WebChannel(BaseWsChannel):
             )
             return
 
-        # ── 「项目」群聊下行：项目面板是全局的（不绑定任何会话），群里来了新消息或
-        # 订阅状态变化时，按 group_id 广播给所有 web 连接，由前端过滤出当前打开的项目。
-        # 与上面 heartbeat/cron/proactive 同理：无 session_id 会被下面的旧路径丢弃。
-        if msg.event_type in (EventType.TEAM_GROUP_MESSAGE, EventType.TEAM_GROUP_STATE):
+        # ── 「项目」群聊下行：项目面板是全局的（不绑定任何会话），群里来了新消息、
+        # 订阅状态变化或 Agent turn 过程提示时，按 group_id 广播给所有 web 连接，由前端
+        # 过滤出当前打开的项目。与上面 heartbeat/cron/proactive 同理：无 session_id 会被
+        # 下面的旧路径丢弃。
+        if msg.event_type in (
+            EventType.TEAM_GROUP_MESSAGE,
+            EventType.TEAM_GROUP_STATE,
+            EventType.TEAM_GROUP_PROGRESS,
+        ):
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
@@ -833,6 +838,23 @@ class WebChannel(BaseWsChannel):
                 len(clients),
                 getattr(msg, "id", ""),
                 (msg.payload or {}).get("group_id") if isinstance(msg.payload, dict) else None,
+            )
+            return
+
+        # ── 跨设备任务下行：任务面板同样是全局的（不绑定任何会话），任务日志
+        # 有新消息或本设备租约变化时，按 task_id 广播给所有 web 连接，由前端
+        # 过滤出当前打开的任务。与群聊广播同一模型。
+        if msg.event_type in (EventType.TASK_MESSAGE, EventType.TASK_STATE):
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] %s broadcast to %d client(s) id=%s task_id=%s",
+                msg.event_type.value,
+                len(clients),
+                getattr(msg, "id", ""),
+                (msg.payload or {}).get("task_id") if isinstance(msg.payload, dict) else None,
             )
             return
 

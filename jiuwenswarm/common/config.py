@@ -336,6 +336,26 @@ def set_auto_memory_enabled(enabled: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def set_tasks_enabled(enabled: bool) -> None:
+    """Set the personal task-continuation user switch (``tasks.enabled``).
+
+    网页「任务」界面的任务接续开关写这里：config.yaml 是该开关的持久层，
+    AgentServer 进程内的 bridge 启停由 RPC handler 在写回后另行触发。
+
+    Args:
+        enabled: True to enable, False to disable.
+    """
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        tasks = data.get("tasks")
+        if not isinstance(tasks, dict):
+            tasks = {}
+            data["tasks"] = tasks
+        tasks["enabled"] = bool(enabled)
+        return data
+
+    update_config(mutator)
+
+
 def load_yaml_round_trip(config_path: Path):
     """ruamel 加载 config，保留注释与格式。"""
     rt = YAML()

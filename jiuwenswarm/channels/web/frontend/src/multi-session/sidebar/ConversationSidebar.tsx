@@ -1,6 +1,6 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, CircleAlert, Code2, LoaderCircle, Workflow } from 'lucide-react';
+import { Check, ChevronDown, CircleAlert, Code2, LoaderCircle, MonitorSmartphone, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
@@ -10,8 +10,12 @@ import {
   useWorkspaceStore,
   useCronStore,
   filterJobsForProject,
+  tasksAvailable,
+  useTaskRelayStore,
   type SidebarCronJob,
 } from '../../stores';
+import { taskStateKey, type TaskItem } from '../../features/taskRelayPanelState';
+import { getTaskActivityAt, mergeSidebarEntries, shouldHideHandedOverSession } from '../../features/taskChatState';
 import type { ProjectInfo, Session } from '../../types';
 import {
   getConversationMenuItems,
@@ -66,8 +70,12 @@ function isDefaultProject(project: ProjectInfo): boolean {
 
 interface ConversationSidebarProps {
   activeSessionId: string | null;
+  /** 当前在聊天主视图打开的跨设备任务 id（任务条目的选中态；未打开为 null）。 */
+  activeTaskId: number | null;
   onNew: (options?: NewConversationOptions) => void;
   onSelect: (session: Session) => void;
+  /** 点击跨设备任务条目：在聊天主视图内打开该任务。 */
+  onSelectTask: (task: TaskItem) => void;
   onDelete: (session: Session) => void;
   /** 跳转到"定时任务"主面板；该入口原来在最左侧图标栏，现移到工作小窗口的"新建任务"下方 */
   onOpenCron: () => void;
@@ -311,6 +319,79 @@ function ConversationListItem({
           }}
         />
       ) : null}
+    </div>
+  );
+}
+
+interface TaskListItemProps {
+  task: TaskItem;
+  active: boolean;
+  now: number;
+  onSelect: () => void;
+}
+
+/**
+ * 「任务」分组里的跨设备任务条目：relay 任务在本侧边栏的投影。
+ *
+ * 视觉与会话条目（``ConversationListItem``）保持同一套语言：跨设备身份
+ * 用标题前的弱化图标标记（照 cron 行图标先例），meta 只放一个状态指示器
+ * ——working 转 spinner、input_required/pending 转等待文案、failed/canceled
+ * 转错误图标、其余（含 completed）退回相对时间。没有 pin/rename/delete
+ * 菜单——relay 是任务状态的属主，retire 不可逆，不放进侧边栏的 v1。
+ */
+function TaskListItem({ task, active, now, onSelect }: TaskListItemProps) {
+  const { t, i18n } = useTranslation();
+  const title = task.title || t('taskRelay.untitled', { id: task.task_id });
+  const stateLabel = t(`taskRelay.states.${taskStateKey(task.state)}`);
+
+  let status: React.ReactNode;
+  if (task.state === 'working') {
+    status = (
+      <span title={stateLabel} data-testid="multi-session-task-list-item-status-processing">
+        <LoaderCircle className="conversation-list-item__loader" aria-hidden="true" />
+      </span>
+    );
+  } else if (task.state === 'input_required' || task.state === 'pending') {
+    status = (
+      <span className="conversation-list-item__status-waiting" title={stateLabel} data-testid="multi-session-task-list-item-status-waiting">
+        <span>{stateLabel}</span>
+      </span>
+    );
+  } else if (task.state === 'failed' || task.state === 'canceled') {
+    status = (
+      <span title={stateLabel} data-testid="multi-session-task-list-item-status-error">
+        <CircleAlert className="conversation-list-item__status-error" size={14} strokeWidth={1.8} aria-hidden="true" />
+      </span>
+    );
+  } else {
+    status = (
+      <span className="conversation-list-item__status-read" title={stateLabel} data-testid="multi-session-task-list-item-status-read">
+        <span>{formatRelativeTime(getTaskActivityAt(task), now, i18n.language, t)}</span>
+      </span>
+    );
+  }
+
+  return (
+    <div
+      className={`conversation-list-item conversation-list-item--relay-task${active ? ' is-active' : ''}`}
+      data-testid="multi-session-task-list-item"
+      data-variant={String(task.task_id)}
+    >
+      <button type="button" className="conversation-list-item__main" onClick={onSelect} title={title} data-testid="multi-session-task-list-item-main">
+        <MonitorSmartphone
+          className="conversation-list-item__task-icon"
+          size={14}
+          strokeWidth={1.8}
+          aria-hidden="true"
+          data-testid="multi-session-task-list-item-icon"
+        />
+        <span className="conversation-list-item__title" data-testid="multi-session-task-list-item-title">
+          {title}
+        </span>
+        <span className="conversation-list-item__meta" data-testid="multi-session-task-list-item-meta">
+          {status}
+        </span>
+      </button>
     </div>
   );
 }
@@ -725,14 +806,20 @@ type RenameTarget =
 
 export function ConversationSidebar({
   activeSessionId,
+  activeTaskId,
   onNew,
   onSelect,
+  onSelectTask,
   onDelete,
   onOpenCron,
   isCronActive,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
-  const runtimes = useChatStore((state) => state.runtimes);
+  const runtimes = useChatStore(state => state.runtimes);
+  const relayTasks = useTaskRelayStore(state => state.tasks);
+  const relayStatus = useTaskRelayStore(state => state.status);
+  const startRelayPolling = useTaskRelayStore(state => state.startPolling);
+  const stopRelayPolling = useTaskRelayStore(state => state.stopPolling);
   const [relativeTimeNow, setRelativeTimeNow] = useState(Date.now);
   const [unreadSessions, setUnreadSessions] = useState(loadUnreadSessions);
   const [pathDialogOpen, setPathDialogOpen] = useState(false);
@@ -899,6 +986,30 @@ export function ConversationSidebar({
 
   const pinnedProjects = useMemo(() => projects.filter((project) => project.pinned && !isDefaultProject(project)), [projects]);
   const regularProjects = useMemo(() => projects.filter((project) => !project.pinned && !isDefaultProject(project)), [projects]);
+
+  // ── 跨设备任务混排（relay 任务 → 「任务」分组） ──────────────────────────
+  // 侧边栏是共享轮询的消费者之一：挂载即拉取，卸载时退出（最后一个消费者
+  // 离开才真正停表）。relay 未配置时 tasksAvailable=false，完全降级为纯
+  // 会话列表（不显示任务条目、不隐藏任何会话）。
+  useEffect(() => {
+    startRelayPolling();
+    return () => stopRelayPolling();
+  }, [startRelayPolling, stopRelayPolling]);
+
+  const relayAvailable = useMemo(() => tasksAvailable(relayStatus), [relayStatus]);
+  const visibleRelayTaskIds = useMemo(() => {
+    const ids = new Set<number>();
+    if (!relayAvailable) return ids;
+    for (const task of relayTasks) {
+      if (!task.archived) ids.add(task.task_id);
+    }
+    return ids;
+  }, [relayAvailable, relayTasks]);
+  const hideHandedOver = useCallback(
+    (session: Session) => shouldHideHandedOverSession(session, visibleRelayTaskIds, relayAvailable),
+    [visibleRelayTaskIds, relayAvailable],
+  );
+
   const sortedProjectSessions = useMemo(() => {
     const sorted: Record<string, Session[]> = {};
     for (const [projectId, list] of Object.entries(projectSessions)) {
@@ -910,6 +1021,12 @@ export function ConversationSidebar({
     if (defaultProject) return sortedProjectSessions[defaultProject.project_id] || [];
     return [];
   }, [defaultProject, sortedProjectSessions]);
+  // 「任务」分组的混排条目：本地会话与 relay 任务按活跃时间交错；已交接且
+  // 任务仍可见的会话在此被隐藏（条目替换为任务）。
+  const conversationEntries = useMemo(
+    () => mergeSidebarEntries(conversationSessions, relayTasks, { tasksAvailable: relayAvailable }),
+    [conversationSessions, relayTasks, relayAvailable],
+  );
   const orderedPinnedSessions = useMemo(() => sortSessionsForSidebar(pinnedSessions), [pinnedSessions]);
   const observedSidebarSessions = useMemo(() => {
     const byId = new Map<string, Session>();
@@ -1072,10 +1189,24 @@ export function ConversationSidebar({
     );
   }
 
+  function renderTask(task: TaskItem) {
+    return (
+      <TaskListItem
+        key={`relay-task-${task.task_id}`}
+        task={task}
+        active={activeTaskId === task.task_id}
+        now={relativeTimeNow}
+        onSelect={() => onSelectTask(task)}
+      />
+    );
+  }
+
   function renderCronJob(job: SidebarCronJob, projectId: string, nested = false) {
     const cronGroupId = `cron-${job.id}`;
     const cronExpanded = expandedCronGroups[cronGroupId] ?? false;
     const triggerSessions = cronSessions[job.id] || [];
+    // 交接给 relay 的 cron 触发会话同样被任务条目取代（隐藏规则与普通会话一致）。
+    const visibleTriggerSessions = triggerSessions.filter(ts => !hideHandedOver(ts));
     const isCronSessionsLoading = cronSessionsLoading[job.id] ?? false;
     const isCronUnread = Boolean(unreadCronJobs[job.id]);
     return (
@@ -1102,8 +1233,8 @@ export function ConversationSidebar({
           <div className="conversation-sidebar__cron-sessions" data-testid="multi-session-cron-job-sessions">
             {isCronSessionsLoading ? (
               <div className="conversation-sidebar__cron-sessions-loading" data-testid="multi-session-cron-job-sessions-loading">{t('common.loading')}</div>
-            ) : triggerSessions.length > 0 ? (
-              triggerSessions.map((ts) => (
+            ) : visibleTriggerSessions.length > 0 ? (
+              visibleTriggerSessions.map(ts => (
                 <ConversationListItem
                   key={ts.session_id}
                   session={ts}
@@ -1176,7 +1307,8 @@ export function ConversationSidebar({
   }
 
   function renderProject(project: ProjectInfo) {
-    const sessionsForProject = sortedProjectSessions[project.project_id] || [];
+    // 项目分组同样隐藏已交接到 relay 的会话（任务条目只在顶部「任务」分组出现）。
+    const sessionsForProject = (sortedProjectSessions[project.project_id] || []).filter(session => !hideHandedOver(session));
     const expanded = expandedProjectIds[project.project_id] ?? true;
     return (
       <div key={project.project_id} className="conversation-sidebar__group" data-testid="multi-session-project-group" data-variant={project.project_id}>
@@ -1299,13 +1431,15 @@ export function ConversationSidebar({
               <span className="conversation-sidebar__label" data-testid="multi-session-pinned-group-label">{t('multiSession.project.pinned')}</span>
             </div>
             <div className="conversation-sidebar__group-list" data-testid="multi-session-pinned-group-list">
-              {orderedPinnedSessions.map((session) => {
-                const project = getSessionProject(session);
-                return renderSession(session, {
-                  projectMenu: Boolean(project && !isDefaultProject(project)),
-                });
-              })}
-              {pinnedProjects.map((project) => renderProject(project))}
+              {orderedPinnedSessions
+                .filter(session => !hideHandedOver(session))
+                .map(session => {
+                  const project = getSessionProject(session);
+                  return renderSession(session, {
+                    projectMenu: Boolean(project && !isDefaultProject(project)),
+                  });
+                })}
+              {pinnedProjects.map(project => renderProject(project))}
             </div>
           </div>
         ) : null}
@@ -1384,9 +1518,13 @@ export function ConversationSidebar({
           </div>
           <div className="conversation-sidebar__group-list" data-testid="multi-session-conversations-list">
             {defaultProject ? (jobsByProject.get(defaultProject.project_id) || []).map((job) => renderCronJob(job, defaultProject.project_id)) : null}
-            {conversationSessions.length > 0 ? conversationSessions.map((session) => renderSession(session)) : (
-              (!defaultProject || (jobsByProject.get(defaultProject.project_id) || []).length === 0) ? <div className="conversation-sidebar__empty" data-testid="multi-session-conversations-empty">{t('multiSession.project.noConversations')}</div> : null
-            )}
+            {/* 混排：本地会话 + relay 跨设备任务条目，按活跃时间倒序（mergeSidebarEntries）。 */}
+            {conversationEntries.map(entry => (entry.kind === 'session' ? renderSession(entry.session) : renderTask(entry.task)))}
+            {conversationEntries.length === 0 && (!defaultProject || (jobsByProject.get(defaultProject.project_id) || []).length === 0) ? (
+              <div className="conversation-sidebar__empty" data-testid="multi-session-conversations-empty">
+                {t('multiSession.project.noConversations')}
+              </div>
+            ) : null}
             {defaultProject ? renderSessionPagination(defaultProject.project_id, false) : null}
           </div>
         </div>

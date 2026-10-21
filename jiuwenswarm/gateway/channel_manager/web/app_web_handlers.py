@@ -715,6 +715,26 @@ _FORWARD_REQ_METHODS = frozenset({
     "team.message.ack",
     "team.message.subscribe",
     "team.message.unsubscribe",
+    # 个人多设备任务接续
+    "task.create",
+    "task.list",
+    "task.get",
+    "task.update",
+    "task.retire",
+    "task.acquire",
+    "task.release",
+    "task.renew",
+    "task.checkpoint",
+    "task.message.send",
+    "task.message.list",
+    "task.message.ack",
+    "task.whoami",
+    "task.status",
+    "task.local_status",
+    "task.set_enabled",
+    "task.message.subscribe",
+    "task.message.unsubscribe",
+    "task.handover",
     # Agent configuration
     "agents.list",
     "agents.get",
@@ -770,6 +790,25 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "team.message.ack",
     "team.message.subscribe",
     "team.message.unsubscribe",
+    "task.create",
+    "task.list",
+    "task.get",
+    "task.update",
+    "task.retire",
+    "task.acquire",
+    "task.release",
+    "task.renew",
+    "task.checkpoint",
+    "task.message.send",
+    "task.message.list",
+    "task.message.ack",
+    "task.whoami",
+    "task.status",
+    "task.local_status",
+    "task.set_enabled",
+    "task.message.subscribe",
+    "task.message.unsubscribe",
+    "task.handover",
     "skills.marketplace.list",
     "skills.list",
     "skills.installed",
@@ -3955,6 +3994,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     def _to_session_info(meta: dict[str, Any]) -> dict[str, Any]:
         """将会话元数据投影为 SessionInfo(排除 delivery_context/channel_metadata 等内部字段)。"""
         lum = meta.get("last_user_message_at")
+        hti = meta.get("handover_task_id")
         return {
             "session_id": str(meta.get("session_id", "")),
             "title": str(meta.get("title", "")),
@@ -3971,6 +4011,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "last_user_message_at": lum if isinstance(lum, (int, float)) and not isinstance(lum, bool) else None,
             "model": str(meta.get("model", "")),
             "work_mode": str(meta.get("work_mode") or DEFAULT_WEB_WORK_MODE),
+            # 交接标记：会话已交接到 relay 任务（task.handover 成功后写入）。
+            # 前端据此把侧边栏会话条目替换为跨设备任务条目；无效/缺失为 None。
+            "handover_task_id": int(hti) if isinstance(hti, (int, float)) and not isinstance(hti, bool) else None,
         }
 
     async def _project_get_sessions(ws, req_id, params, session_id, user_id=None):

@@ -12,4 +12,6 @@ export { useHarnessStore } from './harnessStore';
 export { ensureSessionRuntimes } from './ensureSessionRuntimes';
 export { useCronStore, filterJobsForProject, isDefaultProjectId, isWebChannelJob } from './cronStore';
 export type { SidebarCronJob } from './cronStore';
+export { tasksAvailable, useTaskRelayStore } from './taskRelayStore';
+export type { TaskLocalStatus } from './taskRelayStore';
 export type { HarnessStageInfo, HarnessStageStatus, CachedFileTreeEntry } from './harnessStore';

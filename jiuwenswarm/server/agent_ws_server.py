@@ -942,6 +942,48 @@ def _ensure_group_hub_callback(hub: Any) -> None:
     set_group_frame_callback(hub)
 
 
+def _coerce_task_id(value: Any) -> int:
+    """Parse a task id from RPC params, raising the client's own error type.
+
+    Imported lazily so the module keeps loading when the optional tasks
+    dependencies are absent — same posture as ``_coerce_group_id``.
+    """
+    from jiuwenswarm.agents.harness.team.tasks import TaskRequestInvalidError
+
+    if isinstance(value, bool):
+        raise TaskRequestInvalidError("task_id 必须是正整数")
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise TaskRequestInvalidError("task_id 必须是正整数") from exc
+    if parsed < 1:
+        raise TaskRequestInvalidError("task_id 必须大于 0")
+    return parsed
+
+
+def _task_subscriber_id(request: AgentRequest) -> str:
+    """Identity of one task subscription binding, keyed on the channel.
+
+    The bridge binds as ``tasks_bridge`` and a panel binds under its channel
+    id, so the hub's per-(task, subscriber) reference counting keeps the
+    bridge's relay connection alive when the panel unsubscribes.
+    """
+    return f"{request.channel_id or 'unknown'}"
+
+
+def _ensure_task_hub_callback(hub: Any) -> None:
+    """Point the tasks hub's frame callback at the server-push channel, once.
+
+    Same re-bind-on-every-subscribe posture as ``_ensure_group_hub_callback``:
+    cheap, and keeps the callback in sync with the live AgentServer instance.
+    """
+    from jiuwenswarm.agents.harness.team.tasks.subscription import (
+        set_task_frame_callback,
+    )
+
+    set_task_frame_callback(hub)
+
+
 class AgentWebSocketServer:
     """Gateway 与 AgentServer 之间的 WebSocket 服务端（单例）.
 
@@ -1641,6 +1683,66 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.TEAM_MESSAGE_UNSUBSCRIBE:
                 await self._handle_team_message_unsubscribe(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TEAM_GROUP_PROGRESS_GET:
+                await self._handle_team_progress_get(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_CREATE:
+                await self._handle_task_create(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_LIST:
+                await self._handle_task_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_GET:
+                await self._handle_task_get(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_UPDATE:
+                await self._handle_task_update(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_RETIRE:
+                await self._handle_task_retire(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_ACQUIRE:
+                await self._handle_task_acquire(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_RELEASE:
+                await self._handle_task_release(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_RENEW:
+                await self._handle_task_renew(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_CHECKPOINT:
+                await self._handle_task_checkpoint(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_MESSAGE_SEND:
+                await self._handle_task_message_send(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_MESSAGE_LIST:
+                await self._handle_task_message_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_MESSAGE_ACK:
+                await self._handle_task_message_ack(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_WHOAMI:
+                await self._handle_task_whoami(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_STATUS:
+                await self._handle_task_status(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_LOCAL_STATUS:
+                await self._handle_task_local_status(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_SET_ENABLED:
+                await self._handle_task_set_enabled(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_MESSAGE_SUBSCRIBE:
+                await self._handle_task_message_subscribe(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_MESSAGE_UNSUBSCRIBE:
+                await self._handle_task_message_unsubscribe(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.TASK_HANDOVER:
+                await self._handle_task_handover(ws, request, send_lock)
                 return
             if request.req_method in get_permissions_config_req_methods():
                 await self._handle_permissions_config(ws, request, send_lock)
@@ -4425,6 +4527,494 @@ class AgentWebSocketServer:
             ),
         )
 
+    # ── 个人多设备任务接续（relay tasks）：任务、租约、消息 ──────────────────
+
+    @staticmethod
+    def _task_response(
+        request: AgentRequest, *, ok: bool, payload: dict[str, Any]
+    ) -> AgentResponse:
+        """Build a response in the shape every task handler returns."""
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=ok,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
+    async def _run_task_handler(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+        *,
+        label: str,
+        failure_code: str,
+        action: Any,
+    ) -> None:
+        """Shared error mapping for the task handlers.
+
+        Mirrors ``_run_group_chat_handler``: a ``TaskError`` carrying a code the
+        UI branches on, an unexpected exception that must still produce a
+        response, and success.
+        """
+        from jiuwenswarm.agents.harness.team.tasks import TaskError
+
+        try:
+            payload = await action()
+            resp = self._task_response(request, ok=True, payload=payload or {})
+        except TaskError as exc:
+            resp = self._task_response(
+                request, ok=False, payload={"error": str(exc), "code": exc.code}
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the request loop
+            logger.exception("[AgentWebSocketServer] %s failed: %s", label, exc)
+            resp = self._task_response(
+                request, ok=False, payload={"error": str(exc), "code": failure_code}
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    @staticmethod
+    def _task_params(request: AgentRequest) -> dict[str, Any]:
+        return request.params if isinstance(request.params, dict) else {}
+
+    @staticmethod
+    def _task_id(params: dict[str, Any]) -> Any:
+        """Pick the task id out of either spelling the panels may send."""
+        return params.get("task_id")
+
+    async def _handle_task_create(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Create a personal task on the relay. Returns ``{task}``."""
+        from jiuwenswarm.agents.harness.team.tasks import create_task
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            task = await create_task(
+                title=str(params.get("title") or ""),
+                owner_dataset=str(params.get("owner_dataset") or "").strip() or None,
+                payload=params.get("payload"),
+            )
+            return {"task": task}
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.create", failure_code="CREATE_FAILED", action=action
+        )
+
+    async def _handle_task_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """List this principal's tasks, optionally filtered by state."""
+        from jiuwenswarm.agents.harness.team.tasks import list_tasks
+
+        params = self._task_params(request)
+        try:
+            limit = int(params.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+
+        async def action() -> dict[str, Any]:
+            tasks = await list_tasks(
+                state=params.get("state"),
+                limit=limit,
+            )
+            return {"tasks": tasks}
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.list", failure_code="LIST_FAILED", action=action
+        )
+
+    async def _handle_task_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Task detail plus its recent messages."""
+        from jiuwenswarm.agents.harness.team.tasks import get_task
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            return dict(await get_task(task_id=self._task_id(params)))
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.get", failure_code="GET_FAILED", action=action
+        )
+
+    async def _handle_task_update(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Rename or archive a task. Returns ``{task_id, title, archived}``."""
+        from jiuwenswarm.agents.harness.team.tasks import update_task
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            return dict(
+                await update_task(
+                    task_id=self._task_id(params),
+                    title=params.get("title"),
+                    archived=params.get("archived"),
+                )
+            )
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.update", failure_code="UPDATE_FAILED", action=action
+        )
+
+    async def _handle_task_retire(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Retire a terminal task. Irreversible."""
+        from jiuwenswarm.agents.harness.team.tasks import retire
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            return dict(await retire(task_id=self._task_id(params)))
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.retire", failure_code="RETIRE_FAILED", action=action
+        )
+
+    async def _handle_task_acquire(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Take the lease on a task, engaging the proactive bridge where active.
+
+        This is the "start running on this device" entry point: when the task
+        bridge is up it is handed the task so the lease stays alive and a
+        takeover is noticed promptly; otherwise a plain data-plane acquire.
+        Returns ``{task_id, fence, holder, expires_at, state}``.
+        """
+        params = self._task_params(request)
+        task_id = self._task_id(params)
+
+        async def action() -> dict[str, Any]:
+            from jiuwenswarm.agents.harness.team.tasks import acquire
+            from jiuwenswarm.agents.harness.team.tasks.bridge import get_bridge
+
+            bridge = get_bridge()
+            if bridge is not None:
+                return dict(
+                    await bridge.take_task(
+                        int(task_id),
+                        ttl_seconds=params.get("ttl_seconds"),
+                        mode=str(params.get("mode") or "force"),
+                    )
+                )
+            return dict(
+                await acquire(
+                    task_id=task_id,
+                    ttl_seconds=params.get("ttl_seconds"),
+                    mode=str(params.get("mode") or "force"),
+                )
+            )
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.acquire", failure_code="ACQUIRE_FAILED", action=action
+        )
+
+    async def _handle_task_release(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Drop the lease, handing the task back via a checkpoint + next state.
+
+        When the bridge holds the task this also stops the local keepalive loop.
+        """
+        params = self._task_params(request)
+        task_id = self._task_id(params)
+
+        async def action() -> dict[str, Any]:
+            from jiuwenswarm.agents.harness.team.tasks import release
+            from jiuwenswarm.agents.harness.team.tasks.bridge import get_bridge
+
+            bridge = get_bridge()
+            if bridge is not None and bridge.run_for(int(task_id)) is not None:
+                return dict(
+                    await bridge.finish_task(
+                        int(task_id),
+                        next_state=str(params.get("next_state") or "input_required"),
+                        checkpoint=params.get("checkpoint"),
+                        checkpoint_seq=params.get("checkpoint_seq"),
+                    )
+                )
+            return dict(
+                await release(
+                    task_id=task_id,
+                    fence=params.get("fence"),
+                    next_state=params.get("next_state"),
+                    checkpoint=params.get("checkpoint"),
+                    checkpoint_seq=params.get("checkpoint_seq"),
+                )
+            )
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.release", failure_code="RELEASE_FAILED", action=action
+        )
+
+    async def _handle_task_renew(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Extend a held lease."""
+        from jiuwenswarm.agents.harness.team.tasks import renew
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            return dict(
+                await renew(
+                    task_id=self._task_id(params),
+                    fence=params.get("fence"),
+                    ttl_seconds=params.get("ttl_seconds"),
+                )
+            )
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.renew", failure_code="RENEW_FAILED", action=action
+        )
+
+    async def _handle_task_checkpoint(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Write a resume checkpoint under a held lease."""
+        from jiuwenswarm.agents.harness.team.tasks import checkpoint
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            return dict(
+                await checkpoint(
+                    task_id=self._task_id(params),
+                    fence=params.get("fence"),
+                    checkpoint=params.get("checkpoint"),
+                    checkpoint_seq=params.get("checkpoint_seq"),
+                )
+            )
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.checkpoint", failure_code="CHECKPOINT_FAILED", action=action
+        )
+
+    async def _handle_task_message_send(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Post one entry to the task log (requires the lease)."""
+        from jiuwenswarm.agents.harness.team.tasks import append_message
+        from jiuwenswarm.agents.harness.team.tasks.bridge import get_bridge
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            fence = params.get("fence")
+            if fence is None:
+                # 面板不跟踪 fencing token；本机 bridge 持有该任务时用它的
+                # fence 兜底。未持有（或已被击落）则原样传 None，让客户端
+                # 校验报错——此刻该任务不属于这台设备。
+                bridge = get_bridge()
+                if bridge is not None:
+                    fence = bridge.fence_for(int(self._task_id(params)))
+            return dict(
+                await append_message(
+                    task_id=self._task_id(params),
+                    fence=fence,
+                    payload=params.get("payload"),
+                    kind=params.get("kind", "text"),
+                    client_msg_id=params.get("client_msg_id"),
+                    reply_to=params.get("reply_to"),
+                )
+            )
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.message.send", failure_code="SEND_FAILED", action=action
+        )
+
+    async def _handle_task_message_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Pull a page of the task log."""
+        from jiuwenswarm.agents.harness.team.tasks import fetch_messages
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            return dict(
+                await fetch_messages(
+                    task_id=self._task_id(params),
+                    after_seq=params.get("after_seq"),
+                    before_seq=params.get("before_seq"),
+                    limit=params.get("limit"),
+                )
+            )
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.message.list", failure_code="LIST_FAILED", action=action
+        )
+
+    async def _handle_task_message_ack(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Advance this device's read cursor on a task."""
+        from jiuwenswarm.agents.harness.team.tasks import ack_messages
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            return dict(
+                await ack_messages(task_id=self._task_id(params), seq=params.get("seq"))
+            )
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.message.ack", failure_code="ACK_FAILED", action=action
+        )
+
+    async def _handle_task_whoami(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Resolve the identity behind the configured tasks credential."""
+        from jiuwenswarm.agents.harness.team.tasks import whoami
+
+        async def action() -> dict[str, Any]:
+            return dict(await whoami())
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.whoami", failure_code="WHOAMI_FAILED", action=action
+        )
+
+    async def _handle_task_status(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Relay-side tasks module status."""
+        from jiuwenswarm.agents.harness.team.tasks import status
+
+        async def action() -> dict[str, Any]:
+            return dict(await status())
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.status", failure_code="STATUS_FAILED", action=action
+        )
+
+    async def _handle_task_local_status(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Local tasks module status: no relay round-trip.
+
+        网页「任务」界面的接续开关用这个渲染初始状态——relay 未配置/不可达时
+        也要能拿到开关本身的值（``enabled``）与服务可用性（``service_ready``）。
+        """
+        from jiuwenswarm.agents.harness.team.tasks import get_bridge, resolve_tasks_config
+
+        async def action() -> dict[str, Any]:
+            config = resolve_tasks_config()
+            bridge = get_bridge()
+            return {
+                # 用户开关：config.yaml tasks.enabled（env 覆盖后）。
+                "enabled": bool(config.enabled),
+                # 服务可用性：base_url 显式有效 + api_key 已填（匿名模式是配置错误）。
+                "service_ready": bool(config.base_url and config.api_key),
+                "bridge_running": bridge is not None,
+                "held_task_ids": list(bridge.held_tasks) if bridge is not None else [],
+            }
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.local_status", failure_code="STATUS_FAILED", action=action
+        )
+
+    async def _handle_task_set_enabled(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Toggle the task-continuation user switch: persist + (re)start/stop the bridge.
+
+        写回 config.yaml 后 ``get_config()`` 按文件 mtime 失效缓存，
+        ``start_bridge`` 重新 resolve 即可读到新值，无需重启进程。
+        """
+        from jiuwenswarm.agents.harness.team.tasks import (
+            TaskRequestInvalidError,
+            get_bridge,
+            resolve_tasks_config,
+            start_bridge,
+            stop_bridge,
+        )
+        from jiuwenswarm.common.config import set_tasks_enabled
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            raw = params.get("enabled")
+            if not isinstance(raw, bool):
+                raise TaskRequestInvalidError("enabled 必须为布尔值")
+            set_tasks_enabled(raw)
+            if raw:
+                # 幂等：已在运行的 bridge 不重复 start（重复 start 会向订阅
+                # hub 注册第二个 frame consumer）。
+                if get_bridge() is None:
+                    await start_bridge()
+            else:
+                await stop_bridge()
+            config = resolve_tasks_config()
+            bridge = get_bridge()
+            return {
+                "enabled": bool(config.enabled),
+                "service_ready": bool(config.base_url and config.api_key),
+                "bridge_running": bridge is not None,
+                "held_task_ids": list(bridge.held_tasks) if bridge is not None else [],
+            }
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.set_enabled", failure_code="SET_ENABLED_FAILED", action=action
+        )
+
+    async def _handle_task_message_subscribe(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Start (or join) the live relay subscription for a task.
+
+        The subscription itself is process-wide; what this binds is the
+        AgentServer's interest in it. Frames reach browsers through the normal
+        server-push channel, so no per-connection state is kept here. The
+        bridge's own binding is independent, so a panel unsubscribing never
+        tears down the connection the lease holder depends on.
+        """
+        from jiuwenswarm.agents.harness.team.tasks import get_subscription_hub
+
+        params = self._task_params(request)
+        hub = get_subscription_hub()
+        _ensure_task_hub_callback(hub)
+
+        async def action() -> dict[str, Any]:
+            task_id = _coerce_task_id(params.get("task_id"))
+            await hub.attach(task_id=task_id, subscriber_id=_task_subscriber_id(request))
+            return {"task_id": task_id, "subscribed": True, "watched": hub.watched_tasks}
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.message.subscribe", failure_code="SUBSCRIBE_FAILED", action=action
+        )
+
+    async def _handle_task_message_unsubscribe(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.agents.harness.team.tasks import get_subscription_hub
+
+        params = self._task_params(request)
+        hub = get_subscription_hub()
+
+        async def action() -> dict[str, Any]:
+            task_id = _coerce_task_id(params.get("task_id"))
+            await hub.detach(task_id=task_id, subscriber_id=_task_subscriber_id(request))
+            return {"task_id": task_id, "subscribed": False, "watched": hub.watched_tasks}
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.message.unsubscribe", failure_code="UNSUBSCRIBE_FAILED", action=action
+        )
+
+    async def _handle_task_handover(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Export a local session's history to the relay as an ``input_required`` task.
+
+        服务端原子完成 create → acquire → 逐条 append → release，刻意不走
+        ``task.acquire``（那会路由到 bridge.take_task，让每条导入的历史都触发
+        一轮 agent 回合）。任何设备随后可在「跨设备任务」里接管继续。
+
+        成功后在本地 session metadata 打 ``handover_task_id`` 标记：前端据此把
+        侧边栏的会话条目替换为对应的跨设备任务条目（任务消失/未启用 tasks 时
+        条目自动回归）。
+        """
+        from jiuwenswarm.agents.harness.team.tasks import TaskRequestInvalidError
+        from jiuwenswarm.agents.harness.team.tasks.handover import handover_session
+        from jiuwenswarm.server.runtime.session.session_metadata import set_session_handover_marker
+
+        params = self._task_params(request)
+
+        async def action() -> dict[str, Any]:
+            session_id = str(params.get("session_id") or "").strip()
+            if not session_id:
+                raise TaskRequestInvalidError("session_id 不能为空")
+            title = str(params.get("title") or "").strip()
+            result = dict(await handover_session(session_id=session_id, title=title))
+            # 标记是增强不是前提：relay 上的任务已创建成功，标记失败只记 warning，
+            # 不改变 handover 的成功语义（会话保持普通条目，任务独立出现在列表）。
+            try:
+                task = result.get("task")
+                task_id = int(task.get("task_id") or 0) if isinstance(task, dict) else 0
+                if task_id > 0:
+                    set_session_handover_marker(session_id, task_id)
+            except Exception as exc:  # noqa: BLE001 - 见上注释
+                logger.warning(
+                    "[AgentWebSocketServer] handover marker write failed (session=%s): %s",
+                    session_id, exc,
+                )
+            return result
+
+        await self._run_task_handler(
+            ws, request, send_lock, label="task.handover", failure_code="HANDOVER_FAILED", action=action
+        )
+
     # ── 「项目」群聊（relay group chat）：成员、邀请、消息 ──────────────────────
 
     @staticmethod
@@ -4753,6 +5343,31 @@ class AgentWebSocketServer:
             send_lock,
             label="team.message.unsubscribe",
             failure_code="UNSUBSCRIBE_FAILED",
+            action=action,
+        )
+
+    async def _handle_team_progress_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Snapshot of the group's running agent turn, for the progress card.
+
+        The panel calls this on open/refresh to rebuild the live card after the
+        push stream was missed. ``progress`` is ``None`` when no turn is
+        running — the card simply does not render.
+        """
+        from jiuwenswarm.agents.harness.team.groupchat import get_bridge
+
+        params = request.params if isinstance(request.params, dict) else {}
+
+        async def action() -> dict[str, Any]:
+            bridge = get_bridge()
+            snapshot = bridge.progress_snapshot(_coerce_group_id(params.get("group_id"))) if bridge else None
+            return {"progress": snapshot}
+
+        await self._run_group_chat_handler(
+            ws,
+            request,
+            send_lock,
+            label="team.group.progress.get",
+            failure_code="PROGRESS_FAILED",
             action=action,
         )
 

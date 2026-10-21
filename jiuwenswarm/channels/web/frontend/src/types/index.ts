@@ -39,6 +39,8 @@ export interface Session {
   user_id?: string;            // 创建人ID
   last_message_at?: number;    // 最近对话时间(Unix时间戳)
   last_user_message_at?: number; // 最后一条用户消息时间(Unix时间戳)
+  /** 交接后指向 relay 跨设备任务的 id；侧边栏据此把会话条目替换为任务条目 */
+  handover_task_id?: number | null;
 }
 
 export type AgentMode = 'agent' | 'team' | 'auto_harness';

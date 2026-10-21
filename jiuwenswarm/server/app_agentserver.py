@@ -125,6 +125,31 @@ else:
         _perm_ns_logger.addHandler(_perm_sh)
     _perm_ns_logger.propagate = False
 
+# The groupchat bridge narrates its lifecycle (started / replied / turn timed
+# out / turn failed) only through logging, and those lines are the first thing
+# wanted when a group goes quiet. Terminal scrollback is not a durable store,
+# so the bridge gets its own rotating file whichever branch above ran.
+from jiuwenswarm.common.utils import get_logs_dir as _get_logs_dir
+
+_gc_logs_dir = _get_logs_dir()
+_gc_logs_dir.mkdir(parents=True, exist_ok=True)
+_gc_logger = logging.getLogger("jiuwenswarm.agents.harness.team.groupchat")
+_gc_logger.setLevel(logging.INFO)
+_gc_fh = logging.handlers.RotatingFileHandler(
+    _gc_logs_dir / "groupchat_bridge.log",
+    maxBytes=20 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_gc_fh.setLevel(logging.INFO)
+_gc_fh.setFormatter(
+    logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+_gc_logger.addHandler(_gc_fh)
+
 # Load env from user workspace config/.env
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -280,6 +305,16 @@ async def _run(host: str, port: int) -> None:
 
     await start_bridge()
 
+    # Personal-task bridge: holds the lease on tasks this device is running,
+    # renews them and yields on takeover. Same lifecycle posture as the group
+    # chat bridge; start_bridge never raises.
+    from jiuwenswarm.agents.harness.team.tasks import (
+        start_bridge as start_task_bridge,
+        stop_bridge as stop_task_bridge,
+    )
+
+    await start_task_bridge()
+
     def _on_signal() -> None:
         stop_event.set()
 
@@ -302,6 +337,10 @@ async def _run(host: str, port: int) -> None:
             await stop_bridge()
         except Exception as exc:  # noqa: BLE001 - shutdown must continue
             logger.warning("[AgentServer] group chat bridge stop failed: %s", exc)
+        try:
+            await stop_task_bridge()
+        except Exception as exc:  # noqa: BLE001 - shutdown must continue
+            logger.warning("[AgentServer] task bridge stop failed: %s", exc)
         if teammate_bootstrap_task is not None:
             teammate_bootstrap_task.cancel()
             try:
