@@ -141,6 +141,26 @@ def _gui_response_session_id(message: dict[str, Any]) -> str:
     return ""
 
 
+def cron_push_gate(
+    cron_block: dict[str, Any] | None, session_id: str | None
+) -> tuple[bool, str]:
+    """cron-push 帧的推送闸门（路由增强定案：无会话不推送 + 占位帧不下发）.
+
+    返回 (should_push, reason)：
+    - 占位帧（is_placeholder）不下发：结果帧到达后再推。对齐 PC 端
+      jiuwenswarm-framework.ts 的 is_placeholder 替换语义（手机通知栏
+      不做"执行中"提示，避免占位/结果双通知）。
+    - 无会话绑定不推送：推送需要会话路由（to），无会话时推往未知目的地的
+      行为按定案取消，仅记日志。
+    """
+    block = cron_block if isinstance(cron_block, dict) else {}
+    if block.get("is_placeholder"):
+        return False, "placeholder frame skipped (result frame will be pushed)"
+    if not str(session_id or "").strip():
+        return False, "no session bound; skip push"
+    return True, ""
+
+
 FILE_TYPE_TO_MIME_TYPE: dict[str, str] = {
     "txt": "text/plain",
     "html": "text/html",
@@ -1507,6 +1527,7 @@ class XiaoyiChannel(BaseChannel):
         content = ""
         cron_job_name = ""
         cron_job_id = ""
+        cron_block: dict = {}
         if isinstance(msg.payload, dict):
             content = msg.payload.get("content", "\n")
             if msg.event_type == EventType.CHAT_ERROR:
@@ -1532,6 +1553,15 @@ class XiaoyiChannel(BaseChannel):
 
         # 推送消息发送
         if msg.id.startswith("cron-push"):
+            # 路由增强定案：占位帧不下发（结果帧到达后再推）+ 无会话绑定不推送
+            should_push, gate_reason = cron_push_gate(cron_block, session_id)
+            if not should_push:
+                logger.info(
+                    "[XiaoyiChannel][CRON-PUSH] skip push: %s (job=%s)",
+                    gate_reason,
+                    cron_job_id or "-",
+                )
+                return
             # 与 xy_channel cron-buffer.ts flushBufferedTexts + outbound.ts sendText 对齐：
             # 1. 持久化全文到 pushData（客户端 Trigger 回查看全文，不受截断影响）
             # 2. 经 push_broadcast 向所有已注册 pushId 广播（单 pushId 失败不影响其他）
