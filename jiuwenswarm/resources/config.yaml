@@ -1462,6 +1462,8 @@ sandbox:
   path_allowlist: []
   # Parent tool variables to forward by exact name; values are not stored here.
   # Missing field / [] disables extra forwarding. Product hosts supply their own names.
+  # Migration: former product tool defaults are no longer implicit; hosts must declare them.
+  # Internal service startup warns when enabled=true and this list is empty.
   # Interpreter loader keys (PYTHONPATH/NODE_OPTIONS/etc.) are never inherited
   # into tool commands; they require explicit request/policy environment values.
   # Changes take effect after restarting the sandbox service.

@@ -499,7 +499,8 @@ class JiuwenBoxRunner:
                 get_sandbox_env_allowlist, get_sandbox_path_allowlist, get_sandbox_runtime,
             )
 
-            sandbox_limits = get_sandbox_runtime()["limits"]
+            sandbox_runtime = get_sandbox_runtime()
+            sandbox_limits = sandbox_runtime["limits"]
             desired_env_allowlist = tuple(get_sandbox_env_allowlist())
             desired_path_allowlist = tuple(get_sandbox_path_allowlist())
             desired_limits = (
@@ -633,6 +634,13 @@ class JiuwenBoxRunner:
             else:
                 env.pop("JIUWENBOX_POLICY_PATH", None)
 
+            if sandbox_runtime["enabled"] and not desired_env_allowlist:
+                logger.warning(
+                    "[JiuwenBoxRunner] sandbox.enabled=true but sandbox.env_allowlist is empty; "
+                    "no parent tool variables or credentials will be inherited. "
+                    "Configure exact names in sandbox.env_allowlist; tool roots/PATH require "
+                    "host-provided JIUWENBOX_TOOL_PATHS.",
+                )
             logger.info("[JiuwenBoxRunner] spawning: %s", " ".join(cmd))
             if sys.platform == "win32":
                 setup_started = time.monotonic()

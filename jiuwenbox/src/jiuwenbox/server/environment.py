@@ -29,7 +29,7 @@ def inherited_environment(*, for_runner: bool = False) -> dict[str, str]:
     request/policy, never by inheriting a service's interpreter environment.
     """
     try:
-        names = json.loads(os.environ.get(ENV_ALLOWLIST, "[]"))
+        names = json.loads((os.environ.get(ENV_ALLOWLIST) or "").strip() or "[]")
     except (ValueError, TypeError) as exc:
         raise ValueError("Invalid JIUWENBOX_ENV_ALLOWLIST") from exc
     if not isinstance(names, list) or any(

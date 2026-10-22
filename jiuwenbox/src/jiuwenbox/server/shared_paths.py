@@ -33,8 +33,8 @@ def _absolute_paths(raw, name: str) -> list[str]:
 
 def configured_shared_paths() -> list[str]:
     """Exact host-configured paths; command request env never grants access."""
-    return _absolute_paths(json.loads(os.environ.get("JIUWENBOX_PATH_ALLOWLIST", "[]")),
-                           "JIUWENBOX_PATH_ALLOWLIST")
+    raw = (os.environ.get("JIUWENBOX_PATH_ALLOWLIST") or "").strip() or "[]"
+    return _absolute_paths(json.loads(raw), "JIUWENBOX_PATH_ALLOWLIST")
 
 
 def configured_tool_paths() -> tuple[list[str], list[str]]:
@@ -43,7 +43,7 @@ def configured_tool_paths() -> tuple[list[str], list[str]]:
     Command env is deliberately not an input. Executable directories must be
     covered by a declared tool root, so declaring PATH cannot grant more ACLs.
     """
-    raw = json.loads(os.environ.get("JIUWENBOX_TOOL_PATHS", "{}"))
+    raw = json.loads((os.environ.get("JIUWENBOX_TOOL_PATHS") or "").strip() or "{}")
     if not isinstance(raw, dict) or raw.keys() - {"read_roots", "executable_dirs"}:
         raise ValueError("JIUWENBOX_TOOL_PATHS requires read_roots and executable_dirs lists")
     roots = _absolute_paths(raw.get("read_roots", []), "JIUWENBOX_TOOL_PATHS.read_roots")

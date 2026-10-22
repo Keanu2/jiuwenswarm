@@ -15,6 +15,32 @@ def explicit_tool_defaults(monkeypatch):
     monkeypatch.setenv("JIUWENBOX_TOOL_PATHS", "{}")
 
 
+@pytest.mark.parametrize("value", [None, "", " \t\n"])
+def test_blank_host_declarations_use_empty_defaults(monkeypatch, value):
+    from jiuwenbox.server.environment import inherited_environment
+
+    for name in ("JIUWENBOX_PATH_ALLOWLIST", "JIUWENBOX_TOOL_PATHS", "JIUWENBOX_ENV_ALLOWLIST"):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.setenv("UNLISTED_HOST_TOKEN", "must-not-inherit")
+    assert shared_paths.configured_shared_paths() == []
+    assert shared_paths.configured_tool_paths() == ([], [])
+    assert "UNLISTED_HOST_TOKEN" not in inherited_environment()
+    assert "UNLISTED_HOST_TOKEN" not in inherited_environment(for_runner=True)
+    # Also exercise the policy-loading entry point used during startup.
+    policy_reader._resolve_tool_paths(SecurityPolicy(version=1))
+
+
+@pytest.mark.parametrize("name", ["JIUWENBOX_PATH_ALLOWLIST", "JIUWENBOX_TOOL_PATHS"])
+def test_nonempty_invalid_host_json_still_fails_closed(monkeypatch, name):
+    monkeypatch.setenv(name, "{broken-json")
+    read = shared_paths.configured_shared_paths if name.endswith("PATH_ALLOWLIST") else shared_paths.configured_tool_paths
+    with pytest.raises(ValueError):
+        read()
+
+
 def test_configured_paths_expand_and_work_without_desktop_tools(tmp_path, monkeypatch):
     root = tmp_path / "shared dependencies"
     monkeypatch.setenv("DEPENDENCIES_ROOT", str(root))
