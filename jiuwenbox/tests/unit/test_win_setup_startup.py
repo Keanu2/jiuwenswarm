@@ -144,7 +144,7 @@ def test_authorization_only_does_not_rebuild_account_or_network(monkeypatch, sta
 
 
 def test_ensure_cli_uses_explicit_merged_policy(monkeypatch, state, tmp_path):
-    from jiuwenbox.server import policy_reader
+    from jiuwenbox.server import policy_reader, shared_paths
     fs = SimpleNamespace(allow_read=[str(tmp_path)], deny_read=[], allow_write=[], deny_write=[])
     policy = SimpleNamespace(windows=SimpleNamespace(filesystem=fs, proxy=SimpleNamespace(
         port_range_start=60080, port_range_end=60089)))
@@ -154,9 +154,14 @@ def test_ensure_cli_uses_explicit_merged_policy(monkeypatch, state, tmp_path):
     monkeypatch.setattr(setup, "collect_preinstall_paths", lambda policy: [])
     ensure = Mock()
     monkeypatch.setattr(setup, "ensure_windows_setup", ensure)
+    # The CLI prepares shared ACLs with the same policy after setup. Keep this
+    # unit test independent of the installed account and persistent host cache.
+    prepare_shared = Mock()
+    monkeypatch.setattr(shared_paths, "prepare_shared_tool_acl", prepare_shared)
     assert setup._main(["--ensure", "--policy-path", str(path)]) == 0
     reader.assert_called_once_with(policy_path=path)
     assert ensure.call_args.kwargs["acl_paths"] == [str(tmp_path)]
+    prepare_shared.assert_called_once_with(policy)
 
 
 def test_owned_tool_dir_uses_user_cache_without_hklm(monkeypatch, state, tmp_path):

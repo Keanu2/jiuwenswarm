@@ -2457,30 +2457,48 @@ def get_model_config(name: str, index: int | None = None) -> dict[str, Any] | No
 # 的 ``timeout`` 子段不驱动 reaper, 必须改根 policy 才能让空闲淘汰生效)。
 # =====================================================================
 
-_SANDBOX_ENV_ALLOWLIST_DEFAULT = (
-    "CLAW_SKILL_TOKEN", "CLAW_PYTHON_EXE", "CLAW_PYTHON_HOME", "CLAW_PYTHON_BASE_EXE",
-    "CLAW_NODE_EXE", "CLAW_NPM_CMD", "CLAW_NPX_CMD", "CLAW_GIT_EXE",
-    "CLAW_GIT_BASH_EXE", "GIT_BASH",
-)
-
-
 def get_sandbox_env_allowlist(config: dict[str, Any] | None = None) -> list[str]:
     """Parent variable names allowed by sandbox.env_allowlist; [] disables tool inheritance.
 
-    Missing configuration retains the default desktop tool keys. Values are
-    never stored in YAML; callers copy only names present in the environment.
+    The host declares product tool names explicitly. Missing configuration
+    defaults to no extra inheritance. Values are never stored in YAML.
     """
     cfg = get_config() if config is None else config
     sandbox = (cfg or {}).get("sandbox") or {}
     if not isinstance(sandbox, dict):
         raise ValueError("sandbox must be a mapping")
-    names = sandbox.get("env_allowlist", list(_SANDBOX_ENV_ALLOWLIST_DEFAULT))
+    names = sandbox.get("env_allowlist", [])
     if not isinstance(names, list) or any(
         not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
         for name in names
     ):
         raise ValueError("sandbox.env_allowlist must be a list of exact environment variable names")
     return list(dict.fromkeys(names))
+
+
+def get_sandbox_path_allowlist(config: dict[str, Any] | None = None) -> list[str]:
+    """Explicit shared read/write directories; no product-specific defaults."""
+    cfg = get_config() if config is None else config
+    sandbox = (cfg or {}).get("sandbox") or {}
+    if not isinstance(sandbox, dict):
+        raise ValueError("sandbox must be a mapping")
+    paths = sandbox.get("path_allowlist", [])
+    if not isinstance(paths, list) or any(
+        not isinstance(path, str) or not path.strip() or any(c in path for c in "\x00\r\n*?")
+        for path in paths
+    ):
+        raise ValueError("sandbox.path_allowlist must be a list of absolute directory paths")
+    result = []
+    for raw in paths:
+        path = Path(os.path.expandvars(os.path.expanduser(raw.strip())))
+        if path.is_absolute():
+            path = path.resolve()
+        if not path.is_absolute() or path == Path(path.anchor):
+            raise ValueError("sandbox.path_allowlist must contain absolute directory paths")
+        value = str(path)
+        if os.path.normcase(value) not in {os.path.normcase(p) for p in result}:
+            result.append(value)
+    return result
 
 
 _SANDBOX_RUNTIME_DEFAULTS: dict[str, Any] = {

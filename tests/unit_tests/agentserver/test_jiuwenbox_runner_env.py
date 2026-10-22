@@ -82,13 +82,25 @@ async def test_stop_timeout_kills_before_draining_shutdown_logs(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("platform", ["win32", "linux"])
+@pytest.mark.parametrize("enabled", [False, True])
 async def test_policy_reload_retains_bootstrap_env_until_explicitly_replaced(
-    tmp_path, monkeypatch, platform,
+    tmp_path, monkeypatch, platform, enabled,
 ):
     from jiuwenswarm.common import config
 
-    allowlist = ["CLAW_SKILL_TOKEN", "CLAW_PYTHON_EXE", "CUSTOM_TOOL_SETTING", "EMPTY_TOOL_SETTING"]
+    allowlist = ["HOST_TOOL_TOKEN", "HOST_PYTHON_EXE", "CUSTOM_TOOL_SETTING", "EMPTY_TOOL_SETTING"]
+    paths = [str(tmp_path / "shared-dependencies")]
+    tools = {"read_roots": [str(tmp_path / "tools")], "executable_dirs": [str(tmp_path / "tools")]}
+    runtime = config.get_sandbox_runtime()
+    runtime["enabled"] = enabled
+    monkeypatch.setattr(config, "get_sandbox_runtime", lambda: runtime)
+    warning = Mock()
+    monkeypatch.setattr(runner_module.logger, "warning", warning)
+
+    def empty_allowlist_warnings():
+        return [call for call in warning.call_args_list if "sandbox.env_allowlist is empty" in call.args[0]]
     monkeypatch.setattr(config, "get_sandbox_env_allowlist", lambda: allowlist)
+    monkeypatch.setattr(config, "get_sandbox_path_allowlist", lambda: paths)
     monkeypatch.setattr(runner_module, "sys", SimpleNamespace(platform=platform, executable=sys.executable))
     runner = runner_module.JiuwenBoxRunner()
     policy = tmp_path / "policy.yaml"
@@ -99,13 +111,16 @@ async def test_policy_reload_retains_bootstrap_env_until_explicitly_replaced(
     monkeypatch.setattr(runner, "_bind_win_job", Mock())
     monkeypatch.setattr(runner, "_prepare_windows_setup", AsyncMock())
     monkeypatch.setattr(runner, "_wait_until_ready", AsyncMock(return_value=True))
+    monkeypatch.setattr(runner, "health_check", AsyncMock(return_value=True))
     monkeypatch.setattr(runner, "_pump_stream", AsyncMock())
     monkeypatch.delenv("JIUWENBOX_RUNNER_PYTHON", raising=False)
     monkeypatch.delenv("JIUWENBOX_SKILLS_DIR", raising=False)
     monkeypatch.setenv("CUSTOM_TOOL_SETTING", "inherited-setting")
     monkeypatch.setenv("EMPTY_TOOL_SETTING", "")
-    monkeypatch.setenv("CLAW_SKILL_TOKEN", "test-skill-token")
-    monkeypatch.setenv("CLAW_PYTHON_EXE", "C:/managed/python.exe")
+    monkeypatch.setenv("HOST_TOOL_TOKEN", "test-tool-token")
+    monkeypatch.setenv("HOST_PYTHON_EXE", "C:/managed/python.exe")
+    monkeypatch.setenv("JIUWENBOX_TOOL_PATHS", json.dumps(tools))
+    monkeypatch.setenv("CLAW_SKILL_TOKEN", "unlisted-product-token")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-forwarded")
     monkeypatch.setenv("DATABASE_URL", "must-not-be-forwarded")
 
@@ -138,29 +153,47 @@ async def test_policy_reload_retains_bootstrap_env_until_explicitly_replaced(
         assert env["JIUWENBOX_RUNNER_PYTHON"] == "C:/Python312/python.exe"
         assert env["JIUWENBOX_SKILLS_DIR"] == "C:/workspace/skills"
         assert env["JIUWENBOX_POLICY_PATH"] == str(policy)
-        assert env["CLAW_SKILL_TOKEN"] == "test-skill-token"
-        assert env["CLAW_PYTHON_EXE"] == "C:/managed/python.exe"
+        assert env["HOST_TOOL_TOKEN"] == "test-tool-token"
+        assert env["HOST_PYTHON_EXE"] == "C:/managed/python.exe"
+        assert "CLAW_SKILL_TOKEN" not in env
         assert env["CUSTOM_TOOL_SETTING"] == "startup-override"
         assert env["EMPTY_TOOL_SETTING"] == ""
         assert os.environ["CUSTOM_TOOL_SETTING"] == "inherited-setting"
         assert "OPENAI_API_KEY" not in env
         assert "DATABASE_URL" not in env
         assert json.loads(env["JIUWENBOX_ENV_ALLOWLIST"]) == allowlist
+        assert json.loads(env["JIUWENBOX_PATH_ALLOWLIST"]) == paths
+        assert json.loads(env["JIUWENBOX_TOOL_PATHS"]) == tools
 
     policy.write_text("version: 3", encoding="utf-8")
     assert await runner.ensure_running(policy_path=policy, extra_env={})
     assert "JIUWENBOX_RUNNER_PYTHON" not in spawn.await_args.kwargs["env"]
     assert "JIUWENBOX_SKILLS_DIR" not in spawn.await_args.kwargs["env"]
     assert spawn.await_args.kwargs["env"]["CUSTOM_TOOL_SETTING"] == "inherited-setting"
+    assert empty_allowlist_warnings() == []
     # A config-only allowlist change must restart the owned service too.
     allowlist.clear()
     assert await runner.ensure_running(policy_path=policy)
     assert spawn.await_count == 4
     env = spawn.await_args.kwargs["env"]
+    assert "HOST_TOOL_TOKEN" not in env
     assert "CLAW_SKILL_TOKEN" not in env
     assert "CUSTOM_TOOL_SETTING" not in env
     assert "EMPTY_TOOL_SETTING" not in env
     assert json.loads(env["JIUWENBOX_ENV_ALLOWLIST"]) == []
+    assert len(empty_allowlist_warnings()) == int(enabled)
+    # Reusing the same service must not repeat startup warnings.
+    assert await runner.ensure_running(policy_path=policy)
+    assert spawn.await_count == 4
+    assert len(empty_allowlist_warnings()) == int(enabled)
+    # A path-only config change also restarts the service; an explicit empty
+    # list cannot retain a stale bootstrap or inherited path allowlist.
+    paths.clear()
+    assert await runner.ensure_running(policy_path=policy)
+    assert spawn.await_count == 5
+    assert json.loads(spawn.await_args.kwargs["env"]["JIUWENBOX_PATH_ALLOWLIST"]) == []
+    assert len(empty_allowlist_warnings()) == 2 * int(enabled)
+    assert "test-tool-token" not in str(warning.call_args_list)
     await asyncio.sleep(0)  # Complete mocked stdout/stderr drain tasks.
 
 

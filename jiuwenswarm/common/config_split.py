@@ -50,6 +50,10 @@ _EXTRACT_LOCK = threading.Lock()
 # xiaoyi / GaussPD / auto_memory / 权限档 knobs 不要加本表（桌面打回 / 跟模板）。
 _SCALAR_PATHS: tuple[tuple[str, ...], ...] = (
     ("sandbox", "enabled"),
+    # Host-configured allowlists are atomic settings, including explicit [].
+    # Preserve them before AgentServer's template migration and sandbox startup.
+    ("sandbox", "path_allowlist"),
+    ("sandbox", "env_allowlist"),
     ("permissions", "shell_guard", "builtin_rules_enabled"),
     ("permissions", "soft_delete", "enabled"),
     ("permissions", "soft_delete", "archive_dir"),

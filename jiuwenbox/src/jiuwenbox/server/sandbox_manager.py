@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from jiuwenbox.server.environment import inherited_environment
+from jiuwenbox.server.shared_paths import configured_tool_paths
 
 # Cap stdout/stderr at this many chars per audit event. Large model
 # completions can dump megabytes, which is fine to keep in the runtime
@@ -89,7 +90,8 @@ def _build_windows_exec_env(
     """
     base = inherited_environment()
     base.update(env or {})
-    parts: list[str] = []
+    # Trusted host declarations, independent of the command request environment.
+    _, parts = configured_tool_paths()
     # tool_paths 展开 (和 _create_windows 给 runner 的 PATH 一致, 确保 exec
     # 子进程能解析到与预装 ACL 匹配的工具可执行). git_dir 含 usr/bin + bin.
     if tool_paths is not None:

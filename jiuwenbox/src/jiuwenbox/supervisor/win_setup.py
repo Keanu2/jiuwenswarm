@@ -2359,6 +2359,7 @@ def revoke_stale_acl(
     current_policy_paths: list[str],
     workspace: str = "",
     sandbox_user_sid: str | None = None,
+    *, preserve_roots: list[str] | None = None,
 ) -> list[str]:
     """启动时差集清理: 历史施加路径 − 当前 policy 路径 − 数据根 → 对差集 revoke."""
     _require_windows()
@@ -2385,7 +2386,7 @@ def revoke_stale_acl(
         return []
 
     try:
-        win_acl.revoke_sandbox_acl(stale, sandbox_user_sid=sandbox_user_sid)
+        win_acl.revoke_sandbox_acl(stale, sandbox_user_sid=sandbox_user_sid, preserve_roots=preserve_roots)
     except Exception as exc:  # noqa: BLE001
         logger.warning("revoke_stale_acl 清理失败 (差集=%s): %s", stale, exc)
         return []
@@ -2658,6 +2659,11 @@ def _main(argv: list[str]) -> int:
             policy_path=str(reader.policy_path),
             acl_paths=[os.path.expandvars(p) for p in acl_paths],
         )
+        # Explicit shared-path ACLs live in server.shared_paths. Prepare before spawning
+        # box-server so a cold ACL repair does not consume its health timeout.
+        from jiuwenbox.server.shared_paths import prepare_shared_tool_acl
+
+        prepare_shared_tool_acl(policy)
         return 0
     if args.cmd == const.INSTALL_SUBCOMMAND.lstrip("-"):
         import base64

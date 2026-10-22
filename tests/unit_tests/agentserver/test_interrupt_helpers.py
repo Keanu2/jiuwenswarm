@@ -10,6 +10,78 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 )
 
 
+@pytest.fixture
+def channel_permission_case(monkeypatch, tmp_path):
+    from contextvars import ContextVar
+    from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+    from jiuwenswarm.common import utils
+    from jiuwenswarm.common.invocation_context import InvocationContext, runtime
+    from jiuwenswarm.agents.harness.common.rails.permissions import (
+        permissions_persist, tool_permission_context,
+    )
+
+    monkeypatch.setattr(utils, "get_config_file", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(utils, "get_workspace_dir", lambda: tmp_path)
+
+    def create(channel, behavior_enabled=False, use_invocation=True, permission="ask"):
+        monkeypatch.setenv("CLAW_BEHAVIOR_SECURITY", "1" if behavior_enabled else "0")
+        monkeypatch.setenv("CLAW_SKILL_TOKEN", "permission-regression-token")
+        invocation = InvocationContext(
+            version=1, invocation_id="approval-test", request_id="approval-test",
+            session_id=None, channel_id=channel, chat_id=None,
+        ) if use_invocation else None
+        monkeypatch.setattr(runtime, "get_current_invocation_context", lambda: invocation)
+        # The actual invocation must take precedence over the legacy web fallback.
+        monkeypatch.setattr(tool_permission_context, "TOOL_PERMISSION_CHANNEL_ID", ContextVar(
+            "test_permission_channel", default="web" if use_invocation else channel,
+        ))
+        permissions = {"enabled": True, "package_builtin_rules": False, "tools": {"bash": permission}}
+        monkeypatch.setattr(permissions_persist, "get_permissions_with_session_overlay", lambda **kw: permissions)
+        rail = build_permission_rail({"permissions": permissions})
+        assert rail is not None
+        call = ToolCall(id="approval-call", type="function", name="bash",
+                        arguments='{"command":"echo permission-regression"}')
+        return rail, SimpleNamespace(session=None, extra={}), call
+
+    return create
+
+
+@pytest.mark.parametrize("behavior_enabled", [False, True])
+@pytest.mark.parametrize("use_invocation", [False, True])
+def test_desktop_ask_interrupts_until_explicit_confirmation(
+    channel_permission_case, behavior_enabled, use_invocation,
+):
+    from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, InterruptResult, RejectResult
+
+    rail, ctx, call = channel_permission_case("desktop", behavior_enabled, use_invocation)
+    decision = asyncio.run(rail.resolve_interrupt(ctx, call, None))
+    assert isinstance(decision, InterruptResult), "desktop ASK must not silently approve"
+    assert decision.request.metadata["matched_rule"] == "tools.bash"
+    assert isinstance(asyncio.run(rail.resolve_interrupt(ctx, call, {"approved": False})), RejectResult)
+    assert isinstance(asyncio.run(rail.resolve_interrupt(ctx, call, {"approved": True})), ApproveResult)
+
+
+@pytest.mark.parametrize("channel", ["unknown-client", "websocket", ""])
+@pytest.mark.parametrize("behavior_enabled", [False, True])
+def test_unknown_channel_ask_fails_closed(channel_permission_case, channel, behavior_enabled):
+    from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
+
+    rail, ctx, call = channel_permission_case(channel, behavior_enabled)
+    decision = asyncio.run(rail.resolve_interrupt(ctx, call, None))
+    assert isinstance(decision, RejectResult), "ASK without an approval channel must fail closed"
+    assert "[PERMISSION_DENIED]" in decision.tool_result
+
+
+@pytest.mark.parametrize("channel", ["desktop", "unknown-client"])
+@pytest.mark.parametrize("permission", ["allow", "deny"])
+def test_channel_fix_preserves_explicit_allow_and_deny(channel_permission_case, channel, permission):
+    from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, RejectResult
+
+    rail, ctx, call = channel_permission_case(channel, permission=permission)
+    decision = asyncio.run(rail.resolve_interrupt(ctx, call, None))
+    assert isinstance(decision, ApproveResult if permission == "allow" else RejectResult)
+
+
 def test_permission_scope_options_reach_frontend():
     scopes = [{"value": "exact", "label": "当前文件"}, {"value": "parent", "label": "上一级目录"}]
     interaction = SimpleNamespace(id="approval", value={

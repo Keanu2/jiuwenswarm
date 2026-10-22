@@ -356,6 +356,8 @@ def test_upgrade_copies_and_restores_keep_set(tmp_path: Path) -> None:
             [
                 "sandbox:",
                 "  enabled: false",
+                "  path_allowlist: [C:/shared/dependencies]",
+                "  env_allowlist: [CUSTOM_TOOL, EMPTY_TOOL]",
                 "evolution:",
                 "  enabled: true",
                 "channels:",
@@ -400,6 +402,8 @@ def test_upgrade_copies_and_restores_keep_set(tmp_path: Path) -> None:
     restored = yaml.safe_load(user.read_text(encoding="utf-8"))
     assert restored["evolution"]["enabled"] is False
     assert restored["sandbox"]["enabled"] is True
+    assert restored["sandbox"]["path_allowlist"] == ["C:/shared/dependencies"]
+    assert restored["sandbox"]["env_allowlist"] == ["CUSTOM_TOOL", "EMPTY_TOOL"]
     assert restored["channels"]["xiaoyi"]["last_session_id"] == "sess-1"
     assert restored["channels"]["xiaoyi"]["last_task_id"] == "task-1"
     assert restored["channels"]["xiaoyi"]["last_message_id"] == "msg-1"

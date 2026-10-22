@@ -399,19 +399,16 @@ def build_permission_rail(
             invocation = get_current_invocation_context()
             channel = invocation.channel_id if invocation is not None else TOOL_PERMISSION_CHANNEL_ID.get() or "web"
             channel = channel.strip().lower()
-            if channel not in {"web", "tui", "acp", "xiaoyi", "a2a"} and not behavior_enabled:
+            if channel not in {"web", "tui", "acp", "xiaoyi", "a2a", "desktop"}:
                 tool_call = req.tool_call
                 tool_name = getattr(tool_call, "name", "") if tool_call is not None else ""
-                logger.info(
-                    "[InterruptHelpers] auto approved permission for channel=%s tool=%s",
+                logger.warning(
+                    "[InterruptHelpers] denying permission: unsupported approval channel=%s tool=%s",
                     channel,
                     tool_name,
                 )
-                return PermissionConfirmResponse(
-                    approved=True,
-                    auto_confirm=False,
-                    feedback="",
-                )
+                # No approval transport must never turn ASK into ALLOW.
+                return None
             if channel != "acp":
                 return "interrupt"
 
