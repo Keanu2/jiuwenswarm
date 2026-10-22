@@ -11,7 +11,12 @@ import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
 import { ProjectsPanel } from './components/ProjectsPanel';
-import { TaskChatView } from './components/TaskChatView';
+
+const taskChatModules = import.meta.glob('./components/TaskChatView/index.tsx', { eager: true }) as Record<
+  string,
+  { TaskChatView?: (props: { taskId: number; onClose: () => void }) => ReactNode }
+>
+const TaskChatView = Object.values(taskChatModules)[0]?.TaskChatView ?? null
 import { SessionsPanel } from './components/SessionsPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
@@ -2535,7 +2540,7 @@ function AppContent() {
                   data-testid="app-chat-surface"
                 >
                   <div className={`flex-1 min-h-0`}>
-                    {activeTaskId != null ? (
+                    {activeTaskId != null && TaskChatView ? (
                       <TaskChatView taskId={activeTaskId} onClose={() => setActiveTaskId(null)} />
                     ) : (
                       <ChatPanel

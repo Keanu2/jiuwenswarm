@@ -110,7 +110,7 @@ flowchart LR
 | `task_id` 或生成值 | `Message.id`（与回包关联） |
 | `context_id` | `Message.session_id` |
 | `parts[].text` | 合并为 `params.query` |
-| `parts` 中非文本（url / data / raw） | `params.files[]`（含与 web 对齐的冗余键） |
+| `parts` 中非文本（url / data / raw） | 字节落入接收目录 `JIUWENSWARM_FILE_SANDBOX_ROOT`（默认桌面 `JiuwenSwarm`）后写入 `params.files[]`，同时保留 `url` / `data` / `raw` |
 | 元数据 | `Message.metadata` |
 
 ### 6.2 响应（`Message` → A2A）
@@ -124,6 +124,8 @@ flowchart LR
 **思考与正文的区分**：思考内容不会写入 `response` artifact。默认（`A2A_SERVER_EXPOSE_REASONING` 开启）以 working 状态的 `TaskStatusUpdateEvent` 输出，`status.message.parts[].metadata` 携带 `{"jiuwen_thought": true}` 标记（对齐 Google ADK 的 `adk_thought` 惯例），调用方可结构化识别或忽略；设为 `false`/`0`/`no`/`off` 时直接丢弃。
 
 ---
+
+跨设备传文件的稳定性说明见 [A2A-跨设备改动说明.md](A2A-跨设备改动说明.md)。对话 Agent 上的 `a2a_send_message` 走 sidecar，可带 `file_paths`；`a2a_send_file` / `a2a_send_local_file` 仍由 swarm 的 A2A Gateway 注册。Gateway 源码未包含在当前分支时，出站初始化会跳过，入站和 sidecar 发送保持可用。
 
 ## 7. 出站 A2A（Agent 侧）
 

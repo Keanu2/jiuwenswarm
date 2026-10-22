@@ -960,6 +960,19 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             return
 
         file_path = payload.get("path", "")
+        try:
+            from jiuwenswarm.common.file_sandbox import resolve_allowed_delivery_path
+
+            file_path = str(
+                resolve_allowed_delivery_path(
+                    file_path,
+                    must_exist=True,
+                    require_file=True,
+                )
+            )
+        except (OSError, ValueError):
+            self._write_json(403, {"error": "forbidden_path"})
+            return
         if not file_path or not os.path.isfile(file_path):
             self._write_json(404, {"error": "file_not_found"})
             return

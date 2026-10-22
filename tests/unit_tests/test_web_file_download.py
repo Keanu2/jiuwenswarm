@@ -55,6 +55,7 @@ def _serve_file(
     command: str = "HEAD",
     headers: dict[str, str] | None = None,
 ) -> _DownloadHandlerStub:
+    monkeypatch.setenv("JIUWENSWARM_FILE_SANDBOX_ROOT", str(file_path.parent))
     monkeypatch.setattr(
         web_file_download,
         "validate_file_download_token",

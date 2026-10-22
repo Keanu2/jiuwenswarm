@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
@@ -14,6 +15,7 @@ from jiuwenswarm.common.context_keys import JIUWENSWARM_CHANNEL_CONTEXT_KEY
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     LocalSectionName,
     PromptPriority,
+    _a2a_transfer_prompt,
     _input_prompt,
     _output_prompt,
 )
@@ -45,6 +47,7 @@ class ResponsePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("response")
             self.system_prompt_builder.remove_section("input")
             self.system_prompt_builder.remove_section("output")
+            self.system_prompt_builder.remove_section(LocalSectionName.A2A)
             self.system_prompt_builder.remove_section(LocalSectionName.A2UI)
         self.system_prompt_builder = None
         self._runtime_channel = None
@@ -79,6 +82,7 @@ class ResponsePromptRail(DeepAgentRail):
         self.system_prompt_builder.remove_section("response")
         self.system_prompt_builder.add_section(_input_prompt(language))
         self.system_prompt_builder.add_section(_output_prompt(language))
+        self._sync_a2a_transfer_prompt(language)
         self._sync_a2ui_prompt_section(
             self._resolve_channel(ctx),
             skip_a2ui=self._should_skip_a2ui(ctx),
@@ -90,6 +94,16 @@ class ResponsePromptRail(DeepAgentRail):
                     or self._resolve_context_value(ctx, "session_id")
                 ),
             ),
+        )
+
+    def _sync_a2a_transfer_prompt(self, language: str) -> None:
+        """Remind both sender and receiver how to transfer files over A2A."""
+        if self.system_prompt_builder is None:
+            return
+        self_service_id = os.getenv("JIUWENSWARM_A2A_SERVICE_ID", "").strip()
+        self.system_prompt_builder.remove_section(LocalSectionName.A2A)
+        self.system_prompt_builder.add_section(
+            _a2a_transfer_prompt(language, self_service_id)
         )
 
     def _should_skip_a2ui(self, ctx: AgentCallbackContext) -> bool:

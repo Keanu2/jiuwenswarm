@@ -29,7 +29,8 @@ def test_partition_and_mark_sent_files():
     assert skipped == []
 
 
-def test_send_file_skips_duplicate_after_success(tmp_path):
+def test_send_file_skips_duplicate_after_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("JIUWENSWARM_FILE_SANDBOX_ROOT", str(tmp_path))
     file_path = tmp_path / "handoff.md"
     file_path.write_text("hello", encoding="utf-8")
 

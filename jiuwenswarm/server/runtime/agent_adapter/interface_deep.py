@@ -280,7 +280,7 @@ from jiuwenswarm.agents.harness.common.tools import (
     is_skill_retrieval_enabled,
     SymphonyToolkit,
 )
-from jiuwenswarm.agents.harness.common.a2a_gateway.tools import A2ASendFileToolkit
+from jiuwenswarm.agents.harness.common.tools.a2a_registry_tools import A2ARegistryToolkit
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
@@ -6522,30 +6522,45 @@ class JiuWenSwarmDeepAdapter:
                 exc,
             )
 
-        # A2A gateway toolkit: register the registry-backed agent tools the
-        # conversational agent needs directly — the read-only ``a2x_list_agents``
-        # query and the outbound ``a2a_send_message`` (text to a registry
-        # agent, tunnel-forwarded when the peer is behind NAT). The two
-        # file-sending tools (a2a_send_file / a2a_send_local_file) are
-        # intentionally NOT registered here: they are owned by the swarm
-        # provider path and would collide on the same tool names.
+        # Sidecar registry tools own ``a2a_send_message`` (text + file_paths).
+        # The gateway toolkit, when its package is present, only adds
+        # ``a2x_list_agents``. File tools stay on the swarm provider so the
+        # same names are not registered twice.
         try:
+            registry_tool_names: list[str] = []
+            for registry_tool in A2ARegistryToolkit.get_tools():
+                self._register_shared_tool(registry_tool)
+                tool_cards.append(registry_tool.card)
+                registry_tool_names.append(registry_tool.card.name)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] A2ARegistryToolkit registered: tools=%s",
+                registry_tool_names,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] A2A Registry tools registration failed: %s",
+                exc,
+            )
+
+        try:
+            from jiuwenswarm.agents.harness.common.a2a_gateway.tools import A2ASendFileToolkit
+
             a2a_toolkit = A2ASendFileToolkit()
             a2x_tool_names: list[str] = []
             for tool in a2a_toolkit.get_tools():
                 tool_name = getattr(getattr(tool, "card", tool), "name", "")
-                if tool_name not in ("a2x_list_agents", "a2a_send_message"):
+                if tool_name != "a2x_list_agents":
                     continue
                 self._register_shared_tool(tool)
                 tool_cards.append(tool.card)
                 a2x_tool_names.append(tool.card.name)
             logger.info(
-                "[JiuWenSwarmDeepAdapter] A2ASendFileToolkit registered: tools=%s",
+                "[JiuWenSwarmDeepAdapter] A2A gateway list tool registered: tools=%s",
                 a2x_tool_names,
             )
         except Exception as exc:
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] a2a gateway tools registration failed: %s",
+                "[JiuWenSwarmDeepAdapter] a2a gateway tools registration skipped: %s",
                 exc,
             )
 

@@ -110,7 +110,7 @@ Inbound A2A `message.parts` are mapped into internal `Message.params.query` and 
 | `task_id` or generated value | `Message.id` (used to correlate replies) |
 | `context_id` | `Message.session_id` |
 | `parts[].text` | merged into `params.query` |
-| non-text parts (`url` / `data` / `raw`) | `params.files[]` (includes web-compatible redundant keys) |
+| non-text parts (`url` / `data` / `raw`) | bytes are saved under `JIUWENSWARM_FILE_SANDBOX_ROOT` (default Desktop `JiuwenSwarm`) and recorded in `params.files[]`, which also keeps `url` / `data` / `raw` |
 | metadata | `Message.metadata` |
 
 ### 6.2 Response (`Message` → A2A)
@@ -124,6 +124,8 @@ Inbound A2A `message.parts` are mapped into internal `Message.params.query` and 
 **Separating reasoning from the answer**: reasoning content never enters the `response` artifact. By default (`A2A_SERVER_EXPOSE_REASONING` enabled) it is emitted as working-state `TaskStatusUpdateEvent`s whose `status.message.parts[].metadata` carries `{"jiuwen_thought": true}` (mirroring Google ADK's `adk_thought` convention), so callers can structurally render or ignore it. Set to `false`/`0`/`no`/`off` to drop it.
 
 ---
+
+Cross-device transfer notes live in `docs/zh/A2A-跨设备改动说明.md`. The conversational `a2a_send_message` tool uses the sidecar and accepts `file_paths`. `a2a_send_file` / `a2a_send_local_file` stay on the swarm A2A Gateway. When that package is absent, outbound gateway startup is skipped and inbound plus sidecar send keep working.
 
 ## 7. Outbound A2A (Agent Side)
 

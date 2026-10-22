@@ -6,6 +6,7 @@ import { spawnSync } from 'child_process'
 import { createHash } from 'node:crypto'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { ServerResponse } from 'http'
+import os from 'os'
 import path from 'path'
 import fs from 'fs'
 
@@ -456,6 +457,23 @@ function devFileContentApi(): Plugin {
     const inAutoHarness = !relativeAutoHarnessPath.startsWith('..') && !path.isAbsolute(relativeAutoHarnessPath)
     return inWorkspace || inAgentTeams || inWebLogs || inAutoHarness
   }
+  const fileSandboxRootDir = path.resolve(
+    process.env.JIUWENSWARM_FILE_SANDBOX_ROOT
+      || process.env.JIUWENSWARM_RECEIVED_FILES_DIR
+      || path.join(os.homedir(), 'Desktop', 'JiuwenSwarm'),
+  )
+  const isPathUnderReceiveRoot = (targetPath: string) => {
+    let canonicalTarget = path.resolve(targetPath)
+    let canonicalRoot = path.resolve(fileSandboxRootDir)
+    try {
+      canonicalTarget = fs.realpathSync(canonicalTarget)
+      canonicalRoot = fs.realpathSync(canonicalRoot)
+    } catch {
+      return false
+    }
+    const relativePath = path.relative(canonicalRoot, canonicalTarget)
+    return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+  }
 
   return {
     name: 'dev-file-content-api',
@@ -739,6 +757,12 @@ function devFileContentApi(): Plugin {
           res.statusCode = 403
           res.setHeader('content-type', 'application/json; charset=utf-8')
           res.end(JSON.stringify({ error: 'invalid_or_expired_token' }))
+          return
+        }
+        if (!isPathUnderAllowedRoot(payload.path) && !isPathUnderReceiveRoot(payload.path)) {
+          res.statusCode = 403
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ error: 'forbidden_path' }))
           return
         }
 

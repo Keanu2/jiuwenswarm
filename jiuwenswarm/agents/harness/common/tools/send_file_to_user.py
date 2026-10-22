@@ -21,6 +21,11 @@ from typing import Any, List, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
+from jiuwenswarm.common.file_sandbox import (
+    FileSandboxViolation,
+    resolve_allowed_delivery_path,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -287,15 +292,28 @@ class SendFileToolkit:
 
         valid_files = []
         missing_files = []
+        rejected_files = []
+        project_dir = self._resolve_project_dir()
+        extra_roots = (project_dir, self._team_workspace_root)
         for fp in abs_file_path_list:
             fp = str(fp).strip()
             if not fp:
                 continue
-            if os.path.isfile(fp):
-                valid_files.append(fp)
-            else:
+            try:
+                allowed = resolve_allowed_delivery_path(
+                    fp,
+                    extra_roots=extra_roots,
+                    must_exist=True,
+                    require_file=True,
+                )
+            except FileSandboxViolation as exc:
+                rejected_files.append(f"{fp}: {exc}")
+                logger.warning("[SendFileToolkit] 接收目录和项目目录之外的文件被拒绝: %s", fp)
+            except OSError:
                 missing_files.append(fp)
                 logger.warning("[SendFileToolkit] 文件不存在: %s", fp)
+            else:
+                valid_files.append(str(allowed))
 
         source_files = list(valid_files)
         materialized_files: list[str] = []
@@ -316,7 +334,9 @@ class SendFileToolkit:
         )
 
         if not valid_files:
-            msg_parts = ["发送文件失败：所有文件均不存在"]
+            msg_parts = ["发送文件失败：没有可发送的文件（仅接收目录、当前项目目录和团队工作区）"]
+            for rejected in rejected_files:
+                msg_parts.append(f"  - {rejected}")
             for mf in missing_files:
                 msg_parts.append(f"  - {mf}")
             return "\n".join(msg_parts)
@@ -470,7 +490,8 @@ class SendFileToolkit:
             make_tool(
                 name="send_file_to_user",
                 description=(
-                    "【文件发送工具】当需要将生成的文件、导出的数据、创建的文档等发送给用户时使用此工具。"
+                    "只把文件投给当前网页或 IM 对话里的人。发给另一台设备时用 direct 工具 a2a_send_message。"
+                    "当需要将生成的文件、导出的数据、创建的文档等发送给当前对话里的用户时使用此工具。"
                     "使用场景包括：用户请求导出/下载文件、任务完成后需要交付文件、生成报告/文档后发送给用户。"
                     "参数格式：abs_file_path_list 接受单个路径字符串或路径数组，路径必须是绝对路径。"
                     "示例：'/tmp/report.pdf' 或 ['/tmp/file1.csv', '/tmp/file2.xlsx']。"

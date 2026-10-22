@@ -13,6 +13,7 @@ from openjiuwen.harness.prompts import (
     resolve_language,
 )
 
+from jiuwenswarm.common.file_sandbox import describe_file_sandbox_dir
 from jiuwenswarm.common.utils import logger
 
 
@@ -26,6 +27,7 @@ class PromptPriority(IntEnum):
     INPUT = 60
     A2UI = 61
     OUTPUT = 65
+    A2A = 76
     WORKSPACE = 70
     TODO = 85
 
@@ -34,6 +36,7 @@ class LocalSectionName:
     """Local section names for optional JiuwenSwarm prompt sections."""
 
     A2UI = "a2ui"
+    A2A = "a2a_transfer"
 
 
 def _identity_prompt(language: str) -> PromptSection:
@@ -165,7 +168,7 @@ def _output_prompt(language: str) -> PromptSection:
 
 - 完整交付物必须放在最后一条不带工具调用的消息中。
 - 不要只用“已完成”“详见上文”等状态说明代替完整交付物。
-- 任务产生需要交付的文件，或用户明确请求下载、导出、发送文件时，调用 `send_file_to_user`，调用时使用服务端可访问的绝对路径，如果用户指定了投递 channel 则传入 `target_channels` 参数，具体参数、支持的 channel 和默认投递行为以 `send_file_to_user` 工具 Schema 为准。
+- 仅当要把文件投给**当前网页/IM 对话里的人**时，才调用 `send_file_to_user`（绝对路径，可选 `target_channels`）。发给注册中心上的其他设备、或当前渠道是 `a2a` 时，必须用 `a2a_send_message` 的 `file_paths`，禁止 `send_file_to_user`。
 - 需要渲染为图片卡片的矢量产物（流程图、架构图、示意图、图标、插画等），默认用 ```svg 围栏包裹完整自包含的 `<svg>...</svg>` 源码写在最终回复正文里；每个围栏必须且只能包含一个顶层 `<svg>`，多个产物分别使用独立围栏。仅展示、讲解、调试或供用户复制修改 SVG 源码时，不得使用 ```svg 围栏：独立 SVG/XML 源码使用 ```xml 围栏，SVG 嵌入 HTML 的示例使用 ```html 围栏，不完整的伪代码或标签片段使用 ```text 围栏。不生成 .svg 文件、不调 `generate_image`、不落盘投递。
 - **词义消歧**：用户说“给我 svg”“用 svg 画”“要矢量图标”指源码而非 .svg 文件附件；仅当明确出现“文件/下载/导出/保存为 .svg”时才生成并
   投递文件。Mermaid 仅用于标准结构图，超出其表达或用户明确要 SVG 时直接给源码。
@@ -196,7 +199,7 @@ def _output_prompt(language: str) -> PromptSection:
 
 - Put the complete deliverable in the final message that contains no tool calls.
 - Do not replace the complete deliverable with a status statement such as “done” or “see above.”
-- When a task produces a file that must be delivered, or the user explicitly requests a download, export, or file delivery, call `send_file_to_user` with an absolute path accessible to the server. If the user specifies a delivery channel, pass `target_channels`; follow the tool schema for parameters, supported channels, and default delivery behavior.
+- Call `send_file_to_user` only to deliver a file to the human in the current web/IM chat (absolute path; optional `target_channels`). To send a file to another Registry device, or when the current channel is `a2a`, use `a2a_send_message` with `file_paths`. Never use `send_file_to_user` for A2A peers.
 - Vector artifacts that should render as image cards (flowcharts, architecture diagrams,
   schematics, icons, illustrations, etc.) default to inline SVG source in the final reply body:
   wrap one complete, self-contained top-level `<svg>...</svg>` in each ```svg fenced
@@ -234,6 +237,63 @@ def _output_prompt(language: str) -> PromptSection:
     )
 
 
+def _a2a_transfer_prompt(language: str, self_service_id: str = "") -> PromptSection:
+    """Device-to-device file rules. Injected on every turn so both sender and receiver stay aligned."""
+    self_id = str(self_service_id or "").strip() or "(先调用 a2a_registry_list，读取 self_service_id)"
+    sandbox = describe_file_sandbox_dir()
+    if language == "cn":
+        content = f"""# A2A 设备间传文件
+
+用户要把文件发给另一台设备时，direct 工具 `a2a_send_message` 已经明确支持，按渐进式工具规则第 2 条直接调用。这种操作不要改用 `send_file_to_user`。
+投进当前网页或 IM 对话时，用 deferred 工具 `send_file_to_user`，按第 3 条先 `tool_search` 再 `tool_call`。
+
+本机 service_id：`{self_id}`。本机文件目录：`{sandbox}`。`file_paths` 填这个目录里的文件名即可，只写文件名会落到该目录。入站 A2A 信封**不会**带来源设备 ID，不要根据注册中心名单猜测「发给我」是谁。
+
+- `a2a_send_message` / `a2a_registry_list` 是 **direct 工具**，顶层已有 schema。跨设备传文件直接调用它们。
+- **当前渠道已经是 `a2a` 时**：对端在同步等你这一轮的最终回复。「在吗 / 你好 / 确认在线」等纯文字直接写最终回复，禁止再调 `a2a_send_message` 或 `tool_search`。再开一条会嵌套等待，拖到一两分钟。
+- **本机发文件**：用 direct 工具 `a2a_send_message` + `file_paths`，不要用 `send_file_to_user`，不要转 HEIC/JPG。文件只在 `{sandbox}`。用户给出完整文件名（含扩展名）时直接填这个名字。用户只描述了文件、没有给出目录里的完整文件名时，先用 `glob` 只看 `{sandbox}` 这一层，对上真实文件名后再发送。不要猜文件名，不要搜索其它目录。对上多份就问用户要哪一份。
+- **请对端发文件回来时**：text 必须写明本机 `service_id={self_id}`，禁止只写「发给我」。始终带一句说明文字，避免对端 empty query。按对端类型选工具名：
+  - `JiuwenSwarm-*`：让对方用 `a2a_send_message` + `file_paths`。
+  - `HW-Phone1` 等 OpenClaw 设备：对方**没有** `a2a_send_message` / `file_paths` / `send_file_to_user`。让它用本机的 `a2a_send_local_file`（等同 `a2a_send_file`），原文件、不转格式。目标 service_id 按注册中心**逐字**填写 `{self_id}`。
+- **对端请你发文件时**：从正文里找目标 service_id 和路径，第一轮立刻 `a2a_send_message`。路径已写明就不要 glob / bash / 列目录。找不到 service_id 就请对方写明，不要 ask_user 猜设备。
+- **入站已经带了文件**：只确认收到。不要再搜 `send_file_to_user`，不要用 bash 验证（HarmonyOS 上 bash 常被禁用）。
+
+范例：向 HW-Phone1 要原图  
+`a2a_send_message(service_id="HW-Phone1", text="请用 a2a_send_local_file（等同 a2a_send_file）把最新照片原文件发给 service_id={self_id}。不要转格式。不要用 a2a_send_message / send_file_to_user。")`
+
+范例：把沙箱文件发给对端  
+`a2a_send_message(service_id="JiuwenSwarm-HW-PC1", text="发送文件：example.pptx，请查收。", file_paths=["example.pptx"])`
+"""
+    else:
+        content = f"""# A2A device file transfer
+
+When the user wants a file sent to another device, the direct tool `a2a_send_message` already supports that operation. Follow progressive-tool rule 2 and call it directly. Do not switch that operation to `send_file_to_user`.
+Delivering a file into the current web or IM chat still uses the deferred tool `send_file_to_user`: follow rule 3, `tool_search` first, then `tool_call`.
+
+This host's service_id: `{self_id}`. Local file directory: `{sandbox}`. Put the file name from that directory in `file_paths`; a bare file name resolves there. Inbound A2A envelopes do **not** include the caller's service_id. Do not guess "send it to me" from the Registry list.
+
+- `a2a_send_message` / `a2a_registry_list` are **direct tools** with schemas already in the top-level `tools` list. Call them directly for cross-device transfers.
+- **If the current channel is already `a2a`**: the caller is blocked on this turn's final reply. For plain text such as "are you there", just write the final reply. Do not call `a2a_send_message` or `tool_search` — a nested send waits for the peer's whole turn and can take minutes.
+- **This host sending a file**: use the direct tool `a2a_send_message` + `file_paths`. Never `send_file_to_user`. Do not convert HEIC/JPG. Files live only in `{sandbox}`. If the user gave the exact file name including its extension, fill that name in directly. If they only described the file, first `glob` that directory alone, then send the real file name. Do not invent a file name, and do not search other directories. If several files match, ask which one.
+- **Asking a peer to send a file back**: the text MUST include this host's `service_id={self_id}`. Never only write "send it to me". Always include a short text part to avoid empty-query failures. Pick the peer's own tool name:
+  - `JiuwenSwarm-*`: ask them to call `a2a_send_message` + `file_paths`.
+  - `HW-Phone1` and other OpenClaw devices: they do **not** have `a2a_send_message` / `file_paths` / `send_file_to_user`. Ask them to use `a2a_send_local_file` (same as `a2a_send_file`), original file, no conversion. Copy `{self_id}` from the Registry verbatim.
+- **A peer asked you to send a file**: take the target service_id and path from the message text and call `a2a_send_message` in the first turn. If the path is already given, do not glob, bash, or list the directory. If the service_id is missing, ask them to include it; do not guess among Registry devices.
+- **Inbound already includes a file**: acknowledge receipt only. Do not search for `send_file_to_user`. Do not use bash to verify (often disabled on HarmonyOS).
+
+Example — ask HW-Phone1 for the original photo:  
+`a2a_send_message(service_id="HW-Phone1", text="Please a2a_send_local_file (same as a2a_send_file) the original latest photo to service_id={self_id}. Do not convert. Do not use a2a_send_message or send_file_to_user.")`
+
+Example — send a sandbox file to a peer:  
+`a2a_send_message(service_id="JiuwenSwarm-HW-PC1", text="Sending file: example.pptx", file_paths=["example.pptx"])`
+"""
+    return PromptSection(
+        name=LocalSectionName.A2A,
+        content={language: content},
+        priority=PromptPriority.A2A,
+    )
+
+
 def build_agent_identity_prompt(language: str) -> str:
     """Build stable identity and task-execution sections for the general agent."""
 
@@ -264,6 +324,7 @@ def _read_file(file_path: str) -> Optional[str]:
 __all__ = [
     "LocalSectionName",
     "PromptPriority",
+    "_a2a_transfer_prompt",
     "_identity_prompt",
     "_input_prompt",
     "_output_prompt",

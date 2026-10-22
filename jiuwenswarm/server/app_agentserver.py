@@ -206,6 +206,8 @@ from jiuwenswarm.agents.harness.agent_observability import (
 
 install_subagent_observability_hook()
 
+# Register optional local Codex CLI ModelClient when the codex extra is installed.
+from jiuwenswarm.server.runtime.codex_cli_model_client import CodexCLIModelClient  # noqa: F401
 
 
 async def _run(host: str, port: int) -> None:
@@ -298,22 +300,29 @@ async def _run(host: str, port: int) -> None:
         run_teammate_bootstrap_daemon(stop_event=stop_event)
     )
 
-    # Group-chat bridge: answers @-mentions in the relay groups this agent
-    # belongs to. Started here (after server.start(), before the wait) so it
-    # shares this process's lifecycle; start_bridge never raises.
-    from jiuwenswarm.agents.harness.team.groupchat import start_bridge, stop_bridge
+    # Group-chat bridge is started only when its package imports. The group
+    # branch references groupchat.progress, which is not in the tree yet.
+    stop_bridge = None
+    try:
+        from jiuwenswarm.agents.harness.team.groupchat import start_bridge, stop_bridge
 
-    await start_bridge()
+        await start_bridge()
+    except Exception as exc:  # noqa: BLE001 - incomplete groupchat package must not stop the server
+        logger.warning("[AgentServer] group chat bridge skipped: %s", exc)
+        stop_bridge = None
 
-    # Personal-task bridge: holds the lease on tasks this device is running,
-    # renews them and yields on takeover. Same lifecycle posture as the group
-    # chat bridge; start_bridge never raises.
-    from jiuwenswarm.agents.harness.team.tasks import (
-        start_bridge as start_task_bridge,
-        stop_bridge as stop_task_bridge,
-    )
+    # Personal-task bridge is optional until its package is present in the tree.
+    stop_task_bridge = None
+    try:
+        from jiuwenswarm.agents.harness.team.tasks import (
+            start_bridge as start_task_bridge,
+            stop_bridge as stop_task_bridge,
+        )
 
-    await start_task_bridge()
+        await start_task_bridge()
+    except Exception as exc:  # noqa: BLE001 - missing tasks package must not stop the server
+        logger.warning("[AgentServer] task bridge skipped: %s", exc)
+        stop_task_bridge = None
 
     def _on_signal() -> None:
         stop_event.set()
@@ -333,14 +342,16 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
-        try:
-            await stop_bridge()
-        except Exception as exc:  # noqa: BLE001 - shutdown must continue
-            logger.warning("[AgentServer] group chat bridge stop failed: %s", exc)
-        try:
-            await stop_task_bridge()
-        except Exception as exc:  # noqa: BLE001 - shutdown must continue
-            logger.warning("[AgentServer] task bridge stop failed: %s", exc)
+        if stop_bridge is not None:
+            try:
+                await stop_bridge()
+            except Exception as exc:  # noqa: BLE001 - shutdown must continue
+                logger.warning("[AgentServer] group chat bridge stop failed: %s", exc)
+        if stop_task_bridge is not None:
+            try:
+                await stop_task_bridge()
+            except Exception as exc:  # noqa: BLE001 - shutdown must continue
+                logger.warning("[AgentServer] task bridge stop failed: %s", exc)
         if teammate_bootstrap_task is not None:
             teammate_bootstrap_task.cancel()
             try:

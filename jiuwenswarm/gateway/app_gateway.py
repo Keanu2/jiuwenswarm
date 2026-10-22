@@ -1527,19 +1527,6 @@ async def _run(
         A2AChannelConfig,
         _strip_msys2_path_conv,
     )
-    from jiuwenswarm.agents.harness.common.a2a_gateway import A2AGatewayConfig
-    from jiuwenswarm.agents.harness.common.a2a_gateway.outbound_client import A2AOutboundClient
-    from jiuwenswarm.agents.harness.common.a2a_gateway.runtime import (
-        set_outbound_client,
-        set_tunnel,
-    )
-    from jiuwenswarm.agents.harness.common.a2a_gateway.tunnel.session import (
-        TunnelSession,
-        TunnelSessionOptions,
-    )
-    from jiuwenswarm.agents.harness.common.a2a_gateway.tunnel.protocol import (
-        TunnelRegisterExtras,
-    )
     from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, \
         DingTalkConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_connect import FeishuChannel, FeishuConfig
@@ -2095,12 +2082,32 @@ async def _run(
     # OpenClaw a2a-gateway plugin. They are long-lived singletons held in
     # a2a_gateway.runtime and consumed by the swarm a2a_send tools.
     # ------------------------------------------------------------------
-    a2a_gateway_cfg = A2AGatewayConfig.from_config(
-        full_cfg.get("a2a_gateway") if isinstance(full_cfg, dict) else None,
-    )
+    try:
+        from jiuwenswarm.agents.harness.common.a2a_gateway import A2AGatewayConfig
+        from jiuwenswarm.agents.harness.common.a2a_gateway.outbound_client import A2AOutboundClient
+        from jiuwenswarm.agents.harness.common.a2a_gateway.runtime import (
+            set_outbound_client,
+            set_tunnel,
+        )
+        from jiuwenswarm.agents.harness.common.a2a_gateway.tunnel.session import (
+            TunnelSession,
+            TunnelSessionOptions,
+        )
+        from jiuwenswarm.agents.harness.common.a2a_gateway.tunnel.protocol import (
+            TunnelRegisterExtras,
+        )
+    except Exception as exc:  # noqa: BLE001 - package is not in this tree yet
+        logger.warning("[App] A2A gateway module unavailable, outbound skipped: %s", exc)
+        A2AGatewayConfig = None  # type: ignore[assignment]
+    if A2AGatewayConfig is None:
+        a2a_gateway_cfg = None
+    else:
+        a2a_gateway_cfg = A2AGatewayConfig.from_config(
+            full_cfg.get("a2a_gateway") if isinstance(full_cfg, dict) else None,
+        )
     # Re-read env-driven config (from_config already merges env, but the
     # explicit A2A_GATEWAY_ENABLED gate is the canonical on/off switch).
-    if a2a_gateway_cfg.enabled:
+    if a2a_gateway_cfg is not None and a2a_gateway_cfg.enabled:
         try:
             outbound_client = A2AOutboundClient(a2a_gateway_cfg)
             set_outbound_client(outbound_client)

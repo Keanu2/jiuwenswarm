@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -10,8 +14,12 @@ from typing import Any
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel
 from jiuwenswarm.common.e2a.acp.acp_tool_updates import is_reasoning_event
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
-from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
+from jiuwenswarm.common.file_sandbox import (
+    persist_received_file,
+    resolve_file_sandbox_path,
+    safe_sandbox_filename,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +32,69 @@ except ImportError:
 # convention popularized by Google ADK (`adk_thought`). A2A itself has no
 # first-class thought field; `Part.metadata` is the official extension point.
 A2A_THOUGHT_METADATA_KEY = "jiuwen_thought"
+_DEFAULT_A2A_MAX_INLINE_FILE_BYTES = 50 * 1024 * 1024
+
+
+def _max_inline_file_bytes() -> int:
+    raw = os.getenv("JIUWENSWARM_A2A_MAX_INLINE_FILE_BYTES", "").strip()
+    if not raw:
+        return _DEFAULT_A2A_MAX_INLINE_FILE_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_A2A_MAX_INLINE_FILE_BYTES
+    return value if value > 0 else _DEFAULT_A2A_MAX_INLINE_FILE_BYTES
+_FILE_DELIVERY_MARKERS = (
+    "请查收",
+    "发送文件",
+    "sending file",
+    "here is the file",
+    "here's the file",
+    "原样发送",
+)
+_FILE_WORK_MARKERS = (
+    "分析",
+    "总结",
+    "summarize",
+    "摘要",
+    "翻译",
+    "打开",
+    "修改",
+    "解释",
+    "explain",
+    "extract",
+    "提取",
+    "看看",
+    "帮我",
+    "处理",
+    "inspect",
+)
+
+
+def inbound_file_delivery_ack_text(query: str, files: list[dict[str, Any]]) -> str | None:
+    """Return a canned ACK when inbound A2A is only delivering files.
+
+    Skips the receiver agent turn so the sender is not blocked for another
+    model round. Requests that ask to analyze or edit the file still run.
+    """
+    if not files:
+        return None
+    text = str(query or "").strip()
+    lowered = text.lower()
+    if any(marker.lower() in lowered for marker in _FILE_WORK_MARKERS):
+        return None
+    names = [
+        str(item.get("filename") or item.get("name") or "").strip()
+        for item in files
+        if isinstance(item, dict)
+    ]
+    names = [name for name in names if name] or ["file"]
+    ack = "已收到文件：" + "、".join(names) + "，已保存。"
+    if not text:
+        return ack
+    if any(marker.lower() in lowered for marker in _FILE_DELIVERY_MARKERS):
+        return ack
+    return None
 
 
 def _raise_missing_a2a_sdk(exc: ImportError) -> None:
@@ -41,11 +112,6 @@ def _strip_msys2_path_conv(value: str, default: str) -> str:
     absolute filesystem path rooted at the Git install dir (e.g.
     ``C:/Program Files/Git/a2a``). That corrupted value then fails the
     Starlette ``Route`` assertion (paths must start with ``/``).
-
-    This helper strips any leading ``<drive>:/.../Git`` prefix so the path
-    once again starts with ``/``. If the value is empty, the configured
-    default is returned. Values that already start with ``/`` are returned
-    unchanged.
     """
     if value is None:
         return default
@@ -54,16 +120,12 @@ def _strip_msys2_path_conv(value: str, default: str) -> str:
         return default
     if v.startswith("/"):
         return v
-    # MSYS2 conversion turns /a2a into C:/Program Files/Git/a2a — strip
-    # everything up to and including the Git root segment, then re-slash.
     lowered = v.lower()
     marker = "/git/"
     idx = lowered.find(marker)
     if idx >= 0:
         tail = v[idx + len(marker):]
         return "/" + tail.lstrip("/")
-    # Could not detect a Git-Bash conversion; fall back to default rather
-    # than passing a non-slash path to Starlette (which would assert).
     logger.warning(
         "[A2AChannel] path value %r does not start with '/' and no Git-Bash "
         "conversion prefix was detected; falling back to default %r",
@@ -150,6 +212,38 @@ class _A2AAgentExecutor(_AgentExecutorBase):
         query, files = self._channel.map_a2a_parts_to_params(context.message)
         if not query:
             query = str(context.get_user_input() or "").strip()
+        ack_text = inbound_file_delivery_ack_text(query, files)
+        if ack_text:
+            from a2a.types import Part
+
+            logger.info(
+                "[A2AChannel] auto-ack inbound files without agent turn: request_id=%s files=%s",
+                request_id,
+                [item.get("filename") for item in files if isinstance(item, dict)],
+            )
+            await event_queue.enqueue_event(task)
+            await event_queue.enqueue_event(
+                TaskArtifactUpdateEvent(
+                    task_id=task_id,
+                    context_id=context_id,
+                    artifact=Artifact(
+                        artifact_id=f"{task_id}_response",
+                        name="response",
+                        parts=[Part(text=ack_text)],
+                    ),
+                    append=False,
+                    last_chunk=True,
+                )
+            )
+            await event_queue.enqueue_event(
+                TaskStatusUpdateEvent(
+                    task_id=task_id,
+                    context_id=context_id,
+                    status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+                )
+            )
+            await event_queue.close()
+            return
         if not query:
             await event_queue.enqueue_event(task)
             await event_queue.enqueue_event(
@@ -182,6 +276,7 @@ class _A2AAgentExecutor(_AgentExecutorBase):
             )
             artifact_id = f"{task_id}_response"
             artifact_started = False
+            last_artifact_signature: tuple[bytes | str, ...] | None = None
             while True:
                 response_msg = await pending.queue.get()
                 is_terminal = self._channel.is_terminal_message(response_msg)
@@ -240,7 +335,10 @@ class _A2AAgentExecutor(_AgentExecutorBase):
                     if self._channel.is_completion_sentinel_text(part_text):
                         continue
                     filtered_parts.append(part)
-                response_parts = filtered_parts
+                response_parts = self._channel.dedupe_a2a_parts(filtered_parts)
+                part_signature = self._channel.a2a_parts_signature(response_parts)
+                if is_terminal and part_signature and part_signature == last_artifact_signature:
+                    response_parts = []
                 if response_parts:
                     await event_queue.enqueue_event(
                         TaskArtifactUpdateEvent(
@@ -257,6 +355,7 @@ class _A2AAgentExecutor(_AgentExecutorBase):
                         )
                     )
                     artifact_started = True
+                    last_artifact_signature = part_signature
                 if is_terminal:
                     if response_msg.event_type == EventType.CHAT_ERROR:
                         final_state = TaskState.TASK_STATE_FAILED
@@ -317,6 +416,49 @@ class A2AChannel(BaseChannel):
     def channel_id(self) -> str:
         return str(self.config.channel_id or self.name).strip() or self.name
 
+    def _enable_v0_3_compat(self) -> bool:
+        """Expose the SDK v0.3 adapter when this endpoint advertises v0.3."""
+        return str(self.config.protocol_version).strip().startswith("0.3")
+
+    @staticmethod
+    def a2a_parts_signature(parts: list[Any]) -> tuple[bytes | str, ...]:
+        """Return a stable signature for user-visible part content.
+
+        Protobuf presence can make ``metadata=None`` serialize differently from
+        an omitted metadata field even though both render identically. Artifact
+        de-duplication therefore compares the visible payload fields and ignores
+        metadata-only presence differences.
+        """
+        signature: list[bytes | str] = []
+        for part in parts:
+            visible_fields = []
+            for field_name in ("text", "filename", "media_type", "url", "data", "raw"):
+                value = getattr(part, field_name, None)
+                if value not in (None, "", b""):
+                    visible_fields.append((field_name, value))
+            if visible_fields:
+                signature.append(repr(tuple(visible_fields)))
+                continue
+            serialize = getattr(part, "SerializeToString", None)
+            if callable(serialize):
+                signature.append(serialize(deterministic=True))
+            else:
+                signature.append(repr(part))
+        return tuple(signature)
+
+    @classmethod
+    def dedupe_a2a_parts(cls, parts: list[Any]) -> list[Any]:
+        """Remove byte-identical parts while preserving their first-seen order."""
+        seen: set[bytes | str] = set()
+        unique_parts: list[Any] = []
+        for part in parts:
+            signature = cls.a2a_parts_signature([part])[0]
+            if signature in seen:
+                continue
+            seen.add(signature)
+            unique_parts.append(part)
+        return unique_parts
+
     def on_message(self, callback) -> None:
         self._on_message_cb = callback
 
@@ -371,7 +513,11 @@ class A2AChannel(BaseChannel):
         )
         routes = [
             *create_agent_card_routes(agent_card, card_url=self.config.card_path),
-            *create_jsonrpc_routes(request_handler, rpc_url=self.config.rpc_path),
+            *create_jsonrpc_routes(
+                request_handler,
+                rpc_url=self.config.rpc_path,
+                enable_v0_3_compat=self._enable_v0_3_compat(),
+            ),
         ]
         fastapi_app = FastAPI(routes=routes)
 
@@ -537,6 +683,7 @@ class A2AChannel(BaseChannel):
             url = str(file_item.get("url") or file_item.get("uri") or "").strip()
             data = str(file_item.get("data") or "").strip()
             raw = str(file_item.get("raw") or "").strip()
+            local_path = str(file_item.get("path") or "").strip()
 
             common_fields: dict[str, str] = {}
             if file_name:
@@ -549,6 +696,24 @@ class A2AChannel(BaseChannel):
                 parts.append(Part(data=data, **common_fields))
             if raw:
                 parts.append(Part(raw=raw, **common_fields))
+            if local_path:
+                try:
+                    sandbox_file = resolve_file_sandbox_path(
+                        local_path,
+                        must_exist=True,
+                        require_file=True,
+                    )
+                    if sandbox_file.stat().st_size > _max_inline_file_bytes():
+                        raise ValueError("file exceeds A2A inline size limit")
+                    parts.append(
+                        Part(
+                            raw=sandbox_file.read_bytes(),
+                            filename=sandbox_file.name,
+                            media_type=media_type or "application/octet-stream",
+                        )
+                    )
+                except (OSError, ValueError) as exc:
+                    logger.warning("[A2AChannel] sandbox file response rejected: %s", exc)
 
         if parts:
             return parts
@@ -568,6 +733,7 @@ class A2AChannel(BaseChannel):
         if msg.type != "event":
             return False
         if msg.event_type in {
+            EventType.CHAT_FINAL,
             EventType.CHAT_ERROR,
             EventType.CHAT_INTERRUPT_RESULT,
         }:
@@ -590,7 +756,7 @@ class A2AChannel(BaseChannel):
 
     @staticmethod
     def map_a2a_parts_to_params(a2a_message: Any) -> tuple[str, list[dict[str, Any]]]:
-        """Map A2A message parts to JiuwenSwarm-friendly query/files params."""
+        """Map A2A parts and save received files to the Desktop receive folder."""
         if a2a_message is None:
             return "", []
 
@@ -605,16 +771,61 @@ class A2AChannel(BaseChannel):
             file_name = str(getattr(part, "filename", "") or "").strip()
             media_type = str(getattr(part, "media_type", "") or "").strip()
             url = str(getattr(part, "url", "") or "").strip()
-            data = str(getattr(part, "data", "") or "").strip()
-            raw = str(getattr(part, "raw", "") or "").strip()
+            data_value = getattr(part, "data", None)
+            raw_value = getattr(part, "raw", b"")
 
-            # Preserve non-text parts as files metadata for downstream tools.
-            if url or data or raw:
-                normalized_name = file_name or f"a2a_part_{idx}"
+            received_bytes: bytes | None = None
+            if isinstance(raw_value, bytes) and raw_value:
+                received_bytes = raw_value
+            elif isinstance(raw_value, str) and raw_value:
+                try:
+                    received_bytes = base64.b64decode(raw_value, validate=True)
+                except (binascii.Error, ValueError):
+                    received_bytes = raw_value.encode("utf-8")
+            elif isinstance(data_value, str) and data_value:
+                try:
+                    received_bytes = base64.b64decode(data_value, validate=True)
+                except (binascii.Error, ValueError):
+                    received_bytes = data_value.encode("utf-8")
+            elif url:
+                received_bytes = json.dumps(
+                    {"url": url, "media_type": media_type},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                if not file_name:
+                    file_name = f"a2a_part_{idx}.url.json"
+            elif data_value is not None:
+                kind = getattr(data_value, "WhichOneof", lambda _name: None)("kind")
+                if kind == "string_value":
+                    encoded = str(getattr(data_value, "string_value", "") or "")
+                    try:
+                        received_bytes = base64.b64decode(encoded, validate=True)
+                    except (binascii.Error, ValueError):
+                        received_bytes = encoded.encode("utf-8")
+                elif kind:
+                    from google.protobuf.json_format import MessageToDict
+
+                    received_bytes = json.dumps(
+                        MessageToDict(data_value),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    if not file_name:
+                        file_name = f"a2a_part_{idx}.json"
+            if received_bytes is not None:
+                normalized_name = safe_sandbox_filename(
+                    file_name or f"a2a_part_{idx}",
+                    fallback=f"a2a_part_{idx}",
+                )
+                saved_path = persist_received_file(
+                    received_bytes,
+                    filename=normalized_name,
+                    max_bytes=_max_inline_file_bytes(),
+                )
                 entry: dict[str, Any] = {
                     # web_channel compatibility keys
                     "name": normalized_name,
                     "filename": normalized_name,
+                    "path": str(saved_path),
                 }
                 if media_type:
                     entry["media_type"] = media_type
@@ -623,11 +834,11 @@ class A2AChannel(BaseChannel):
                 if url:
                     entry["url"] = url
                     entry["uri"] = url
-                if data:
-                    entry["data"] = data
+                if isinstance(data_value, str) and data_value:
+                    entry["data"] = data_value
                     entry["encoding"] = "base64"
-                if raw:
-                    entry["raw"] = raw
+                if isinstance(raw_value, str) and raw_value:
+                    entry["raw"] = raw_value
                 files.append(entry)
 
         query = "\n".join(seg for seg in text_segments if seg).strip()
